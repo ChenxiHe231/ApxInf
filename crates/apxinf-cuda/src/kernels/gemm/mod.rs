@@ -9,15 +9,17 @@ use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
 use crate::cublas::CublasTranspose;
 
-pub use bf16::{autotune_cublaslt_bf16, gemm_bf16 as bf16, Bf16AutotuneResult};
-#[cfg(apxinf_cutlass_gemm)]
+pub use bf16::{
+    autotune_cublaslt_bf16, gemm_bf16 as bf16, gemm_bf16_geglu_fused as bf16_geglu_fused,
+    Bf16AutotuneResult,
+};
 pub use fp8::autotune_cutlass_gemm_f16 as autotune_cutlass_fp8;
 #[cfg(test)]
 pub(crate) use fp8::prepare_cublaslt_fp8_gemm;
 pub use fp8::{
     autotune_cublaslt_gemm_f16 as autotune_cublaslt_fp8, cold_l2_tuning_metadata, exact_fp8_tactic,
-    gemm_fp8 as fp8, install_tuning_db, install_tuning_dbs,
-    native_fp8_gemm_supported as native_fp8_supported, ColdL2TuningMetadata,
+    gemm_fp8 as fp8, gemm_fp8_geglu_fused as fp8_geglu_fused, install_tuning_db,
+    install_tuning_dbs, native_fp8_gemm_supported as native_fp8_supported, ColdL2TuningMetadata,
     CublasLtAlgorithmTiming, CutlassTacticTiming, Fp8WeightView,
 };
 #[cfg(test)]

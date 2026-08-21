@@ -40,6 +40,8 @@ pub fn gemm_bias_fp8(
         super::gemm::Fp8WeightView {
             values_e4m3: weight,
             scale: weight_scale,
+            dual_geglu_interleaved: false,
+            dual_geglu_auto_interleaved: None,
         },
     )?;
     super::elementwise::bias_f16(ctx, &projection, Some(bias))
@@ -74,6 +76,8 @@ pub fn gemm_bias_gelu_fp8(
         super::gemm::Fp8WeightView {
             values_e4m3: weight,
             scale: weight_scale,
+            dual_geglu_interleaved: false,
+            dual_geglu_auto_interleaved: None,
         },
     )?;
     super::activation::bias_gelu_quant_f16_e4m3(ctx, &projection, bias, output_scale)
@@ -108,6 +112,8 @@ pub fn gemm_bias_residual_fp8(
         super::gemm::Fp8WeightView {
             values_e4m3: weight,
             scale: weight_scale,
+            dual_geglu_interleaved: false,
+            dual_geglu_auto_interleaved: None,
         },
     )?;
     bias_residual_f16(ctx, &projection, bias, residual)

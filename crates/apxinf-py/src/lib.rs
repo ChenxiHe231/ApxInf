@@ -319,6 +319,7 @@ impl Model {
         let options = LoadOptions {
             model_name: Some(model.to_owned()),
             precision: parse_precision(precision)?,
+            text_weight_dtype: None,
             calibration_path,
             tuning_path: tactics,
             config: Some(config.clone()),

@@ -110,6 +110,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(apxinf_cutlass_int8_sm80)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_sm80)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_f16_sm100)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_direct_e4m3_sm100)");
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH_CUTLASS");
     println!("cargo:rerun-if-env-changed=APXINF_KERNEL_BUILD_ID");
@@ -191,6 +192,10 @@ fn main() {
             // new top-level .cu file invalidates an existing Cargo build.
             println!("cargo:rerun-if-changed={kernels_dir}");
             println!("cargo:rerun-if-changed={adapters_dir}");
+            // The build ID hashes every CUDA/CUTLASS source below kernels/.
+            // Track the same complete tree so an in-place header edit cannot
+            // leave Cargo using a stale build ID or stale device object.
+            emit_rerun_if_changed_tree(std::path::Path::new(&kernels_dir));
             emit_rerun_if_changed_tree(std::path::Path::new(&adapters_dir));
             // Pick a target arch: explicit override > native CUDA device
             // detection. Never infer a GPU architecture from the CPU target:
@@ -245,10 +250,10 @@ fn main() {
             });
             emit_kernel_build_id(&kernel_build_id);
 
-            // Compile only host adapters from an explicit list. Operator
-            // implementation files under kernels/ are included by these
-            // adapters and never compiled as standalone C ABI translation
-            // units.
+            // Compile host adapters from an explicit list. Template-heavy
+            // CUTLASS operators are added below as their own translation
+            // units; adapters include declaration-only headers and own only
+            // the stable C ABI.
             let mut kernel_files = vec![
                 std::path::Path::new(&adapters_dir).join("core_kernels_adapter.cu"),
                 std::path::Path::new(&adapters_dir).join("static_bf16_adapter.cu"),
@@ -265,9 +270,15 @@ fn main() {
             let cutlass_root = std::path::Path::new(&kernels_dir).join("cutlass");
             let cutlass_fmha_operator = cutlass_root.join("fmha_sm100.cu");
             let cutlass_gemm_operator = cutlass_root.join("fp8_gemm_sm100.cu");
+            let cutlass_fp8_dual_operator = cutlass_root.join("fp8_dual_geglu_sm100.cu");
+            let cutlass_fp8_header = cutlass_root.join("fp8_operators_sm100.h");
+            let cutlass_bf16_operator = cutlass_root.join("bf16_gemm_sm100.cu");
+            let cutlass_bf16_dual_operator = cutlass_root.join("bf16_dual_geglu_sm100.cu");
+            let cutlass_bf16_header = cutlass_root.join("bf16_operators_sm100.h");
             let cutlass_int8_operator = cutlass_root.join("w8a8_gemm_sm80.cu");
             let cutlass_fmha = std::path::Path::new(&adapters_dir).join("cutlass_fmha_adapter.cu");
             let cutlass_gemm = std::path::Path::new(&adapters_dir).join("cutlass_fp8_adapter.cu");
+            let cutlass_bf16 = std::path::Path::new(&adapters_dir).join("cutlass_bf16_adapter.cu");
             let cutlass_int8 = std::path::Path::new(&adapters_dir).join("cutlass_w8a8_adapter.cu");
             let mut cutlass_includes = Vec::new();
             if cutlass_arch.as_deref().is_some_and(is_cutlass_sm100_family) {
@@ -281,13 +292,26 @@ fn main() {
                 );
                 assert!(
                     cutlass_gemm_operator.is_file()
+                        && cutlass_fp8_dual_operator.is_file()
+                        && cutlass_fp8_header.is_file()
+                        && cutlass_bf16_operator.is_file()
+                        && cutlass_bf16_dual_operator.is_file()
+                        && cutlass_bf16_header.is_file()
                         && cutlass_fmha_operator.is_file()
                         && cutlass_gemm.is_file()
+                        && cutlass_bf16.is_file()
                         && cutlass_fmha.is_file(),
                     "CUTLASS operators or native C ABI adapters are missing"
                 );
                 cutlass_includes.extend([fmha, cutlass, cutlass_utils]);
-                kernel_files.push(cutlass_gemm.clone());
+                kernel_files.extend([
+                    cutlass_gemm_operator.clone(),
+                    cutlass_fp8_dual_operator.clone(),
+                    cutlass_bf16_operator.clone(),
+                    cutlass_bf16_dual_operator.clone(),
+                    cutlass_gemm.clone(),
+                    cutlass_bf16.clone(),
+                ]);
                 kernel_files.push(cutlass_fmha.clone());
                 println!("cargo:rustc-cfg=apxinf_cutlass_gemm");
                 println!("cargo:rustc-cfg=apxinf_cutlass_fmha");
@@ -326,6 +350,7 @@ fn main() {
             let fa2_operator = cutlass_root.join("fa2_bf16_sm80.cu");
             let fa2_wrapper = std::path::Path::new(&adapters_dir).join("fa2_adapter.cu");
             let mut fa2_sources = Vec::new();
+            let mut fa2_direct_e4m3_sources = Vec::new();
             let mut fa2_includes = Vec::new();
             let fa2_sm80 = nvcc_arch.as_deref().is_some_and(is_fa2_sm80_family);
             let fa2_f16_sm100 = nvcc_arch.as_deref().is_some_and(is_cutlass_sm100_family);
@@ -355,6 +380,19 @@ fn main() {
                 ]);
                 if fa2_f16_sm100 {
                     println!("cargo:rustc-cfg=apxinf_fa2_f16_sm100");
+                    let direct_operator = cutlass_root.join("fa2_f16_e4m3_sm100.cu");
+                    let direct_wrapper =
+                        std::path::Path::new(&adapters_dir).join("fa2_direct_e4m3_adapter.cu");
+                    let direct_hdim256 = fa2_root.join("flash_attn/flash_fwd_hdim256_fp16_e4m3.cu");
+                    assert!(
+                        direct_operator.is_file()
+                            && direct_wrapper.is_file()
+                            && direct_hdim256.is_file(),
+                        "FA2 direct-E4M3 FA2 sources are incomplete"
+                    );
+                    fa2_direct_e4m3_sources.extend([direct_wrapper, direct_hdim256]);
+                    kernel_files.extend(fa2_direct_e4m3_sources.iter().cloned());
+                    println!("cargo:rustc-cfg=apxinf_fa2_direct_e4m3_sm100");
                 }
                 fa2_includes.extend([fa2_root.clone(), fa2_cutlass]);
                 kernel_files.extend(fa2_sources.iter().cloned());
@@ -387,7 +425,14 @@ fn main() {
                         "-O3",
                         "-std=c++17",
                     ]);
-                    let selected_arch = if entry == &cutlass_fmha || entry == &cutlass_gemm {
+                    let selected_arch = if entry == &cutlass_fmha
+                        || entry == &cutlass_gemm_operator
+                        || entry == &cutlass_fp8_dual_operator
+                        || entry == &cutlass_bf16_operator
+                        || entry == &cutlass_bf16_dual_operator
+                        || entry == &cutlass_gemm
+                        || entry == &cutlass_bf16
+                    {
                         cutlass_arch.as_ref()
                     } else {
                         nvcc_arch.as_ref()
@@ -400,12 +445,25 @@ fn main() {
                             cmd.arg(format!("-I{include}"));
                         }
                     }
-                    if entry == &cutlass_fmha || entry == &cutlass_gemm {
+                    if entry == &cutlass_fmha
+                        || entry == &cutlass_gemm_operator
+                        || entry == &cutlass_fp8_dual_operator
+                        || entry == &cutlass_bf16_operator
+                        || entry == &cutlass_bf16_dual_operator
+                        || entry == &cutlass_gemm
+                        || entry == &cutlass_bf16
+                    {
                         cmd.arg("--expt-relaxed-constexpr");
                         cmd.arg("--expt-extended-lambda");
                         for include in &cutlass_includes {
                             cmd.arg(format!("-I{}", include.display()));
                         }
+                    }
+                    if entry == &cutlass_fp8_dual_operator {
+                        cmd.arg("-DAPXINF_FP8_DUAL_GEGLU_PRODUCTION=1");
+                    }
+                    if entry == &cutlass_bf16_dual_operator {
+                        cmd.arg("-DAPXINF_BF16_DUAL_GEGLU_PRODUCTION=1");
                     }
                     if entry == &cutlass_int8 {
                         cmd.arg("--expt-relaxed-constexpr");
@@ -424,6 +482,22 @@ fn main() {
                             "-U__CUDA_NO_HALF2_OPERATORS__",
                             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                             "-DFLASH_NAMESPACE=apxinf_fa2",
+                        ]);
+                        for include in &fa2_includes {
+                            cmd.arg(format!("-I{}", include.display()));
+                        }
+                    }
+                    if fa2_direct_e4m3_sources.contains(entry) {
+                        cmd.args([
+                            "--expt-relaxed-constexpr",
+                            "--expt-extended-lambda",
+                            "--use_fast_math",
+                            "-U__CUDA_NO_HALF_OPERATORS__",
+                            "-U__CUDA_NO_HALF_CONVERSIONS__",
+                            "-U__CUDA_NO_HALF2_OPERATORS__",
+                            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                            "-DFLASH_NAMESPACE=apxinf_fa2_direct_e4m3",
+                            "-DAPXINF_FA2_DIRECT_E4M3=1",
                         ]);
                         for include in &fa2_includes {
                             cmd.arg(format!("-I{}", include.display()));

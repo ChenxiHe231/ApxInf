@@ -1,7 +1,7 @@
-//! π0.5 CUDA transformer-layer execution.
+//! π0.5 FP8 CUDA transformer-layer execution.
 
 use super::backend::{kernels, Context};
-use apxinf_core::{Result, Tensor};
+use apxinf_core::{Error, Result, Tensor};
 use kernels::{activation, attention, embedding, fused, gemm, norm, quantization, rope};
 
 use super::{DeviceActionLayer, DeviceLanguageLayer, DeviceVisionBlock, GemmaVariantConfig};
@@ -36,6 +36,40 @@ pub struct LanguageLayerOutput {
 pub struct ActionLayerOutput {
     pub hidden: Tensor,
     pub next_normalized: Tensor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Fa2DirectE4m3Mode {
+    Auto,
+    Off,
+    On,
+}
+
+fn parse_fa2_direct_e4m3_mode(value: Option<&str>) -> Result<Fa2DirectE4m3Mode> {
+    match value {
+        None | Some("auto") => Ok(Fa2DirectE4m3Mode::Auto),
+        Some("0" | "off") => Ok(Fa2DirectE4m3Mode::Off),
+        Some("1" | "on") => Ok(Fa2DirectE4m3Mode::On),
+        Some(value) => Err(Error::Other(format!(
+            "APXINF_PI05_FA2_DIRECT_E4M3 must be auto, 0/off, or 1/on; got {value}"
+        ))),
+    }
+}
+
+fn fa2_direct_e4m3_mode() -> Result<Fa2DirectE4m3Mode> {
+    match std::env::var("APXINF_PI05_FA2_DIRECT_E4M3") {
+        Ok(value) => parse_fa2_direct_e4m3_mode(Some(&value)),
+        Err(std::env::VarError::NotPresent) => parse_fa2_direct_e4m3_mode(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(Error::Other(
+            "APXINF_PI05_FA2_DIRECT_E4M3 must be valid Unicode".into(),
+        )),
+    }
+}
+
+fn fa2_direct_e4m3_exact_shape(q: &Tensor, k: &Tensor, v: &Tensor) -> bool {
+    q.shape().dims() == [522, 8, 256]
+        && k.shape().dims() == [522, 1, 256]
+        && v.shape().dims() == [522, 1, 256]
 }
 
 pub fn language_layer(
@@ -80,11 +114,22 @@ pub fn language_layer(
             value: qkv.v.reshape(vec![tokens, config.head_dim])?,
         });
     }
-    let attention = attention::mqa_f16(ctx, &qkv.q, &qkv.k, &qkv.v)?.reshape(vec![
-        input.shape().dims()[0],
-        config.num_heads * config.head_dim,
-    ])?;
-    let attention = quantization::quantize_f16_e4m3(ctx, &attention, scales.attention_output)?;
+    let fa2_direct = match fa2_direct_e4m3_mode()? {
+        Fa2DirectE4m3Mode::Auto => fa2_direct_e4m3_exact_shape(&qkv.q, &qkv.k, &qkv.v),
+        Fa2DirectE4m3Mode::Off => false,
+        Fa2DirectE4m3Mode::On => true,
+    };
+    let attention = if fa2_direct {
+        attention::mqa_f16_e4m3_522(ctx, &qkv.q, &qkv.k, &qkv.v, scales.attention_output)?.reshape(
+            vec![input.shape().dims()[0], config.num_heads * config.head_dim],
+        )?
+    } else {
+        let attention = attention::mqa_f16(ctx, &qkv.q, &qkv.k, &qkv.v)?.reshape(vec![
+            input.shape().dims()[0],
+            config.num_heads * config.head_dim,
+        ])?;
+        quantization::quantize_f16_e4m3(ctx, &attention, scales.attention_output)?
+    };
     let projected = gemm::fp8(
         ctx,
         &attention,
@@ -102,13 +147,23 @@ pub fn language_layer(
     )?;
     let hidden = fused.hidden;
     let normalized = fused.normalized;
-    let gate_up = gemm::fp8(
+    let activated = if let Some(activated) = gemm::fp8_geglu_fused(
         ctx,
         &normalized,
         scales.mlp_norm,
         weights.gate_up.as_kernel_view(),
-    )?;
-    let activated = activation::geglu_quant_f16_e4m3(ctx, &gate_up, scales.mlp_activation)?;
+        scales.mlp_activation,
+    )? {
+        activated
+    } else {
+        let gate_up = gemm::fp8(
+            ctx,
+            &normalized,
+            scales.mlp_norm,
+            weights.gate_up.as_kernel_view(),
+        )?;
+        activation::geglu_quant_f16_e4m3(ctx, &gate_up, scales.mlp_activation)?
+    };
     let hidden = fused::gemm_bias_residual_fp8(
         ctx,
         &activated,
@@ -123,6 +178,38 @@ pub fn language_layer(
         key: qkv.k.reshape(vec![tokens, config.head_dim])?,
         value: qkv.v.reshape(vec![tokens, config.head_dim])?,
     })
+}
+
+#[cfg(test)]
+mod fa2_direct_e4m3_tests {
+    use super::{parse_fa2_direct_e4m3_mode, Fa2DirectE4m3Mode};
+
+    #[test]
+    fn fa2_direct_e4m3_parser_is_fail_closed() {
+        assert_eq!(
+            parse_fa2_direct_e4m3_mode(None).unwrap(),
+            Fa2DirectE4m3Mode::Auto
+        );
+        assert_eq!(
+            parse_fa2_direct_e4m3_mode(Some("auto")).unwrap(),
+            Fa2DirectE4m3Mode::Auto
+        );
+        for value in ["0", "off"] {
+            assert_eq!(
+                parse_fa2_direct_e4m3_mode(Some(value)).unwrap(),
+                Fa2DirectE4m3Mode::Off
+            );
+        }
+        for value in ["1", "on"] {
+            assert_eq!(
+                parse_fa2_direct_e4m3_mode(Some(value)).unwrap(),
+                Fa2DirectE4m3Mode::On
+            );
+        }
+        for value in ["", "true", "AUTO", "2"] {
+            assert!(parse_fa2_direct_e4m3_mode(Some(value)).is_err());
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -172,18 +259,15 @@ pub fn action_layer(
         prefix_v,
         position_offset,
     )?;
-    let attention = attention::mqa_cached_f16(
-        ctx,
-        &q,
-        prefix_k,
-        prefix_v,
-        position_offset + input.shape().dims()[0],
-    )?
-    .reshape(vec![
-        input.shape().dims()[0],
-        config.num_heads * config.head_dim,
-    ])?;
-    let attention = quantization::quantize_f16_e4m3(ctx, &attention, scales.attention_output)?;
+    let key_tokens = position_offset + input.shape().dims()[0];
+    let attention = attention::mqa_cached_f16(ctx, &q, prefix_k, prefix_v, key_tokens)?;
+    let attention =
+        quantization::quantize_f16_e4m3(ctx, &attention, scales.attention_output)?.reshape(
+            vec![
+                input.shape().dims()[0],
+                config.num_heads * config.head_dim,
+            ],
+        )?;
     let projected = gemm::fp8(
         ctx,
         &attention,
