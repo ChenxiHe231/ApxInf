@@ -1193,3 +1193,69 @@ pub fn mqa_f16(ctx: &CudaContext, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<
     #[cfg(not(apxinf_fa2_f16_sm100))]
     cublas_mqa_f16(ctx, q, k, v, k_shape[0])
 }
+
+pub fn mqa_f16_e4m3_522(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    output_scale: f32,
+) -> Result<Tensor> {
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if q.dtype() != DType::F16
+        || k.dtype() != DType::F16
+        || v.dtype() != DType::F16
+        || q_shape != [522, 8, 256]
+        || k_shape != [522, 1, 256]
+        || v.shape().dims() != k_shape
+        || !output_scale.is_finite()
+        || output_scale <= 0.0
+    {
+        return Err(Error::Other(format!(
+            "FA2 direct E4M3 requires FP16 Q [522,8,256], K/V [522,1,256] and finite positive scale; got q={q_shape:?}, k={k_shape:?}, v={:?}, scale={output_scale}",
+            v.shape().dims()
+        )));
+    }
+    #[cfg(apxinf_fa2_direct_e4m3_sm100)]
+    {
+        let output = output_buffer(ctx, q.numel())?;
+        let lse_elements = q_shape[0]
+            .checked_mul(q_shape[1])
+            .ok_or_else(|| Error::Other("FA2 direct E4M3 LSE size overflow".into()))?;
+        let softmax_lse = output_buffer(
+            ctx,
+            lse_elements
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| Error::Other("FA2 direct E4M3 LSE byte size overflow".into()))?,
+        )?;
+        unsafe {
+            ffi::check_cuda(ffi::apxinf_static_fa2_f16_direct_e4m3_522(
+                gpu_ptr(q)?,
+                gpu_ptr(k)?,
+                gpu_ptr(v)?,
+                output.ptr(),
+                softmax_lse.ptr(),
+                1,
+                522,
+                522,
+                8,
+                1,
+                256,
+                output_scale,
+                ctx.stream().handle(),
+            ))
+            .map_err(Error::Cuda)?;
+        }
+        return Ok(make_gpu_tensor(
+            q.shape().clone(),
+            DType::F8E4M3,
+            ctx.device_id(),
+            output,
+        ));
+    }
+    #[cfg(not(apxinf_fa2_direct_e4m3_sm100))]
+    Err(Error::Other(
+        "FA2 direct E4M3 requires an SM100-family FA2 build".into(),
+    ))
+}

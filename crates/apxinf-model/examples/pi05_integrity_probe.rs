@@ -83,7 +83,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("loading π0.5 checkpoint...");
     let host_weights = Pi05Weights::from_safetensors(&config, Path::new(&arguments[1]))?;
     eprintln!("quantizing and uploading static FP8 weights...");
-    let device_weights = Arc::new(StaticFp8Pi05Weights::from_host(&host_weights, &*backend)?);
+    let device_weights = Arc::new(StaticFp8Pi05Weights::from_host(
+        &host_weights,
+        &*backend,
+        config.language_dual_geglu_shape_possible(),
+    )?);
     drop(host_weights);
 
     let patch_tokens = config.num_views * config.patches_per_view();

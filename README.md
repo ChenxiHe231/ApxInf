@@ -16,7 +16,7 @@ workload with batch 1, 224 x 224 NHWC `uint8` images, 10 flow-matching steps,
 `H=10`, 10 warm-up iterations, and 30 measured samples.
 
 **Best published ApxInf PI0.5 performance:** Thor FP8 reaches
-**50.02 ms (20 Hz)** on the performance workload.
+**41.159 ms (24.3 Hz)** on the performance workload.
 
 ### Performance
 
@@ -25,9 +25,9 @@ single-stream policy inference rate.
 
 | Hardware | Mode | Latency | Throughput |
 |---|---|---:|---:|
-| Jetson AGX Thor | BF16 | 91.05 ms | 11 Hz |
-| Jetson AGX Thor | FP8 | **50.02 ms** | **20 Hz** |
-| Jetson AGX Orin | BF16 | 213.35 ms | 4.7 Hz |
+| Jetson AGX Thor | BF16 | 72.454 ms | 13.8 Hz |
+| Jetson AGX Thor | FP8 | **41.159 ms** | **24.3 Hz** |
+| Jetson AGX Orin | BF16 | 165.665 ms | 6.0 Hz |
 
 ### LIBERO accuracy
 

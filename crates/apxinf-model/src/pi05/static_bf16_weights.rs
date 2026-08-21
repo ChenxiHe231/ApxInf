@@ -62,7 +62,11 @@ pub struct StaticBf16Pi05Weights {
 }
 
 impl StaticBf16Pi05Weights {
-    pub fn from_host(weights: &Pi05Weights, backend: &dyn Backend) -> Result<Self> {
+    pub fn from_host(
+        weights: &Pi05Weights,
+        backend: &dyn Backend,
+        language_dual_layout: bool,
+    ) -> Result<Self> {
         Ok(Self {
             patch_embedding: Bf16LinearWeights::from_host(
                 &weights.vision.patch_embedding,
@@ -87,7 +91,9 @@ impl StaticBf16Pi05Weights {
             language_layers: weights
                 .language_layers
                 .iter()
-                .map(|layer| Bf16DeviceLanguageLayer::from_host(layer, backend))
+                .map(|layer| {
+                    Bf16DeviceLanguageLayer::from_host(layer, backend, language_dual_layout)
+                })
                 .collect::<Result<Vec<_>>>()?,
             language_final_norm_scale: bf16_to_device(&weights.language_final_norm_scale, backend)?,
             action_layers: weights
@@ -130,7 +136,11 @@ impl Bf16DeviceVisionBlock {
 }
 
 impl Bf16DeviceLanguageLayer {
-    fn from_host(weights: &LanguageLayerWeights, backend: &dyn Backend) -> Result<Self> {
+    fn from_host(
+        weights: &LanguageLayerWeights,
+        backend: &dyn Backend,
+        allow_dual_layout: bool,
+    ) -> Result<Self> {
         Ok(Self {
             input_norm_scale: bf16_to_device(&weights.input_norm_scale, backend)?,
             qkv: Bf16LinearWeights::from_host_parts(
@@ -143,9 +153,10 @@ impl Bf16DeviceLanguageLayer {
             )?,
             output: Bf16LinearWeights::from_host(&weights.attention.output, backend)?,
             post_attention_norm_scale: bf16_to_device(&weights.post_attention_norm_scale, backend)?,
-            gate_up: Bf16LinearWeights::from_host_parts(
+            gate_up: Bf16LinearWeights::from_host_parts_with_dual_layout(
                 &[&weights.mlp.gate, &weights.mlp.up],
                 backend,
+                allow_dual_layout,
             )?,
             down: Bf16LinearWeights::from_host(&weights.mlp.down, backend)?,
         })

@@ -7,7 +7,7 @@
     "method": "cold_l2_exact_shape",
     "name": "pi05_cutlass_tune"
   },
-  "kernel_build_id": "kb1-72b398f332ec581e84b8489c4d336ddf",
+  "kernel_build_id": "kb1-5c8c12913a9206958668d721742d5168",
   "measurement": {
     "benchmark_iterations": 30,
     "eviction_buffer_bytes": 134217728,
@@ -1647,77 +1647,77 @@
       ]
     },
     "fp8_f16_m522_n2048_k16384": {
-      "backend": "cublaslt",
+      "backend": "cublaslt_custom_bias",
       "cublaslt_candidates": [
         {
           "heuristic_rank": 0,
-          "milliseconds": 0.27439576387405396
+          "milliseconds": 0.25508370995521545
         },
         {
           "heuristic_rank": 1,
-          "milliseconds": 0.2734965682029724
+          "milliseconds": 0.25876584649086
         },
         {
           "heuristic_rank": 2,
-          "milliseconds": 0.2754250764846802
+          "milliseconds": 0.2566485106945038
         },
         {
           "heuristic_rank": 3,
-          "milliseconds": 0.431060254573822
+          "milliseconds": 0.41258031129837036
         },
         {
           "heuristic_rank": 4,
-          "milliseconds": 0.4260117709636688
+          "milliseconds": 0.4212586581707001
         },
         {
           "heuristic_rank": 5,
-          "milliseconds": 0.34710508584976196
+          "milliseconds": 0.3277621567249298
         },
         {
           "heuristic_rank": 6,
-          "milliseconds": 0.2993450462818146
+          "milliseconds": 0.27571627497673035
         },
         {
           "heuristic_rank": 7,
-          "milliseconds": 0.3730207681655884
+          "milliseconds": 0.35280320048332214
         }
       ],
       "cutlass_candidates": [
         {
-          "milliseconds": 1.3454154531160991,
+          "milliseconds": 1.3047893285751342,
           "tactic": 0
         },
         {
-          "milliseconds": 0.4518485337495804,
+          "milliseconds": 0.444884267449379,
           "tactic": 1
         },
         {
-          "milliseconds": 0.2772703995307287,
+          "milliseconds": 0.26680320302645366,
           "tactic": 2
         },
         {
-          "milliseconds": 0.27987093329429624,
+          "milliseconds": 0.24908159921566644,
           "tactic": 3
         },
         {
-          "milliseconds": 0.3616853346427282,
+          "milliseconds": 0.32573866347471875,
           "tactic": 4
         },
         {
-          "milliseconds": 0.30169280370076496,
+          "milliseconds": 0.25461546729008355,
           "tactic": 5
         },
         {
-          "milliseconds": 0.36823040147622427,
+          "milliseconds": 0.33995733261108396,
           "tactic": 6
         },
         {
-          "milliseconds": 0.3004778683185577,
+          "milliseconds": 0.25932479947805404,
           "tactic": 7
         }
       ],
-      "milliseconds": 0.2734965682029724,
-      "tactic": 1,
+      "milliseconds": 0.144243,
+      "tactic": 18926998,
       "workloads": [
         {
           "name": "language.down",
@@ -1893,77 +1893,80 @@
       ]
     },
     "fp8_f16_m522_n32768_k2048": {
-      "backend": "cutlass",
+      "backend": "cutlass_fp8_dual_geglu",
+      "cold_l2_candidate_ms": 0.51696,
+      "cold_l2_control_ms": 0.584512,
+      "cublaslt_custom_find_ms": 0.464557,
       "cublaslt_candidates": [
         {
           "heuristic_rank": 0,
-          "milliseconds": 0.5985758900642395
+          "milliseconds": 0.4479924738407135
         },
         {
           "heuristic_rank": 1,
-          "milliseconds": 1.3557171821594238
+          "milliseconds": 0.9280917048454285
         },
         {
           "heuristic_rank": 2,
-          "milliseconds": 0.6091039776802063
+          "milliseconds": 0.46897071599960327
         },
         {
           "heuristic_rank": 3,
-          "milliseconds": 1.2750688791275024
+          "milliseconds": 0.731288492679596
         },
         {
           "heuristic_rank": 4,
-          "milliseconds": 1.907136082649231
+          "milliseconds": 1.3120734691619873
         },
         {
           "heuristic_rank": 5,
-          "milliseconds": 1.1811466217041016
+          "milliseconds": 0.9237183332443237
         },
         {
           "heuristic_rank": 6,
-          "milliseconds": 0.6023434996604919
+          "milliseconds": 0.4679242968559265
         },
         {
           "heuristic_rank": 7,
-          "milliseconds": 3.614701509475708
+          "milliseconds": 2.105512857437134
         }
       ],
       "cutlass_candidates": [
         {
-          "milliseconds": 0.7806869347890218,
+          "milliseconds": 0.700955722729365,
           "tactic": 0
         },
         {
-          "milliseconds": 1.1663104017575583,
+          "milliseconds": 0.7754719972610473,
           "tactic": 1
         },
         {
-          "milliseconds": 0.7381877322991689,
+          "milliseconds": 0.47081813017527263,
           "tactic": 2
         },
         {
-          "milliseconds": 0.6149962683518727,
+          "milliseconds": 0.47912106613318123,
           "tactic": 3
         },
         {
-          "milliseconds": 0.5794080038865407,
+          "milliseconds": 0.4848778674999873,
           "tactic": 4
         },
         {
-          "milliseconds": 0.5810656030972798,
+          "milliseconds": 0.47137493391831714,
           "tactic": 5
         },
         {
-          "milliseconds": 0.6127658605575561,
+          "milliseconds": 0.4608863989512126,
           "tactic": 6
         },
         {
-          "milliseconds": 0.7767040034135183,
+          "milliseconds": 0.48656853636105857,
           "tactic": 7
         }
       ],
-      "milliseconds": 0.5794080038865407,
-      "tactic": 4,
+      "milliseconds": 0.51696,
+      "tactic": 0,
       "workloads": [
         {
           "name": "language.gate_up",
@@ -1975,77 +1978,77 @@
       ]
     },
     "fp8_f16_m533_n2048_k16384": {
-      "backend": "cublaslt",
+      "backend": "cublaslt_custom_bias",
       "cublaslt_candidates": [
         {
           "heuristic_rank": 0,
-          "milliseconds": 0.265999972820282
+          "milliseconds": 0.21931730210781097
         },
         {
           "heuristic_rank": 1,
-          "milliseconds": 0.2694624066352844
+          "milliseconds": 0.22607894241809845
         },
         {
           "heuristic_rank": 2,
-          "milliseconds": 0.27394983172416687
+          "milliseconds": 0.22484903037548065
         },
         {
           "heuristic_rank": 3,
-          "milliseconds": 0.42854297161102295
+          "milliseconds": 0.3533109128475189
         },
         {
           "heuristic_rank": 4,
-          "milliseconds": 0.4331893026828766
+          "milliseconds": 0.3608650863170624
         },
         {
           "heuristic_rank": 5,
-          "milliseconds": 0.43844690918922424
+          "milliseconds": 0.35734617710113525
         },
         {
           "heuristic_rank": 6,
-          "milliseconds": 0.3460085093975067
+          "milliseconds": 0.2598613500595093
         },
         {
           "heuristic_rank": 7,
-          "milliseconds": 0.36505281925201416
+          "milliseconds": 0.30791571736335754
         }
       ],
       "cutlass_candidates": [
         {
-          "milliseconds": 1.3261578599611918,
+          "milliseconds": 1.1014101227124533,
           "tactic": 0
         },
         {
-          "milliseconds": 0.45673706630865735,
+          "milliseconds": 0.41136640111605327,
           "tactic": 1
         },
         {
-          "milliseconds": 0.27788693010807036,
+          "milliseconds": 0.2525567968686422,
           "tactic": 2
         },
         {
-          "milliseconds": 0.2757919987042745,
+          "milliseconds": 0.23269333293040592,
           "tactic": 3
         },
         {
-          "milliseconds": 0.3317834655443827,
+          "milliseconds": 0.30399893124898275,
           "tactic": 4
         },
         {
-          "milliseconds": 0.2932501326004664,
+          "milliseconds": 0.24733119954665503,
           "tactic": 5
         },
         {
-          "milliseconds": 0.3565408001343409,
+          "milliseconds": 0.32547093331813814,
           "tactic": 6
         },
         {
-          "milliseconds": 0.2862378656864166,
+          "milliseconds": 0.24534933567047118,
           "tactic": 7
         }
       ],
-      "milliseconds": 0.265999972820282,
-      "tactic": 0,
+      "milliseconds": 0.133939,
+      "tactic": 18924573,
       "workloads": [
         {
           "name": "language.down",
@@ -2221,77 +2224,79 @@
       ]
     },
     "fp8_f16_m533_n32768_k2048": {
-      "backend": "cutlass",
+      "backend": "cutlass_fp8_dual_geglu",
+      "cublaslt_custom_find_control_ms": 0.554826,
+      "cublaslt_custom_find_ms": 0.471533,
       "cublaslt_candidates": [
         {
           "heuristic_rank": 0,
-          "milliseconds": 0.5904864072799683
+          "milliseconds": 0.45717117190361023
         },
         {
           "heuristic_rank": 1,
-          "milliseconds": 1.342842936515808
+          "milliseconds": 0.9165781140327454
         },
         {
           "heuristic_rank": 2,
-          "milliseconds": 0.6086528301239014
+          "milliseconds": 0.4689493179321289
         },
         {
           "heuristic_rank": 3,
-          "milliseconds": 1.242192029953003
+          "milliseconds": 0.7210079431533813
         },
         {
           "heuristic_rank": 4,
-          "milliseconds": 1.8654656410217285
+          "milliseconds": 1.2592724561691284
         },
         {
           "heuristic_rank": 5,
-          "milliseconds": 1.1921534538269043
+          "milliseconds": 0.8759435415267944
         },
         {
           "heuristic_rank": 6,
-          "milliseconds": 3.492645502090454
+          "milliseconds": 2.0341858863830566
         },
         {
           "heuristic_rank": 7,
-          "milliseconds": 0.8839433789253235
+          "milliseconds": 0.6919370293617249
         }
       ],
       "cutlass_candidates": [
         {
-          "milliseconds": 0.7632981280485789,
+          "milliseconds": 0.6957824031511942,
           "tactic": 0
         },
         {
-          "milliseconds": 1.1383402665456137,
+          "milliseconds": 0.7838037351767222,
           "tactic": 1
         },
         {
-          "milliseconds": 0.6562293370564779,
+          "milliseconds": 0.468693337837855,
           "tactic": 2
         },
         {
-          "milliseconds": 0.6020842711130778,
+          "milliseconds": 0.4764693369468053,
           "tactic": 3
         },
         {
-          "milliseconds": 0.5731818656126658,
+          "milliseconds": 0.465949868162473,
           "tactic": 4
         },
         {
-          "milliseconds": 0.5846410632133484,
+          "milliseconds": 0.46785173018773396,
           "tactic": 5
         },
         {
-          "milliseconds": 0.6259029308954874,
+          "milliseconds": 0.4550026684999466,
           "tactic": 6
         },
         {
-          "milliseconds": 0.7705407996972402,
+          "milliseconds": 0.480908798178037,
           "tactic": 7
         }
       ],
-      "milliseconds": 0.5731818656126658,
-      "tactic": 4,
+      "milliseconds": 0.471533,
+      "tactic": 0,
       "workloads": [
         {
           "name": "language.gate_up",
@@ -3544,77 +3549,77 @@
       ]
     },
     "fp8_f16_m778_n2048_k16384": {
-      "backend": "cutlass",
+      "backend": "cublaslt_custom_bias",
       "cublaslt_candidates": [
         {
           "heuristic_rank": 0,
-          "milliseconds": 0.5003936290740967
+          "milliseconds": 0.39630186557769775
         },
         {
           "heuristic_rank": 1,
-          "milliseconds": 0.4710955023765564
+          "milliseconds": 0.394870400428772
         },
         {
           "heuristic_rank": 2,
-          "milliseconds": 0.48621124029159546
+          "milliseconds": 0.39752426743507385
         },
         {
           "heuristic_rank": 3,
-          "milliseconds": 0.4989332854747772
+          "milliseconds": 0.4041557312011719
         },
         {
           "heuristic_rank": 4,
-          "milliseconds": 0.43992215394973755
+          "milliseconds": 0.3461727499961853
         },
         {
           "heuristic_rank": 5,
-          "milliseconds": 0.35666781663894653
+          "milliseconds": 0.28416532278060913
         },
         {
           "heuristic_rank": 6,
-          "milliseconds": 0.3877674639225006
+          "milliseconds": 0.31583040952682495
         },
         {
           "heuristic_rank": 7,
-          "milliseconds": 0.44646185636520386
+          "milliseconds": 0.39207786321640015
         }
       ],
       "cutlass_candidates": [
         {
-          "milliseconds": 1.960918406645457,
+          "milliseconds": 1.6961834629376729,
           "tactic": 0
         },
         {
-          "milliseconds": 0.6251914660135905,
+          "milliseconds": 0.5943936049938202,
           "tactic": 1
         },
         {
-          "milliseconds": 0.3911146660645803,
+          "milliseconds": 0.35782079994678495,
           "tactic": 2
         },
         {
-          "milliseconds": 0.35049173335234324,
+          "milliseconds": 0.3445322652657827,
           "tactic": 3
         },
         {
-          "milliseconds": 0.6443391978740692,
+          "milliseconds": 0.597293863693873,
           "tactic": 4
         },
         {
-          "milliseconds": 0.328698667883873,
+          "milliseconds": 0.2879978676637014,
           "tactic": 5
         },
         {
-          "milliseconds": 0.571890131632487,
+          "milliseconds": 0.5002634644508361,
           "tactic": 6
         },
         {
-          "milliseconds": 0.40686826705932616,
+          "milliseconds": 0.31360000173250835,
           "tactic": 7
         }
       ],
-      "milliseconds": 0.328698667883873,
-      "tactic": 5,
+      "milliseconds": 0.150323,
+      "tactic": 18924956,
       "workloads": [
         {
           "name": "language.down",
@@ -3790,77 +3795,79 @@
       ]
     },
     "fp8_f16_m778_n32768_k2048": {
-      "backend": "cublaslt",
+      "backend": "cublaslt_custom_split_serial",
+      "cublaslt_custom_find_control_ms": 0.545149,
+      "cublaslt_custom_find_ms": 0.531629,
       "cublaslt_candidates": [
         {
           "heuristic_rank": 0,
-          "milliseconds": 1.1464873552322388
+          "milliseconds": 0.7966901659965515
         },
         {
           "heuristic_rank": 1,
-          "milliseconds": 1.7873791456222534
+          "milliseconds": 1.2355389595031738
         },
         {
           "heuristic_rank": 2,
-          "milliseconds": 0.7495637536048889
+          "milliseconds": 0.5547956824302673
         },
         {
           "heuristic_rank": 3,
-          "milliseconds": 0.8494858145713806
+          "milliseconds": 0.5793279409408569
         },
         {
           "heuristic_rank": 4,
-          "milliseconds": 1.1257802248001099
+          "milliseconds": 0.8073803186416626
         },
         {
           "heuristic_rank": 5,
-          "milliseconds": 1.4979766607284546
+          "milliseconds": 1.0039637088775635
         },
         {
           "heuristic_rank": 6,
-          "milliseconds": 1.9997484683990479
+          "milliseconds": 1.416534423828125
         },
         {
           "heuristic_rank": 7,
-          "milliseconds": 0.7452768087387085
+          "milliseconds": 0.5585333704948425
         }
       ],
       "cutlass_candidates": [
         {
-          "milliseconds": 1.0507349332173666,
+          "milliseconds": 0.9587914705276489,
           "tactic": 0
         },
         {
-          "milliseconds": 1.3546730637550355,
+          "milliseconds": 1.1125162720680237,
           "tactic": 1
         },
         {
-          "milliseconds": 0.9131381313006083,
+          "milliseconds": 0.613976534207662,
           "tactic": 2
         },
         {
-          "milliseconds": 0.8133877396583558,
+          "milliseconds": 0.6706495940685272,
           "tactic": 3
         },
         {
-          "milliseconds": 0.846230399608612,
+          "milliseconds": 0.6341738680998484,
           "tactic": 4
         },
         {
-          "milliseconds": 0.7920597354571025,
+          "milliseconds": 0.6690453290939331,
           "tactic": 5
         },
         {
-          "milliseconds": 0.7927093346913655,
+          "milliseconds": 0.5745664020379384,
           "tactic": 6
         },
         {
-          "milliseconds": 0.9653088013331096,
+          "milliseconds": 0.6186005314191182,
           "tactic": 7
         }
       ],
-      "milliseconds": 0.7452768087387085,
-      "tactic": 7,
+      "milliseconds": 0.708288,
+      "tactic": 18923959,
       "workloads": [
         {
           "name": "language.gate_up",
@@ -3872,77 +3879,77 @@
       ]
     },
     "fp8_f16_m789_n2048_k16384": {
-      "backend": "cutlass",
+      "backend": "cublaslt_custom_bias",
       "cublaslt_candidates": [
         {
           "heuristic_rank": 0,
-          "milliseconds": 0.4980171024799347
+          "milliseconds": 0.4148266613483429
         },
         {
           "heuristic_rank": 1,
-          "milliseconds": 0.4521876573562622
+          "milliseconds": 0.4205247759819031
         },
         {
           "heuristic_rank": 2,
-          "milliseconds": 0.4784213602542877
+          "milliseconds": 0.41756802797317505
         },
         {
           "heuristic_rank": 3,
-          "milliseconds": 0.48737820982933044
+          "milliseconds": 0.42059198021888733
         },
         {
           "heuristic_rank": 4,
-          "milliseconds": 0.43818554282188416
+          "milliseconds": 0.37337496876716614
         },
         {
           "heuristic_rank": 5,
-          "milliseconds": 0.35687682032585144
+          "milliseconds": 0.2964629530906677
         },
         {
           "heuristic_rank": 6,
-          "milliseconds": 0.39086297154426575
+          "milliseconds": 0.3267520070075989
         },
         {
           "heuristic_rank": 7,
-          "milliseconds": 0.43471676111221313
+          "milliseconds": 0.4116799533367157
         }
       ],
       "cutlass_candidates": [
         {
-          "milliseconds": 1.8919840057690938,
+          "milliseconds": 1.722211209932963,
           "tactic": 0
         },
         {
-          "milliseconds": 0.6309290647506713,
+          "milliseconds": 0.6013397336006164,
           "tactic": 1
         },
         {
-          "milliseconds": 0.39956906537214915,
+          "milliseconds": 0.3670346667369207,
           "tactic": 2
         },
         {
-          "milliseconds": 0.33434560100237526,
+          "milliseconds": 0.3420746664206187,
           "tactic": 3
         },
         {
-          "milliseconds": 0.6199861367543539,
+          "milliseconds": 0.6009290655453999,
           "tactic": 4
         },
         {
-          "milliseconds": 0.3216213325659434,
+          "milliseconds": 0.31172480086485543,
           "tactic": 5
         },
         {
-          "milliseconds": 0.5530986626942952,
+          "milliseconds": 0.4949877301851908,
           "tactic": 6
         },
         {
-          "milliseconds": 0.4054666688044866,
+          "milliseconds": 0.34216852982838947,
           "tactic": 7
         }
       ],
-      "milliseconds": 0.3216213325659434,
-      "tactic": 5,
+      "milliseconds": 0.148371,
+      "tactic": 18927004,
       "workloads": [
         {
           "name": "language.down",
@@ -4118,77 +4125,79 @@
       ]
     },
     "fp8_f16_m789_n32768_k2048": {
-      "backend": "cublaslt",
+      "backend": "cublaslt_custom",
+      "cublaslt_custom_find_control_ms": 0.521507,
+      "cublaslt_custom_find_ms": 0.50063,
       "cublaslt_candidates": [
         {
           "heuristic_rank": 0,
-          "milliseconds": 1.1554569005966187
+          "milliseconds": 0.8044682145118713
         },
         {
           "heuristic_rank": 1,
-          "milliseconds": 1.7998766899108887
+          "milliseconds": 1.216270923614502
         },
         {
           "heuristic_rank": 2,
-          "milliseconds": 0.7576629519462585
+          "milliseconds": 0.5642901659011841
         },
         {
           "heuristic_rank": 3,
-          "milliseconds": 0.8552191257476807
+          "milliseconds": 0.5937471985816956
         },
         {
           "heuristic_rank": 4,
-          "milliseconds": 1.111948847770691
+          "milliseconds": 0.8191796541213989
         },
         {
           "heuristic_rank": 5,
-          "milliseconds": 1.4988211393356323
+          "milliseconds": 0.9990934133529663
         },
         {
           "heuristic_rank": 6,
-          "milliseconds": 2.0263071060180664
+          "milliseconds": 1.403778314590454
         },
         {
           "heuristic_rank": 7,
-          "milliseconds": 0.7600789666175842
+          "milliseconds": 0.5709460973739624
         }
       ],
       "cutlass_candidates": [
         {
-          "milliseconds": 1.0632959961891175,
+          "milliseconds": 0.9721493343512217,
           "tactic": 0
         },
         {
-          "milliseconds": 1.378484268983205,
+          "milliseconds": 1.1198090751965841,
           "tactic": 1
         },
         {
-          "milliseconds": 0.9214143971602122,
+          "milliseconds": 0.6342794716358184,
           "tactic": 2
         },
         {
-          "milliseconds": 0.8436981280644734,
+          "milliseconds": 0.6533205290635427,
           "tactic": 3
         },
         {
-          "milliseconds": 0.8618719975153605,
+          "milliseconds": 0.6691637376944224,
           "tactic": 4
         },
         {
-          "milliseconds": 0.812281600634257,
+          "milliseconds": 0.6388245264689127,
           "tactic": 5
         },
         {
-          "milliseconds": 0.8002442677815755,
+          "milliseconds": 0.6055082658926646,
           "tactic": 6
         },
         {
-          "milliseconds": 0.961405873298645,
+          "milliseconds": 0.6468095938364665,
           "tactic": 7
         }
       ],
-      "milliseconds": 0.7576629519462585,
-      "tactic": 2,
+      "milliseconds": 0.50063,
+      "tactic": 18902425,
       "workloads": [
         {
           "name": "language.gate_up",
