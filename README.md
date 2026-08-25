@@ -28,7 +28,7 @@ single-stream policy inference rate.
 | Jetson AGX Thor | BF16 | 72.454 ms | 13.8 Hz |
 | Jetson AGX Thor | FP8 | **41.159 ms** | **24.3 Hz** |
 | Jetson AGX Orin | BF16 | 165.665 ms | 6.0 Hz |
-| RTX 4090 | BF16 | 35.20 ms | 28.4 Hz |
+| RTX 4090 | BF16 | 31.38 ms | 31.9 Hz |
 | RTX 4090 | INT8 | 25.99 ms | 38.5 Hz |
 
 ### LIBERO accuracy
