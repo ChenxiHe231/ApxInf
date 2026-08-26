@@ -4,7 +4,10 @@ Use this guide after the reference model runs and its semantics are understood.
 Follow [the porting workflow](porting-workflow.md) for evidence and acceptance,
 [the model-layer architecture](model-layer-architecture.md) for ownership and
 dependencies, and [the kernel guide](adding-new-kernels.md) for genuine backend
-gaps.
+gaps. For a VLA, [adding an embodiment](adding-an-embodiment.md) covers the
+Python-side serving contract this guide leaves to the policy layer: which
+observation keys a client sends, how state is routed, and how to register a new
+robot.
 
 ## Start with a separate model directory
 
