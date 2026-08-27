@@ -3,8 +3,10 @@
 Use this guide after the reference model runs and its semantics are understood.
 Follow [the porting workflow](porting-workflow.md) for evidence and acceptance,
 [the model-layer architecture](model-layer-architecture.md) for ownership and
-dependencies, and [the kernel guide](adding-new-kernels.md) for genuine backend
-gaps. For a VLA, [adding an embodiment](adding-an-embodiment.md) covers the
+dependencies, [Model Execution Wiring](model-execution-wiring.md) for composing
+the maintained device path, and [the kernel guide](adding-new-kernels.md) for
+genuine backend gaps. For a VLA,
+[adding an embodiment](adding-an-embodiment.md) covers the
 Python-side serving contract this guide leaves to the policy layer: which
 observation keys a client sends, how state is routed, and how to register a new
 robot.
@@ -25,6 +27,12 @@ The first correct implementation should be self-contained. Copying substantial
 code from the closest model is preferable to inventing a shared abstraction
 before the second implementation exposes the real common boundary. Preserve
 provenance when copying and rename model-specific concepts immediately.
+
+Model-family directories are private architecture modules. Follow the
+[dependency matrix](model-layer-architecture.md#per-model-isolation): inspect
+and copy from a close implementation when useful, but keep the new product code
+independent of other families. Run
+`scripts/check_model_family_boundaries.sh` before review.
 
 ## Choose the runtime contract
 
@@ -113,12 +121,27 @@ specialized fast path may recover a concrete backend for capabilities that do
 not belong on the portable trait. Trait is the floor; concrete types are the
 ceiling.
 
+Do not begin coverage discovery from `dyn Backend` alone. First inspect the
+closest maintained executor at the requested precision and the safe interfaces
+under `apxinf_cuda::kernels`, especially fused normalization/residual,
+QKV/RoPE/cache, attention, activation, and GEMM paths. Complete the execution
+ledger from [Model Execution Wiring](model-execution-wiring.md) before treating
+an operation as missing.
+
 ### Execution and preparation
 
 Separate reusable mathematics from execution state. A runtime may own device
 weights, caches, workspaces, CUDA graphs, and shape-specific preparation. A
 prepared object must bind every shape or condition that changes allocation,
 dispatch, or captured execution.
+
+Preparation runs the real fixed-shape executor once, installs required native
+plans, and proves workspace capacity before capture. Configuration validation
+alone is not preparation. Keep a CPU implementation inside a layer only as a
+named correctness scaffold with an exit criterion. For an accelerator target,
+replace it through an existing safe device path or `adding-new-kernels.md`
+before completion; a repeated host escape is unfinished implementation rather
+than ordinary best-effort optimization debt.
 
 For VLA models, include state shape, image/grid structure, masks, action horizon,
 action width, embodiment/category selection, and stochastic input shape where
@@ -165,8 +188,9 @@ otherwise.
 
 ## Kernel decisions
 
-Try existing operators and reshapes first. A missing dtype, layout, shape, mask,
-or semantic variant may require backend work, but the new API must be
+Match repeated model sequences to existing fused safe interfaces first, then
+compose device primitives and layouts. A missing dtype, layout, shape, mask, or
+semantic variant may require backend work, but the new API must be
 model-neutral. Follow [Adding New Kernels](adding-new-kernels.md) and return to
 the original model references for operator replay.
 
@@ -183,13 +207,18 @@ Verify progressively:
 7. requested device and precision combinations;
 8. latency and memory, reported separately from correctness.
 
-Temporary capture and replay programs belong in the private port workspace.
-Commit only maintained product tests or examples whose purpose remains after
-the port is complete.
+Temporary capture and replay programs belong in the
+[private port workspace](porting-workflow.md#private-port-workspace). Commit only
+maintained product tests or examples whose purpose remains after the port is
+complete.
 
 ## Completion criteria
 
 The model has its own directory, uses the correct runtime contract, respects the
 model/backend boundary, loads through the maintained registry, passes declared
-numerical tolerances through the public path, reports unsupported cases
-clearly, and introduces no speculative shared abstraction.
+numerical tolerances through the public path, has no accelerator hot-path host
+escapes unless a concrete operator blocker is recorded, audits applicable
+prepared/static/captured execution, reports functional and optimization status
+separately, reports unsupported cases clearly, and introduces no speculative
+shared abstraction. Explicit performance release gates remain mandatory;
+otherwise optimization is best effort.
