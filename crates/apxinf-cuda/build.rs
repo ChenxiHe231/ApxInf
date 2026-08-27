@@ -261,6 +261,7 @@ fn main() {
             // the stable C ABI.
             let mut kernel_files = vec![
                 std::path::Path::new(&adapters_dir).join("core_kernels_adapter.cu"),
+                std::path::Path::new(&adapters_dir).join("sampling_adapter.cu"),
                 std::path::Path::new(&adapters_dir).join("static_bf16_adapter.cu"),
                 std::path::Path::new(&adapters_dir).join("w8a8_adapter.cu"),
                 std::path::Path::new(&adapters_dir).join("custom_kernels.cu"),
@@ -408,6 +409,16 @@ fn main() {
                     fa2_f16_hdim96,
                     fa2_f16_hdim256,
                 ]);
+                if fa2_sm80 {
+                    let fa2_split_hdim256 =
+                        fa2_root.join("flash_attn/flash_fwd_split_hdim256_bf16_sm80.cu");
+                    assert!(
+                        fa2_split_hdim256.is_file(),
+                        "vendored FlashAttention-2 split-KV source is incomplete under {}",
+                        fa2_root.display()
+                    );
+                    fa2_sources.push(fa2_split_hdim256);
+                }
                 if fa2_f16_sm100 {
                     println!("cargo:rustc-cfg=apxinf_fa2_f16_sm100");
                     let direct_operator = cutlass_root.join("fa2_f16_e4m3_sm100.cu");
@@ -517,6 +528,9 @@ fn main() {
                             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                             "-DFLASH_NAMESPACE=apxinf_fa2",
                         ]);
+                        if fa2_sm80 {
+                            cmd.arg("-DAPXINF_FA2_SM80=1");
+                        }
                         for include in &fa2_includes {
                             cmd.arg(format!("-I{}", include.display()));
                         }
