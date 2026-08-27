@@ -54,6 +54,7 @@ from apxinf.robots.presets import (  # noqa: E402
     get_robot_preset,
 )
 from apxinf.serving import WebsocketPolicyServer  # noqa: E402
+from apxinf._tactics import resolve_pi05_tactics  # noqa: E402
 
 DEFAULT_ROBOT = "franka_libero"
 
@@ -130,7 +131,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tactics",
         type=pathlib.Path,
-        help="FP8 GEMM tactics JSON; required only for --precision fp8",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--action-dim",
@@ -214,10 +215,16 @@ def main() -> None:
         "precision": args.precision,
         "policy": preset.name,
     }
-
     if args.random_weights:
         import apxinf_py  # lazy: only the synthetic path needs the CUDA binding here
 
+        # Random engines bypass Pi05Policy.from_pretrained, so this synthetic
+        # server is the sole caller that must resolve the package default.
+        tactics = resolve_pi05_tactics(
+            args.device, args.precision, override=args.tactics
+        )
+        if tactics is not None:
+            logging.info("using %s tactics for %s: %s", args.precision, args.device, tactics)
         # Synthetic FP8 has no calibration file; a uniform activation scale keeps the
         # FP8 path on. bf16/int8 need neither calibration nor tactics.
         calibration = None
@@ -259,7 +266,7 @@ def main() -> None:
             num_flow_steps=args.num_flow_steps,
             max_token_len=args.max_token_len,
             calibration=calibration,
-            tactics=(str(args.tactics) if args.tactics is not None else None),
+            tactics=(str(tactics) if tactics is not None else None),
             seed=args.seed,
         )
         policy = Pi05Policy.from_random(
@@ -272,9 +279,6 @@ def main() -> None:
             metadata={**metadata, "robot": preset.name},
         )
     else:
-        if args.precision == "fp8" and (args.calibration is None or args.tactics is None):
-            raise ValueError("--calibration and --tactics are required for FP8")
-
         logging.info(
             "loading %s policy in-process from %s as robot=%s",
             args.precision,

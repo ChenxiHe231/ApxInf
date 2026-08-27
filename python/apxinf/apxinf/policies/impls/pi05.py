@@ -40,6 +40,7 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ..._tactics import resolve_pi05_tactics
 from ..base import BareModel
 from ...processors import (
     GaussianNoise,
@@ -242,6 +243,11 @@ class Pi05Policy:
         (a masked view is excluded from attention, occupies no RoPE position, and
         the vision tower has no per-slot parameters) and skips their patch tokens.
 
+        Unless ``tactics`` is explicitly supplied, CUDA deployments select the
+        validated tactic database for their compute capability and precision.
+        A checkpoint-local ``tactics.json`` takes precedence over source-tree
+        defaults, so normal Python and serving callers share the same routing.
+
         For a **fully custom** pre/post chain, do not funnel it through here:
         build the parts yourself and use :meth:`default_pipelines` +
         :meth:`__init__` (or mutate ``policy.input_pipeline`` after construction).
@@ -251,6 +257,12 @@ class Pi05Policy:
             import apxinf_py  # lazy: processor-only users never import the binding
 
             ckpt = str(checkpoint) if checkpoint is not None else str(model_dir / "model.safetensors")
+            tactics = resolve_pi05_tactics(
+                device,
+                precision,
+                model_dir=model_dir,
+                override=Path(tactics) if tactics is not None else None,
+            )
             model = apxinf_py.Model.load(
                 model_name,
                 ckpt,

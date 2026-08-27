@@ -553,7 +553,7 @@ def parse_args() -> argparse.Namespace:
     in_process.add_argument("--checkpoint", type=pathlib.Path)
     in_process.add_argument("--device", default="cuda:0")
     in_process.add_argument("--calibration", type=pathlib.Path)
-    in_process.add_argument("--tactics", type=pathlib.Path)
+    in_process.add_argument("--tactics", type=pathlib.Path, help=argparse.SUPPRESS)
     in_process.add_argument("--tokenizer", type=pathlib.Path)
     in_process.add_argument("--norm-key", default="actions")
     in_process.add_argument("--action-dim", type=int, default=7, help="0 keeps the full vector")
