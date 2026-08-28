@@ -11,7 +11,9 @@ verification evidence agree.
 
 Before implementation, read [Adding a New Model](adding-a-new-model.md). Use
 [the model-layer architecture](model-layer-architecture.md) to decide ownership
-and refactoring boundaries. When coverage is missing, switch explicitly to
+and refactoring boundaries. Design the target device path with
+[Model Execution Wiring](model-execution-wiring.md). When coverage is missing,
+switch explicitly to
 [Adding New Kernels](adding-new-kernels.md) and return here after the kernel has
 been replayed against the original model evidence.
 
@@ -26,28 +28,94 @@ Before editing code, record outside the repository:
 - correctness tolerances and performance goals;
 - expected public API and deployment path.
 
-### Resolve missing inputs with the user
+### Discover missing inputs and ask early
+
+Treat the list above as a discovery contract, not as an assumption that the
+user has already supplied every value. Before implementation, inspect only the
+current task's allowed workspace and environment for evidence such as the
+reference checkout, checkpoint configuration, configured execution hosts, GPU
+capabilities, and CUDA toolchain. Do not infer a source revision, checkpoint
+variant, target precision, or hardware target from a similarly named branch or
+an unrelated previous experiment.
+
+At the first user-facing preflight, ask the user to choose an execution mode:
+
+- **hands-off (recommended):** continue through every workflow stage and stop
+  only at completion, a concrete blocker, or a required approval;
+- **hands-on:** pause at named review checkpoints and ask for direction, for
+  example before committing, choosing between materially different public
+  interfaces, or accepting measured optimization debt.
+
+If the user does not select a mode but has asked the agent to implement or
+complete the port, use hands-off. Record the selected mode in the private port
+notes. A progress summary is an update, not a stopping condition in hands-off
+mode. In hands-on mode, a checkpoint pause must ask a concrete question and
+state the default action; a bare progress report is not a checkpoint. Continue
+safe read-only discovery while waiting for the mode choice.
+
+If required facts remain unknown or ambiguous after inspection, combine them
+with the mode choice in one concise question. Explicitly request the missing
+parts of:
+
+- reference source location and immutable revision;
+- checkpoint location and exact model variant;
+- target device or execution host, GPU/compute capability, and CUDA toolkit;
+- target inference dtype; and
+- mandatory correctness, latency, memory, or capture gates.
+
+Offer discovered defaults rather than presenting every blank as homework:
+
+- when no source is supplied, search the model owner's official GitHub
+  repositories and propose an immutable revision;
+- when no checkpoint is supplied, search the model owner's official
+  Hugging Face repositories and propose the exact model/revision, without
+  treating a ref or partial cache as a complete local snapshot;
+- inspect the local machine first; if it is a Thor or Orin, propose the detected
+  GPU, compute capability, CUDA toolkit, and available execution path; otherwise
+  leave the target-hardware default blank; and
+- label every proposed value as discovered and unconfirmed until the user
+  accepts it or the task already authorizes that exact target.
+
+Ask as ordinary requirements gathering and name what each missing value
+unlocks. Do not replace the question with a generic blocked-status message. A
+useful request is, for example: "To run the reference and design the CUDA path,
+please provide the reference source/revision, checkpoint, target GPU and CUDA
+environment, and inference dtype."
+
+This preflight is best effort rather than an all-or-nothing form:
+
+- continue independent repository inspection and design work while waiting
+  when it is safe and useful;
+- use an explicit user-provided value even when environment discovery suggests
+  a likely default;
+- when no performance target is supplied, pursue functional and numerical
+  acceptance first and report optimization as best effort;
+- do not require the user to repeat facts that are already available in the
+  current task or can be verified safely; and
+- report a blocker only when a specific missing fact prevents further useful
+  progress, after stating what was inspected, what operation is prevented, and
+  exactly what information or access would resolve it.
 
 The model variant, checkpoint, dtype, and target hardware are user choices, not
-implementation details. If any is missing, explicitly ask the user before
-implementation. First gather enough evidence to make the question useful:
+implementation details. Present one recommended tuple and explain material
+alternatives. Record the confirmed or explicitly authorized tuple before
+implementation; never infer consent from a convenient cache or silently
+substitute a different model release.
 
-- inspect the model publisher's official GitHub repository and Hugging Face
-  organization for maintained variants, compatible checkpoints, licenses, and
-  reference precision;
-- inspect the available execution environment for GPU model, compute
-  capability, memory, CUDA toolkit, and existing official checkpoint caches;
-- compare those facts with ApxInf's currently supported devices and dtypes.
+In hands-off mode, continue after every intermediate validation, build result,
+or numerical checkpoint while required completion criteria remain. Do not end
+a turn with a list of remaining work unless the same message contains a
+specific blocker or approval request that prevents that work.
 
-Present one recommended default tuple and explain the tradeoff, plus alternatives
-when they materially change scope or feasibility. Recommendations are proposals:
-wait for the user to confirm or replace the model, checkpoint, dtype, and target
-hardware. Record the confirmed tuple before proceeding. Never infer consent from
-a convenient local cache or silently substitute a different model release.
+### Private port workspace
 
-Keep private paths and generated evidence under the private workspace described
-in `AGENTS.md`. Do not commit model weights, captured tensors, environment
-snapshots, or generated JSON reports.
+Use a **private port workspace** for reference checkouts, captures, temporary
+programs, and generated evidence. Place it under the ignored
+`experiment/<port-name>/` directory or outside the repository, and verify with
+`git status` that none of its contents are tracked. Do not commit model weights,
+captured tensors, environment snapshots, or generated JSON reports. This rule
+is repository-local and self-contained; machine-specific agent configuration
+does not change it.
 
 ## 2. Run the reference implementation
 
@@ -111,9 +179,22 @@ Do not approve a rewrite solely because shapes match or the final output looks
 plausible. If a supposedly canonical rewrite changes semantics, stop and report
 the gap.
 
-## 5. Check kernel coverage
+## 5. Design the target execution path
 
-For every computation required by the canonical model, classify it as:
+Before implementing the executor, build the execution ledger required by
+[Model Execution Wiring](model-execution-wiring.md). Resolve repeated semantic
+sequences against maintained optimized executors and the safe CUDA kernel
+facade before consulting only the portable backend trait.
+
+The design must identify fusion choices, tensor lifetimes, reusable KV/state,
+workspace ownership, host transfers, and CUDA Graph eligibility. Any CPU
+implementation inside the steady-state model graph is a temporary correctness
+scaffold. Give it a device replacement and exit criterion in the ledger.
+
+## 6. Check kernel coverage
+
+For every computation or repeated composition required by the canonical model,
+classify it as:
 
 - existing fused implementation;
 - existing primitive;
@@ -122,9 +203,12 @@ For every computation required by the canonical model, classify it as:
 - missing capability;
 - unsupported semantics.
 
-Layout adaptations and fallbacks require operator-level replay against captured
-reference tensors. A declared fallback without replay evidence is a kernel gap,
-not a passed capability.
+Layout adaptations and device fallbacks require operator-level replay against
+captured reference tensors. A declared fallback without replay evidence is a
+kernel gap, not a passed capability. A host fallback in the hot path may satisfy
+an intermediate functional checkpoint, but the accelerator port remains
+unfinished until the fallback is replaced or a concrete operator blocker is
+established.
 
 When a genuine gap is found, follow
 [`adding-new-kernels.md`](adding-new-kernels.md). Hand off the operation's full
@@ -135,7 +219,7 @@ After kernel work returns, replay it against the original model references and
 repeat coverage analysis. A returned implementation is not accepted merely
 because it builds or passes a synthetic unit test.
 
-## 6. Implement the model
+## 7. Implement the model
 
 Follow [Adding a New Model](adding-a-new-model.md), including its separate model
 directory, runtime-contract choice, and YAGNI rules. Consult
@@ -148,16 +232,16 @@ call raw CUDA, vendor libraries, or FFI directly.
 
 Prefer this order:
 
-1. reuse an existing runtime abstraction;
-2. reuse existing operators and layouts;
-3. add a model-neutral operator when semantics are genuinely missing;
-4. optimize only after correctness evidence exists.
+1. reuse the execution structure of a maintained optimized runtime;
+2. reuse matching fused safe interfaces;
+3. compose existing device primitives when fusion semantics do not match;
+4. add a model-neutral operator when semantics are genuinely missing.
 
 If implementation reveals that an earlier preflight assumption was wrong,
 return to semantic inventory or kernel coverage. Finding more work is progress,
 not completion.
 
-## 7. Verify independently
+## 8. Verify independently
 
 Verification must be runnable independently of the agent's reasoning notes.
 Use the repository's existing build, test, example, and benchmark mechanisms
@@ -171,12 +255,17 @@ Verify in increasing scope:
 3. complete deterministic inference against the reference;
 4. the public policy or serving API;
 5. requested target/precision tuples;
-6. latency and memory against stated goals.
+6. eager-versus-captured output parity;
+7. host-transfer and synchronization audit of the steady-state path;
+8. wall-clock and graph-replay latency plus memory against stated goals.
 
-Correctness gates are mandatory. Performance goals may remain explicitly
-unmet, but must not be reported as passed.
+Correctness gates are mandatory. Optimization is best effort unless the request
+explicitly declares a performance release gate. Report functional acceptance
+separately from optimization status. Unmet latency, host escapes, or capture
+gaps must include attempted reuse, measured impact where available, and the
+next concrete optimization; they must not be hidden behind a generic fallback.
 
-## 8. Prepare the review
+## 9. Prepare the review
 
 The reviewable change should contain only maintained product material:
 
@@ -215,5 +304,19 @@ A port is complete only when:
 - end-to-end output passes the declared tolerance;
 - the public deployment path has been exercised;
 - unsupported targets fail clearly;
-- performance is measured and reported honestly;
+- the new model neither imports nor modifies another model-family directory
+  without a separately reviewed shared-seam design;
+- optimization opportunities, host escapes, static-buffer/KV reuse, and CUDA
+  Graph eligibility have been audited;
+- applicable existing optimized paths have been attempted and remaining
+  performance debt is itemized;
+- every accelerator hot-path correctness scaffold has been replaced by a
+  device implementation, or a concrete operator blocker names the missing
+  semantics, attempted safe interfaces, and required resolution;
+- performance is measured with the declared metric and reported independently
+  from functional acceptance;
 - the repository diff contains no private or one-off experiment artifacts.
+
+When the task explicitly makes a latency, memory, or capture target a release
+gate, that target remains part of completion. Otherwise a functionally accepted
+port may finish with optimization status `best effort with performance debt`.

@@ -70,6 +70,29 @@ Each architecture lives under `src/<model>/`. A new model may copy the nearest
 implementation to establish a correct vertical slice. It must not grow inside
 another model's directory.
 
+Treat a model-family directory as a private architecture module, not as a reuse
+library. During an initial port, dependencies follow this matrix:
+
+| Dependency | Allowed |
+|---|---|
+| `<new_model>` → `apxinf-core` contracts | yes |
+| `<new_model>` → safe `apxinf-cuda` kernel interfaces | yes |
+| `<new_model>` → explicitly shared top-level model modules | yes |
+| `<new_model>` → another model-family directory | no |
+| another model-family directory changed to accommodate `<new_model>` | no by default; requires a separate shared-seam design and review |
+
+Use another maintained executor as evidence for layer ordering, fusion choices,
+workspace lifetimes, and safe CUDA calls. Copy the architecture-specific code
+needed by the new model and rename its concepts locally. Reusing an optimized
+runtime means reusing those proven patterns and model-neutral interfaces; it
+does not mean importing the other family's config, weights, model, executor,
+backend seam, cache, or graph modules.
+
+Extract a shared architecture module only after both model implementations are
+maintained, independently tested, and demonstrate the same stable semantics and
+lifecycle. Make that extraction a separately reviewable design change. A new
+port alone is not evidence for moving code out of either family.
+
 The directory's `backend.rs` is the only CUDA-facing seam when concrete device
 facilities are required. Other files import through that seam. This keeps
 accelerator changes from rewriting the directory topology.
@@ -86,6 +109,20 @@ schedule, or model family, it belongs in the model layer.
 Portable models use `dyn Backend`. Optimized runtimes may use concrete backend
 facilities for fusion, graph capture, or transfers that should not enlarge the
 portable trait. Trait is the floor; concrete types are the ceiling.
+
+ApxInf currently concentrates on CUDA backends, and the maintained model set
+does not yet provide enough repeated fusion cases to justify a stable abstract
+interface for every high-performance composition. Following YAGNI, broadly
+useful primitive operations may live on `Backend`, while optimized CUDA model
+paths call safe model-neutral fused functions through the model directory's
+CUDA seam. This direct safe call is intentional; raw FFI remains forbidden.
+
+Revisit that boundary when multiple maintained models or hardware backends need
+the same semantic fusion and lifecycle contract. At that point, extract the
+smallest common interface supported by those implementations instead of
+forecasting variants through optional flags today. Moving a proven fusion
+behind a trait later is an architectural evolution, not a prerequisite for its
+first correct optimized use.
 
 A fused mega-kernel still lives in the backend as a kernel implementation, but
 the model chooses when its semantics match. The backend does not import the
@@ -118,9 +155,18 @@ behavior, the commonality is not stable enough.
 ## Review checks
 
 - The new architecture has its own directory.
+- The product diff neither imports nor modifies another model-family directory
+  for the new architecture. Any exception points to an explicitly shared module
+  and a separately approved extraction design.
 - No backend crate imports model types or model-family concepts.
 - Model code reaches CUDA through its declared seam.
 - Weight transformations occur at load time where possible.
 - Network mathematics has one owner.
 - Prepared execution binds every allocation/dispatch-relevant shape.
 - Shared code is backed by repeated maintained use, not a forecast.
+
+Run `scripts/check_model_family_boundaries.sh` to reject direct Rust references
+from one model-family directory into another. The check complements review: it
+cannot determine why an existing family was modified. The
+`apxinf-model` integration test runs the same check during the normal Rust test
+suite.

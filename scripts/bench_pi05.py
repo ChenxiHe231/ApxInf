@@ -64,6 +64,8 @@ _APXINF_PKG = _REPO_ROOT / "python" / "apxinf"
 if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
     sys.path.insert(0, str(_APXINF_PKG))
 
+from apxinf._tactics import resolve_pi05_tactics
+
 # doc/pi05-cuda-regression.md primary/worst-case LIBERO prompts
 # (T = PaliGemma token count).
 PROMPT_T10 = "put both moka pots on the stove"
@@ -147,10 +149,12 @@ def parse_args() -> argparse.Namespace:
         "--random-weights", action="store_true", help="checkpoint-free engine (L0/L1/L2)"
     )
 
-    # FP8 knobs. In random mode these feed `Model.random`; in checkpoint mode the
-    # loader reads calibration.json / tactics.json from the model dir.
+    # Calibration is public for synthetic FP8 latency runs. Tactics are routed
+    # internally by CUDA SM + precision below.
     p.add_argument("--calibration", help="FP8 calibration json or `uniform:SCALE` (random mode)")
-    p.add_argument("--tactics", type=pathlib.Path, help="FP8 tactics json (random mode)")
+    # Internal escape hatch for tactic generation/debugging. Normal benchmark
+    # runs select the repository's validated JSON from CUDA SM + precision.
+    p.add_argument("--tactics", type=pathlib.Path, help=argparse.SUPPRESS)
 
     # Architecture overrides — synthetic shapes. `--action-horizon` is the one
     # knob that also applies to a checkpoint (see below).
@@ -287,20 +291,17 @@ def main() -> None:
                 "--model-dir (they reshape synthetic weights; a checkpoint runs its "
                 "native config apart from --action-horizon)"
             )
-    # FP8 tuning knobs: synthetic + fp8 only (a checkpoint reads calibration/tactics
-    # from its own dir; bf16/int8 have no per-tensor FP8 scales).
-    fp8_knobs = [
-        name for name, value in (("--tactics", args.tactics), ("--calibration", args.calibration))
-        if value is not None
-    ]
-    if fp8_knobs:
-        if checkpoint:
-            raise SystemExit(
-                f"{', '.join(fp8_knobs)} only apply to synthetic weights (drop --model-dir); "
-                "a checkpoint loads calibration/tactics from its own directory"
-            )
-        if args.precision != "fp8":
-            raise SystemExit(f"{', '.join(fp8_knobs)} only apply to --precision fp8")
+    # Calibration remains a synthetic FP8 knob here. Tactics are selected below
+    # from CUDA SM + precision for both synthetic and checkpoint benchmarks.
+    if checkpoint and args.calibration is not None:
+        raise SystemExit(
+            "--calibration only applies to synthetic weights (drop --model-dir); "
+            "a checkpoint loads calibration.json from its model directory"
+        )
+    if args.calibration is not None and args.precision != "fp8":
+        raise SystemExit("--calibration only applies to --precision fp8")
+    if args.tactics is not None and args.precision == "int8":
+        raise SystemExit("--tactics only applies to --precision bf16 or fp8")
 
     handle = None
     policy = None
@@ -310,6 +311,16 @@ def main() -> None:
         if random:
             from apxinf import Model
 
+            # Random engines bypass Pi05Policy.from_pretrained, so this synthetic
+            # benchmark is the sole caller that must resolve the package default.
+            tactics = resolve_pi05_tactics(
+                args.device, args.precision, override=args.tactics
+            )
+            if tactics is not None:
+                print(
+                    f"using {args.precision} tactics for {args.device}: {tactics}",
+                    file=sys.stderr,
+                )
             calibration = args.calibration
             if args.precision == "fp8" and calibration is None:
                 # Synthetic FP8 has no calibration file; a uniform scale keeps the
@@ -326,7 +337,7 @@ def main() -> None:
                 num_flow_steps=args.num_flow_steps if args.num_flow_steps is not None else 10,
                 max_token_len=args.max_token_len if args.max_token_len is not None else 200,
                 calibration=calibration,
-                tactics=str(args.tactics) if args.tactics is not None else None,
+                tactics=str(tactics) if tactics is not None else None,
                 seed=args.seed,
             )
             if "l2" in layers:
@@ -377,6 +388,7 @@ def main() -> None:
                 args.model_dir,
                 device=args.device,
                 precision=args.precision,
+                tactics=args.tactics,
                 action_dim=(args.action_dim or None),
                 action_horizon=args.action_horizon,
             )
@@ -446,6 +458,8 @@ def main() -> None:
             result["model_dir"] = str(args.model_dir)
             result["workload"]["prompt"] = args.prompt
             result["workload"]["deploy_action_dim"] = policy.action_dim
+        if tactics is not None:
+            result["tactics"] = str(tactics)
     if in_process_report:
         result["layers_ms"] = in_process_report
         result["raw_ms"] = {layer_names[layer]: ms for layer, ms in in_process_raw.items()}
