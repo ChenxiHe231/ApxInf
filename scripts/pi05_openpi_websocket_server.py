@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import logging
 import pathlib
+import shlex
 import sys
 
 # Make ``import apxinf`` work from a source checkout without installation. The
@@ -322,7 +323,27 @@ def main() -> None:
         policy.metadata["state_key"],
         policy.metadata["discrete_state"],
     )
-    server = WebsocketPolicyServer(policy, args.host, args.port, log=args.log)
+    checkpoint_path = None
+    if not args.random_weights:
+        checkpoint = args.checkpoint or (args.model_dir / "model.safetensors")
+        checkpoint_path = str(checkpoint.expanduser().resolve())
+    log_context = {
+        "command": shlex.join(sys.argv),
+        "checkpoint_path": checkpoint_path,
+        "model_dir": str(args.model_dir.expanduser().resolve()) if args.model_dir else None,
+        "cwd": str(pathlib.Path.cwd()),
+        "precision": args.precision,
+        "robot": preset.name,
+    }
+    server = WebsocketPolicyServer(
+        policy,
+        args.host,
+        args.port,
+        log=args.log,
+        log_context=log_context,
+    )
+    if args.log:
+        logging.info("diagnostic JSONL log: %s", server.log_path)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

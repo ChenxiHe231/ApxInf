@@ -421,8 +421,19 @@ class Pi05Policy:
         if not isinstance(prompt, str):
             raise TypeError(f"{self.prompt_key} must be a string, got {type(prompt)!r}")
 
-        # pre: obs dict -> model inputs (rgb / token_ids / optional noise)
-        data = self.input_pipeline({OBSERVATION: observation, PROMPT: prompt})
+        # pre: obs dict -> model inputs (rgb / token_ids / optional noise). In
+        # diagnostic mode we time named processor steps individually; the
+        # normal path keeps the original single pipeline call and allocation
+        # profile.
+        input_step_timings = {}
+        if diagnostics_enabled:
+            data = {OBSERVATION: observation, PROMPT: prompt}
+            for step_name, step in self.input_pipeline:
+                step_started = time.perf_counter_ns()
+                data = step(data)
+                input_step_timings[step_name] = (time.perf_counter_ns() - step_started) / 1_000_000.0
+        else:
+            data = self.input_pipeline({OBSERVATION: observation, PROMPT: prompt})
         preprocessed = time.perf_counter_ns() if diagnostics_enabled else 0
         rgb = data[RGB]
         token_ids = data[TOKEN_IDS]
@@ -461,12 +472,36 @@ class Pi05Policy:
         # ``trim`` / ``unnormalize`` steps ignore it. Mirrors openpi, whose output
         # transforms see the same ``state`` its input transforms produced.
         processed_obs = data.get(OBSERVATION, observation)
-        out = self.output_pipeline({NORMALIZED: normalized, OBSERVATION: processed_obs})
+        output_step_timings = {}
+        output_input = {NORMALIZED: normalized, OBSERVATION: processed_obs}
+        if diagnostics_enabled:
+            out = output_input
+            for step_name, step in self.output_pipeline:
+                step_started = time.perf_counter_ns()
+                out = step(out)
+                output_step_timings[step_name] = (time.perf_counter_ns() - step_started) / 1_000_000.0
+        else:
+            out = self.output_pipeline(output_input)
         actions = out[ACTIONS]
         finished = time.perf_counter_ns()
         total_ms = (finished - started) / 1_000_000.0
 
-        timing = {"model_ms": model_ms, "total_ms": total_ms}
+        native_layers = getattr(self.model, "last_layer_timings", None)
+        if callable(native_layers):
+            native_layers = native_layers()
+        layer_timing_source = "native"
+        if not isinstance(native_layers, Mapping):
+            # The current CUDA graph binding exposes one host-visible model
+            # boundary. Keep this explicit instead of presenting launch time as
+            # synchronized per-layer GPU time.
+            native_layers = {"native.infer_rgb": model_ms}
+            layer_timing_source = "host_boundary"
+        timing = {
+            "model_ms": model_ms,
+            "total_ms": total_ms,
+            "layer_timings_ms": dict(native_layers),
+            "layer_timing_source": layer_timing_source,
+        }
         result = {
             "actions": actions,
             "normalized_actions": normalized,
@@ -480,6 +515,8 @@ class Pi05Policy:
                 {
                     "preprocess_ms": (preprocessed - started) / 1_000_000.0,
                     "postprocess_ms": (finished - model_finished) / 1_000_000.0,
+                    "input_steps_ms": input_step_timings,
+                    "output_steps_ms": output_step_timings,
                 }
             )
             # References only: the websocket layer converts these to O(1)

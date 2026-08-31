@@ -20,10 +20,11 @@ import http
 import itertools
 import json
 import logging
+import os
 import queue
+import time
 import sys
 import threading
-import time
 import traceback
 from collections.abc import Mapping
 from pathlib import Path
@@ -104,10 +105,23 @@ class AsyncJsonLogger:
         *,
         max_queue: int = 256,
         stream: TextIO | None = None,
+        log_path: Path | None = None,
     ) -> None:
         if max_queue <= 0:
             raise ValueError("log queue size must be positive")
         self.enabled = bool(enabled)
+        if stream is not None and log_path is not None:
+            raise ValueError("pass either log_stream or log_path, not both")
+        self._owns_stream = False
+        if self.enabled and stream is None:
+            if log_path is None:
+                stamp = time.strftime("%Y%m%d_%H%M%S")
+                log_path = Path.cwd() / "apxinf_logs" / f"apxinf_{stamp}_{os.getpid()}.jsonl"
+            log_path = Path(log_path)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            stream = log_path.open("a", encoding="utf-8", buffering=1)
+            self._owns_stream = True
+        self.log_path = str(log_path) if log_path is not None else None
         self._stream = stream if stream is not None else sys.stdout
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=max_queue)
         self._dropped = 0
@@ -143,6 +157,8 @@ class AsyncJsonLogger:
             self._queue.put(self._STOP)
         self._thread.join(timeout=10)
         self._stream.flush()
+        if self._owns_stream:
+            self._stream.close()
         self._thread = None
 
     def _worker(self) -> None:
@@ -208,6 +224,8 @@ class WebsocketPolicyServer:
         metadata: dict | None = None,
         log: bool = False,
         log_stream: TextIO | None = None,
+        log_path: Path | None = None,
+        log_context: Mapping[str, Any] | None = None,
     ) -> None:
         self._policy = policy
         self._host = host
@@ -219,8 +237,12 @@ class WebsocketPolicyServer:
         )
         self._request_ids = itertools.count(1)
         self._diagnostic_log = AsyncJsonLogger(
-            log, max_queue=_DIAGNOSTIC_LOG_QUEUE_SIZE, stream=log_stream
+            log,
+            max_queue=_DIAGNOSTIC_LOG_QUEUE_SIZE,
+            stream=log_stream,
+            log_path=log_path,
         )
+        self._log_context = dict(log_context or {})
         configure = getattr(policy, "set_diagnostics", None)
         if callable(configure):
             configure(log)
@@ -236,7 +258,9 @@ class WebsocketPolicyServer:
                     "request_sampling": "first_request",
                     "queue_capacity": _DIAGNOSTIC_LOG_QUEUE_SIZE,
                     "tensor_values_scanned": False,
+                    "log_file": self._diagnostic_log.log_path,
                 },
+                "startup": self._log_context,
             }
         )
 
@@ -303,6 +327,17 @@ class WebsocketPolicyServer:
                         "send": (send_finished - send_started) / 1_000_000.0,
                         "server_after_receive": previous_total_ms,
                     }
+                    layer_timings = timing.get("layer_timings_ms")
+                    if isinstance(layer_timings, Mapping):
+                        timing_record["model_layers"] = {
+                            str(name): float(value) for name, value in layer_timings.items()
+                        }
+                    for key in ("input_steps_ms", "output_steps_ms"):
+                        steps = timing.get(key)
+                        if isinstance(steps, Mapping):
+                            timing_record[key] = {
+                                str(name): float(value) for name, value in steps.items()
+                            }
                     connection_timings.append(timing_record)
 
                 should_log = request_id == _DIAGNOSTIC_REQUEST_ID
@@ -358,6 +393,11 @@ class WebsocketPolicyServer:
         ) as server:
             logger.info("websocket policy server listening on %s", server.sockets)
             await server.serve_forever()
+
+    @property
+    def log_path(self) -> str | None:
+        """Path of the automatically created JSONL file, if logging is enabled."""
+        return self._diagnostic_log.log_path
 
     def serve_forever(self) -> None:
         try:
