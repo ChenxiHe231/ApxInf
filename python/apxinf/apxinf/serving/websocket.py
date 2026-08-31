@@ -17,10 +17,17 @@ from __future__ import annotations
 
 import asyncio
 import http
+import itertools
+import json
 import logging
+import queue
+import sys
+import threading
 import time
 import traceback
-from typing import Any
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, TextIO
 
 import numpy as np
 import websockets
@@ -29,9 +36,146 @@ import websockets.frames
 
 from .msgpack_numpy import packer, unpackb
 
-__all__ = ["WebsocketPolicyServer", "wire_response", "health_check"]
+__all__ = ["AsyncJsonLogger", "WebsocketPolicyServer", "wire_response", "health_check"]
 
 logger = logging.getLogger(__name__)
+
+_DIAGNOSTIC_LOG_QUEUE_SIZE = 256
+_DIAGNOSTIC_REQUEST_ID = 1
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return _tensor_descriptor(value)
+    if isinstance(value, Path):
+        return str(value)
+    return {"type": type(value).__name__}
+
+
+def _tensor_descriptor(value: Any) -> dict[str, Any]:
+    """Describe a tensor without scanning or copying its payload."""
+    array = np.asarray(value)
+    return {
+        "type": "tensor",
+        "shape": list(array.shape),
+        "dtype": str(array.dtype),
+        "ndim": int(array.ndim),
+        "nbytes": int(array.nbytes),
+        "strides": list(array.strides),
+        "c_contiguous": bool(array.flags.c_contiguous),
+        "f_contiguous": bool(array.flags.f_contiguous),
+    }
+
+
+def describe_value(value: Any) -> Any:
+    """Build an O(1)-per-field JSON-safe description of a request/result tree."""
+    if isinstance(value, np.ndarray):
+        return _tensor_descriptor(value)
+    if isinstance(value, np.generic):
+        return {"type": type(value).__name__, "value": value.item()}
+    if isinstance(value, Mapping):
+        return {str(key): describe_value(item) for key, item in value.items()}
+    if isinstance(value, str):
+        return {"type": "str", "chars": len(value), "preview": value[:160]}
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"type": type(value).__name__, "nbytes": len(value)}
+    if isinstance(value, (list, tuple)):
+        return {"type": type(value).__name__, "length": len(value)}
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return {"type": type(value).__name__}
+
+
+class AsyncJsonLogger:
+    """Non-blocking JSONL printer used only by explicit ``--log`` mode.
+
+    The request thread builds small O(1) descriptors and calls ``put_nowait``.
+    JSON encoding, stream writes, and flushing happen on a daemon thread. If the
+    bounded queue is full, records are dropped rather than delaying inference.
+    """
+
+    _STOP = object()
+
+    def __init__(
+        self,
+        enabled: bool,
+        *,
+        max_queue: int = 256,
+        stream: TextIO | None = None,
+    ) -> None:
+        if max_queue <= 0:
+            raise ValueError("log queue size must be positive")
+        self.enabled = bool(enabled)
+        self._stream = stream if stream is not None else sys.stdout
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=max_queue)
+        self._dropped = 0
+        self._thread: threading.Thread | None = None
+        if self.enabled:
+            self._thread = threading.Thread(
+                target=self._worker,
+                name="apxinf-json-log",
+                daemon=True,
+            )
+            self._thread.start()
+
+    @property
+    def dropped(self) -> int:
+        return self._dropped
+
+    def emit(self, record: Mapping[str, Any]) -> None:
+        if not self.enabled:
+            return
+        try:
+            self._queue.put_nowait(dict(record))
+        except queue.Full:
+            self._dropped += 1
+
+    def close(self) -> None:
+        if not self.enabled or self._thread is None:
+            return
+        try:
+            self._queue.put_nowait(self._STOP)
+        except queue.Full:
+            # Shutdown is outside inference; waiting here prevents truncating
+            # already accepted records and cannot affect request latency.
+            self._queue.put(self._STOP)
+        self._thread.join(timeout=10)
+        self._stream.flush()
+        self._thread = None
+
+    def _worker(self) -> None:
+        while True:
+            record = self._queue.get()
+            if record is self._STOP:
+                break
+            rendered = json.dumps(
+                record,
+                default=_json_default,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            self._stream.write(f"APXINF_LOG {rendered}\n")
+            self._stream.flush()
+
+
+def _summarize_timings(rows: list[Mapping[str, float]]) -> dict[str, dict[str, float | int]]:
+    """Summarize in-memory timings after a connection closes."""
+    if not rows:
+        return {}
+    summary: dict[str, dict[str, float | int]] = {}
+    for key in rows[0]:
+        values = np.asarray([row[key] for row in rows], dtype=np.float64)
+        summary[key] = {
+            "samples": int(values.size),
+            "min": float(values.min()),
+            "p50": float(np.quantile(values, 0.50)),
+            "p95": float(np.quantile(values, 0.95)),
+            "max": float(values.max()),
+            "mean": float(values.mean()),
+        }
+    return summary
 
 
 def wire_response(result: dict) -> dict:
@@ -46,6 +190,9 @@ def wire_response(result: dict) -> dict:
     policy_timing = {"infer_ms": float(timing.get("model_ms", 0.0))}
     if "total_ms" in timing:
         policy_timing["policy_ms"] = float(timing["total_ms"])
+    for key in ("preprocess_ms", "postprocess_ms"):
+        if key in timing:
+            policy_timing[key] = float(timing[key])
     return {"actions": actions, "policy_timing": policy_timing}
 
 
@@ -53,7 +200,14 @@ class WebsocketPolicyServer:
     """Serve any ``apxinf.Policy`` over the websocket protocol (openpi-compatible wire)."""
 
     def __init__(
-        self, policy: Any, host: str, port: int, *, metadata: dict | None = None
+        self,
+        policy: Any,
+        host: str,
+        port: int,
+        *,
+        metadata: dict | None = None,
+        log: bool = False,
+        log_stream: TextIO | None = None,
     ) -> None:
         self._policy = policy
         self._host = host
@@ -63,22 +217,48 @@ class WebsocketPolicyServer:
             if metadata is not None
             else dict(getattr(policy, "metadata", {}))
         )
+        self._request_ids = itertools.count(1)
+        self._diagnostic_log = AsyncJsonLogger(
+            log, max_queue=_DIAGNOSTIC_LOG_QUEUE_SIZE, stream=log_stream
+        )
+        configure = getattr(policy, "set_diagnostics", None)
+        if callable(configure):
+            configure(log)
+        self._diagnostic_log.emit(
+            {
+                "event": "server_config",
+                "timestamp_ns": time.time_ns(),
+                "host": host,
+                "port": port,
+                "metadata": self._metadata,
+                "logging": {
+                    "mode": "async_jsonl",
+                    "request_sampling": "first_request",
+                    "queue_capacity": _DIAGNOSTIC_LOG_QUEUE_SIZE,
+                    "tensor_values_scanned": False,
+                },
+            }
+        )
 
     async def handler(self, websocket: websocket_server.ServerConnection) -> None:
         logger.info("connection from %s opened", websocket.remote_address)
         pack = packer()
         await websocket.send(pack.pack(self._metadata))
-        previous_total_seconds = None
+        previous_total_ms = None
+        connection_timings: list[dict[str, float]] = []
         while True:
             try:
-                request_started = time.monotonic()
                 payload = await websocket.recv()
                 if isinstance(payload, str):
                     raise TypeError(
                         "inference requests must be binary MessagePack frames"
                     )
+                request_id = next(self._request_ids)
+                request_started = time.perf_counter_ns()
+                unpack_started = request_started
                 observation = unpackb(payload)
-                infer_started = time.monotonic()
+                unpack_finished = time.perf_counter_ns()
+                infer_started = unpack_finished
                 # Call the policy directly on the event-loop thread rather than
                 # offloading to a worker (``asyncio.to_thread``): the L1 handle
                 # ``apxinf_py.Model`` is *unsendable* — its CUDA context is bound
@@ -87,17 +267,75 @@ class WebsocketPolicyServer:
                 # thread panics. Inference is one-at-a-time per GPU anyway, so
                 # briefly blocking the loop here is the correct, simplest shape.
                 result = self._policy.infer(observation)
-                infer_seconds = time.monotonic() - infer_started
+                infer_finished = time.perf_counter_ns()
                 response = wire_response(result)
-                response["server_timing"] = {"infer_ms": infer_seconds * 1000}
-                if previous_total_seconds is not None:
-                    response["server_timing"]["prev_total_ms"] = (
-                        previous_total_seconds * 1000
+                response["server_timing"] = {
+                    "request_id": request_id,
+                    "unpack_ms": (unpack_finished - unpack_started) / 1_000_000.0,
+                    "infer_ms": (infer_finished - infer_started) / 1_000_000.0,
+                    "payload_bytes": len(payload),
+                }
+                if previous_total_ms is not None:
+                    response["server_timing"]["prev_total_ms"] = previous_total_ms
+
+                pack_started = time.perf_counter_ns()
+                packed_response = pack.pack(response)
+                pack_finished = time.perf_counter_ns()
+                send_started = pack_finished
+                await websocket.send(packed_response)
+                send_finished = time.perf_counter_ns()
+                previous_total_ms = (send_finished - request_started) / 1_000_000.0
+
+                timing_record = None
+                if self._diagnostic_log.enabled:
+                    # Appending a handful of floats is the only per-request log
+                    # work after the sampled records. Sorting/JSON output waits
+                    # until the client disconnects, outside the inference path.
+                    timing = result.get("timing", {}) or {}
+                    timing_record = {
+                        "unpack": (unpack_finished - unpack_started) / 1_000_000.0,
+                        "preprocess": float(timing.get("preprocess_ms", 0.0)),
+                        "model": float(timing.get("model_ms", 0.0)),
+                        "postprocess": float(timing.get("postprocess_ms", 0.0)),
+                        "policy": float(timing.get("total_ms", 0.0)),
+                        "wire_response_and_pack": (pack_finished - infer_finished)
+                        / 1_000_000.0,
+                        "send": (send_finished - send_started) / 1_000_000.0,
+                        "server_after_receive": previous_total_ms,
+                    }
+                    connection_timings.append(timing_record)
+
+                should_log = request_id == _DIAGNOSTIC_REQUEST_ID
+                if self._diagnostic_log.enabled and should_log:
+                    assert timing_record is not None
+                    self._diagnostic_log.emit(
+                        {
+                            "event": "request",
+                            "timestamp_ns": time.time_ns(),
+                            "request_id": request_id,
+                            "cold_start_candidate": request_id == 1,
+                            "remote": str(websocket.remote_address),
+                            "payload_bytes": len(payload),
+                            "response_bytes": len(packed_response),
+                            "timing_ms": timing_record,
+                            "observation": describe_value(observation),
+                            "tensors": describe_value(result.get("diagnostic_tensors", {})),
+                            "log_queue_dropped": self._diagnostic_log.dropped,
+                        }
                     )
-                await websocket.send(pack.pack(response))
-                previous_total_seconds = time.monotonic() - request_started
             except websockets.ConnectionClosed:
                 logger.info("connection from %s closed", websocket.remote_address)
+                if self._diagnostic_log.enabled and connection_timings:
+                    self._diagnostic_log.emit(
+                        {
+                            "event": "connection_summary",
+                            "timestamp_ns": time.time_ns(),
+                            "remote": str(websocket.remote_address),
+                            "requests": len(connection_timings),
+                            "timing_ms": _summarize_timings(connection_timings),
+                            "log_queue_dropped": self._diagnostic_log.dropped,
+                        }
+                    )
                 break
             except Exception:
                 logger.exception("websocket inference failed")
@@ -122,7 +360,14 @@ class WebsocketPolicyServer:
             await server.serve_forever()
 
     def serve_forever(self) -> None:
-        asyncio.run(self.run())
+        try:
+            asyncio.run(self.run())
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        """Flush and stop the optional asynchronous diagnostic logger."""
+        self._diagnostic_log.close()
 
 
 def health_check(

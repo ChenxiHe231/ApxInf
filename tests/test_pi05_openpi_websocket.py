@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import os
 import pathlib
 import sys
@@ -90,8 +92,10 @@ def build_policy() -> Pi05Policy:
 
 
 class RunningServer:
-    def __init__(self, policy) -> None:
-        self._policy_server = WebsocketPolicyServer(policy, "127.0.0.1", 0)
+    def __init__(self, policy, **server_kwargs) -> None:
+        self._policy_server = WebsocketPolicyServer(
+            policy, "127.0.0.1", 0, **server_kwargs
+        )
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -126,6 +130,7 @@ class RunningServer:
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=10)
         self._loop.close()
+        self._policy_server.close()
 
 
 class WebsocketServerCompatibilityTest(unittest.TestCase):
@@ -189,6 +194,55 @@ class WebsocketServerCompatibilityTest(unittest.TestCase):
         self.assertFalse(
             np.array_equal(self.policy.model.noises[0], self.policy.model.noises[1])
         )
+
+
+class DiagnosticLoggingTest(unittest.TestCase):
+    def test_log_mode_reports_breakdown_and_tensor_descriptors(self) -> None:
+        policy = build_policy()
+        stream = io.StringIO()
+        server = RunningServer(policy, log=True, log_stream=stream)
+        client = websocket_client_policy.WebsocketClientPolicy("127.0.0.1", server.port)
+        observation = {
+            "observation/image": np.zeros((224, 224, 3), dtype=np.uint8),
+            "observation/wrist_image": np.zeros((224, 224, 3), dtype=np.uint8),
+            "observation/state": np.zeros(8, dtype=np.float32),
+            "prompt": "diagnostic request",
+        }
+        try:
+            response = client.infer(observation)
+        finally:
+            client._ws.close()
+            server.close()
+            policy.close()
+
+        for key in ("preprocess_ms", "infer_ms", "postprocess_ms", "policy_ms"):
+            self.assertIn(key, response["policy_timing"])
+            self.assertGreaterEqual(response["policy_timing"][key], 0.0)
+        for key in ("request_id", "unpack_ms", "infer_ms", "payload_bytes"):
+            self.assertIn(key, response["server_timing"])
+
+        records = []
+        for line in stream.getvalue().splitlines():
+            self.assertTrue(line.startswith("APXINF_LOG "))
+            records.append(json.loads(line.removeprefix("APXINF_LOG ")))
+        self.assertEqual(
+            [record["event"] for record in records],
+            ["server_config", "request", "connection_summary"],
+        )
+        request = records[1]
+        self.assertEqual(request["request_id"], response["server_timing"]["request_id"])
+        self.assertEqual(
+            request["observation"]["observation/image"]["shape"], [224, 224, 3]
+        )
+        self.assertEqual(request["observation"]["observation/state"]["dtype"], "float32")
+        self.assertEqual(request["tensors"]["rgb"]["shape"], [2, 224, 224, 3])
+        self.assertEqual(request["tensors"]["token_ids"]["dtype"], "uint32")
+        self.assertEqual(request["tensors"]["actions"]["shape"], [10, 7])
+        self.assertEqual(request["log_queue_dropped"], 0)
+        self.assertTrue(request["cold_start_candidate"])
+        summary = records[2]
+        self.assertEqual(summary["requests"], 1)
+        self.assertEqual(summary["timing_ms"]["model"]["samples"], 1)
 
 
 if __name__ == "__main__":

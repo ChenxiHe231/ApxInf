@@ -185,6 +185,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="print asynchronous APXINF_LOG JSON lines with request timing and O(1) "
+        "tensor shape/dtype descriptors; queueing never blocks inference",
+    )
     return parser.parse_args()
 
 
@@ -316,7 +322,7 @@ def main() -> None:
         policy.metadata["state_key"],
         policy.metadata["discrete_state"],
     )
-    server = WebsocketPolicyServer(policy, args.host, args.port)
+    server = WebsocketPolicyServer(policy, args.host, args.port, log=args.log)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
