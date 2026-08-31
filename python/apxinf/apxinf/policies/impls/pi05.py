@@ -76,6 +76,8 @@ _DEFAULT_IMAGE_KEYS = ("observation/image", "observation/wrist_image")
 _STATE_KEY = "observation/state"
 _PROMPT_KEY = "prompt"
 
+_DIAGNOSTICS_ENABLED_DEFAULT = False
+
 
 @register_policy("pi05")
 class Pi05Policy:
@@ -99,6 +101,10 @@ class Pi05Policy:
         self.image_keys = tuple(image_keys)
         self.prompt_key = prompt_key
         self.state_key = state_key
+        # Enabled only by the serving layer's explicit ``--log`` mode. Keeping
+        # this false preserves the normal inference path: no tensor descriptors
+        # are built and no extra arrays are retained in the result.
+        self._diagnostics_enabled = _DIAGNOSTICS_ENABLED_DEFAULT
         self.action_dim_out = (
             int(action_dim) if action_dim is not None else self._derive_action_dim(output_pipeline)
         )
@@ -405,7 +411,8 @@ class Pi05Policy:
         and over a custom input-pipeline sampler. If all are absent, the bare model
         generates standard-normal noise directly in its device buffer.
         """
-        started = time.perf_counter()
+        diagnostics_enabled = self._diagnostics_enabled
+        started = time.perf_counter_ns()
         if not isinstance(observation, Mapping):
             raise TypeError(f"observation must be a mapping, got {type(observation)!r}")
         self._require_keys(observation)
@@ -414,8 +421,20 @@ class Pi05Policy:
         if not isinstance(prompt, str):
             raise TypeError(f"{self.prompt_key} must be a string, got {type(prompt)!r}")
 
-        # pre: obs dict -> model inputs (rgb / token_ids / optional noise)
-        data = self.input_pipeline({OBSERVATION: observation, PROMPT: prompt})
+        # pre: obs dict -> model inputs (rgb / token_ids / optional noise). In
+        # diagnostic mode we time named processor steps individually; the
+        # normal path keeps the original single pipeline call and allocation
+        # profile.
+        input_step_timings = {}
+        if diagnostics_enabled:
+            data = {OBSERVATION: observation, PROMPT: prompt}
+            for step_name, step in self.input_pipeline:
+                step_started = time.perf_counter_ns()
+                data = step(data)
+                input_step_timings[step_name] = (time.perf_counter_ns() - step_started) / 1_000_000.0
+        else:
+            data = self.input_pipeline({OBSERVATION: observation, PROMPT: prompt})
+        preprocessed = time.perf_counter_ns() if diagnostics_enabled else 0
         rgb = data[RGB]
         token_ids = data[TOKEN_IDS]
         selected_noise = noise
@@ -434,11 +453,12 @@ class Pi05Policy:
                 raise ValueError("noise must contain only finite values")
 
         # model: the policy's own middle step (not a pipeline stage)
-        model_started = time.perf_counter()
+        model_started = time.perf_counter_ns()
         normalized = np.asarray(
             self.model.infer_rgb(rgb, "nhwc", token_ids, selected_noise), dtype=np.float32
         )
-        model_ms = (time.perf_counter() - model_started) * 1000.0
+        model_finished = time.perf_counter_ns()
+        model_ms = (model_finished - model_started) / 1_000_000.0
 
         expected = (self.model.action_horizon, self.model.action_dim)
         if normalized.shape != expected:
@@ -452,20 +472,70 @@ class Pi05Policy:
         # ``trim`` / ``unnormalize`` steps ignore it. Mirrors openpi, whose output
         # transforms see the same ``state`` its input transforms produced.
         processed_obs = data.get(OBSERVATION, observation)
-        out = self.output_pipeline({NORMALIZED: normalized, OBSERVATION: processed_obs})
+        output_step_timings = {}
+        output_input = {NORMALIZED: normalized, OBSERVATION: processed_obs}
+        if diagnostics_enabled:
+            out = output_input
+            for step_name, step in self.output_pipeline:
+                step_started = time.perf_counter_ns()
+                out = step(out)
+                output_step_timings[step_name] = (time.perf_counter_ns() - step_started) / 1_000_000.0
+        else:
+            out = self.output_pipeline(output_input)
         actions = out[ACTIONS]
-        total_ms = (time.perf_counter() - started) * 1000.0
+        finished = time.perf_counter_ns()
+        total_ms = (finished - started) / 1_000_000.0
 
-        return {
+        native_layers = getattr(self.model, "last_layer_timings", None)
+        if callable(native_layers):
+            native_layers = native_layers()
+        layer_timing_source = "native"
+        if not isinstance(native_layers, Mapping):
+            # The current CUDA graph binding exposes one host-visible model
+            # boundary. Keep this explicit instead of presenting launch time as
+            # synchronized per-layer GPU time.
+            native_layers = {"native.infer_rgb": model_ms}
+            layer_timing_source = "host_boundary"
+        timing = {
+            "model_ms": model_ms,
+            "total_ms": total_ms,
+            "layer_timings_ms": dict(native_layers),
+            "layer_timing_source": layer_timing_source,
+        }
+        result = {
             "actions": actions,
             "normalized_actions": normalized,
             "token_ids": token_ids,
             "noise": selected_noise,
-            "timing": {"model_ms": model_ms, "total_ms": total_ms},
+            "timing": timing,
             "metadata": self.metadata,
         }
+        if diagnostics_enabled:
+            timing.update(
+                {
+                    "preprocess_ms": (preprocessed - started) / 1_000_000.0,
+                    "postprocess_ms": (finished - model_finished) / 1_000_000.0,
+                    "input_steps_ms": input_step_timings,
+                    "output_steps_ms": output_step_timings,
+                }
+            )
+            # References only: the websocket layer converts these to O(1)
+            # shape/dtype descriptors before queuing a log record. They never go
+            # onto the wire and are not retained after the request completes.
+            result["diagnostic_tensors"] = {
+                "rgb": rgb,
+                "token_ids": token_ids,
+                "noise": selected_noise,
+                "normalized_actions": normalized,
+                "actions": actions,
+            }
+        return result
 
     __call__ = infer
+
+    def set_diagnostics(self, enabled: bool) -> None:
+        """Enable lightweight tensor/timing descriptors for the serving layer."""
+        self._diagnostics_enabled = bool(enabled)
 
     @property
     def action_dim(self) -> int:

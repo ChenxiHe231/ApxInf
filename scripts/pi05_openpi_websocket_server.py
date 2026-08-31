@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import logging
 import pathlib
+import shlex
 import sys
 
 # Make ``import apxinf`` work from a source checkout without installation. The
@@ -185,6 +186,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="print asynchronous APXINF_LOG JSON lines with request timing and O(1) "
+        "tensor shape/dtype descriptors; queueing never blocks inference",
+    )
     return parser.parse_args()
 
 
@@ -316,7 +323,27 @@ def main() -> None:
         policy.metadata["state_key"],
         policy.metadata["discrete_state"],
     )
-    server = WebsocketPolicyServer(policy, args.host, args.port)
+    checkpoint_path = None
+    if not args.random_weights:
+        checkpoint = args.checkpoint or (args.model_dir / "model.safetensors")
+        checkpoint_path = str(checkpoint.expanduser().resolve())
+    log_context = {
+        "command": shlex.join(sys.argv),
+        "checkpoint_path": checkpoint_path,
+        "model_dir": str(args.model_dir.expanduser().resolve()) if args.model_dir else None,
+        "cwd": str(pathlib.Path.cwd()),
+        "precision": args.precision,
+        "robot": preset.name,
+    }
+    server = WebsocketPolicyServer(
+        policy,
+        args.host,
+        args.port,
+        log=args.log,
+        log_context=log_context,
+    )
+    if args.log:
+        logging.info("diagnostic JSONL log: %s", server.log_path)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
