@@ -259,6 +259,10 @@ class WebsocketPolicyServer:
                     "queue_capacity": _DIAGNOSTIC_LOG_QUEUE_SIZE,
                     "tensor_values_scanned": False,
                     "log_file": self._diagnostic_log.log_path,
+                    "layer_timing": {
+                        "source": "policy_timing.layer_timings_ms",
+                        "gpu_synchronized": False,
+                    },
                 },
                 "startup": self._log_context,
             }
