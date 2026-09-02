@@ -626,6 +626,22 @@ impl Pi05CudaRuntime {
         self.denoise_all_steps(noise, time_embeddings, &prefix)
     }
 
+    /// Run eager inference when RGB preprocessing has already produced
+    /// calibrated E4M3 patch tokens.
+    pub fn infer_fp8_patches(
+        &self,
+        patches: &Tensor,
+        token_ids: &CudaBuffer,
+        token_count: usize,
+        noise: &Tensor,
+        time_embeddings: &[Tensor],
+    ) -> Result<Tensor> {
+        let vision = self.encode_vision_fp8_patches(patches)?;
+        let prefix = self.embed_prefix(&vision, token_ids, token_count)?;
+        let prefix = self.prefix_forward(&prefix)?;
+        self.denoise_all_steps(noise, time_embeddings, &prefix)
+    }
+
     fn infer_with_styles(
         &self,
         patches: &Tensor,
@@ -718,19 +734,36 @@ impl Pi05CudaRuntime {
 
         // Fail shape, calibration, and workspace checks before beginning a
         // stream capture, where recovery from a rejected launch is harder.
-        let eager_output = kernels::prepare_with_workspace(&workspace, || {
-            self.infer_captured_inputs(
-                &patches,
-                raw_images.as_ref(),
-                raw_image_layout,
-                token_ids,
-                token_count,
-                noise,
-                &styles,
-            )
-        })?;
-        backend.synchronize()?;
-        drop(eager_output);
+        // Online tuning may publish several exact winners during the first
+        // eager traversal. Run one more traversal after the generation stops
+        // changing so every cached plan is prepared from the final snapshot
+        // before CUDA begins capture.
+        let mut stable = false;
+        for _ in 0..4 {
+            let generation = self.ctx().tuning().generation();
+            let eager_output = kernels::prepare_with_workspace(&workspace, || {
+                self.infer_captured_inputs(
+                    &patches,
+                    raw_images.as_ref(),
+                    raw_image_layout,
+                    token_ids,
+                    token_count,
+                    noise,
+                    &styles,
+                )
+            })?;
+            backend.synchronize()?;
+            drop(eager_output);
+            if self.ctx().tuning().generation() == generation {
+                stable = true;
+                break;
+            }
+        }
+        if !stable {
+            return Err(Error::Other(
+                "GEMM tactic store did not stabilize before PI0.5 graph capture".into(),
+            ));
+        }
 
         backend.begin_capture()?;
         let output = match kernels::with_workspace(&workspace, || {

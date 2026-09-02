@@ -3,92 +3,18 @@ use std::collections::HashMap;
 use apxinf_core::{Error, Result};
 
 use super::key::{GemmBucketKey, GemmTuningKey};
+use super::tactic::TacticId;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TacticBackend {
-    Cutlass,
-    CublasLt,
-    /// Fully specified cuBLASLt algorithm configuration. Unlike a heuristic
-    /// rank, this remains stable when the library reorders its candidates.
-    CublasLtCustom,
-    /// Fully specified cuBLASLt algorithm validated for the fused FP16-bias
-    /// operation descriptor used by static FP8 down/residual projections.
-    CublasLtCustomBias,
-    /// Fully specified cuBLASLt algorithm for two serial half-width GEMMs over
-    /// one packed weight/output allocation. This is an exact-shape backend:
-    /// it preserves the fused tensor layout while selecting a faster N/2
-    /// kernel family on shapes where the full-width kernel underperforms.
-    CublasLtCustomSplitSerial,
-    /// First-half cuBLASLt gate GEMM followed by a CUTLASS second-half up
-    /// GEMM whose epilogue performs exact GeGLU and E4M3 quantization. This
-    /// backend is valid only for explicitly tuned native-FP8 shapes.
-    CublasLtCustomSplitGeGluCutlass,
-    /// Two-SM 128x256x128 CUTLASS up/GeGLU epilogue using a 2x2
-    /// cluster. KernelScheduleAuto selects the SM100 two-SM, eight-stage path.
-    CublasLtCustomSplitGeGluCutlass2SmAuto,
-    /// Same two-SM cluster with an explicit three-stage
-    /// mainloop candidate. Kept separate so end-to-end timing can decide.
-    CublasLtCustomSplitGeGluCutlass2SmStage3,
-    /// Exact M522 language MLP path: current half-width
-    /// cuBLASLt gate tactic followed by an explicit SM100 two-SM CUTLASS up
-    /// GEMM with exact GeGLU and E4M3 quantization in its EVT epilogue.
-    CublasLtCustomSplitGeGluCutlassM522Explicit2Sm,
-    /// Exact-shape FP8 one-node dual-GEMM + GeGLU operator. Exact tuning keys
-    /// and runtime validation restrict it to the production M522/M533 shapes;
-    /// the resident weight must use the validated [gate256,up256] layout.
-    CutlassFp8DualGeGlu,
-    /// Exact BF16 M522 one-node dual-GEMM mega-kernel. The
-    /// resident weight must use the load-time-validated [gate256,up256]
-    /// physical layout.
-    CutlassBf16DualGeGluM522,
-    /// Exact BF16 M533 generalization of the accepted M522 one-node
-    /// dual-GEMM mega-kernel. It reuses the same
-    /// load-time-validated [gate256,up256] physical layout while remaining a
-    /// distinct exact-shape backend rather than a generic-M route.
-    CutlassBf16DualGeGluM533,
-    /// BF16 split-EVT first-half cuBLASLt gate followed by a native
-    /// SM100 CUTLASS up GEMM whose EVT preserves the exact BF16 GeGLU rounds.
-    CublasLtCustomSplitGeGluCutlassBf16,
-    Vendor,
-}
-
-/// Decoded representation of a compact `cublaslt_custom` tactic id.
-///
-/// Algorithm id 66, split-K=1, reduction=none, swizzle=0, and inner-shape=0
-/// are part of the backend contract. The remaining CUDA 13 configuration is
-/// packed into the signed JSON-compatible tactic value as follows:
-/// tile[9:0], custom[12:10], cluster[18:13], stages[24:19].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CublasLtCustomConfig {
-    pub tile_id: i32,
-    pub custom_option: i32,
-    pub cluster_shape_id: i32,
-    pub stages_id: i32,
-}
-
-pub fn decode_cublaslt_custom_tactic(value: i32) -> Option<CublasLtCustomConfig> {
-    if value <= 0 || value & !0x01ff_ffff != 0 {
-        return None;
-    }
-    let config = CublasLtCustomConfig {
-        tile_id: value & 0x3ff,
-        custom_option: (value >> 10) & 0x7,
-        cluster_shape_id: (value >> 13) & 0x3f,
-        stages_id: (value >> 19) & 0x3f,
-    };
-    (config.tile_id > 0 && config.stages_id > 0).then_some(config)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct TacticId {
-    pub backend: TacticBackend,
-    pub value: i32,
-}
+#[cfg(test)]
+use super::tactic::TacticBackend;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GemmTuningRecord {
     pub key: GemmTuningKey,
     pub tactic: TacticId,
+    /// Missing on legacy records, which remain accepted. Newly generated
+    /// records carry the selected provider family's compatibility revision.
+    pub implementation_version: Option<u32>,
     pub milliseconds: Option<f64>,
 }
 
@@ -105,9 +31,11 @@ impl TacticStore {
         let mut bucket_gemm: HashMap<GemmBucketKey, GemmTuningRecord> = HashMap::new();
         for record in records {
             if let Some(existing) = exact_gemm.get(&record.key) {
-                if existing.tactic != record.tactic {
+                if existing.tactic != record.tactic
+                    && (existing.milliseconds.is_none() || record.milliseconds.is_none())
+                {
                     return Err(Error::Other(format!(
-                        "conflicting tuning records for {:?}",
+                        "conflicting unmeasured tuning records for {:?}",
                         record.key
                     )));
                 }
@@ -116,6 +44,9 @@ impl TacticStore {
                 }
             }
             exact_gemm.insert(record.key.clone(), record.clone());
+            if !record.tactic.backend.bucket_eligible() {
+                continue;
+            }
             let bucket = record.key.bucket();
             match bucket_gemm.get(&bucket) {
                 Some(existing) if !is_faster(&record, existing) => {}
@@ -130,8 +61,9 @@ impl TacticStore {
         })
     }
 
-    /// Merge records loaded from several validated databases. Identical exact
-    /// records are deduplicated; conflicting tactics for one physical key fail.
+    /// Merge records loaded from validated databases. Identical exact records
+    /// are deduplicated; measured conflicts keep the faster winner, while an
+    /// unmeasured conflict is rejected because it has no ordering evidence.
     pub fn merge(stores: impl IntoIterator<Item = Self>) -> Result<Self> {
         Self::from_gemm_records(
             stores
@@ -151,6 +83,25 @@ impl TacticStore {
         self.exact_gemm.get(key).map(|record| record.tactic)
     }
 
+    pub fn lookup_gemm_bucket(&self, key: &GemmTuningKey) -> Option<TacticId> {
+        self.bucket_gemm
+            .get(&key.bucket())
+            .map(|record| record.tactic)
+    }
+
+    /// Add or replace one exact winner and rebuild the derived bucket index.
+    /// Returns whether the store changed.
+    pub fn upsert_gemm(&mut self, record: GemmTuningRecord) -> bool {
+        if let Some(existing) = self.exact_gemm.get(&record.key) {
+            if existing == &record || !is_faster(&record, existing) {
+                return false;
+            }
+        }
+        self.exact_gemm.insert(record.key.clone(), record);
+        self.rebuild_buckets();
+        true
+    }
+
     pub fn gemm_records(&self) -> impl Iterator<Item = &GemmTuningRecord> {
         self.exact_gemm.values()
     }
@@ -161,6 +112,22 @@ impl TacticStore {
 
     pub fn is_empty(&self) -> bool {
         self.exact_gemm.is_empty()
+    }
+
+    fn rebuild_buckets(&mut self) {
+        self.bucket_gemm.clear();
+        for record in self.exact_gemm.values() {
+            if !record.tactic.backend.bucket_eligible() {
+                continue;
+            }
+            let bucket = record.key.bucket();
+            match self.bucket_gemm.get(&bucket) {
+                Some(existing) if !is_faster(record, existing) => {}
+                _ => {
+                    self.bucket_gemm.insert(bucket, record.clone());
+                }
+            }
+        }
     }
 }
 
@@ -204,6 +171,7 @@ mod tests {
                 backend: TacticBackend::Cutlass,
                 value,
             },
+            implementation_version: Some(TacticBackend::Cutlass.implementation_version()),
             milliseconds: Some(milliseconds),
         }
     }
@@ -218,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_deduplicates_equal_records_and_rejects_conflicts() {
+    fn merge_deduplicates_and_keeps_the_fastest_measured_winner() {
         let left = TacticStore::from_gemm_records([record(10, 1, 0.03)]).unwrap();
         let right = TacticStore::from_gemm_records([record(10, 1, 0.01)]).unwrap();
         let merged = TacticStore::merge([left, right]).unwrap();
@@ -226,6 +194,17 @@ mod tests {
 
         let left = TacticStore::from_gemm_records([record(10, 1, 0.03)]).unwrap();
         let conflict = TacticStore::from_gemm_records([record(10, 2, 0.01)]).unwrap();
-        assert!(TacticStore::merge([left, conflict]).is_err());
+        let merged = TacticStore::merge([left, conflict]).unwrap();
+        assert_eq!(merged.lookup_gemm_exact(&key(10)).unwrap().value, 2);
+    }
+
+    #[test]
+    fn upsert_replaces_exact_and_rebuilds_bucket() {
+        let mut store = TacticStore::from_gemm_records([record(10, 1, 0.03)]).unwrap();
+        assert!(store.upsert_gemm(record(10, 4, 0.02)));
+        assert_eq!(store.lookup_gemm_exact(&key(10)).unwrap().value, 4);
+        assert_eq!(store.lookup_gemm_bucket(&key(11)).unwrap().value, 4);
+        assert!(!store.upsert_gemm(record(10, 4, 0.02)));
+        assert!(!store.upsert_gemm(record(10, 5, 0.04)));
     }
 }
