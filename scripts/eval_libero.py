@@ -276,9 +276,14 @@ class Backend(Protocol):
     metadata: dict
 
     def infer(
-        self, base: np.ndarray, wrist: np.ndarray, state: np.ndarray, prompt: str
-    ) -> Tuple[np.ndarray, dict]:
-        """Return ``(actions, {"model_seconds", "server_processor_seconds"})``."""
+        self,
+        base: np.ndarray,
+        wrist: np.ndarray,
+        state: np.ndarray,
+        prompt: str,
+        noise: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], dict]:
+        """Return ``(actions, normalized_actions, timing)``."""
         ...
 
     def close(self) -> None:
@@ -319,7 +324,11 @@ class WebsocketBackend:
                 f"server precision is {actual_precision!r}, expected {expected_precision!r}"
             )
 
-    def infer(self, base, wrist, state, prompt) -> Tuple[np.ndarray, dict]:
+    def infer(
+        self, base, wrist, state, prompt, noise=None
+    ) -> Tuple[np.ndarray, Optional[np.ndarray], dict]:
+        if noise is not None:
+            raise RuntimeError("warm-start noise requires --backend in-process")
         response = self._client.infer(_observation(base, wrist, state, prompt))
         actions = np.asarray(response["actions"], dtype=np.float32)
         # Only OpenPI-contract keys ride the wire; ``policy_timing`` /
@@ -333,7 +342,7 @@ class WebsocketBackend:
         model_ms = float(policy_timing.get("infer_ms", 0.0))
         server_total_ms = float(policy_timing.get("policy_ms", model_ms))
         server_compute_ms = float(server_timing.get("infer_ms", server_total_ms))
-        return actions, {
+        return actions, None, {
             "model_seconds": model_ms / 1000.0,
             # Server compute the client can see beyond the pure model = the
             # server-side processor pipeline (event-loop wall clock minus model).
@@ -375,19 +384,25 @@ class InProcessBackend:
             norm_key=args.norm_key,
             action_dim=(args.action_dim or None),
             action_horizon=args.action_horizon,
+            num_views=args.num_views,
+            num_flow_steps=args.num_flow_steps,
+            flow_start_time=args.flow_start_time,
             seed=args.seed,
             discrete_state=args.discrete_state,
             metadata={"precision": args.precision, "policy": "libero"},
         )
         self.metadata = dict(getattr(self._policy, "metadata", {}))
 
-    def infer(self, base, wrist, state, prompt) -> Tuple[np.ndarray, dict]:
-        result = self._policy.infer(_observation(base, wrist, state, prompt))
+    def infer(
+        self, base, wrist, state, prompt, noise=None
+    ) -> Tuple[np.ndarray, np.ndarray, dict]:
+        result = self._policy.infer(_observation(base, wrist, state, prompt), noise=noise)
         actions = np.asarray(result["actions"], dtype=np.float32)
+        normalized = np.asarray(result["normalized_actions"], dtype=np.float32)
         timing = result.get("timing", {}) or {}
         model_ms = float(timing.get("model_ms", 0.0))
         total_ms = float(timing.get("total_ms", model_ms))
-        return actions, {
+        return actions, normalized, {
             "model_seconds": model_ms / 1000.0,
             "server_processor_seconds": max(0.0, total_ms - model_ms) / 1000.0,
         }
@@ -417,6 +432,8 @@ def run_episode(
     backend: Backend,
     transport: str,
     seed: int,
+    warm_start: bool,
+    warm_start_alpha: float,
 ) -> dict:
     episode_started = time.perf_counter()
     env.reset()
@@ -443,6 +460,10 @@ def run_episode(
     server_processor_seconds = 0.0
     transport_seconds = 0.0
     first_action_checksum = None
+    previous_normalized_chunk = None
+    warm_start_replans = 0
+    warm_noise_checksum = None
+    rng = np.random.default_rng(seed + 1_000_003 * task_id + 10_007 * trial_id)
 
     while action_steps < MAX_STEPS:
         if not action_plan:
@@ -460,8 +481,26 @@ def run_episode(
             ).astype(np.float32, copy=False)
             preprocess_seconds += time.perf_counter() - preprocess_started
 
+            noise = None
+            if warm_start and previous_normalized_chunk is not None:
+                shift = np.empty_like(previous_normalized_chunk)
+                replan = min(REPLAN_STEPS, shift.shape[0])
+                if replan < shift.shape[0]:
+                    shift[: shift.shape[0] - replan] = previous_normalized_chunk[replan:]
+                shift[shift.shape[0] - replan :] = previous_normalized_chunk[-1]
+                epsilon = rng.standard_normal(previous_normalized_chunk.shape).astype(np.float32)
+                noise = np.ascontiguousarray(
+                    warm_start_alpha * shift + (1.0 - warm_start_alpha) * epsilon,
+                    dtype=np.float32,
+                )
+                warm_start_replans += 1
+                if warm_noise_checksum is None:
+                    warm_noise_checksum = float(np.abs(noise).sum())
+
             request_started = time.perf_counter()
-            actions, timing = backend.infer(images[0], images[1], state, prompt)
+            actions, normalized_actions, timing = backend.infer(
+                images[0], images[1], state, prompt, noise=noise
+            )
             round_trip_seconds = time.perf_counter() - request_started
             inference_seconds += round_trip_seconds
             # The action horizon is a checkpoint property (metadata ``action_horizon``),
@@ -480,6 +519,18 @@ def run_episode(
                 )
             if not np.isfinite(actions).all():
                 raise FloatingPointError("backend returned non-finite actions")
+            if warm_start:
+                if normalized_actions is None:
+                    raise RuntimeError("warm-start requires backend normalized_actions")
+                if normalized_actions.ndim != 2:
+                    raise ValueError(
+                        f"expected normalized actions [H, D], got {normalized_actions.shape}"
+                    )
+                if not np.isfinite(normalized_actions).all():
+                    raise FloatingPointError("backend returned non-finite normalized actions")
+                previous_normalized_chunk = np.ascontiguousarray(
+                    normalized_actions, dtype=np.float32
+                )
 
             segment_model = float(timing.get("model_seconds", 0.0))
             segment_processor = float(timing.get("server_processor_seconds", 0.0))
@@ -516,6 +567,10 @@ def run_episode(
         "websocket_transport_seconds": transport_seconds,
         "elapsed_seconds": time.perf_counter() - episode_started,
         "first_action_abs_checksum": first_action_checksum,
+        "warm_start": warm_start,
+        "warm_start_alpha": warm_start_alpha if warm_start else None,
+        "warm_start_replans": warm_start_replans,
+        "first_warm_noise_abs_checksum": warm_noise_checksum,
         "transport": transport,
         "image_input": "openpi_uint8_hwc",
         "seed": seed,
@@ -558,6 +613,28 @@ def parse_args() -> argparse.Namespace:
     in_process.add_argument("--norm-key", default="actions")
     in_process.add_argument("--action-dim", type=int, default=7, help="0 keeps the full vector")
     in_process.add_argument(
+        "--num-views",
+        type=int,
+        default=None,
+        help="load fewer camera views than the checkpoint declares; LIBERO uses 2",
+    )
+    in_process.add_argument(
+        "--num-flow-steps",
+        type=int,
+        default=None,
+        help="override the checkpoint's diffusion/flow inference steps",
+    )
+    in_process.add_argument(
+        "--flow-start-time",
+        type=float,
+        default=None,
+        help=(
+            "override reverse-flow start time; with --warm-start this defaults to "
+            "1-alpha, and without --warm-start values below 1.0 run partial flow "
+            "from pure noise"
+        ),
+    )
+    in_process.add_argument(
         "--action-horizon",
         type=int,
         default=None,
@@ -566,9 +643,48 @@ def parse_args() -> argparse.Namespace:
     )
     in_process.add_argument("--discrete-state", action="store_true")
 
+    warm = parser.add_argument_group("warm start")
+    warm.add_argument(
+        "--warm-start",
+        action="store_true",
+        help="enable shifted action cache + tail repeat + alpha noise blend + partial flow",
+    )
+    warm.add_argument(
+        "--warm-start-alpha",
+        type=float,
+        default=0.5,
+        help=(
+            "cache/noise blend coefficient used only with --warm-start; partial "
+            "flow starts at 1-alpha"
+        ),
+    )
+
     args = parser.parse_args()
     if args.backend == "in-process" and args.model_dir is None:
         parser.error("--backend in-process requires --model-dir")
+    if not (0.0 <= args.warm_start_alpha <= 1.0):
+        parser.error("--warm-start-alpha must be in [0, 1]")
+    if args.warm_start and args.warm_start_alpha >= 1.0:
+        parser.error(
+            "--warm-start-alpha must be < 1.0 when --warm-start is enabled "
+            "(otherwise the default flow_start_time would be 0)"
+        )
+    if args.warm_start:
+        if args.backend != "in-process":
+            parser.error("--warm-start requires --backend in-process")
+        if args.num_flow_steps is None:
+            args.num_flow_steps = 1
+        if args.flow_start_time is None:
+            args.flow_start_time = 1.0 - args.warm_start_alpha
+        if args.flow_start_time <= 0.0 or args.flow_start_time > 1.0:
+            parser.error("--flow-start-time must be in (0, 1]")
+    elif args.flow_start_time is not None and args.flow_start_time < 1.0:
+        print(
+            "warning: --flow-start-time < 1.0 without --warm-start runs partial "
+            "flow from pure noise",
+            file=sys.stderr,
+            flush=True,
+        )
     if args.action_horizon is not None:
         # The websocket backend gets its horizon from whatever the server loaded,
         # so accepting the flag here would silently do nothing.
@@ -671,6 +787,8 @@ def main() -> None:
                                     backend,
                                     transport,
                                     args.seed,
+                                    args.warm_start,
+                                    args.warm_start_alpha,
                                 )
                                 record["attempt"] = attempt
                                 record["precision"] = args.precision

@@ -61,6 +61,7 @@ pub struct Pi05Config {
     pub action_horizon: usize,
     pub max_token_len: usize,
     pub num_flow_steps: usize,
+    pub flow_start_time: f32,
     pub num_views: usize,
     pub image_size: usize,
     pub patch_size: usize,
@@ -87,6 +88,7 @@ impl Default for Pi05Config {
             action_horizon: 50,
             max_token_len: 200,
             num_flow_steps: 10,
+            flow_start_time: 1.0,
             num_views: 3,
             image_size: 224,
             patch_size: 14,
@@ -155,6 +157,7 @@ impl Pi05Config {
             &["num_inference_steps", "num_flow_steps"],
             cfg.num_flow_steps,
         );
+        cfg.flow_start_time = f32_field(&v, "flow_start_time", cfg.flow_start_time);
         cfg.num_views = resolve_num_views(&v, cfg.num_views);
         cfg.discrete_state_input = v
             .get("discrete_state_input")
@@ -446,6 +449,15 @@ impl Pi05Config {
         if self.num_flow_steps == 0 {
             return Err(Error::Other("pi05 num_flow_steps must be non-zero".into()));
         }
+        if !(self.flow_start_time.is_finite()
+            && self.flow_start_time > 0.0
+            && self.flow_start_time <= 1.0)
+        {
+            return Err(Error::Other(format!(
+                "pi05 flow_start_time must be in (0, 1], got {}",
+                self.flow_start_time
+            )));
+        }
         if self.language.depth != self.action_expert.depth
             || self.language.num_heads != self.action_expert.num_heads
             || self.language.num_kv_heads != self.action_expert.num_kv_heads
@@ -511,6 +523,7 @@ mod tests {
             "chunk_size": 10,
             "tokenizer_max_length": 200,
             "num_inference_steps": 10,
+            "flow_start_time": 0.5,
             "num_views": 2,
             "image_resolution": [224, 224],
             "discrete_state_input": false
@@ -521,6 +534,7 @@ mod tests {
             cfg,
             Pi05Config {
                 discrete_state_input: false,
+                flow_start_time: 0.5,
                 ..Pi05Config::thor_two_view()
             }
         );

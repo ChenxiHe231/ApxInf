@@ -115,6 +115,8 @@ class Pi05Policy:
             "action_horizon": model.action_horizon,
             "action_dim": self.action_dim_out,
             "model_action_dim": model.action_dim,
+            "num_flow_steps": getattr(model, "num_flow_steps", None),
+            "flow_start_time": getattr(model, "flow_start_time", None),
             "num_views": model.num_views,
             "image_size": [model.image_size, model.image_size],
             "image_keys": list(self.image_keys),
@@ -207,6 +209,8 @@ class Pi05Policy:
         norm_key: str = "actions",
         action_dim: Optional[int] = None,
         action_horizon: Optional[int] = None,
+        num_flow_steps: Optional[int] = None,
+        flow_start_time: Optional[float] = None,
         seed: int = 0,
         discrete_state: bool = False,
         state_norm_key: str = "state",
@@ -275,6 +279,8 @@ class Pi05Policy:
                 autotune=bool(autotune),
                 **({"action_horizon": int(action_horizon)} if action_horizon else {}),
                 **({"num_views": int(num_views)} if num_views is not None else {}),
+                **({"num_flow_steps": int(num_flow_steps)} if num_flow_steps is not None else {}),
+                **({"flow_start_time": float(flow_start_time)} if flow_start_time is not None else {}),
                 sampling_seed=int(seed),
             )
         elif action_horizon is not None and int(action_horizon) != int(model.action_horizon):
@@ -292,6 +298,26 @@ class Pi05Policy:
                 f"Pi05Policy.from_pretrained: num_views={num_views} but the model "
                 f"passed in was loaded with {model.num_views}; pass num_views to "
                 "the load call instead"
+            )
+        elif (
+            num_flow_steps is not None
+            and hasattr(model, "num_flow_steps")
+            and int(num_flow_steps) != int(model.num_flow_steps)
+        ):
+            raise ValueError(
+                f"Pi05Policy.from_pretrained: num_flow_steps={num_flow_steps} but "
+                f"the model passed in was loaded with {model.num_flow_steps}; pass "
+                "num_flow_steps to the load call instead"
+            )
+        elif (
+            flow_start_time is not None
+            and hasattr(model, "flow_start_time")
+            and float(flow_start_time) != float(model.flow_start_time)
+        ):
+            raise ValueError(
+                f"Pi05Policy.from_pretrained: flow_start_time={flow_start_time} but "
+                f"the model passed in was loaded with {model.flow_start_time}; pass "
+                "flow_start_time to the load call instead"
             )
 
         tokenizer = PromptTokenizer(

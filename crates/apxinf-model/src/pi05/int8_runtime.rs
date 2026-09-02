@@ -391,7 +391,7 @@ impl Pi05Int8CudaRuntime {
             )));
         }
         let mut state = noise.clone();
-        let dt = -1.0 / self.config.num_flow_steps as f32;
+        let dt = -self.config.flow_start_time / self.config.num_flow_steps as f32;
         for step_styles in styles {
             state = self.denoise_step_with_styles(&state, step_styles, prefix, dt)?;
         }
@@ -605,7 +605,8 @@ pub fn upload_time_embeddings_int8(
 ) -> Result<Vec<Tensor>> {
     (0..config.num_flow_steps)
         .map(|step| {
-            let time = 1.0 - step as f32 / config.num_flow_steps as f32;
+            let time =
+                config.flow_start_time * (1.0 - step as f32 / config.num_flow_steps as f32);
             let values = sinusoidal_time_embedding(
                 time,
                 config.action_expert.width,
