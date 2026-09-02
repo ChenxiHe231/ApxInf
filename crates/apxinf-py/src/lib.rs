@@ -27,6 +27,7 @@
 //! imports and reports shape contracts, but `load` errors for pi05.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use numpy::ndarray::Array2;
@@ -38,6 +39,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use apxinf_core::{Device, RngKey, Shape, Tensor};
+use apxinf_model::pi05::Pi05CalibrationPlan;
 use apxinf_model::{
     AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
     SyntheticWeights, VisionObservation, VlaRequest,
@@ -577,6 +579,55 @@ impl Model {
             }
             None => self.run_generated(py, observation, self.next_sampling_rng()?),
         }
+    }
+
+    /// Internal native-BF16 activation probe used by ``scripts/calibrate_pi05.py``.
+    #[pyo3(name = "_calibrate_rgb", signature = (rgb_u8, layout, token_ids, noise))]
+    fn calibrate_rgb(
+        &self,
+        rgb_u8: PyReadonlyArrayDyn<'_, u8>,
+        layout: &str,
+        token_ids: PyReadonlyArray1<'_, u32>,
+        noise: PyReadonlyArray2<'_, f32>,
+    ) -> PyResult<BTreeMap<String, f32>> {
+        let layout = parse_layout(layout)?;
+        let expected_bytes =
+            self.config.num_views * self.config.image_size * self.config.image_size * 3;
+        let bytes = rgb_u8
+            .as_slice()
+            .map_err(|_| {
+                PyValueError::new_err("apxinf_py._calibrate_rgb: rgb_u8 must be C-contiguous uint8")
+            })?
+            .to_vec();
+        if bytes.len() != expected_bytes {
+            return Err(PyValueError::new_err(format!(
+                "apxinf_py._calibrate_rgb: expected {expected_bytes} image bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let tokens = token_ids
+            .as_slice()
+            .map_err(|_| {
+                PyValueError::new_err(
+                    "apxinf_py._calibrate_rgb: token_ids must be C-contiguous uint32",
+                )
+            })?
+            .to_vec();
+        self.validate_tokens(&tokens)?;
+        let noise = self.noise_tensor(noise)?;
+        let observation = Observation {
+            vision: VisionObservation::RgbU8 { bytes, layout },
+            token_ids: tokens,
+        };
+        self.model
+            .calibration_amax(&VlaRequest::provided(&observation, &noise))
+            .map_err(runtime_err)
+    }
+
+    /// Stable logical sites required by this model's static-FP8 execution plan.
+    #[pyo3(name = "_calibration_plan")]
+    fn calibration_plan(&self) -> Vec<String> {
+        Pi05CalibrationPlan::for_config(&self.config).sites().to_vec()
     }
 
     /// Seeded L1 inference. This avoids creating or transferring a host noise

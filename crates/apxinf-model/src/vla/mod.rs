@@ -1,5 +1,7 @@
 //! Model-neutral interfaces for vision-language-action runtimes.
 
+use std::collections::BTreeMap;
+
 use apxinf_core::{Error, Result, RngKey, Tensor};
 
 /// Memory layout for an RGB `u8` observation batch.
@@ -148,6 +150,13 @@ pub trait VlaRuntime {
     /// This convenience performs the device→host copy inside the runtime, which
     /// already owns the backend.
     fn infer_host_f32(&self, request: &VlaRequest<'_>) -> Result<Vec<f32>>;
+
+    /// Collect named BF16 activation maxima for an FP8 calibration profile.
+    fn calibration_amax(&self, _request: &VlaRequest<'_>) -> Result<BTreeMap<String, f32>> {
+        Err(Error::Other(
+            "activation calibration is not supported by this VLA runtime".into(),
+        ))
+    }
 }
 
 #[cfg(test)]

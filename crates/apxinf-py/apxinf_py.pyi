@@ -54,6 +54,16 @@ class Model:
         """L1: infer from resized RGB uint8. Returns normalized-domain action."""
         ...
 
+    def _calibrate_rgb(
+        self,
+        rgb_u8: npt.NDArray[np.uint8],
+        layout: str,
+        token_ids: npt.NDArray[np.uint32],
+        noise: npt.NDArray[np.float32],
+    ) -> dict[str, float]: ...
+
+    def _calibration_plan(self) -> list[str]: ...
+
     @property
     def device(self) -> str: ...
     @property

@@ -285,14 +285,14 @@ policy = AutoPolicy.from_pretrained("<path-to-model>", precision="bf16")
 Thor only, where it is the fastest path. Orin has no FP8 Tensor Cores and is not
 supported.
 
-FP8 is the one precision that needs an artifact beyond the weights: per-tensor
-activation scales, and the load fails without them. A `calibration.json` in the
-checkpoint directory is picked up automatically, so `--calibration` is only for
-pointing elsewhere:
+FP8 needs per-tensor activation scales. Pass the calibration generated for the
+deployment data explicitly; when omitted, ApxInf falls back to
+`<path-to-model>/calibration.json`:
 
 ```bash
 python scripts/pi05_openpi_websocket_server.py \
   --model-dir <path-to-model> --robot franka_libero --precision fp8 \
+  --calibration <path-to-calibration.json> \
   --port 8000
 ```
 
@@ -300,12 +300,31 @@ python scripts/pi05_openpi_websocket_server.py \
 policy = AutoPolicy.from_pretrained(
     "<path-to-model>",
     precision="fp8",
-    calibration="<path-to-calibration.json>",   # default: <model-dir>/calibration.json
+    calibration="<path-to-calibration.json>",
 )
 ```
 
-The calibration is per-tensor activation scales from a calibration sweep and
-decides accuracy; `uniform:SCALE` is a flat stand-in for latency work only.
+If the checkpoint does not contain `calibration.json`, generate one from
+representative Observations:
+
+```bash
+python3 scripts/calibrate_pi05.py \
+  --model-dir <path-to-model> \
+  --manifest <path-to-observations.jsonl>
+```
+
+For the PI0.5 LIBERO checkpoint, capture task-balanced observations directly
+from the native LIBERO10 simulator:
+
+```bash
+python3 scripts/calibrate_pi05.py \
+  --model-dir <path-to-model> \
+  --libero-suite libero_10
+```
+
+See [PI0.5 FP8 calibration](doc/pi05-fp8-calibration.md) for the Observation
+format, native LIBERO sampling, and output options. The native path uses the
+same LIBERO/MuJoCo dependencies as [LIBERO evaluation](#libero-evaluation).
 
 ### INT8
 

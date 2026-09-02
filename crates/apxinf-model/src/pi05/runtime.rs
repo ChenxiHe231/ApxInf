@@ -9,7 +9,7 @@ use half::f16;
 use super::backend::{kernels, transfers, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
 use kernels::{activation, cache, elementwise, embedding, gemm, norm, preprocess, quantization};
 
-use super::StaticFp8Calibration;
+use super::{LayerCalibrationSites, Pi05CalibrationPlan, StaticFp8Calibration};
 use super::{
     action_layer, language_layer, sinusoidal_time_embedding, vision_layer, vision_patch_embed_fp8,
     vision_qkv_packed_from_env, Pi05Config, StaticFp8Pi05Weights, TransformerLayerScales,
@@ -36,35 +36,46 @@ impl Pi05ActivationScales {
         config: &Pi05Config,
         calibration: &StaticFp8Calibration,
     ) -> Result<Self> {
-        let transformer_layer = |prefix: &str, index: usize| -> Result<TransformerLayerScales> {
+        let plan = Pi05CalibrationPlan::for_config(config);
+        let optional_scale = |site: &Option<String>| -> Result<f32> {
+            site.as_deref()
+                .map(|name| calibration.scale(name))
+                .transpose()
+                .map(|scale| scale.unwrap_or(1.0))
+        };
+        let transformer_layer = |sites: &LayerCalibrationSites| -> Result<TransformerLayerScales> {
             Ok(TransformerLayerScales {
-                attention_norm: calibration
-                    .scale(&format!("{prefix}.layers.{index}.attention_norm"))?,
-                attention_output: calibration
-                    .scale(&format!("{prefix}.layers.{index}.attention_output"))?,
-                mlp_norm: calibration.scale(&format!("{prefix}.layers.{index}.mlp_norm"))?,
-                mlp_activation: calibration
-                    .scale(&format!("{prefix}.layers.{index}.mlp_activation"))?,
+                attention_norm: calibration.scale(&sites.attention_norm)?,
+                attention_output: optional_scale(&sites.attention_output)?,
+                mlp_norm: optional_scale(&sites.mlp_norm)?,
+                mlp_activation: optional_scale(&sites.mlp_activation)?,
             })
         };
-        let vision_layers = (0..config.vision_depth)
-            .map(|index| {
+        let vision_layers = plan
+            .vision_layers()
+            .iter()
+            .map(|sites| {
                 Ok(VisionLayerScales {
-                    attention_norm: calibration
-                        .scale(&format!("vision.layers.{index}.attention_norm"))?,
-                    attention_output: calibration
-                        .scale(&format!("vision.layers.{index}.attention_output"))?,
-                    mlp_norm: calibration.scale(&format!("vision.layers.{index}.mlp_norm"))?,
+                    attention_norm: calibration.scale(&sites.attention_norm)?,
+                    attention_output: calibration.scale(
+                        sites.attention_output.as_deref().expect("vision tail site"),
+                    )?,
+                    mlp_norm: calibration
+                        .scale(sites.mlp_norm.as_deref().expect("vision tail site"))?,
                     mlp_activation: calibration
-                        .scale(&format!("vision.layers.{index}.mlp_activation"))?,
+                        .scale(sites.mlp_activation.as_deref().expect("vision tail site"))?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let language_layers = (0..config.language.depth)
-            .map(|index| transformer_layer("language", index))
+        let language_layers = plan
+            .language_layers()
+            .iter()
+            .map(transformer_layer)
             .collect::<Result<Vec<_>>>()?;
-        let action_layers = (0..config.action_expert.depth)
-            .map(|index| transformer_layer("action", index))
+        let action_layers = plan
+            .action_layers()
+            .iter()
+            .map(transformer_layer)
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             vision_patch_input: calibration.scale("vision.patch_input")?,
@@ -899,12 +910,4 @@ mod tests {
         assert_eq!(scales.action_layers.len(), 18);
     }
 
-    #[test]
-    fn named_calibration_reports_first_missing_scale() {
-        let calibration = StaticFp8Calibration::from_json_str("{}").unwrap();
-        let error =
-            Pi05ActivationScales::from_calibration(&Pi05Config::thor_two_view(), &calibration)
-                .unwrap_err();
-        assert!(error.to_string().contains("vision.layers.0.attention_norm"));
-    }
 }

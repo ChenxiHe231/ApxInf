@@ -71,6 +71,10 @@ class MockModel:
         self.last_noise = np.asarray(noise, dtype=np.float32).copy()
         return self.last_noise
 
+    def _calibrate_rgb(self, rgb_u8, layout, token_ids, noise):
+        self.infer_rgb(rgb_u8, layout, token_ids, noise)
+        return {"vision.patch_input": float(np.max(rgb_u8))}
+
 
 class ConstTokenizer(PromptTokenizer):
     """A tokenizer that needs no SentencePiece model (bypasses __init__)."""
@@ -151,6 +155,22 @@ def test_explicit_noise_is_forwarded_exactly():
     result = policy.infer(make_obs(), noise=noise)
     np.testing.assert_array_equal(result["noise"], noise)
     np.testing.assert_array_equal(result["normalized_actions"], noise)
+    np.testing.assert_array_equal(policy.model.last_noise, noise)
+
+
+def test_calibration_and_inference_share_observation_preprocessing():
+    policy = build_policy()
+    observation = make_obs()
+    noise = np.arange(HORIZON * MODEL_DIM, dtype=np.float32).reshape(HORIZON, MODEL_DIM)
+
+    policy.infer(observation, noise=noise)
+    expected_rgb = policy.model.last_rgb.copy()
+    expected_tokens = policy.model.last_tokens.copy()
+    records = policy.calibrate_observation(observation, noise=noise)
+
+    assert records == {"vision.patch_input": float(np.max(expected_rgb))}
+    np.testing.assert_array_equal(policy.model.last_rgb, expected_rgb)
+    np.testing.assert_array_equal(policy.model.last_tokens, expected_tokens)
     np.testing.assert_array_equal(policy.model.last_noise, noise)
 
 
@@ -358,3 +378,9 @@ def test_real_model_layering(model_dir):
     unnormalizer = policy.output_pipeline["unnormalize"].unnormalizer
     recomputed = unnormalizer(np.ascontiguousarray(l1[:, :LIBERO_DIM]))
     np.testing.assert_allclose(result["actions"], recomputed, rtol=0.0, atol=2e-3)
+
+    # The real Observation seam reaches the native BF16 collector and must
+    # cover exactly the stable sites declared by the FP8 execution plan.
+    records = policy.calibrate_observation(obs, noise=noise)
+    assert set(records) == set(policy.model._calibration_plan())
+    assert all(np.isfinite(value) and value >= 0.0 for value in records.values())

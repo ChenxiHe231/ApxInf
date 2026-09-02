@@ -1,4 +1,6 @@
+use std::cell::Cell;
 use std::path::Path;
+use std::rc::Rc;
 
 use apxinf_core::{Backend, Tensor};
 use half::bf16;
@@ -8,6 +10,49 @@ use crate::tuning::{
     TacticMatch, TuningDType,
 };
 use crate::CudaBackend;
+
+struct CountingObserver(Cell<usize>);
+
+impl crate::kernels::gemm::Bf16ActivationObserver for CountingObserver {
+    fn observe(&self, _activation: &Tensor, _weight: &Tensor) -> apxinf_core::Result<()> {
+        self.0.set(self.0.get() + 1);
+        Ok(())
+    }
+}
+
+#[test]
+fn bf16_geglu_fallback_observes_activation_once() {
+    const M: usize = 3;
+    const K: usize = 5;
+    const FULL_N: usize = 14;
+
+    let backend = CudaBackend::new(0).unwrap();
+    let activation = backend
+        .to_device(&Tensor::from_bf16(vec![M, K], &vec![bf16::ZERO; M * K]).unwrap())
+        .unwrap();
+    let weight = backend
+        .to_device(
+            &Tensor::from_bf16(vec![K, FULL_N], &vec![bf16::ZERO; K * FULL_N]).unwrap(),
+        )
+        .unwrap();
+    let observer = Rc::new(CountingObserver(Cell::new(0)));
+    let _guard = crate::kernels::gemm::install_bf16_observer(observer.clone()).unwrap();
+
+    let fused = crate::kernels::gemm::bf16_geglu_fused(
+        backend.context(),
+        &activation,
+        &weight,
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(fused.is_none());
+    assert_eq!(observer.0.get(), 0, "a rejected fused probe must not observe");
+
+    crate::kernels::gemm::bf16(backend.context(), &activation, &weight).unwrap();
+    assert_eq!(observer.0.get(), 1, "the fallback must observe exactly once");
+}
 
 #[test]
 fn persisted_bf16_cublaslt_tactic_matches_vendor() {

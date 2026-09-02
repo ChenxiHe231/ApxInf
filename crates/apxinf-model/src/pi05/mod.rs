@@ -12,6 +12,8 @@ mod bf16_executor;
 #[cfg(feature = "cuda")]
 mod bf16_runtime;
 mod bf16_weights;
+#[cfg(feature = "cuda")]
+mod calibration;
 mod config;
 mod device_weights;
 mod fp8;
@@ -44,10 +46,13 @@ pub use bf16_runtime::{
     upload_time_embeddings_bf16, Bf16PrefixKvCache, Pi05Bf16CapturedGraph, Pi05Bf16CudaRuntime,
 };
 pub use bf16_weights::{bf16_to_device, Bf16LinearWeights};
+#[cfg(feature = "cuda")]
+pub use calibration::Pi05CalibrationObserver;
 pub use config::{GemmaVariantConfig, Pi05Config, Pi05PerformanceProfile};
 pub use device_weights::{fp16_to_device, Fp8LinearWeights};
 pub use fp8::{
-    decode_e4m3, dequantize_e4m3, encode_e4m3, quantize_e4m3, quantize_e4m3_absmax, Fp8Tensor,
+    checkpoint_identity, decode_e4m3, dequantize_e4m3, encode_e4m3, quantize_e4m3,
+    quantize_e4m3_absmax, Fp8Tensor, LayerCalibrationSites, Pi05CalibrationPlan,
     StaticFp8Calibration, E4M3_MAX,
 };
 #[cfg(feature = "cuda")]

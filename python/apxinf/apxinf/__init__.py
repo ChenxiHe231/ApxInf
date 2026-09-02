@@ -34,6 +34,17 @@ policy's ``from_pretrained`` pull in the ``apxinf_py`` binding.
 from __future__ import annotations
 
 from . import processors
+from .calibration import (
+    CalibrationContext,
+    CalibrationPlan,
+    CalibrationRunner,
+    ConsumerContract,
+    CaptureSite,
+    Fp8ExecutionPlan,
+    QuantizationSpec,
+    QuantizedOperator,
+    adapt_records,
+)
 from .policies import AutoPolicy, Pi05Policy, Policy
 from .robots import (
     ROBOT_PRESETS,
@@ -61,6 +72,16 @@ __all__ = [
     # L2 policies
     "Pi05Policy",
     "AutoPolicy",
+    # offline calibration framework
+    "CalibrationContext",
+    "CalibrationPlan",
+    "CalibrationRunner",
+    "ConsumerContract",
+    "CaptureSite",
+    "Fp8ExecutionPlan",
+    "QuantizationSpec",
+    "QuantizedOperator",
+    "adapt_records",
     # robot adapters
     "build_unitree_g1_policy",
     # robot presets (embodiment -> wire keys + pipelines), openpi's TrainConfig analogue

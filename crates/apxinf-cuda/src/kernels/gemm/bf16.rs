@@ -379,6 +379,7 @@ pub fn gemm_bf16(ctx: &CudaContext, activation: &Tensor, weight: &Tensor) -> Res
             },
         });
     }
+    super::observe_bf16(activation, weight)?;
 
     let (m, k, n) = (activation_shape[0], activation_shape[1], weight_shape[1]);
     let output = output_buffer(ctx, m * n * DType::BF16.size_in_bytes())?;
@@ -491,7 +492,6 @@ pub fn gemm_bf16_geglu_fused(
             },
         });
     }
-
     let (m, k, full_n) = (a[0], a[1], b[1]);
     let key = tuning_key(ctx, m, full_n, k);
     // Do not cache Bucket/Default from this optional fused probe. On an exact
@@ -571,6 +571,7 @@ pub fn gemm_bf16_geglu_fused(
 
         #[cfg(apxinf_cutlass_bf16_sm89)]
         {
+            super::observe_bf16(activation, packed_weight)?;
             let n = full_n / 2;
             let output = output_buffer(
                 ctx,
@@ -617,6 +618,7 @@ pub fn gemm_bf16_geglu_fused(
         ));
         #[cfg(apxinf_cutlass_gemm)]
         {
+            super::observe_bf16(activation, packed_weight)?;
             let n = full_n / 2;
             let output = output_buffer(
                 ctx,
@@ -664,6 +666,7 @@ pub fn gemm_bf16_geglu_fused(
 
     #[cfg(apxinf_cutlass_gemm)]
     {
+        super::observe_bf16(activation, packed_weight)?;
         let n = full_n / 2;
         let gate = output_buffer(
             ctx,

@@ -72,7 +72,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let token_count = arguments[4].parse::<usize>()?;
     let config = Arc::new(Pi05Config::thor_two_view());
-    let calibration = StaticFp8Calibration::from_json_file(Path::new(&arguments[2]))?;
+    let checkpoint = apxinf_model::pi05::checkpoint_identity(Path::new(&arguments[1]))?;
+    let calibration = StaticFp8Calibration::from_json_file(
+        Path::new(&arguments[2]),
+        &config,
+        &checkpoint,
+    )?;
     let scales = Arc::new(Pi05ActivationScales::from_calibration(
         &config,
         &calibration,

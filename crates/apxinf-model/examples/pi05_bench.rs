@@ -985,7 +985,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         )?)
                     }
                     Some(path) => {
-                        let calibration = StaticFp8Calibration::from_json_file(Path::new(path))?;
+                        if random {
+                            return Err(
+                                "random FP8 benchmarks require uniform:SCALE, not a checkpoint profile"
+                                    .into(),
+                            );
+                        }
+                        let checkpoint = apxinf_model::pi05::checkpoint_identity(Path::new(
+                            &args.source,
+                        ))?;
+                        let calibration = StaticFp8Calibration::from_json_file(
+                            Path::new(path),
+                            &config,
+                            &checkpoint,
+                        )?;
                         Arc::new(Pi05ActivationScales::from_calibration(
                             &config,
                             &calibration,

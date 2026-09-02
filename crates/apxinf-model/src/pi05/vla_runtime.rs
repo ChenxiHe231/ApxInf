@@ -1,6 +1,7 @@
 //! Owning VLA frontend for the three PI0.5 execution variants.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -20,10 +21,11 @@ use super::backend::{
     kernels, transfers, tuning, DeviceBuffer, ImageLayout as KernelImageLayout, RuntimeBackend,
 };
 use super::{
-    upload_time_embeddings, upload_time_embeddings_bf16, upload_time_embeddings_int8,
-    Pi05ActivationScales, Pi05Bf16CapturedGraph, Pi05Bf16CudaRuntime, Pi05CapturedGraph,
-    Pi05Config, Pi05CudaRuntime, Pi05Int8CapturedGraph, Pi05Int8CudaRuntime, Pi05Weights,
-    StaticBf16Pi05Weights, StaticFp8Calibration, StaticFp8Pi05Weights, StaticInt8Pi05Weights,
+    checkpoint_identity, upload_time_embeddings, upload_time_embeddings_bf16,
+    upload_time_embeddings_int8, Pi05ActivationScales, Pi05Bf16CapturedGraph,
+    Pi05Bf16CudaRuntime, Pi05CapturedGraph, Pi05Config, Pi05CudaRuntime, Pi05Int8CapturedGraph,
+    Pi05Int8CudaRuntime, Pi05Weights, StaticBf16Pi05Weights, StaticFp8Calibration,
+    StaticFp8Pi05Weights, StaticInt8Pi05Weights,
 };
 
 #[derive(Clone)]
@@ -281,6 +283,13 @@ struct EagerInputs {
     token_ids: DeviceBuffer,
 }
 
+struct PreparedBuffers {
+    patches: Tensor,
+    noise: Tensor,
+    token_ids: DeviceBuffer,
+    normal_generator: Box<dyn NormalGenerator>,
+}
+
 enum ExecStrategy {
     Graph(GraphVariant),
     Eager(EagerInputs),
@@ -298,7 +307,7 @@ pub struct Pi05PreparedInference {
 }
 
 impl Pi05PreparedInference {
-    fn run_eager(&self, inputs: &EagerInputs, request: &VlaRequest<'_>) -> Result<Action> {
+    fn update_eager_inputs(&self, inputs: &EagerInputs, request: &VlaRequest<'_>) -> Result<()> {
         let observation = request.observation;
         self.backend.synchronize()?;
         let patches = normalize_tensor(
@@ -344,6 +353,12 @@ impl Pi05PreparedInference {
             }
         }
         copy_token_ids(&inputs.token_ids, &observation.token_ids)?;
+        Ok(())
+    }
+
+    fn run_eager(&self, inputs: &EagerInputs, request: &VlaRequest<'_>) -> Result<Action> {
+        let observation = request.observation;
+        self.update_eager_inputs(inputs, request)?;
         Ok(Action::new(self.runtime.infer(
             &inputs.patches,
             &inputs.token_ids,
@@ -351,6 +366,29 @@ impl Pi05PreparedInference {
             &inputs.noise,
             matches!(&observation.vision, VisionObservation::RgbU8 { .. }),
         )?))
+    }
+
+    fn calibrate_eager(
+        &self,
+        inputs: &EagerInputs,
+        request: &VlaRequest<'_>,
+    ) -> Result<BTreeMap<String, f32>> {
+        self.update_eager_inputs(inputs, request)?;
+        match &self.runtime {
+            RuntimeVariant::Bf16 {
+                runtime,
+                time_embeddings,
+            } => runtime.calibrate(
+                &inputs.patches,
+                &inputs.token_ids,
+                self.spec.token_count,
+                &inputs.noise,
+                time_embeddings,
+            ),
+            _ => Err(Error::Other(
+                "PI0.5 activation calibration requires a BF16 model".into(),
+            )),
+        }
     }
 
     fn preprocess_rgb(
@@ -490,7 +528,7 @@ where
 }
 
 impl Pi05VlaRuntime {
-    fn build_eager(&self, spec: &InferenceSpec) -> Result<Pi05PreparedInference> {
+    fn allocate_prepared_buffers(&self, spec: &InferenceSpec) -> Result<PreparedBuffers> {
         spec.validate()?;
         if spec.token_count > self.config.max_token_len {
             return Err(Error::Other(format!(
@@ -499,26 +537,40 @@ impl Pi05VlaRuntime {
             )));
         }
         let cuda = &*self.backend;
+        let dtype = self.runtime.input_dtype();
         let raw_rgb = spec.image_layout.is_some();
         let patches = self.backend.to_device(&Tensor::zeros(
             patch_shape(&self.config),
             self.runtime.captured_patch_dtype(raw_rgb),
         ))?;
-        let noise = self.backend.to_device(&Tensor::zeros(
-            noise_shape(&self.config),
-            self.runtime.input_dtype(),
-        ))?;
+        let noise = self
+            .backend
+            .to_device(&Tensor::zeros(noise_shape(&self.config), dtype))?;
         let normal_generator = self.backend.create_normal_generator(noise.clone())?;
         let token_ids = DeviceBuffer::alloc_zeros(spec.token_count * 4, cuda.device_id())
             .map_err(Error::Cuda)?;
-        let raw_images = if raw_rgb {
-            Some(
-                DeviceBuffer::alloc_zeros(image_bytes(&self.config), cuda.device_id())
-                    .map_err(Error::Cuda)?,
-            )
-        } else {
-            None
-        };
+        Ok(PreparedBuffers {
+            patches,
+            noise,
+            token_ids,
+            normal_generator,
+        })
+    }
+
+    fn build_eager(&self, spec: &InferenceSpec) -> Result<Pi05PreparedInference> {
+        let PreparedBuffers {
+            patches,
+            noise,
+            token_ids,
+            normal_generator,
+        } = self.allocate_prepared_buffers(spec)?;
+        let cuda = &*self.backend;
+        let raw_images = spec
+            .image_layout
+            .is_some()
+            .then(|| DeviceBuffer::alloc_zeros(image_bytes(&self.config), cuda.device_id()))
+            .transpose()
+            .map_err(Error::Cuda)?;
         Ok(Pi05PreparedInference {
             spec: *spec,
             backend: Arc::clone(&self.backend),
@@ -536,27 +588,14 @@ impl Pi05VlaRuntime {
     }
 
     fn build_prepared(&self, spec: &InferenceSpec) -> Result<Pi05PreparedInference> {
-        spec.validate()?;
-        if spec.token_count > self.config.max_token_len {
-            return Err(Error::Other(format!(
-                "PI0.5 token count {} exceeds maximum {}",
-                spec.token_count, self.config.max_token_len
-            )));
-        }
+        let PreparedBuffers {
+            patches,
+            noise,
+            token_ids,
+            normal_generator,
+        } = self.allocate_prepared_buffers(spec)?;
         let cuda = &*self.backend;
-        let dtype = self.runtime.input_dtype();
         let raw_rgb = spec.image_layout.is_some();
-        let patch_host = Tensor::zeros(
-            patch_shape(&self.config),
-            self.runtime.captured_patch_dtype(raw_rgb),
-        );
-        let patches = self.backend.to_device(&patch_host)?;
-        let noise = self
-            .backend
-            .to_device(&Tensor::zeros(noise_shape(&self.config), dtype))?;
-        let normal_generator = self.backend.create_normal_generator(noise.clone())?;
-        let token_ids = DeviceBuffer::alloc_zeros(spec.token_count * 4, cuda.device_id())
-            .map_err(Error::Cuda)?;
 
         let graph = self.runtime.capture(spec, &patches, &token_ids, &noise);
         let strategy = match graph {
@@ -587,6 +626,36 @@ impl Pi05VlaRuntime {
             strategy,
             normal_generator: RefCell::new(normal_generator),
             tuning_generation: cuda.context().tuning().generation(),
+        })
+    }
+
+    fn build_calibration_prepared(&self, spec: &InferenceSpec) -> Result<Pi05PreparedInference> {
+        let PreparedBuffers {
+            patches,
+            noise,
+            token_ids,
+            normal_generator,
+        } = self.allocate_prepared_buffers(spec)?;
+        let raw_rgb = spec.image_layout.is_some();
+        let raw_images = raw_rgb
+            .then(|| {
+                DeviceBuffer::alloc_zeros(image_bytes(&self.config), self.backend.device_id())
+            })
+            .transpose()
+            .map_err(Error::Cuda)?;
+        Ok(Pi05PreparedInference {
+            spec: *spec,
+            backend: Arc::clone(&self.backend),
+            config: Arc::clone(&self.config),
+            runtime: self.runtime.clone(),
+            strategy: ExecStrategy::Eager(EagerInputs {
+                patches,
+                raw_images,
+                noise,
+                token_ids,
+            }),
+            normal_generator: RefCell::new(normal_generator),
+            tuning_generation: self.backend.context().tuning().generation(),
         })
     }
 }
@@ -632,6 +701,15 @@ impl VlaRuntime for Pi05VlaRuntime {
     fn infer_host_f32(&self, request: &VlaRequest<'_>) -> Result<Vec<f32>> {
         let action = self.infer(request)?;
         self.backend.to_cpu(action.tensor())?.to_f32_vec()
+    }
+
+    fn calibration_amax(&self, request: &VlaRequest<'_>) -> Result<BTreeMap<String, f32>> {
+        request.observation.validate()?;
+        let prepared = self.build_calibration_prepared(&request.observation.inference_spec())?;
+        let ExecStrategy::Eager(inputs) = &prepared.strategy else {
+            unreachable!("calibration plan is always eager")
+        };
+        prepared.calibrate_eager(inputs, request)
     }
 }
 
@@ -682,7 +760,12 @@ pub(super) fn load_registered(
                             .into(),
                     )
                 })?;
-                let calibration = StaticFp8Calibration::from_json_file(&calibration_path)?;
+                let checkpoint = checkpoint_identity(path)?;
+                let calibration = StaticFp8Calibration::from_json_file(
+                    &calibration_path,
+                    &config,
+                    &checkpoint,
+                )?;
                 Arc::new(Pi05ActivationScales::from_calibration(
                     &config,
                     &calibration,

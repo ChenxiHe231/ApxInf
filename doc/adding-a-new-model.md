@@ -155,6 +155,78 @@ example binary is not a deployment integration.
 Expose Python policy support only after the Rust runtime contract is stable.
 Keep preprocessing and postprocessing outside the low-level runtime.
 
+## Add static-FP8 calibration
+
+Use `apxinf.calibration.CalibrationRunner` for representative-data activation
+calibration. The runner is model-neutral: it iterates public Observations,
+aggregates statistics, validates coverage, creates scales, and emits the
+manifest. Do not add a model branch to the runner or copy those operations into
+a model command.
+
+The runtime first publishes its **actual FP8 execution plan** as stable
+`QuantizedOperator` values. The default plan captures the input of every
+quantized `linear` or `gemm` operator. It deliberately does not scan for every
+module whose class or name happens to contain `Linear`; BF16 operators and
+operators absent from the FP8 execution path do not require a scale.
+
+A conventional model needs only a family name:
+
+```python
+spec = QuantizationSpec(model_family="new_model")
+plan = spec.plan_for(runtime.fp8_execution_plan())
+```
+
+Keep the model quantization specification thin. Use its overrides only for
+real execution exceptions:
+
+- `excluded_outputs` keeps declared outputs/layers in BF16;
+- `shared_scales` maps multiple FP8 consumers to one capture-site scale;
+- `custom_captures` declares a fused/custom operator's stable site and
+  statistic;
+- `default_statistic` changes the conventional sites from `absmax` when the
+  quantization algorithm requires it.
+
+Every quantized operator whose kind is not a conventional `linear` or `gemm`
+must have a `custom_captures` entry. Planning fails when the override is absent;
+an exceptional FP8 consumer must never disappear from coverage silently. Shared
+sites must also declare one consistent statistic across all consumers.
+
+Supported statistics are `absmax` and an explicit `percentile:P` with
+`0 < P <= 100`. The model-side collector must calculate the statistic declared
+for each site; the common runner retains and aggregates scalar records rather
+than full activations. Add another statistic only with its aggregation and
+runtime-consumption contract.
+
+Capture-site names are artifact compatibility identifiers. Derive them from
+logical model structure (for example `blocks.3.qkv.input`), never object IDs,
+GPU addresses, hook order, or transient module paths. Renaming a stable site is
+a calibration-schema migration.
+
+The policy/model implements the public `collect_calibration(observation,
+context)` seam. It owns normal preprocessing and model-specific deterministic
+inputs. A dataset adapter may translate an external record with
+`adapt_records`, but it must return only the same public Observation accepted by
+inference; it must not resize images, tokenize, normalize, generate noise, or
+construct hidden tensors.
+
+Before writing a manifest, validation requires every planned capture site to be
+observed, rejects unknown observations, and rejects any generated scale without
+an FP8 consumer. A custom site missing from execution therefore fails closed.
+Dynamic-activation FP8 plans are classified as calibration-free: the runner
+does not iterate the dataset and returns no static profile.
+
+Override the defaults only when the quantized executor proves they are wrong:
+fused operators need explicit capture boundaries, excluded BF16 layers consume
+no FP8 scale, tied kernels may share one scale, and algorithms beyond static
+per-tensor FP8 may require different statistics. Tests should exercise the
+public Observation-to-manifest seam and consumer map, not collector
+registration, hooks, or pointers.
+
+PI0.5's pre-existing schema serializes only its native runtime-validated site
+list. `CalibrationPlan.runtime_validated_sites` is the compatibility adapter for
+that legacy contract; do not use it for a newly integrated model. New schemas
+must serialize and test the consumer map generated from `Fp8ExecutionPlan`.
+
 ## YAGNI and refactoring
 
 Apply YAGNI when any of these is true:

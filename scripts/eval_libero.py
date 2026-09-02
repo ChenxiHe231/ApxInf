@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resumable LIBERO evaluation — dual transport, multi-suite, self-contained.
+"""Resumable LIBERO evaluation — dual transport and multi-suite.
 
 One evaluator for every way of reaching the model and every LIBERO suite:
 
@@ -10,10 +10,10 @@ One evaluator for every way of reaching the model and every LIBERO suite:
   no socket, no server, no subprocess.
 
 Both transports drive the *same* rollout loop through a small :class:`Backend`
-abstraction, so the LIBERO harness (rollout constants, resize-with-pad, the
-resumable fsync'd JSONL ledger, timing split) is shared verbatim. The harness
-used to live in ``scripts/libero_harness.py``; it is inlined here so the script
-is a single self-contained file with no implicit-cwd import.
+abstraction, so the LIBERO harness (rollout constants, the resumable fsync'd
+JSONL ledger, timing split) is shared verbatim. Native observation conversion
+lives in ``scripts/libero_observation.py`` so evaluation and calibration cannot
+silently diverge on camera orientation, resize, or robot-state layout.
 
 ``--suite`` selects one LIBERO task suite (``libero_10`` / ``libero_90`` /
 ``libero_spatial`` / ``libero_object`` / ``libero_goal``) or ``all``. The ledger
@@ -39,7 +39,6 @@ from __future__ import annotations
 import argparse
 import collections
 import json
-import math
 import os
 import pathlib
 import sys
@@ -48,14 +47,17 @@ import traceback
 from typing import Optional, Protocol, Tuple
 
 import numpy as np
-from PIL import Image
+
+if __package__:
+    from .libero_observation import make_env, quat_to_axis_angle, resize_images
+else:
+    from libero_observation import make_env, quat_to_axis_angle, resize_images
 
 # --- rollout protocol constants (OpenPI's public PI0.5 LIBERO configuration) ---
 LIBERO_ACTION_DIM = 7
 MAX_STEPS = 520
 WAIT_STEPS = 10
 REPLAN_STEPS = 5
-IMAGE_SIZE = 224
 
 #: The five LIBERO task suites ``--suite all`` expands to, in a stable order.
 ALL_SUITES = (
@@ -70,40 +72,6 @@ LedgerKey = Tuple[str, int, int]  # (suite, task_id, trial_id)
 
 
 # --- LIBERO harness (inlined; was scripts/libero_harness.py) ------------------
-
-
-def quat_to_axis_angle(quat: np.ndarray) -> np.ndarray:
-    quat = np.asarray(quat, dtype=np.float64).copy()
-    quat[3] = np.clip(quat[3], -1.0, 1.0)
-    denominator = math.sqrt(max(0.0, 1.0 - quat[3] * quat[3]))
-    if math.isclose(denominator, 0.0):
-        return np.zeros(3, dtype=np.float32)
-    return (quat[:3] * 2.0 * math.acos(quat[3]) / denominator).astype(np.float32)
-
-
-def resize_images(base: np.ndarray, wrist: np.ndarray) -> np.ndarray:
-    # LIBERO camera arrays are upside down relative to the training convention.
-    def resize_with_pad(image: np.ndarray) -> np.ndarray:
-        image = np.ascontiguousarray(image[::-1, ::-1])
-        height, width = image.shape[:2]
-        ratio = max(width / IMAGE_SIZE, height / IMAGE_SIZE)
-        resized_height = int(height / ratio)
-        resized_width = int(width / ratio)
-        resized = np.asarray(
-            Image.fromarray(image).resize(
-                (resized_width, resized_height), resample=Image.Resampling.BILINEAR
-            )
-        )
-        canvas = np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.uint8)
-        offset_y = (IMAGE_SIZE - resized_height) // 2
-        offset_x = (IMAGE_SIZE - resized_width) // 2
-        canvas[
-            offset_y : offset_y + resized_height,
-            offset_x : offset_x + resized_width,
-        ] = resized
-        return canvas
-
-    return np.stack([resize_with_pad(base), resize_with_pad(wrist)], axis=0)
 
 
 def completed_runs(path: pathlib.Path, precision: str) -> dict[LedgerKey, dict]:
@@ -244,20 +212,6 @@ def _aggregate_timing(rows: list[dict]) -> dict:
             for name, value in per_call_ms.items()
         },
     }
-
-
-def make_env(task, seed: int):
-    from libero.libero import get_libero_path
-    from libero.libero.envs import OffScreenRenderEnv
-
-    bddl = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
-    env = OffScreenRenderEnv(
-        bddl_file_name=str(bddl),
-        camera_heights=256,
-        camera_widths=256,
-    )
-    env.seed(seed)
-    return env
 
 
 # --- transport backends -------------------------------------------------------

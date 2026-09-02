@@ -1,5 +1,7 @@
 //! Fixed-shape native-BF16 π0.5 inference runtime.
 
+use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::backend::{kernels, transfers, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
@@ -11,6 +13,7 @@ use kernels::{activation, cache, elementwise, embedding, gemm, norm, preprocess}
 use super::{
     action_layer_bf16, language_layer_bf16, sinusoidal_time_embedding, vision_layer_bf16,
     vision_patch_embed_bf16, Bf16LinearWeights, Pi05Config, Pi05ImageLayout, StaticBf16Pi05Weights,
+    Pi05CalibrationObserver,
 };
 
 pub struct Bf16PrefixKvCache {
@@ -475,6 +478,25 @@ impl Pi05Bf16CudaRuntime {
     ) -> Result<Tensor> {
         let styles = self.prepare_all_styles(time_embeddings)?;
         self.infer_with_styles(patches, token_ids, token_count, noise, &styles)
+    }
+
+    pub fn calibrate(
+        &self,
+        patches: &Tensor,
+        token_ids: &CudaBuffer,
+        token_count: usize,
+        noise: &Tensor,
+        time_embeddings: &[Tensor],
+    ) -> Result<BTreeMap<String, f32>> {
+        let observer = Rc::new(Pi05CalibrationObserver::new(
+            Arc::clone(&self.backend),
+            &self.config,
+            &self.weights,
+        )?);
+        let _guard = kernels::gemm::install_bf16_observer(observer.clone())?;
+        self.infer(patches, token_ids, token_count, noise, time_embeddings)?;
+        self.backend.synchronize()?;
+        observer.records()
     }
 
     #[allow(clippy::too_many_arguments)]

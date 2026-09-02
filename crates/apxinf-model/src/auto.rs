@@ -1,5 +1,6 @@
 //! Unified model loading for text, vision-language, and VLA models.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use apxinf_core::{DType, Device, Error, Result, Tensor};
@@ -173,6 +174,10 @@ impl LoadedModel {
     /// callers that need host values without holding a backend handle.
     pub fn infer_host_f32(&self, request: &VlaRequest<'_>) -> Result<Vec<f32>> {
         self.vla()?.infer_host_f32(request)
+    }
+
+    pub fn calibration_amax(&self, request: &VlaRequest<'_>) -> Result<BTreeMap<String, f32>> {
+        self.vla()?.calibration_amax(request)
     }
 
     pub fn prepare(&self, spec: &InferenceSpec) -> Result<Box<dyn PreparedInference>> {
