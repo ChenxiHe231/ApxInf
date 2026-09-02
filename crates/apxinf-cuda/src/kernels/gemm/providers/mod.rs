@@ -9,10 +9,17 @@ use crate::tuning::{Epilogue, GemmOp, GemmTuningKey, TacticBackend, TacticCandid
 
 pub(super) fn prepare(key: &GemmTuningKey, tactic: TacticId) -> Result<()> {
     match tactic.backend {
+        TacticBackend::GemmThenGeGlu if key.epilogue == Epilogue::GeGlu && tactic.value == 0 => {
+            Ok(())
+        }
+        TacticBackend::GemmThenGeGlu => Err(Error::Other(format!(
+            "invalid decomposed GeGLU tactic {tactic:?} for {key:?}"
+        ))),
         TacticBackend::Cutlass
         | TacticBackend::CutlassFp8DualGeGlu
         | TacticBackend::CutlassBf16DualGeGluM522
-        | TacticBackend::CutlassBf16DualGeGluM533 => cutlass::prepare(key, tactic),
+        | TacticBackend::CutlassBf16DualGeGluM533
+        | TacticBackend::CutlassBf16GeGluSm89 => cutlass::prepare(key, tactic),
         TacticBackend::CublasLt
         | TacticBackend::CublasLtCustom
         | TacticBackend::CublasLtCustomBias
@@ -56,7 +63,7 @@ pub(super) fn candidates(
     });
     if matches!(key.op, GemmOp::Bf16 | GemmOp::Fp8F16) {
         tactics.extend(
-            cublaslt::candidates(max_cublaslt_algorithms)
+            cublaslt::candidates(key, max_cublaslt_algorithms)
                 .into_iter()
                 .map(|tactic| TacticCandidate { tactic }),
         );
@@ -68,5 +75,25 @@ pub(super) fn candidates(
                 .map(|tactic| TacticCandidate { tactic }),
         );
     }
+    tactics
+}
+
+/// Complete implementations of a gate/up projection followed by GeGLU.
+/// `GemmThenGeGlu` delegates to the separately tuned plain GEMM plan; the
+/// remaining candidates implement the same final output with fused kernels.
+pub(super) fn geglu_candidates(key: &GemmTuningKey) -> Vec<TacticCandidate> {
+    debug_assert_eq!(key.epilogue, Epilogue::GeGlu);
+    let mut tactics = vec![TacticCandidate {
+        tactic: TacticId {
+            backend: TacticBackend::GemmThenGeGlu,
+            value: 0,
+        },
+    }];
+    tactics.extend(
+        cublaslt::geglu_candidates(key)
+            .into_iter()
+            .chain(cutlass::geglu_candidates(key))
+            .map(|tactic| TacticCandidate { tactic }),
+    );
     tactics
 }

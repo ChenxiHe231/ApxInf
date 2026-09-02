@@ -213,6 +213,7 @@ pub struct DynamicFp8WeightView<'a> {
     pub channel_scales: &'a Tensor,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fp8DualGeGluMode {
     Auto,
@@ -220,6 +221,7 @@ enum Fp8DualGeGluMode {
     On,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Fp8DualGeGluWeightRoute {
     Plain,
@@ -227,6 +229,7 @@ enum Fp8DualGeGluWeightRoute {
     InterleavedAuto,
 }
 
+#[cfg(test)]
 fn parse_fp8_dual_geglu_mode(value: Option<&str>) -> Result<Fp8DualGeGluMode> {
     match value {
         None | Some("auto") => Ok(Fp8DualGeGluMode::Auto),
@@ -238,17 +241,7 @@ fn parse_fp8_dual_geglu_mode(value: Option<&str>) -> Result<Fp8DualGeGluMode> {
     }
 }
 
-fn fp8_dual_geglu_mode() -> Result<Fp8DualGeGluMode> {
-    const NAME: &str = "APXINF_PI05_FP8_DUAL_GEGLU";
-    match std::env::var(NAME) {
-        Err(std::env::VarError::NotPresent) => parse_fp8_dual_geglu_mode(None),
-        Err(std::env::VarError::NotUnicode(_)) => {
-            Err(Error::Other(format!("{NAME} must be valid Unicode")))
-        }
-        Ok(value) => parse_fp8_dual_geglu_mode(Some(&value)),
-    }
-}
-
+#[cfg(test)]
 fn fp8_dual_geglu_weight_route(
     mode: Fp8DualGeGluMode,
     dual_mega: bool,
@@ -294,6 +287,21 @@ pub fn exact_fp8_tactic(
         .lookup_gemm(&tuning_key(ctx, m, n, k))
         .filter(|resolved| resolved.source == crate::tuning::TacticMatch::Exact)
         .map(|resolved| resolved.tactic)
+}
+
+fn resolve_fp8_plan(
+    ctx: &CudaContext,
+    key: &GemmTuningKey,
+    activation: &CudaBuffer,
+    weight: &CudaBuffer,
+    alpha: f32,
+) -> Result<super::PreparedGemmPlan> {
+    ctx.gemm_plans().resolve_or_tune(
+        ctx,
+        key,
+        super::plan::default_fp8_tactic(key.m, key.n, key.k),
+        |preferred| autotune_request_fp8(ctx, key, activation, weight, alpha, preferred),
+    )
 }
 
 /// Physical static FP8 GEMM with FP16 output.
@@ -385,21 +393,7 @@ pub fn gemm_fp8(
 
     let key = tuning_key(ctx, m, n, k);
     let alpha = activation_scale * weight.scale;
-    let plan = ctx.gemm_plans().resolve_or_tune(
-        ctx,
-        &key,
-        super::plan::default_fp8_tactic(m, n, k),
-        |preferred| {
-            autotune_request_fp8(
-                ctx,
-                &key,
-                &activation_buffer,
-                &weight_buffer,
-                alpha,
-                preferred,
-            )
-        },
-    )?;
+    let plan = resolve_fp8_plan(ctx, &key, &activation_buffer, &weight_buffer, alpha)?;
     let selected_tactic = plan.tactic;
     let use_split_serial = matches!(
         selected_tactic.backend,
@@ -621,6 +615,23 @@ pub fn gemm_fp8_dynamic_bf16(
 /// Run the configured cuBLASLt gate + CUTLASS up/GeGLU/E4M3 fused tactic.
 /// Returns `None` unless the exact physical GEMM record selects this backend;
 /// a selected but unsupported record fails closed instead of falling back.
+fn geglu_tuning_key(ctx: &CudaContext, m: usize, full_n: usize, k: usize) -> GemmTuningKey {
+    let mut key = tuning_key(ctx, m, full_n, k);
+    key.output_dtype = TuningDType::F8E4M3;
+    key.epilogue = Epilogue::GeGlu;
+    key
+}
+
+const fn decomposed_geglu_tactic() -> TacticId {
+    TacticId {
+        backend: TacticBackend::GemmThenGeGlu,
+        value: 0,
+    }
+}
+
+/// Resolve and execute the complete FP8 gate/up projection plus GeGLU
+/// operator. A tactic may be one fused kernel or a prepared GEMM followed by
+/// the standalone GeGLU kernel; all candidates have identical final output.
 pub fn gemm_fp8_geglu_fused(
     ctx: &CudaContext,
     activation: &Tensor,
@@ -668,160 +679,429 @@ pub fn gemm_fp8_geglu_fused(
         });
     }
 
-    let (m, k, full_n) = (a[0], a[1], b[1]);
-    let key = tuning_key(ctx, m, full_n, k);
-    // A missing/non-fused record must reach the plain GEMM path without
-    // caching a Bucket/Default plan first; otherwise AUTO_TUNE would observe
-    // that cached plan and skip this exact key.
-    let Some(exact_tactic) = ctx.tuning().lookup_gemm_exact(&key) else {
-        return Ok(None);
-    };
-    let fused_backend = matches!(
-        exact_tactic.backend,
-        TacticBackend::CublasLtCustomSplitGeGluCutlass
-            | TacticBackend::CublasLtCustomSplitGeGluCutlass2SmAuto
-            | TacticBackend::CublasLtCustomSplitGeGluCutlass2SmStage3
-            | TacticBackend::CublasLtCustomSplitGeGluCutlassM522Explicit2Sm
-            | TacticBackend::CutlassFp8DualGeGlu
-    );
-    if !fused_backend {
-        return Ok(None);
-    }
-    let plan =
-        ctx.gemm_plans()
-            .resolve(ctx, &key, super::plan::default_fp8_tactic(m, full_n, k))?;
-    let fused_tactic = (plan.source == super::plan::PlanSource::Exact).then_some(plan.tactic);
-    let (cutlass_geglu_tactic, tuned_m, dual_mega) = match fused_tactic.map(|tactic| tactic.backend)
-    {
-        Some(TacticBackend::CublasLtCustomSplitGeGluCutlass) => (0, 778, false),
-        Some(TacticBackend::CublasLtCustomSplitGeGluCutlass2SmAuto) => (1, 778, false),
-        Some(TacticBackend::CublasLtCustomSplitGeGluCutlass2SmStage3) => (2, 778, false),
-        Some(TacticBackend::CublasLtCustomSplitGeGluCutlassM522Explicit2Sm) => (3, 522, false),
-        Some(TacticBackend::CutlassFp8DualGeGlu) => (0, m, true),
-        _ => return Ok(None),
-    };
-    if (m, full_n, k) != (tuned_m, 32768, 2048) {
-        return Err(Error::Other(format!(
-            "fused FP8 GeGLU backend is tuned only for [{tuned_m},2048] @ [2048,32768], got [{m},{k}] @ [{k},{full_n}]"
-        )));
-    }
     if crate::workspace::fp8_emulation_required(ctx)? {
-        return Err(Error::Other(
-            "FP8 fused GeGLU requires native FP8 Tensor Cores".into(),
-        ));
+        return Ok(None);
     }
-    let weight_route = fp8_dual_geglu_weight_route(
-        fp8_dual_geglu_mode()?,
-        dual_mega,
-        packed_weight.dual_geglu_interleaved,
-        packed_weight.dual_geglu_auto_interleaved.is_some(),
-    )?;
-    let selected_weight = match weight_route {
-        Fp8DualGeGluWeightRoute::Plain | Fp8DualGeGluWeightRoute::InterleavedPrimary => {
-            packed_weight.values_e4m3
-        }
-        Fp8DualGeGluWeightRoute::InterleavedAuto => {
-            packed_weight.dual_geglu_auto_interleaved.unwrap()
+    let (m, k, full_n) = (a[0], a[1], b[1]);
+    let n = full_n / 2;
+    let alpha = activation_scale * packed_weight.scale;
+    let activation_buffer = CudaBuffer::from_tensor(activation).map_err(Error::Cuda)?;
+    let primary_weight = CudaBuffer::from_tensor(packed_weight.values_e4m3).map_err(Error::Cuda)?;
+    let automatic_interleaved = packed_weight
+        .dual_geglu_auto_interleaved
+        .map(CudaBuffer::from_tensor)
+        .transpose()
+        .map_err(Error::Cuda)?;
+    let (plain_weight, interleaved_weight) = if packed_weight.dual_geglu_interleaved {
+        (None, Some(&primary_weight))
+    } else {
+        (Some(&primary_weight), automatic_interleaved.as_ref())
+    };
+
+    let plain_key = tuning_key(ctx, m, full_n, k);
+    let plain_plan = plain_weight
+        .map(|weight| resolve_fp8_plan(ctx, &plain_key, &activation_buffer, weight, alpha))
+        .transpose()?;
+    let key = geglu_tuning_key(ctx, m, full_n, k);
+    let default = if plain_plan.is_some() {
+        decomposed_geglu_tactic()
+    } else {
+        TacticId {
+            backend: TacticBackend::CutlassFp8DualGeGlu,
+            value: 0,
         }
     };
-    if selected_weight.dtype() != DType::F8E4M3 || selected_weight.shape().dims() != b {
-        return Err(Error::Other(format!(
-            "FP8 dual GeGLU selected weight must be E4M3 {b:?}, got {} {:?}",
-            selected_weight.dtype(),
-            selected_weight.shape().dims()
-        )));
-    }
-    if selected_weight.device() != expected_device {
-        return Err(Error::DeviceMismatch {
-            expected: expected_device,
-            got: selected_weight.device(),
-        });
-    }
+    let plan = ctx
+        .gemm_plans()
+        .resolve_or_tune(ctx, &key, default, |preferred| {
+            autotune_request_fp8_geglu(
+                ctx,
+                &key,
+                &plain_key,
+                plain_plan.as_ref(),
+                &activation_buffer,
+                plain_weight,
+                interleaved_weight,
+                alpha,
+                output_scale,
+                preferred,
+            )
+        })?;
 
-    #[cfg(not(apxinf_cutlass_gemm))]
-    {
-        let _ = (ctx, activation_scale, output_scale);
-        return Err(Error::Other(
-            "FP8 fused GeGLU requires the SM100-family CUTLASS build".into(),
-        ));
+    let gate = crate::workspace::output_buffer(
+        ctx,
+        m.checked_mul(full_n)
+            .and_then(|elements| elements.checked_mul(DType::F16.size_in_bytes()))
+            .ok_or_else(|| Error::Other("FP8 GeGLU gate size overflow".into()))?,
+    )?;
+    let output = crate::workspace::output_buffer(
+        ctx,
+        m.checked_mul(n)
+            .and_then(|elements| elements.checked_mul(DType::F8E4M3.size_in_bytes()))
+            .ok_or_else(|| Error::Other("FP8 GeGLU output size overflow".into()))?,
+    )?;
+    if crate::workspace::may_prepare_native_resources() {
+        prepare_fp8_geglu_tactic(&key, &plain_key, plain_plan.as_ref(), plan.tactic)?;
     }
-
-    #[cfg(apxinf_cutlass_gemm)]
-    {
-        let n = full_n / 2;
-        let output = crate::workspace::output_buffer(
-            ctx,
-            m.checked_mul(n)
-                .and_then(|elements| elements.checked_mul(DType::F8E4M3.size_in_bytes()))
-                .ok_or_else(|| Error::Other("FP8 fused GeGLU output size overflow".into()))?,
+    if let Err(error) = launch_fp8_geglu_tactic(
+        ctx,
+        &key,
+        plain_plan.as_ref(),
+        &activation_buffer,
+        plain_weight,
+        interleaved_weight,
+        &gate,
+        &output,
+        alpha,
+        output_scale,
+        plan.tactic,
+    ) {
+        if plan.tactic == default || plain_plan.is_none() {
+            return Err(error);
+        }
+        eprintln!(
+            "[apxinf] FP8 GeGLU tactic {:?} failed for {key:?}: {error}; using decomposed fallback",
+            plan.tactic
+        );
+        ctx.gemm_plans()
+            .fallback_to(ctx, &key, decomposed_geglu_tactic())?;
+        prepare_fp8_geglu_tactic(
+            &key,
+            &plain_key,
+            plain_plan.as_ref(),
+            decomposed_geglu_tactic(),
         )?;
-        let activation_buffer = CudaBuffer::from_tensor(activation).map_err(Error::Cuda)?;
-        let weight_buffer = CudaBuffer::from_tensor(selected_weight).map_err(Error::Cuda)?;
-        if dual_mega {
-            let status = unsafe {
-                ffi::apxinf_static_cutlass_fp8_dual_gemm_geglu_e4m3(
-                    activation_buffer.ptr(),
-                    weight_buffer.ptr(),
+        launch_fp8_geglu_tactic(
+            ctx,
+            &key,
+            plain_plan.as_ref(),
+            &activation_buffer,
+            plain_weight,
+            interleaved_weight,
+            &gate,
+            &output,
+            alpha,
+            output_scale,
+            decomposed_geglu_tactic(),
+        )?;
+    }
+    Ok(Some(
+        output.into_tensor(Shape::new(vec![m, n]), DType::F8E4M3),
+    ))
+}
+
+fn prepare_fp8_geglu_tactic(
+    key: &GemmTuningKey,
+    plain_key: &GemmTuningKey,
+    plain_plan: Option<&super::PreparedGemmPlan>,
+    tactic: TacticId,
+) -> Result<()> {
+    if tactic.backend == TacticBackend::GemmThenGeGlu {
+        let plan = plain_plan.ok_or_else(|| {
+            Error::Other("decomposed FP8 GeGLU has no plain-weight GEMM plan".into())
+        })?;
+        return super::providers::prepare(plain_key, plan.tactic);
+    }
+    super::providers::prepare(key, tactic)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_fp8_geglu_tactic(
+    ctx: &CudaContext,
+    key: &GemmTuningKey,
+    plain_plan: Option<&super::PreparedGemmPlan>,
+    activation: &CudaBuffer,
+    plain_weight: Option<&CudaBuffer>,
+    interleaved_weight: Option<&CudaBuffer>,
+    gate: &CudaBuffer,
+    output: &CudaBuffer,
+    alpha: f32,
+    output_scale: f32,
+    tactic: TacticId,
+) -> Result<()> {
+    let n = key.n / 2;
+    match tactic.backend {
+        TacticBackend::GemmThenGeGlu => {
+            let plain_plan = plain_plan.ok_or_else(|| {
+                Error::Other("decomposed FP8 GeGLU has no prepared GEMM plan".into())
+            })?;
+            let plain_weight = plain_weight.ok_or_else(|| {
+                Error::Other("decomposed FP8 GeGLU has no plain-layout weight".into())
+            })?;
+            launch_tactic_fp8(
+                ctx,
+                &plain_plan.key,
+                activation,
+                plain_weight,
+                gate,
+                alpha,
+                plain_plan.tactic,
+            )?;
+            unsafe {
+                ffi::check_cuda(ffi::apxinf_static_geglu_quant_f16_e4m3(
+                    gate.ptr(),
                     output.ptr(),
-                    m as i32,
+                    key.m as i32,
                     n as i32,
-                    k as i32,
-                    full_n as i32,
-                    activation_scale * packed_weight.scale,
                     output_scale,
                     ctx.stream().handle(),
-                )
+                ))
+                .map_err(Error::Cuda)
+            }
+        }
+        TacticBackend::CutlassFp8DualGeGlu => {
+            let weight = interleaved_weight.ok_or_else(|| {
+                Error::Other("FP8 dual-GEMM GeGLU has no interleaved weight".into())
+            })?;
+            #[cfg(apxinf_cutlass_gemm)]
+            {
+                let status = unsafe {
+                    ffi::apxinf_static_cutlass_fp8_dual_gemm_geglu_e4m3(
+                        activation.ptr(),
+                        weight.ptr(),
+                        output.ptr(),
+                        key.m as i32,
+                        n as i32,
+                        key.k as i32,
+                        key.n as i32,
+                        alpha,
+                        output_scale,
+                        ctx.stream().handle(),
+                    )
+                };
+                if status == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::Cuda(format!(
+                        "FP8 dual-GEMM GeGLU rejected [{},{},{}] ({status})",
+                        key.m, n, key.k
+                    )))
+                }
+            }
+            #[cfg(not(apxinf_cutlass_gemm))]
+            {
+                let _ = weight;
+                Err(Error::Other(
+                    "FP8 dual-GEMM GeGLU requires the SM100-family CUTLASS build".into(),
+                ))
+            }
+        }
+        TacticBackend::CublasLtCustomSplitGeGluCutlass
+        | TacticBackend::CublasLtCustomSplitGeGluCutlass2SmAuto
+        | TacticBackend::CublasLtCustomSplitGeGluCutlass2SmStage3
+        | TacticBackend::CublasLtCustomSplitGeGluCutlassM522Explicit2Sm => {
+            let weight = plain_weight
+                .ok_or_else(|| Error::Other("split FP8 GeGLU has no plain-layout weight".into()))?;
+            let (cutlass_tactic, expected_m) = match tactic.backend {
+                TacticBackend::CublasLtCustomSplitGeGluCutlass => (0, 778),
+                TacticBackend::CublasLtCustomSplitGeGluCutlass2SmAuto => (1, 778),
+                TacticBackend::CublasLtCustomSplitGeGluCutlass2SmStage3 => (2, 778),
+                TacticBackend::CublasLtCustomSplitGeGluCutlassM522Explicit2Sm => (3, 522),
+                _ => unreachable!(),
             };
-            if status != 0 {
-                return Err(Error::Cuda(format!(
-                    "FP8 dual-GEMM GeGLU rejected [{m},{n},{k}] ({status})"
+            if (key.m, key.n, key.k) != (expected_m, 32768, 2048) {
+                return Err(Error::Other(format!(
+                    "split FP8 GeGLU tactic requires [{expected_m},2048] @ [2048,32768], got [{},{}] @ [{},{}]",
+                    key.m, key.k, key.k, key.n
                 )));
             }
-            return Ok(Some(
-                output.into_tensor(Shape::new(vec![m, n]), DType::F8E4M3),
-            ));
+            #[cfg(apxinf_cutlass_gemm)]
+            {
+                cublaslt_fp8_gemm_split_first_f16(
+                    ctx, activation, weight, gate, key.m, key.n, key.k, alpha,
+                )?;
+                let status = unsafe {
+                    ffi::apxinf_static_cutlass_fp8_gemm_geglu_e4m3(
+                        activation.ptr(),
+                        weight.ptr(),
+                        gate.ptr(),
+                        output.ptr(),
+                        key.m as i32,
+                        n as i32,
+                        key.k as i32,
+                        key.n as i32,
+                        alpha,
+                        output_scale,
+                        cutlass_tactic,
+                        ctx.stream().handle(),
+                    )
+                };
+                if status == 0 {
+                    Ok(())
+                } else {
+                    Err(Error::Cuda(format!(
+                        "split FP8 GeGLU tactic {:?} rejected {:?} ({status})",
+                        tactic, key
+                    )))
+                }
+            }
+            #[cfg(not(apxinf_cutlass_gemm))]
+            {
+                let _ = (weight, cutlass_tactic);
+                Err(Error::Other(
+                    "split FP8 GeGLU requires the SM100-family CUTLASS build".into(),
+                ))
+            }
         }
-        let gate = crate::workspace::output_buffer(
-            ctx,
-            m.checked_mul(full_n)
-                .and_then(|elements| elements.checked_mul(DType::F16.size_in_bytes()))
-                .ok_or_else(|| Error::Other("FP8 fused GeGLU gate size overflow".into()))?,
-        )?;
-        cublaslt_fp8_gemm_split_first_f16(
-            ctx,
-            &activation_buffer,
-            &weight_buffer,
-            &gate,
-            m,
-            full_n,
-            k,
-            activation_scale * packed_weight.scale,
-        )?;
-        let status = unsafe {
-            ffi::apxinf_static_cutlass_fp8_gemm_geglu_e4m3(
-                activation_buffer.ptr(),
-                weight_buffer.ptr(),
-                gate.ptr(),
-                output.ptr(),
-                m as i32,
-                n as i32,
-                k as i32,
-                full_n as i32,
-                activation_scale * packed_weight.scale,
-                output_scale,
-                cutlass_geglu_tactic,
-                ctx.stream().handle(),
-            )
-        };
-        if status != 0 {
-            return Err(Error::Cuda(format!(
-                "FP8 fused GeGLU CUTLASS fused GeGLU rejected [{m},{n},{k}] ({status})"
-            )));
-        }
-        Ok(Some(
-            output.into_tensor(Shape::new(vec![m, n]), DType::F8E4M3),
-        ))
+        _ => Err(Error::Other(format!(
+            "FP8 GeGLU online autotune cannot execute {tactic:?}"
+        ))),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn autotune_request_fp8_geglu(
+    ctx: &CudaContext,
+    key: &GemmTuningKey,
+    plain_key: &GemmTuningKey,
+    plain_plan: Option<&super::PreparedGemmPlan>,
+    activation: &CudaBuffer,
+    plain_weight: Option<&CudaBuffer>,
+    interleaved_weight: Option<&CudaBuffer>,
+    alpha: f32,
+    output_scale: f32,
+    preferred: Option<TacticId>,
+) -> Result<TuningOutcome> {
+    let output_elements = key
+        .m
+        .checked_mul(key.n / 2)
+        .ok_or_else(|| Error::Other("FP8 GeGLU autotune output size overflow".into()))?;
+    let gate = CudaBuffer::alloc_zeros(
+        key.m
+            .checked_mul(key.n)
+            .and_then(|elements| elements.checked_mul(DType::F16.size_in_bytes()))
+            .ok_or_else(|| Error::Other("FP8 GeGLU autotune gate size overflow".into()))?,
+        ctx.device_id(),
+    )
+    .map_err(Error::Cuda)?;
+    let reference_output =
+        CudaBuffer::alloc_zeros(output_elements, ctx.device_id()).map_err(Error::Cuda)?;
+    let candidate_output =
+        CudaBuffer::alloc_zeros(output_elements, ctx.device_id()).map_err(Error::Cuda)?;
+    let decoded_output = CudaBuffer::alloc_zeros(
+        output_elements * DType::F16.size_in_bytes(),
+        ctx.device_id(),
+    )
+    .map_err(Error::Cuda)?;
+
+    let reference_tactic = if plain_plan.is_some() && plain_weight.is_some() {
+        decomposed_geglu_tactic()
+    } else {
+        TacticId {
+            backend: TacticBackend::CutlassFp8DualGeGlu,
+            value: 0,
+        }
+    };
+    prepare_fp8_geglu_tactic(key, plain_key, plain_plan, reference_tactic)?;
+    launch_fp8_geglu_tactic(
+        ctx,
+        key,
+        plain_plan,
+        activation,
+        plain_weight,
+        interleaved_weight,
+        &gate,
+        &reference_output,
+        alpha,
+        output_scale,
+        reference_tactic,
+    )?;
+    ctx.synchronize().map_err(Error::Cuda)?;
+    let reference = copy_fused_output(
+        ctx,
+        &reference_output,
+        Some(&decoded_output),
+        output_elements,
+        DType::F8E4M3,
+        output_scale,
+    )?;
+
+    let candidates = super::providers::geglu_candidates(key)
+        .into_iter()
+        .filter(|candidate| {
+            candidate.tactic.backend != TacticBackend::GemmThenGeGlu
+                || (plain_plan.is_some() && plain_weight.is_some())
+        })
+        .filter(|candidate| {
+            candidate.tactic.backend != TacticBackend::CutlassFp8DualGeGlu
+                || interleaved_weight.is_some()
+        });
+    let events = CudaEventPair::new()?;
+    let mut evictor = ColdL2Evictor::new(ctx)?;
+    let engine = AutoTuneEngine::new(AutoTuneConfig::default())?;
+    engine.tune_with_preferred(key, preferred, candidates, |candidate, config| {
+        prepare_fp8_geglu_tactic(key, plain_key, plain_plan, candidate.tactic)?;
+        launch_fp8_geglu_tactic(
+            ctx,
+            key,
+            plain_plan,
+            activation,
+            plain_weight,
+            interleaved_weight,
+            &gate,
+            &candidate_output,
+            alpha,
+            output_scale,
+            candidate.tactic,
+        )?;
+        ctx.synchronize().map_err(Error::Cuda)?;
+        let actual = copy_fused_output(
+            ctx,
+            &candidate_output,
+            Some(&decoded_output),
+            output_elements,
+            DType::F8E4M3,
+            output_scale,
+        )?;
+        let correct = crate::tuning::outputs_are_close(&reference, &actual, 0.03, 0.998);
+        if !correct {
+            return Ok(CandidateMeasurement {
+                tactic: candidate.tactic,
+                milliseconds: None,
+                correct: false,
+            });
+        }
+        for _ in 0..config.warmup_iterations {
+            evictor.evict(ctx)?;
+            launch_fp8_geglu_tactic(
+                ctx,
+                key,
+                plain_plan,
+                activation,
+                plain_weight,
+                interleaved_weight,
+                &gate,
+                &candidate_output,
+                alpha,
+                output_scale,
+                candidate.tactic,
+            )?;
+        }
+        ctx.synchronize().map_err(Error::Cuda)?;
+        let mut milliseconds = 0.0;
+        for _ in 0..config.benchmark_iterations {
+            milliseconds += events.measure(ctx, &mut evictor, || {
+                launch_fp8_geglu_tactic(
+                    ctx,
+                    key,
+                    plain_plan,
+                    activation,
+                    plain_weight,
+                    interleaved_weight,
+                    &gate,
+                    &candidate_output,
+                    alpha,
+                    output_scale,
+                    candidate.tactic,
+                )
+            })?;
+        }
+        Ok(CandidateMeasurement {
+            tactic: candidate.tactic,
+            milliseconds: Some(milliseconds / config.benchmark_iterations as f64),
+            correct: true,
+        })
+    })
 }
 
 pub fn native_fp8_gemm_supported_for_device(device: usize) -> Result<bool> {
@@ -1009,8 +1289,11 @@ fn launch_tactic_fp8(
     tactic: TacticId,
 ) -> Result<()> {
     match tactic.backend {
-        TacticBackend::Vendor | TacticBackend::CublasLt => {
+        TacticBackend::Vendor | TacticBackend::CublasLt | TacticBackend::CublasLtCustom => {
             cublaslt_fp8_gemm_f16(ctx, activation, weight, output, key.m, key.n, key.k, alpha)
+        }
+        TacticBackend::CublasLtCustomSplitSerial => {
+            cublaslt_fp8_gemm_split_f16(ctx, activation, weight, output, key.m, key.n, key.k, alpha)
         }
         TacticBackend::Cutlass => {
             #[cfg(apxinf_cutlass_gemm)]
@@ -1258,8 +1541,8 @@ fn fused_epilogue_id(epilogue: Epilogue) -> Result<i32> {
         Epilogue::Bias => Ok(1),
         Epilogue::BiasGelu => Ok(2),
         Epilogue::BiasResidual => Ok(3),
-        Epilogue::None => Err(Error::Other(
-            "plain GEMM cannot use a fused cuBLASLt epilogue configuration".into(),
+        Epilogue::None | Epilogue::GeGlu => Err(Error::Other(
+            "this operator cannot use a fused cuBLASLt bias epilogue configuration".into(),
         )),
     }
 }

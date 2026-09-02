@@ -34,6 +34,7 @@ pub struct GemmPlanCache {
 }
 
 impl GemmPlanCache {
+    #[cfg(test)]
     pub fn resolve(
         &self,
         ctx: &CudaContext,
@@ -162,11 +163,23 @@ impl GemmPlanCache {
     /// Replace a rejected prepared tactic with the provider-independent safe
     /// route so subsequent calls do not retry the failing launch.
     pub fn fallback(&self, ctx: &CudaContext, key: &GemmTuningKey) -> Result<PreparedGemmPlan> {
+        self.fallback_to(
+            ctx,
+            key,
+            TacticId {
+                backend: TacticBackend::Vendor,
+                value: 0,
+            },
+        )
+    }
+
+    pub(crate) fn fallback_to(
+        &self,
+        ctx: &CudaContext,
+        key: &GemmTuningKey,
+        tactic: TacticId,
+    ) -> Result<PreparedGemmPlan> {
         ensure_native_prepare_allowed(crate::workspace::may_prepare_native_resources())?;
-        let tactic = TacticId {
-            backend: TacticBackend::Vendor,
-            value: 0,
-        };
         providers::prepare(key, tactic)?;
         let plan = PreparedGemmPlan {
             key: key.clone(),

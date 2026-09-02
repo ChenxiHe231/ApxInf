@@ -233,10 +233,12 @@ impl TuningDb {
                         version == record.tactic.backend.implementation_version()
                     });
                 let library_compatible = match record.tactic.backend {
-                    TacticBackend::Cutlass
+                    TacticBackend::GemmThenGeGlu
+                    | TacticBackend::Cutlass
                     | TacticBackend::CutlassFp8DualGeGlu
                     | TacticBackend::CutlassBf16DualGeGluM522
-                    | TacticBackend::CutlassBf16DualGeGluM533 => cuda_compatible,
+                    | TacticBackend::CutlassBf16DualGeGluM533
+                    | TacticBackend::CutlassBf16GeGluSm89 => cuda_compatible,
                     TacticBackend::CublasLt
                     | TacticBackend::CublasLtCustom
                     | TacticBackend::CublasLtCustomBias
@@ -510,6 +512,7 @@ fn parse_v1_record(index: usize, value: &serde_json::Value) -> Result<ParsedGemm
         "bias" => Epilogue::Bias,
         "bias_gelu" => Epilogue::BiasGelu,
         "bias_residual" => Epilogue::BiasResidual,
+        "geglu" => Epilogue::GeGlu,
         value => return invalid_field(&label, "epilogue", value),
     };
     let device = key
@@ -518,6 +521,11 @@ fn parse_v1_record(index: usize, value: &serde_json::Value) -> Result<ParsedGemm
         .transpose()?;
     let (backend, tactic) = parse_v1_tactic(record, &label)?;
     validate_tactic(&label, backend, tactic)?;
+    // v1 databases written before GeGLU became an explicit operator contract
+    // stored fused winners under the corresponding plain GEMM key. Normalize
+    // those records while loading so existing production databases keep
+    // working without allowing a fused plan to shadow a plain GEMM.
+    let (epilogue, output_dtype) = normalize_legacy_geglu_key(backend, epilogue, output_dtype);
     Ok(ParsedGemmRecord {
         op,
         device,
@@ -576,7 +584,11 @@ fn parse_legacy_tactics(value: &serde_json::Value) -> Result<Vec<ParsedGemmRecor
             k,
             activation_dtype: TuningDType::F8E4M3,
             weight_dtype: TuningDType::F8E4M3,
-            output_dtype: TuningDType::F16,
+            output_dtype: if is_geglu_backend(backend) {
+                TuningDType::F8E4M3
+            } else {
+                TuningDType::F16
+            },
             layout: GemmLayout::RowMajor,
             scale_mode: ScaleMode::PerTensor,
             // The legacy custom-bias records were measured on PI0.5's
@@ -585,6 +597,8 @@ fn parse_legacy_tactics(value: &serde_json::Value) -> Result<Vec<ParsedGemmRecor
             // instead of letting the record shadow a plain GEMM.
             epilogue: if backend == TacticBackend::CublasLtCustomBias {
                 Epilogue::BiasResidual
+            } else if is_geglu_backend(backend) {
+                Epilogue::GeGlu
             } else {
                 Epilogue::None
             },
@@ -627,6 +641,7 @@ fn parse_v1_tactic(
 
 fn parse_backend(value: &str, label: &str) -> Result<TacticBackend> {
     match value {
+        "gemm_then_geglu" => Ok(TacticBackend::GemmThenGeGlu),
         "cutlass" => Ok(TacticBackend::Cutlass),
         "cublaslt" => Ok(TacticBackend::CublasLt),
         "cublaslt_custom" => Ok(TacticBackend::CublasLtCustom),
@@ -649,6 +664,7 @@ fn parse_backend(value: &str, label: &str) -> Result<TacticBackend> {
         | "cutlass_fp8_dual_geglu_m533" => Ok(TacticBackend::CutlassFp8DualGeGlu),
         "cutlass_bf16_dual_geglu_m522" => Ok(TacticBackend::CutlassBf16DualGeGluM522),
         "cutlass_bf16_dual_geglu_m533" => Ok(TacticBackend::CutlassBf16DualGeGluM533),
+        "cutlass_bf16_geglu_sm89" => Ok(TacticBackend::CutlassBf16GeGluSm89),
         "cublaslt_custom_split_geglu_cutlass_bf16" => {
             Ok(TacticBackend::CublasLtCustomSplitGeGluCutlassBf16)
         }
@@ -734,6 +750,7 @@ fn invalid_field<T>(label: &str, field: &str, value: &str) -> Result<T> {
 
 fn validate_tactic(key: &str, backend: TacticBackend, tactic: i32) -> Result<()> {
     let valid = match backend {
+        TacticBackend::GemmThenGeGlu => tactic == 0,
         TacticBackend::Cutlass => (0..=7).contains(&tactic),
         TacticBackend::CublasLt => (0..64).contains(&tactic),
         TacticBackend::CublasLtCustom
@@ -748,7 +765,8 @@ fn validate_tactic(key: &str, backend: TacticBackend, tactic: i32) -> Result<()>
         }
         TacticBackend::CutlassFp8DualGeGlu
         | TacticBackend::CutlassBf16DualGeGluM522
-        | TacticBackend::CutlassBf16DualGeGluM533 => tactic == 0,
+        | TacticBackend::CutlassBf16DualGeGluM533
+        | TacticBackend::CutlassBf16GeGluSm89 => tactic == 0,
         TacticBackend::Vendor => tactic == 0,
     };
     if valid {
@@ -758,6 +776,44 @@ fn validate_tactic(key: &str, backend: TacticBackend, tactic: i32) -> Result<()>
             "CUDA tactic {key} has invalid {backend:?} id {tactic}"
         )))
     }
+}
+
+fn is_geglu_backend(backend: TacticBackend) -> bool {
+    matches!(
+        backend,
+        TacticBackend::CublasLtCustomSplitGeGluCutlass
+            | TacticBackend::CublasLtCustomSplitGeGluCutlass2SmAuto
+            | TacticBackend::CublasLtCustomSplitGeGluCutlass2SmStage3
+            | TacticBackend::CublasLtCustomSplitGeGluCutlassM522Explicit2Sm
+            | TacticBackend::CutlassFp8DualGeGlu
+            | TacticBackend::CutlassBf16DualGeGluM522
+            | TacticBackend::CutlassBf16DualGeGluM533
+            | TacticBackend::CutlassBf16GeGluSm89
+            | TacticBackend::CublasLtCustomSplitGeGluCutlassBf16
+    )
+}
+
+fn normalize_legacy_geglu_key(
+    backend: TacticBackend,
+    epilogue: Epilogue,
+    output_dtype: TuningDType,
+) -> (Epilogue, TuningDType) {
+    if epilogue != Epilogue::None || !is_geglu_backend(backend) {
+        return (epilogue, output_dtype);
+    }
+    let output_dtype = if backend == TacticBackend::CutlassFp8DualGeGlu
+        || matches!(
+            backend,
+            TacticBackend::CublasLtCustomSplitGeGluCutlass
+                | TacticBackend::CublasLtCustomSplitGeGluCutlass2SmAuto
+                | TacticBackend::CublasLtCustomSplitGeGluCutlass2SmStage3
+                | TacticBackend::CublasLtCustomSplitGeGluCutlassM522Explicit2Sm
+        ) {
+        TuningDType::F8E4M3
+    } else {
+        output_dtype
+    };
+    (Epilogue::GeGlu, output_dtype)
 }
 
 fn parse_sm(device: &str) -> Option<u32> {
@@ -872,6 +928,68 @@ mod tests {
                 TacticBackend::CutlassFp8DualGeGlu
             );
         }
+    }
+
+    #[test]
+    fn migrates_pre_geglu_v1_fused_record_to_complete_operator_key() {
+        let db = TuningDb::from_json_str(
+            r#"{
+                "schema":"apxinf.cuda.tuning.v1",
+                "device_name":"test",
+                "sm":110,
+                "cuda_version":"12.6",
+                "cublas_version":"12.6",
+                "records":[{
+                    "key":{
+                        "op":"fp8_f16",
+                        "m":522,"n":32768,"k":2048,
+                        "activation_dtype":"f8e4m3",
+                        "weight_dtype":"f8e4m3",
+                        "output_dtype":"f16",
+                        "layout":"row_major",
+                        "scale_mode":"per_tensor",
+                        "epilogue":"none"
+                    },
+                    "tactic":{"backend":"cutlass_fp8_dual_geglu","id":0}
+                }]
+            }"#,
+        )
+        .unwrap();
+        let store = db.build_store(&caps(110), &versions()).unwrap();
+        let record = store.gemm_records().next().unwrap();
+        assert_eq!(record.key.epilogue, Epilogue::GeGlu);
+        assert_eq!(record.key.output_dtype, TuningDType::F8E4M3);
+    }
+
+    #[test]
+    fn parses_explicit_geglu_operator_key() {
+        let db = TuningDb::from_json_str(
+            r#"{
+                "schema":"apxinf.cuda.tuning.v1",
+                "device_name":"test",
+                "sm":110,
+                "cuda_version":"12.6",
+                "cublas_version":"12.6",
+                "records":[{
+                    "key":{
+                        "op":"fp8_f16",
+                        "m":522,"n":32768,"k":2048,
+                        "activation_dtype":"f8e4m3",
+                        "weight_dtype":"f8e4m3",
+                        "output_dtype":"f8e4m3",
+                        "layout":"row_major",
+                        "scale_mode":"per_tensor",
+                        "epilogue":"geglu"
+                    },
+                    "tactic":{"backend":"gemm_then_geglu","id":0}
+                }]
+            }"#,
+        )
+        .unwrap();
+        let store = db.build_store(&caps(110), &versions()).unwrap();
+        let record = store.gemm_records().next().unwrap();
+        assert_eq!(record.key.epilogue, Epilogue::GeGlu);
+        assert_eq!(record.tactic.backend, TacticBackend::GemmThenGeGlu);
     }
 
     #[test]

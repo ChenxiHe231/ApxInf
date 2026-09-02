@@ -3,7 +3,16 @@ use apxinf_core::{Error, Result};
 use crate::tuning::{Epilogue, GemmOp, GemmTuningKey, TacticBackend, TacticId};
 
 pub(super) fn prepare(key: &GemmTuningKey, tactic: TacticId) -> Result<()> {
-    if key.epilogue != Epilogue::None {
+    let plain = key.epilogue == Epilogue::None && tactic.backend == TacticBackend::Cutlass;
+    let geglu = key.epilogue == Epilogue::GeGlu
+        && matches!(
+            tactic.backend,
+            TacticBackend::CutlassFp8DualGeGlu
+                | TacticBackend::CutlassBf16DualGeGluM522
+                | TacticBackend::CutlassBf16DualGeGluM533
+                | TacticBackend::CutlassBf16GeGluSm89
+        );
+    if !plain && !geglu {
         return Err(Error::Other(format!(
             "CUTLASS provider does not implement {:?} for {key:?}",
             key.epilogue
@@ -25,6 +34,12 @@ pub(super) fn prepare(key: &GemmTuningKey, tactic: TacticId) -> Result<()> {
         }
         TacticBackend::CutlassBf16DualGeGluM533 => {
             key.op == GemmOp::Bf16 && (key.m, key.n, key.k, tactic.value) == (533, 32768, 2048, 0)
+        }
+        TacticBackend::CutlassBf16GeGluSm89 => {
+            key.op == GemmOp::Bf16
+                && key.device.sm == 89
+                && matches!((key.n, key.k), (8192, 1024) | (32768, 2048))
+                && tactic.value == 0
         }
         _ => false,
     };
@@ -56,6 +71,39 @@ pub(super) fn candidates(key: &GemmTuningKey) -> Vec<TacticId> {
         });
     }
     candidates
+}
+
+pub(super) fn geglu_candidates(key: &GemmTuningKey) -> Vec<TacticId> {
+    if key.epilogue != Epilogue::GeGlu {
+        return Vec::new();
+    }
+    if key.op == GemmOp::Bf16
+        && key.device.sm == 89
+        && matches!((key.n, key.k), (8192, 1024) | (32768, 2048))
+    {
+        return vec![TacticId {
+            backend: TacticBackend::CutlassBf16GeGluSm89,
+            value: 0,
+        }];
+    }
+    if (key.n, key.k) != (32768, 2048) {
+        return Vec::new();
+    }
+    match (key.op, key.m) {
+        (GemmOp::Fp8F16, 522 | 533) => vec![TacticId {
+            backend: TacticBackend::CutlassFp8DualGeGlu,
+            value: 0,
+        }],
+        (GemmOp::Bf16, 522) => vec![TacticId {
+            backend: TacticBackend::CutlassBf16DualGeGluM522,
+            value: 0,
+        }],
+        (GemmOp::Bf16, 533) => vec![TacticId {
+            backend: TacticBackend::CutlassBf16DualGeGluM533,
+            value: 0,
+        }],
+        _ => Vec::new(),
+    }
 }
 
 fn fp8_supported(key: &GemmTuningKey, tactic: i32) -> bool {

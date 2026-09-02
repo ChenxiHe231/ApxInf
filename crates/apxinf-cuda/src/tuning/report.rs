@@ -123,6 +123,7 @@ pub(crate) fn key_json(key: &GemmTuningKey) -> Value {
             super::Epilogue::Bias => "bias",
             super::Epilogue::BiasGelu => "bias_gelu",
             super::Epilogue::BiasResidual => "bias_residual",
+            super::Epilogue::GeGlu => "geglu",
         },
         "workspace_limit": key.workspace_limit,
     })
@@ -139,6 +140,7 @@ pub(crate) fn tactic_json(backend: TacticBackend, id: i32, milliseconds: Option<
 
 pub(crate) fn backend_name(backend: TacticBackend) -> &'static str {
     match backend {
+        TacticBackend::GemmThenGeGlu => "gemm_then_geglu",
         TacticBackend::Cutlass => "cutlass",
         TacticBackend::CublasLt => "cublaslt",
         TacticBackend::CublasLtCustom => "cublaslt_custom",
@@ -157,6 +159,7 @@ pub(crate) fn backend_name(backend: TacticBackend) -> &'static str {
         TacticBackend::CutlassFp8DualGeGlu => "cutlass_fp8_dual_geglu",
         TacticBackend::CutlassBf16DualGeGluM522 => "cutlass_bf16_dual_geglu_m522",
         TacticBackend::CutlassBf16DualGeGluM533 => "cutlass_bf16_dual_geglu_m533",
+        TacticBackend::CutlassBf16GeGluSm89 => "cutlass_bf16_geglu_sm89",
         TacticBackend::CublasLtCustomSplitGeGluCutlassBf16 => {
             "cublaslt_custom_split_geglu_cutlass_bf16"
         }

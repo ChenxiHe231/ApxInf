@@ -433,7 +433,7 @@
     {
       "key": {
         "activation_dtype": "bf16",
-        "epilogue": "none",
+        "epilogue": "geglu",
         "k": 2048,
         "layout": "row_major",
         "m": 522,
@@ -1742,10 +1742,10 @@
         "k": 2048,
         "activation_dtype": "f8e4m3",
         "weight_dtype": "f8e4m3",
-        "output_dtype": "f16",
+        "output_dtype": "f8e4m3",
         "layout": "row_major",
         "scale_mode": "per_tensor",
-        "epilogue": "none",
+        "epilogue": "geglu",
         "workspace_limit": 18446744073709551615
       },
       "tactic": {
@@ -1842,10 +1842,10 @@
         "k": 2048,
         "activation_dtype": "f8e4m3",
         "weight_dtype": "f8e4m3",
-        "output_dtype": "f16",
+        "output_dtype": "f8e4m3",
         "layout": "row_major",
         "scale_mode": "per_tensor",
-        "epilogue": "none",
+        "epilogue": "geglu",
         "workspace_limit": 18446744073709551615
       },
       "tactic": {

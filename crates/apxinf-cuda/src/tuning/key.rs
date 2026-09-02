@@ -49,6 +49,10 @@ pub enum Epilogue {
     Bias,
     BiasGelu,
     BiasResidual,
+    /// Gate/up projection followed by GeGLU. Unlike a conventional GEMM
+    /// epilogue this halves the last dimension, but it is part of the same
+    /// operator contract from the caller's point of view.
+    GeGlu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

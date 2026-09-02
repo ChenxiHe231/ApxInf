@@ -3,6 +3,10 @@
 /// Physical implementation family selected for one GEMM problem.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TacticBackend {
+    /// Execute the already prepared plain GEMM winner followed by the
+    /// standalone GeGLU kernel. This is the safe composite implementation of
+    /// the GeGLU projection operator.
+    GemmThenGeGlu,
     Cutlass,
     CublasLt,
     /// Fully specified cuBLASLt algorithm configuration. Unlike a heuristic
@@ -17,6 +21,7 @@ pub enum TacticBackend {
     CutlassFp8DualGeGlu,
     CutlassBf16DualGeGluM522,
     CutlassBf16DualGeGluM533,
+    CutlassBf16GeGluSm89,
     CublasLtCustomSplitGeGluCutlassBf16,
     Vendor,
 }
@@ -47,6 +52,7 @@ impl TacticBackend {
     /// generated kernel changes; unrelated source edits keep all winners.
     pub const fn implementation_version(self) -> u32 {
         match self {
+            Self::GemmThenGeGlu => 1,
             Self::Cutlass => 1,
             Self::CublasLt => 1,
             Self::CublasLtCustom => 1,
@@ -59,6 +65,7 @@ impl TacticBackend {
             Self::CutlassFp8DualGeGlu => 1,
             Self::CutlassBf16DualGeGluM522 => 1,
             Self::CutlassBf16DualGeGluM533 => 1,
+            Self::CutlassBf16GeGluSm89 => 1,
             Self::CublasLtCustomSplitGeGluCutlassBf16 => 1,
             Self::Vendor => 1,
         }
