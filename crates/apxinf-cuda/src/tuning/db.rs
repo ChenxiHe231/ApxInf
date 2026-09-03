@@ -962,6 +962,31 @@ mod tests {
     }
 
     #[test]
+    fn migrates_pre_geglu_bf16_fused_record_to_complete_operator_key() {
+        assert_eq!(
+            normalize_legacy_geglu_key(
+                TacticBackend::CutlassBf16DualGeGluM522,
+                Epilogue::None,
+                TuningDType::Bf16,
+            ),
+            (Epilogue::GeGlu, TuningDType::Bf16)
+        );
+    }
+
+    #[test]
+    fn parses_legacy_map_geglu_backend_as_complete_operator() {
+        let db = TuningDb::from_json_str(
+            r#"{"device":"Thor sm_110","tactics":{"fp8_f16_m522_n32768_k2048":{"backend":"cutlass_fp8_dual_geglu","tactic":0}}}"#,
+        )
+        .unwrap();
+        let store = db.build_store(&caps(110), &versions()).unwrap();
+        let record = store.gemm_records().next().unwrap();
+        assert_eq!(record.key.epilogue, Epilogue::GeGlu);
+        assert_eq!(record.key.output_dtype, TuningDType::F8E4M3);
+        assert_eq!(record.tactic.backend, TacticBackend::CutlassFp8DualGeGlu);
+    }
+
+    #[test]
     fn parses_explicit_geglu_operator_key() {
         let db = TuningDb::from_json_str(
             r#"{

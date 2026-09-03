@@ -62,20 +62,14 @@ pub fn language_layer_bf16(
         &weights.post_attention_norm_scale,
         rms_eps,
     )?;
-    let activated = match gemm::bf16_geglu_fused(
+    let activated = gemm::bf16_geglu_fused(
         ctx,
         &fused.normalized,
         &weights.gate_up.weight,
         weights.gate_up.bf16_dual_geglu_interleaved,
         weights.gate_up.bf16_dual_geglu_auto_interleaved.as_ref(),
         weights.gate_up.bf16_sm89_geglu_interleaved.as_ref(),
-    )? {
-        Some(value) => value,
-        None => {
-            let gate_up = gemm::bf16(ctx, &fused.normalized, &weights.gate_up.weight)?;
-            activation::geglu_bf16(ctx, &gate_up)?
-        }
-    };
+    )?;
     let projected = gemm::bf16(ctx, &activated, &weights.down.weight)?;
     let hidden =
         fused::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)?;
@@ -140,20 +134,14 @@ pub fn action_layer_bf16(
         mlp_style,
         rms_eps,
     )?;
-    let activated = match gemm::bf16_geglu_fused(
+    let activated = gemm::bf16_geglu_fused(
         ctx,
         &fused.normalized,
         &weights.gate_up.weight,
         weights.gate_up.bf16_dual_geglu_interleaved,
         weights.gate_up.bf16_dual_geglu_auto_interleaved.as_ref(),
         weights.gate_up.bf16_sm89_geglu_interleaved.as_ref(),
-    )? {
-        Some(value) => value,
-        None => {
-            let gate_up = gemm::bf16(ctx, &fused.normalized, &weights.gate_up.weight)?;
-            activation::geglu_bf16(ctx, &gate_up)?
-        }
-    };
+    )?;
     let projected = gemm::bf16(ctx, &activated, &weights.down.weight)?;
     let fused = fused::adaptive_gate_residual_rms_bf16(
         ctx,

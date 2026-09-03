@@ -492,7 +492,7 @@ pub fn gemm_bf16_geglu_fused(
     bf16_dual_geglu_interleaved: bool,
     bf16_dual_geglu_auto_interleaved: Option<&Tensor>,
     bf16_sm89_geglu_interleaved: Option<&Tensor>,
-) -> Result<Option<Tensor>> {
+) -> Result<Tensor> {
     if activation.dtype() != DType::BF16 || packed_weight.dtype() != DType::BF16 {
         return Err(Error::Other(format!(
             "BF16 fused GeGLU expects BF16 operands, got {} and {}",
@@ -539,20 +539,21 @@ pub fn gemm_bf16_geglu_fused(
     };
 
     let plain_key = tuning_key(ctx, m, full_n, k);
-    let plain_plan = plain_weight
-        .map(|weight| resolve_bf16_plan(ctx, &plain_key, &activation_buffer, weight))
-        .transpose()?;
+    let mut plain_plan = None;
     let key = geglu_tuning_key(ctx, m, full_n, k);
     let default = default_bf16_geglu_tactic(
         ctx,
         &key,
-        plain_plan.is_some(),
+        plain_weight.is_some(),
         dual_weight.is_some(),
         sm89_interleaved.is_some(),
     )?;
     let plan = ctx
         .gemm_plans()
         .resolve_or_tune(ctx, &key, default, |preferred| {
+            plain_plan = plain_weight
+                .map(|weight| resolve_bf16_plan(ctx, &plain_key, &activation_buffer, weight))
+                .transpose()?;
             autotune_request_bf16_geglu(
                 ctx,
                 &key,
@@ -566,12 +567,16 @@ pub fn gemm_bf16_geglu_fused(
             )
         })?;
 
-    let gate = output_buffer(
-        ctx,
-        m.checked_mul(full_n)
-            .and_then(|elements| elements.checked_mul(DType::BF16.size_in_bytes()))
-            .ok_or_else(|| Error::Other("BF16 GeGLU gate size overflow".into()))?,
-    )?;
+    if plan.tactic.backend == TacticBackend::GemmThenGeGlu && plain_plan.is_none() {
+        plain_plan = plain_weight
+            .map(|weight| resolve_bf16_plan(ctx, &plain_key, &activation_buffer, weight))
+            .transpose()?;
+    }
+    let mut gate = if bf16_geglu_tactic_uses_gate(plan.tactic) {
+        Some(output_buffer(ctx, bf16_geglu_gate_bytes(m, full_n)?)?)
+    } else {
+        None
+    };
     let output = output_buffer(
         ctx,
         m.checked_mul(n)
@@ -589,11 +594,11 @@ pub fn gemm_bf16_geglu_fused(
         plain_weight,
         dual_weight,
         sm89_interleaved.as_ref(),
-        &gate,
+        gate.as_ref(),
         &output,
         plan.tactic,
     ) {
-        if plan.tactic == default || plain_plan.is_none() {
+        if plan.tactic == default || plain_weight.is_none() {
             return Err(error);
         }
         eprintln!(
@@ -602,6 +607,14 @@ pub fn gemm_bf16_geglu_fused(
         );
         ctx.gemm_plans()
             .fallback_to(ctx, &key, decomposed_geglu_tactic())?;
+        if plain_plan.is_none() {
+            plain_plan = plain_weight
+                .map(|weight| resolve_bf16_plan(ctx, &plain_key, &activation_buffer, weight))
+                .transpose()?;
+        }
+        if gate.is_none() {
+            gate = Some(output_buffer(ctx, bf16_geglu_gate_bytes(m, full_n)?)?);
+        }
         prepare_bf16_geglu_tactic(
             &key,
             &plain_key,
@@ -616,14 +629,25 @@ pub fn gemm_bf16_geglu_fused(
             plain_weight,
             dual_weight,
             sm89_interleaved.as_ref(),
-            &gate,
+            gate.as_ref(),
             &output,
             decomposed_geglu_tactic(),
         )?;
     }
-    Ok(Some(
-        output.into_tensor(Shape::new(vec![m, n]), DType::BF16),
-    ))
+    Ok(output.into_tensor(Shape::new(vec![m, n]), DType::BF16))
+}
+
+fn bf16_geglu_tactic_uses_gate(tactic: TacticId) -> bool {
+    matches!(
+        tactic.backend,
+        TacticBackend::GemmThenGeGlu | TacticBackend::CublasLtCustomSplitGeGluCutlassBf16
+    )
+}
+
+fn bf16_geglu_gate_bytes(m: usize, full_n: usize) -> Result<usize> {
+    m.checked_mul(full_n)
+        .and_then(|elements| elements.checked_mul(DType::BF16.size_in_bytes()))
+        .ok_or_else(|| Error::Other("BF16 GeGLU gate size overflow".into()))
 }
 
 fn default_bf16_geglu_tactic(
@@ -683,13 +707,15 @@ fn launch_bf16_geglu_tactic(
     plain_weight: Option<&CudaBuffer>,
     dual_weight: Option<&CudaBuffer>,
     sm89_weight: Option<&CudaBuffer>,
-    gate: &CudaBuffer,
+    gate: Option<&CudaBuffer>,
     output: &CudaBuffer,
     tactic: TacticId,
 ) -> Result<()> {
     let n = key.n / 2;
     match tactic.backend {
         TacticBackend::GemmThenGeGlu => {
+            let gate = gate
+                .ok_or_else(|| Error::Other("decomposed BF16 GeGLU has no gate buffer".into()))?;
             let plain_plan = plain_plan.ok_or_else(|| {
                 Error::Other("decomposed BF16 GeGLU has no prepared GEMM plan".into())
             })?;
@@ -792,6 +818,8 @@ fn launch_bf16_geglu_tactic(
             }
         }
         TacticBackend::CublasLtCustomSplitGeGluCutlassBf16 => {
+            let gate =
+                gate.ok_or_else(|| Error::Other("split BF16 GeGLU has no gate buffer".into()))?;
             let weight = plain_weight.ok_or_else(|| {
                 Error::Other("split BF16 GeGLU has no plain-layout weight".into())
             })?;
@@ -898,7 +926,7 @@ fn autotune_request_bf16_geglu(
         plain_weight,
         dual_weight,
         sm89_weight,
-        &gate,
+        Some(&gate),
         &reference_output,
         reference_tactic,
     )?;
@@ -933,7 +961,7 @@ fn autotune_request_bf16_geglu(
             plain_weight,
             dual_weight,
             sm89_weight,
-            &gate,
+            Some(&gate),
             &candidate_output,
             candidate.tactic,
         )?;
@@ -957,7 +985,7 @@ fn autotune_request_bf16_geglu(
                 plain_weight,
                 dual_weight,
                 sm89_weight,
-                &gate,
+                Some(&gate),
                 &candidate_output,
                 candidate.tactic,
             )?;
@@ -974,7 +1002,7 @@ fn autotune_request_bf16_geglu(
                     plain_weight,
                     dual_weight,
                     sm89_weight,
-                    &gate,
+                    Some(&gate),
                     &candidate_output,
                     candidate.tactic,
                 )
@@ -986,58 +1014,6 @@ fn autotune_request_bf16_geglu(
             correct: true,
         })
     })
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Bf16DualGeGluMode {
-    Auto,
-    Off,
-    On,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Bf16DualGeGluWeightRoute {
-    Plain,
-    InterleavedPrimary,
-    InterleavedAuto,
-}
-
-#[cfg(test)]
-fn parse_bf16_dual_geglu_mode(value: Option<&str>) -> Result<Bf16DualGeGluMode> {
-    match value {
-        None | Some("auto") => Ok(Bf16DualGeGluMode::Auto),
-        Some("0" | "off") => Ok(Bf16DualGeGluMode::Off),
-        Some("1" | "on") => Ok(Bf16DualGeGluMode::On),
-        Some(value) => Err(Error::Other(format!(
-            "APXINF_PI05_BF16_DUAL_GEGLU must be auto, 0/off, or 1/on; got {value}"
-        ))),
-    }
-}
-
-#[cfg(test)]
-fn bf16_dual_geglu_weight_route(
-    mode: Bf16DualGeGluMode,
-    dual: bool,
-    primary_interleaved: bool,
-    auto_interleaved_available: bool,
-) -> Result<Bf16DualGeGluWeightRoute> {
-    match (
-        mode,
-        dual,
-        primary_interleaved,
-        auto_interleaved_available,
-    ) {
-        (Bf16DualGeGluMode::Off, false, false, false) => Ok(Bf16DualGeGluWeightRoute::Plain),
-        (Bf16DualGeGluMode::On, true, true, false) => Ok(Bf16DualGeGluWeightRoute::InterleavedPrimary),
-        (Bf16DualGeGluMode::Auto, false, false, false) => Ok(Bf16DualGeGluWeightRoute::Plain),
-        (Bf16DualGeGluMode::Auto, false, false, true) => Ok(Bf16DualGeGluWeightRoute::Plain),
-        (Bf16DualGeGluMode::Auto, true, false, true) => Ok(Bf16DualGeGluWeightRoute::InterleavedAuto),
-        _ => Err(Error::Other(format!(
-            "BF16 dual GeGLU config/layout mismatch: mode={mode:?}, backend_dual={dual}, primary_interleaved={primary_interleaved}, auto_interleaved={auto_interleaved_available}"
-        ))),
-    }
 }
 
 fn validate_bf16_dual_geglu_shape(
@@ -1060,71 +1036,12 @@ mod bf16_dual_geglu_tests {
     use super::*;
 
     #[test]
-    fn bf16_dual_geglu_mode_parser_is_strict_and_defaults_auto() {
-        assert_eq!(
-            parse_bf16_dual_geglu_mode(None).unwrap(),
-            Bf16DualGeGluMode::Auto
-        );
-        assert_eq!(
-            parse_bf16_dual_geglu_mode(Some("auto")).unwrap(),
-            Bf16DualGeGluMode::Auto
-        );
-        assert_eq!(
-            parse_bf16_dual_geglu_mode(Some("0")).unwrap(),
-            Bf16DualGeGluMode::Off
-        );
-        assert_eq!(
-            parse_bf16_dual_geglu_mode(Some("off")).unwrap(),
-            Bf16DualGeGluMode::Off
-        );
-        assert_eq!(
-            parse_bf16_dual_geglu_mode(Some("1")).unwrap(),
-            Bf16DualGeGluMode::On
-        );
-        assert_eq!(
-            parse_bf16_dual_geglu_mode(Some("on")).unwrap(),
-            Bf16DualGeGluMode::On
-        );
-        assert!(parse_bf16_dual_geglu_mode(Some("invalid")).is_err());
-    }
-
-    #[test]
-    fn bf16_dual_geglu_route_truth_table_covers_all_twenty_four_states() {
-        for mode in [
-            Bf16DualGeGluMode::Auto,
-            Bf16DualGeGluMode::Off,
-            Bf16DualGeGluMode::On,
-        ] {
-            for dual in [false, true] {
-                for primary in [false, true] {
-                    for automatic in [false, true] {
-                        let expected = match (mode, dual, primary, automatic) {
-                            (Bf16DualGeGluMode::Off, false, false, false) => {
-                                Some(Bf16DualGeGluWeightRoute::Plain)
-                            }
-                            (Bf16DualGeGluMode::On, true, true, false) => {
-                                Some(Bf16DualGeGluWeightRoute::InterleavedPrimary)
-                            }
-                            (Bf16DualGeGluMode::Auto, false, false, false) => {
-                                Some(Bf16DualGeGluWeightRoute::Plain)
-                            }
-                            (Bf16DualGeGluMode::Auto, false, false, true) => {
-                                Some(Bf16DualGeGluWeightRoute::Plain)
-                            }
-                            (Bf16DualGeGluMode::Auto, true, false, true) => {
-                                Some(Bf16DualGeGluWeightRoute::InterleavedAuto)
-                            }
-                            _ => None,
-                        };
-                        let actual = bf16_dual_geglu_weight_route(mode, dual, primary, automatic);
-                        match expected {
-                            Some(route) => assert_eq!(actual.unwrap(), route),
-                            None => assert!(actual.is_err()),
-                        }
-                    }
-                }
-            }
-        }
+    fn dual_fused_tactic_does_not_require_gate_buffer() {
+        assert!(!bf16_geglu_tactic_uses_gate(TacticId {
+            backend: TacticBackend::CutlassBf16DualGeGluM522,
+            value: 0,
+        }));
+        assert!(bf16_geglu_tactic_uses_gate(decomposed_geglu_tactic()));
     }
 
     #[test]

@@ -6,15 +6,16 @@ pub(super) fn prepare(key: &GemmTuningKey, tactic: TacticId) -> Result<()> {
     use super::super::{bf16, fp8};
 
     match (key.op, tactic.backend) {
-        (GemmOp::Bf16, TacticBackend::CublasLt) => {
+        (GemmOp::Bf16, TacticBackend::CublasLt) if key.epilogue == Epilogue::None => {
             bf16::set_cublaslt_gemm_heuristic(key.m, key.n, key.k, tactic.value)?;
             bf16::prepare_cublaslt_gemm(key.m, key.n, key.k, false)
         }
-        (GemmOp::Fp8F16, TacticBackend::CublasLt) => {
-            if matches!(key.epilogue, Epilogue::None | Epilogue::GeGlu) {
+        (GemmOp::Fp8F16, TacticBackend::CublasLt) => match key.epilogue {
+            Epilogue::None => {
                 fp8::set_cublaslt_gemm_heuristic(key.m, key.n, key.k, tactic.value)?;
                 fp8::prepare_cublaslt_fp8_gemm(key.m, key.n, key.k)
-            } else {
+            }
+            Epilogue::Bias | Epilogue::BiasGelu | Epilogue::BiasResidual => {
                 fp8::set_cublaslt_fused_gemm_heuristic(
                     key.m,
                     key.n,
@@ -23,14 +24,15 @@ pub(super) fn prepare(key: &GemmTuningKey, tactic: TacticId) -> Result<()> {
                     tactic.value,
                 )
             }
-        }
-        (GemmOp::Bf16, TacticBackend::CublasLtCustom) => {
+            Epilogue::GeGlu => Err(Error::Other(format!(
+                "cuBLASLt provider rejected {tactic:?} for {key:?}"
+            ))),
+        },
+        (GemmOp::Bf16, TacticBackend::CublasLtCustom) if key.epilogue == Epilogue::None => {
             bf16::set_cublaslt_gemm_custom(key.m, key.n, key.k, tactic.value)?;
             bf16::prepare_cublaslt_gemm(key.m, key.n, key.k, false)
         }
-        (GemmOp::Fp8F16, TacticBackend::CublasLtCustom)
-            if matches!(key.epilogue, Epilogue::None | Epilogue::GeGlu) =>
-        {
+        (GemmOp::Fp8F16, TacticBackend::CublasLtCustom) if key.epilogue == Epilogue::None => {
             fp8::set_cublaslt_gemm_custom(key.m, key.n, key.k, tactic.value)?;
             fp8::prepare_cublaslt_fp8_gemm(key.m, key.n, key.k)
         }
@@ -40,13 +42,13 @@ pub(super) fn prepare(key: &GemmTuningKey, tactic: TacticId) -> Result<()> {
             fp8::set_cublaslt_gemm_bias_custom(key.m, key.n, key.k, key.epilogue, tactic.value)
         }
         (GemmOp::Bf16, TacticBackend::CublasLtCustomSplitSerial)
-            if matches!(key.epilogue, Epilogue::None | Epilogue::GeGlu) =>
+            if key.epilogue == Epilogue::None =>
         {
             bf16::set_cublaslt_gemm_split_custom(key.m, key.n, key.k, tactic.value)?;
             bf16::prepare_cublaslt_gemm(key.m, key.n, key.k, true)
         }
         (GemmOp::Fp8F16, TacticBackend::CublasLtCustomSplitSerial)
-            if matches!(key.epilogue, Epilogue::None | Epilogue::GeGlu) =>
+            if key.epilogue == Epilogue::None =>
         {
             fp8::set_cublaslt_gemm_split_custom(key.m, key.n, key.k, tactic.value)?;
             fp8::prepare_cublaslt_fp8_gemm_split(key.m, key.n, key.k)
@@ -178,5 +180,21 @@ mod tests {
         assert!(candidates.iter().any(|candidate| {
             candidate.backend == TacticBackend::CublasLtCustomSplitGeGluCutlassM522Explicit2Sm
         }));
+    }
+
+    #[test]
+    fn plain_cublaslt_backends_reject_geglu_keys_before_native_prepare() {
+        for backend in [
+            TacticBackend::CublasLt,
+            TacticBackend::CublasLtCustom,
+            TacticBackend::CublasLtCustomSplitSerial,
+        ] {
+            let value = if backend == TacticBackend::CublasLt {
+                0
+            } else {
+                18_377_904
+            };
+            assert!(prepare(&key(Epilogue::GeGlu), TacticId { backend, value }).is_err());
+        }
     }
 }

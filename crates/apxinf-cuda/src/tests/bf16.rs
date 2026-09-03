@@ -31,9 +31,7 @@ fn bf16_geglu_fallback_observes_activation_once() {
         .to_device(&Tensor::from_bf16(vec![M, K], &vec![bf16::ZERO; M * K]).unwrap())
         .unwrap();
     let weight = backend
-        .to_device(
-            &Tensor::from_bf16(vec![K, FULL_N], &vec![bf16::ZERO; K * FULL_N]).unwrap(),
-        )
+        .to_device(&Tensor::from_bf16(vec![K, FULL_N], &vec![bf16::ZERO; K * FULL_N]).unwrap())
         .unwrap();
     let observer = Rc::new(CountingObserver(Cell::new(0)));
     let _guard = crate::kernels::gemm::install_bf16_observer(observer.clone()).unwrap();
@@ -47,11 +45,12 @@ fn bf16_geglu_fallback_observes_activation_once() {
         None,
     )
     .unwrap();
-    assert!(fused.is_none());
-    assert_eq!(observer.0.get(), 0, "a rejected fused probe must not observe");
-
-    crate::kernels::gemm::bf16(backend.context(), &activation, &weight).unwrap();
-    assert_eq!(observer.0.get(), 1, "the fallback must observe exactly once");
+    assert_eq!(fused.shape().dims(), [M, FULL_N / 2]);
+    assert_eq!(
+        observer.0.get(),
+        1,
+        "the decomposed GeGLU path must observe exactly once"
+    );
 }
 
 #[test]

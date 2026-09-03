@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use apxinf_core::{Error, Result};
 
-use super::key::{GemmBucketKey, GemmTuningKey};
+use super::key::{Epilogue, GemmBucketKey, GemmTuningKey};
 use super::tactic::TacticId;
 
 #[cfg(test)]
@@ -44,7 +44,7 @@ impl TacticStore {
                 }
             }
             exact_gemm.insert(record.key.clone(), record.clone());
-            if !record.tactic.backend.bucket_eligible() {
+            if !bucket_eligible(&record) {
                 continue;
             }
             let bucket = record.key.bucket();
@@ -117,7 +117,7 @@ impl TacticStore {
     fn rebuild_buckets(&mut self) {
         self.bucket_gemm.clear();
         for record in self.exact_gemm.values() {
-            if !record.tactic.backend.bucket_eligible() {
+            if !bucket_eligible(record) {
                 continue;
             }
             let bucket = record.key.bucket();
@@ -129,6 +129,13 @@ impl TacticStore {
             }
         }
     }
+}
+
+fn bucket_eligible(record: &GemmTuningRecord) -> bool {
+    // GeGLU implementations are complete operators and several are pinned to
+    // an exact M. Never derive a bucket entry for them, even if a malformed or
+    // legacy database labels one with a shape-generic backend.
+    record.key.epilogue != Epilogue::GeGlu && record.tactic.backend.bucket_eligible()
 }
 
 fn is_faster(candidate: &GemmTuningRecord, current: &GemmTuningRecord) -> bool {
@@ -206,5 +213,22 @@ mod tests {
         assert_eq!(store.lookup_gemm_bucket(&key(11)).unwrap().value, 4);
         assert!(!store.upsert_gemm(record(10, 4, 0.02)));
         assert!(!store.upsert_gemm(record(10, 5, 0.04)));
+    }
+
+    #[test]
+    fn geglu_records_are_exact_only_even_for_generic_backends() {
+        let mut record = record(522, 0, 0.01);
+        record.key.epilogue = Epilogue::GeGlu;
+        let store = TacticStore::from_gemm_records([record]).unwrap();
+        assert!(store
+            .lookup_gemm_exact(&{
+                let mut key = key(522);
+                key.epilogue = Epilogue::GeGlu;
+                key
+            })
+            .is_some());
+        let mut other = key(789);
+        other.epilogue = Epilogue::GeGlu;
+        assert!(store.lookup_gemm_bucket(&other).is_none());
     }
 }
