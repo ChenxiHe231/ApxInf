@@ -25,6 +25,12 @@ pub enum VisionObservation {
 pub struct Observation {
     pub vision: VisionObservation,
     pub token_ids: Vec<u32>,
+    /// Optional normalized proprioceptive state for models that project it
+    /// directly instead of encoding it in the prompt.
+    pub state: Option<Tensor>,
+    /// Optional per-dimension action mask. Missing means every action
+    /// dimension is active.
+    pub action_mask: Option<Tensor>,
 }
 
 impl Observation {
@@ -48,9 +54,9 @@ impl Observation {
 
 /// Initial continuous latent used by a flow/diffusion VLA.
 ///
-/// PI0.5 is the only current VLA implementation. Production callers may have
-/// ApxInf generate standard-normal noise directly in its captured device
-/// buffer; correctness fixtures can continue to inject an exact latent.
+/// Production callers may have ApxInf generate standard-normal noise directly
+/// in a captured device buffer; correctness fixtures can inject an exact
+/// latent for reproducible parity checks.
 #[derive(Clone, Copy, Debug)]
 pub enum InitialLatent<'a> {
     Generate { rng: RngKey },
@@ -133,11 +139,34 @@ pub trait PreparedInference {
     fn run(&self, request: &VlaRequest<'_>) -> Result<Action>;
 }
 
+/// Fixed public shape contract of a loaded VLA runtime.
+///
+/// Frontends use this to validate host inputs without parsing a concrete
+/// model family's checkpoint config or repeating model-name switches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VlaContract {
+    pub action_shape: [usize; 2],
+    pub patch_shape: [usize; 2],
+    pub max_token_len: usize,
+    pub num_views: usize,
+    pub image_size: usize,
+    pub patch_size: usize,
+    pub accepts_rgb_u8: bool,
+}
+
 /// Unified VLA runtime interface.
 ///
 /// The boxed return keeps this trait object-safe so `LoadedModel::Vla` can
 /// directly hold heterogeneous model runtimes.
 pub trait VlaRuntime {
+    /// Fixed input/output capabilities of this loaded checkpoint.
+    fn contract(&self) -> VlaContract;
+
+    /// Native action tensor shape produced by this loaded checkpoint.
+    fn action_shape(&self) -> [usize; 2] {
+        self.contract().action_shape
+    }
+
     fn infer(&self, request: &VlaRequest<'_>) -> Result<Action>;
     fn prepare(&self, spec: &InferenceSpec) -> Result<Box<dyn PreparedInference>>;
 
@@ -157,6 +186,13 @@ pub trait VlaRuntime {
             "activation calibration is not supported by this VLA runtime".into(),
         ))
     }
+
+    /// Stable logical sites required by this runtime's calibration profile.
+    fn calibration_plan(&self) -> Result<Vec<String>> {
+        Err(Error::Other(
+            "activation calibration is not supported by this VLA runtime".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +207,8 @@ mod tests {
                 layout: ImageLayout::Nhwc,
             },
             token_ids: vec![1, 2, 3],
+            state: None,
+            action_mask: None,
         }
     }
 
@@ -189,6 +227,8 @@ mod tests {
         let empty = Observation {
             vision: VisionObservation::Patches(Tensor::zeros((1, 2), DType::F32)),
             token_ids: Vec::new(),
+            state: None,
+            action_mask: None,
         };
         assert!(empty.validate().is_err());
     }

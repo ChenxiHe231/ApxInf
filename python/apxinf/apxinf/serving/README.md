@@ -369,3 +369,46 @@ full-width identity — that proves the config runs end-to-end through the apxin
 interface (compatibility), not executable numbers. For real values, supply the
 robot's `norm_stats` (≥ROBOT_DIM wide) + real gripper limits + checkpoint; the
 **same adapter code runs unchanged**.
+# WallOSS
+
+WallOSS uses the same model-agnostic websocket transport as PI0.5. Install the
+model-specific preprocessing dependencies and launch the example:
+
+```bash
+pip install 'apxinf[walloss,serving]'
+```
+
+The in-process Python API accepts the same observation dict as the server:
+
+```python
+from apxinf import AutoPolicy
+
+policy = AutoPolicy.from_pretrained(
+    "/path/to/wall-oss-0.5", norm_key="x2_normal", action_dim=7,
+)
+result = policy.infer({
+    "observation/image": base_rgb_uint8,
+    "observation/wrist_image": wrist_rgb_uint8,
+    "observation/state": state_f32,
+    "prompt": "pick up the red block",
+})
+actions = result["actions"]  # float32 [10, 7]
+```
+
+To expose the same policy over WebSocket:
+
+```bash
+python python/apxinf/examples/openpi_server.py \
+  --model-dir /path/to/wall-oss-0.5 \
+  --action-dim 7 \
+  --policy-options '{"norm_key":"x2_normal"}'
+```
+
+Add `"tactics":"/path/to/tactics.json"` to `--policy-options` to override a
+checkpoint-local tuning database, for example after generating tactics for a
+newer kernel build.
+
+Requests contain `observation/image`, `observation/wrist_image`,
+`observation/state`, and `prompt`. Images are RGB `uint8`; the policy owns the
+Qwen2.5-VL resize/patch/token preprocessing and returns an `[10, action_dim]`
+action chunk through the normal OpenPI-compatible `actions` response.

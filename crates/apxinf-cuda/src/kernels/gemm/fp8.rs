@@ -14,6 +14,32 @@ struct ColdL2TuningMetadata {
     eviction_buffer_bytes: usize,
 }
 
+#[cfg(apxinf_cutlass_gemm)]
+fn dynamic_fp8_tactic(m: usize, n: usize, k: usize) -> i32 {
+    match (m, n, k) {
+        (10, 1024, 2048) => 1,
+        (10, 2560, 1024) => 11,
+        (10, 4096, 1024) => 13,
+        (217, 22016, 2048) => 12,
+        (217, 2048, 11008) => 6,
+        (217, 2560, 2048) => 8,
+        (217, 2048, 2048) => 10,
+        (648, 1280, 1280) => 8,
+        (648, 1280, 3424) => 9,
+        (648, 3840, 1280) => 9,
+        (648, 6848, 1280) => 6,
+        _ if m <= 64 => 1,
+        _ if m <= 256 && n >= 10_000 => 0,
+        _ if m <= 256 && k >= 10_000 => 6,
+        _ if m <= 256 && n >= 2_500 => 8,
+        _ if m <= 256 => 3,
+        _ if n >= 5_000 => 6,
+        _ if k >= 3_000 => 8,
+        _ if n >= 2_500 => 6,
+        _ => 8,
+    }
+}
+
 fn cold_l2_tuning_metadata(ctx: &CudaContext) -> Result<ColdL2TuningMetadata> {
     let mut l2_cache_bytes = 0i32;
     unsafe {
@@ -177,6 +203,14 @@ pub struct Fp8WeightView<'a> {
     /// Optional auto-mode physical [gate256,up256] matrix. The primary tensor
     /// remains plain and is used by every non-dual route.
     pub dual_geglu_auto_interleaved: Option<&'a Tensor>,
+}
+
+#[derive(Clone, Copy)]
+pub struct DynamicFp8WeightView<'a> {
+    /// Contiguous output-major physical `[N, K]` E4M3 matrix.
+    pub values_e4m3: &'a Tensor,
+    /// FP32 scale for each output channel, shape `[N]`.
+    pub channel_scales: &'a Tensor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -447,6 +481,141 @@ pub fn gemm_fp8(
         )?;
     }
     Ok(output.into_tensor(Shape::new(vec![m, n]), DType::F16))
+}
+
+/// Dynamic FP8 GEMM with one activation scale per row and one weight scale
+/// per output channel. The native backend applies both vectors and an optional
+/// BF16 bias before returning the final BF16 matrix.
+pub fn gemm_fp8_dynamic_bf16(
+    ctx: &CudaContext,
+    activation: &Tensor,
+    activation_scales: &Tensor,
+    weight: DynamicFp8WeightView<'_>,
+    bias: Option<&Tensor>,
+) -> Result<Tensor> {
+    if activation.dtype() != DType::F8E4M3 || weight.values_e4m3.dtype() != DType::F8E4M3 {
+        return Err(Error::Other(format!(
+            "dynamic FP8 GEMM expects E4M3 operands, got {} and {}",
+            activation.dtype(),
+            weight.values_e4m3.dtype()
+        )));
+    }
+    if activation_scales.dtype() != DType::F32 || weight.channel_scales.dtype() != DType::F32 {
+        return Err(Error::Other(format!(
+            "dynamic FP8 GEMM expects FP32 scale vectors, got {} and {}",
+            activation_scales.dtype(),
+            weight.channel_scales.dtype()
+        )));
+    }
+    let a = activation.shape().dims();
+    let b = weight.values_e4m3.shape().dims();
+    if a.len() != 2 || b.len() != 2 || a[1] != b[1] {
+        return Err(Error::Other(format!(
+            "dynamic FP8 GEMM shape mismatch: activation {a:?}, NK weight {b:?}"
+        )));
+    }
+    let (m, k, n) = (a[0], a[1], b[0]);
+    if activation_scales.shape().dims() != [m] || weight.channel_scales.shape().dims() != [n] {
+        return Err(Error::Other(format!(
+            "dynamic FP8 GEMM scale mismatch: activation {:?}, weight {:?}, expected [{m}] and [{n}]",
+            activation_scales.shape().dims(),
+            weight.channel_scales.shape().dims()
+        )));
+    }
+    if let Some(bias) = bias {
+        if bias.dtype() != DType::BF16 || bias.shape().dims() != [n] {
+            return Err(Error::Other(format!(
+                "dynamic FP8 GEMM bias must be BF16 [{n}], got {} {:?}",
+                bias.dtype(),
+                bias.shape().dims()
+            )));
+        }
+    }
+    let expected_device = Device::Cuda(ctx.device_id());
+    for tensor in [
+        activation,
+        activation_scales,
+        weight.values_e4m3,
+        weight.channel_scales,
+    ] {
+        if tensor.device() != expected_device {
+            return Err(Error::DeviceMismatch {
+                expected: expected_device,
+                got: tensor.device(),
+            });
+        }
+    }
+    if let Some(bias) = bias {
+        if bias.device() != expected_device {
+            return Err(Error::DeviceMismatch {
+                expected: expected_device,
+                got: bias.device(),
+            });
+        }
+    }
+    if crate::workspace::fp8_emulation_required(ctx)? {
+        return Err(Error::Other(
+            "dynamic rowwise FP8 GEMM requires native FP8 Tensor Cores".into(),
+        ));
+    }
+    if n % 16 != 0 || k % 16 != 0 {
+        return Err(Error::Other(format!(
+            "dynamic rowwise FP8 GEMM requires N and K divisible by 16, got N={n}, K={k}"
+        )));
+    }
+
+    let output = crate::workspace::output_buffer(
+        ctx,
+        m.checked_mul(n)
+            .and_then(|elements| elements.checked_mul(DType::BF16.size_in_bytes()))
+            .ok_or_else(|| Error::Other("dynamic FP8 GEMM output size overflow".into()))?,
+    )?;
+    let activation_buffer = CudaBuffer::from_tensor(activation).map_err(Error::Cuda)?;
+    let weight_buffer = CudaBuffer::from_tensor(weight.values_e4m3).map_err(Error::Cuda)?;
+    let activation_scale_buffer =
+        CudaBuffer::from_tensor(activation_scales).map_err(Error::Cuda)?;
+    let weight_scale_buffer =
+        CudaBuffer::from_tensor(weight.channel_scales).map_err(Error::Cuda)?;
+    let bias_buffer = bias
+        .map(CudaBuffer::from_tensor)
+        .transpose()
+        .map_err(Error::Cuda)?;
+    let bias_pointer = bias_buffer.as_ref().map_or(std::ptr::null(), |buffer| {
+        buffer.ptr() as *const std::ffi::c_void
+    });
+
+    #[cfg(not(apxinf_cutlass_gemm))]
+    {
+        return Err(Error::Other(
+            "dynamic rowwise FP8 GEMM requires an SM100-family native backend".into(),
+        ));
+    }
+
+    #[cfg(apxinf_cutlass_gemm)]
+    {
+        let tactic = dynamic_fp8_tactic(m, n, k);
+        let status = unsafe {
+            ffi::apxinf_dynamic_cutlass_fp8_gemm_bf16(
+                activation_buffer.ptr(),
+                weight_buffer.ptr(),
+                activation_scale_buffer.ptr().cast::<f32>(),
+                weight_scale_buffer.ptr().cast::<f32>(),
+                bias_pointer,
+                output.ptr(),
+                m as i32,
+                n as i32,
+                k as i32,
+                tactic,
+                ctx.stream().handle(),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Cuda(format!(
+                "dynamic rowwise FP8 GEMM rejected [{m},{n},{k}] tactic {tactic} ({status})"
+            )));
+        }
+        Ok(output.into_tensor(Shape::new(vec![m, n]), DType::BF16))
+    }
 }
 
 /// Run the configured cuBLASLt gate + CUTLASS up/GeGLU/E4M3 fused tactic.

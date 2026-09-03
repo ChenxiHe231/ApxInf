@@ -12,6 +12,7 @@ pub mod profiling;
 pub mod pi05;
 pub mod qwen3vl;
 pub mod vla;
+mod walloss;
 
 pub use builtin::register_builtin_models;
 pub use debug::{DebugCapture, DebugConfig};
@@ -28,7 +29,7 @@ pub use pi05::{Pi05Config, Pi05PerformanceProfile};
 pub use qwen3vl::{GeneralQwen3VL, Qwen3VLConfig, Qwen3VLTextWeights};
 pub use vla::{
     Action, ImageLayout, InferenceSpec, InitialLatent, Observation,
-    PreparedInference, VisionObservation, VlaRequest, VlaRuntime,
+    PreparedInference, VisionObservation, VlaContract, VlaRequest, VlaRuntime,
 };
 #[cfg(feature = "cuda")]
 pub use llama::{DecodeGraph, DecodeGraphConfig, DecodeGraphWeights, DecodeLayerWeights};

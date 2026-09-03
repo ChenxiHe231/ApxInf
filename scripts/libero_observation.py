@@ -6,10 +6,6 @@ import math
 import pathlib
 
 import numpy as np
-from PIL import Image
-
-
-IMAGE_SIZE = 224
 
 
 def quat_to_axis_angle(quat: np.ndarray) -> np.ndarray:
@@ -21,30 +17,25 @@ def quat_to_axis_angle(quat: np.ndarray) -> np.ndarray:
     return (quat[:3] * 2.0 * math.acos(quat[3]) / denominator).astype(np.float32)
 
 
-def resize_images(base: np.ndarray, wrist: np.ndarray) -> np.ndarray:
-    """Apply the OpenPI LIBERO camera orientation and resize convention."""
+def libero_images(base: np.ndarray, wrist: np.ndarray) -> np.ndarray:
+    """Orient raw LIBERO frames; the selected policy owns model-specific resize."""
+    return np.stack(
+        [np.ascontiguousarray(base[::-1, ::-1]), np.ascontiguousarray(wrist[::-1, ::-1])]
+    )
 
-    def resize_with_pad(image: np.ndarray) -> np.ndarray:
-        image = np.ascontiguousarray(image[::-1, ::-1])
-        height, width = image.shape[:2]
-        ratio = max(width / IMAGE_SIZE, height / IMAGE_SIZE)
-        resized_height = int(height / ratio)
-        resized_width = int(width / ratio)
-        resized = np.asarray(
-            Image.fromarray(image).resize(
-                (resized_width, resized_height), resample=Image.Resampling.BILINEAR
-            )
+
+def libero_state(observation) -> np.ndarray:
+    """Convert LIBERO's two mirrored finger joints to one gripper coordinate."""
+    gripper = np.asarray(observation["robot0_gripper_qpos"]).reshape(-1)
+    if gripper.size != 2:
+        raise ValueError(f"robot0_gripper_qpos must have 2 values, got {gripper.size}")
+    return np.concatenate(
+        (
+            observation["robot0_eef_pos"],
+            quat_to_axis_angle(observation["robot0_eef_quat"]),
+            gripper[:1],
         )
-        canvas = np.zeros((IMAGE_SIZE, IMAGE_SIZE, 3), dtype=np.uint8)
-        offset_y = (IMAGE_SIZE - resized_height) // 2
-        offset_x = (IMAGE_SIZE - resized_width) // 2
-        canvas[
-            offset_y : offset_y + resized_height,
-            offset_x : offset_x + resized_width,
-        ] = resized
-        return canvas
-
-    return np.stack([resize_with_pad(base), resize_with_pad(wrist)], axis=0)
+    ).astype(np.float32, copy=False)
 
 
 def make_env(task, seed: int):
@@ -77,17 +68,11 @@ def to_apxinf_observation(
     state_key: str,
 ) -> dict:
     """Convert one raw simulator frame using the evaluation-time convention."""
-    images = resize_images(
+    images = libero_images(
         observation["agentview_image"],
         observation["robot0_eye_in_hand_image"],
     )
-    state = np.concatenate(
-        (
-            observation["robot0_eef_pos"],
-            quat_to_axis_angle(observation["robot0_eef_quat"]),
-            observation["robot0_gripper_qpos"],
-        )
-    ).astype(np.float32, copy=False)
+    state = libero_state(observation)
     return {
         image_keys[0]: images[0],
         image_keys[1]: images[1],

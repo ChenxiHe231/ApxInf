@@ -105,6 +105,197 @@ extern "C" cudaError_t apxinf_static_dequantize_e4m3_f16(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_static_quantize_bf16_e4m3(
+    const void* input, void* output, int64_t count, float scale,
+    cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0 || !(scale > 0.0f))
+    return cudaErrorInvalidValue;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  quantize_bf16_e4m3_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<__nv_fp8_e4m3*>(output), count, 1.0f / scale);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_dynamic_quantize_rows_bf16_e4m3(
+    const void* input, void* output, void* scales, int rows,
+    int input_cols, int output_cols, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || scales == nullptr ||
+      rows <= 0 || input_cols <= 0 || output_cols < input_cols) {
+    return cudaErrorInvalidValue;
+  }
+  constexpr int threads = 256;
+  if (input_cols % 8 == 0 && output_cols % 8 == 0) {
+    constexpr int rows_per_block = threads / 32;
+    const int blocks = (rows + rows_per_block - 1) / rows_per_block;
+    quantize_rows_bf16_e4m3_vec8_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<__nv_fp8_e4m3*>(output), static_cast<float*>(scales),
+        rows, input_cols, output_cols);
+  } else {
+    quantize_rows_bf16_e4m3_kernel<<<rows, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<__nv_fp8_e4m3*>(output), static_cast<float*>(scales),
+        rows, input_cols, output_cols);
+  }
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_dynamic_rms_norm_quantize_rows_bf16_e4m3(
+    const void* input, const void* weight, void* output, void* scales,
+    int rows, int input_cols, int output_cols, float eps,
+    cudaStream_t stream) {
+  if (input == nullptr || weight == nullptr || output == nullptr ||
+      scales == nullptr || rows <= 0 || input_cols <= 0 ||
+      output_cols < input_cols || !(eps > 0.0f)) {
+    return cudaErrorInvalidValue;
+  }
+  constexpr int threads = 256;
+  constexpr int rows_per_block = threads / 32;
+  const int blocks = (rows + rows_per_block - 1) / rows_per_block;
+  if (input_cols % 8 == 0 && output_cols % 8 == 0) {
+    rms_norm_quantize_rows_bf16_e4m3_vec8_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<const __nv_bfloat16*>(weight),
+        static_cast<__nv_fp8_e4m3*>(output), static_cast<float*>(scales),
+        rows, input_cols, output_cols, eps);
+  } else {
+    rms_norm_quantize_rows_bf16_e4m3_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<const __nv_bfloat16*>(weight),
+        static_cast<__nv_fp8_e4m3*>(output), static_cast<float*>(scales),
+        rows, input_cols, output_cols, eps);
+  }
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_dynamic_swiglu_quantize_rows_bf16_e4m3(
+    const void* gate_up, const void* bias, void* output, void* scales,
+    int rows, int input_cols, int inner, int output_cols,
+    cudaStream_t stream) {
+  if (gate_up == nullptr || output == nullptr || scales == nullptr ||
+      rows <= 0 || inner <= 0 || input_cols < 2 * inner ||
+      output_cols < inner) {
+    return cudaErrorInvalidValue;
+  }
+  constexpr int threads = 256;
+  const size_t shared_bytes = static_cast<size_t>(inner) * sizeof(float);
+  if (input_cols % 8 == 0 && inner % 8 == 0 && output_cols % 8 == 0) {
+    swiglu_quantize_rows_bf16_e4m3_vec8_kernel
+        <<<rows, threads, shared_bytes, stream>>>(
+        static_cast<const __nv_bfloat16*>(gate_up),
+        static_cast<const __nv_bfloat16*>(bias),
+        static_cast<__nv_fp8_e4m3*>(output), static_cast<float*>(scales),
+        rows, input_cols, inner, output_cols);
+  } else if (input_cols % 4 == 0 && inner % 4 == 0 &&
+             output_cols % 4 == 0) {
+    swiglu_quantize_rows_bf16_e4m3_vec4_kernel
+        <<<rows, threads, shared_bytes, stream>>>(
+        static_cast<const __nv_bfloat16*>(gate_up),
+        static_cast<const __nv_bfloat16*>(bias),
+        static_cast<__nv_fp8_e4m3*>(output), static_cast<float*>(scales),
+        rows, input_cols, inner, output_cols);
+  } else {
+    swiglu_quantize_rows_bf16_e4m3_kernel
+        <<<rows, threads, shared_bytes, stream>>>(
+        static_cast<const __nv_bfloat16*>(gate_up),
+        static_cast<const __nv_bfloat16*>(bias),
+        static_cast<__nv_fp8_e4m3*>(output), static_cast<float*>(scales),
+        rows, input_cols, inner, output_cols);
+  }
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t
+apxinf_dynamic_bias_residual_rms_norm_quantize_rows_bf16_e4m3(
+    const void* projection, const void* bias, const void* residual,
+    const void* weight, void* hidden, void* normalized, void* scales,
+    int rows, int cols, int output_cols, float eps, cudaStream_t stream) {
+  if (projection == nullptr || residual == nullptr || weight == nullptr ||
+      hidden == nullptr || normalized == nullptr || scales == nullptr ||
+      rows <= 0 || cols <= 0 || output_cols < cols || !(eps > 0.0f)) {
+    return cudaErrorInvalidValue;
+  }
+  constexpr int threads = 256;
+  if (rows <= 64) {
+    constexpr int rows_per_block = threads / 32;
+    const int blocks = (rows + rows_per_block - 1) / rows_per_block;
+    if (cols % 8 == 0 && output_cols % 8 == 0) {
+      bias_residual_rms_norm_quantize_rows_bf16_e4m3_vec8_kernel
+          <<<blocks, threads, 0, stream>>>(
+              static_cast<const __nv_bfloat16*>(projection),
+              static_cast<const __nv_bfloat16*>(bias),
+              static_cast<const __nv_bfloat16*>(residual),
+              static_cast<const __nv_bfloat16*>(weight),
+              static_cast<__nv_bfloat16*>(hidden),
+              static_cast<__nv_fp8_e4m3*>(normalized),
+              static_cast<float*>(scales), rows, cols, output_cols, eps);
+    } else {
+      bias_residual_rms_norm_quantize_rows_bf16_e4m3_kernel
+          <<<blocks, threads, 0, stream>>>(
+              static_cast<const __nv_bfloat16*>(projection),
+              static_cast<const __nv_bfloat16*>(bias),
+              static_cast<const __nv_bfloat16*>(residual),
+              static_cast<const __nv_bfloat16*>(weight),
+              static_cast<__nv_bfloat16*>(hidden),
+              static_cast<__nv_fp8_e4m3*>(normalized),
+              static_cast<float*>(scales), rows, cols, output_cols, eps);
+    }
+  } else {
+    if (cols % 8 == 0 && output_cols % 8 == 0) {
+      bias_residual_rms_norm_quantize_rows_bf16_e4m3_large_vec8_kernel
+          <<<rows, threads, 0, stream>>>(
+              static_cast<const __nv_bfloat16*>(projection),
+              static_cast<const __nv_bfloat16*>(bias),
+              static_cast<const __nv_bfloat16*>(residual),
+              static_cast<const __nv_bfloat16*>(weight),
+              static_cast<__nv_bfloat16*>(hidden),
+              static_cast<__nv_fp8_e4m3*>(normalized),
+              static_cast<float*>(scales), rows, cols, output_cols, eps);
+    } else {
+      bias_residual_rms_norm_quantize_rows_bf16_e4m3_large_kernel
+          <<<rows, threads, 0, stream>>>(
+              static_cast<const __nv_bfloat16*>(projection),
+              static_cast<const __nv_bfloat16*>(bias),
+              static_cast<const __nv_bfloat16*>(residual),
+              static_cast<const __nv_bfloat16*>(weight),
+              static_cast<__nv_bfloat16*>(hidden),
+              static_cast<__nv_fp8_e4m3*>(normalized),
+              static_cast<float*>(scales), rows, cols, output_cols, eps);
+    }
+  }
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_slice_columns_bf16(
+    const void* input, void* output, int rows, int input_cols,
+    int output_cols, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || rows <= 0 ||
+      output_cols <= 0 || output_cols > input_cols) {
+    return cudaErrorInvalidValue;
+  }
+  const int64_t count = static_cast<int64_t>(rows) * output_cols;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  slice_columns_bf16_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<__nv_bfloat16*>(output), rows, input_cols, output_cols);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_static_cast_f16_bf16(
+    const void* input, void* output, int64_t count, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0)
+    return cudaErrorInvalidValue;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  cast_f16_bf16_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const half*>(input),
+      static_cast<__nv_bfloat16*>(output), count);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_static_rgb_u8_to_patches_e4m3(
     const void* images, void* patches, int views, int image_size,
     int patch_size, int layout, float scale, cudaStream_t stream) {

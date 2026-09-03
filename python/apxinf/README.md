@@ -15,10 +15,11 @@ apxinf/
 │   ├── registry.py   model_type -> policy-class registry
 │   ├── auto.py       AutoPolicy: checkpoint -> concrete policy by config type
 │   └── impls/        concrete per-model policies (the part that grows)
-│       └── pi05.py       Pi05Policy (registered as "pi05")
+│       ├── pi05.py       Pi05Policy (registered as "pi05")
+│       └── walloss.py    WallossPolicy (registered as "walloss")
 ├── adapters/     downstream: expose a Policy through a foreign API (lazy imports)
 │   └── lerobot.py   ApxInfPolicy — drop-in policy for a lerobot control loop
-└── __init__.py   facade: Model (lazy), Pi05Policy, AutoPolicy, Policy, steps
+└── __init__.py   facade: Model (lazy), concrete policies, AutoPolicy, Policy, steps
 ```
 
 **Adding a model:** drop `apxinf/policies/impls/<name>.py` following `pi05.py`
@@ -32,9 +33,10 @@ apxinf/
   `Normalizer`/`Unnormalizer`, `GaussianNoise`, chained by `Pipeline`. No GPU /
   no Rust dependency; unit-tests run offline. sentencepiece is imported lazily
   by the tokenizer only.
-- **L2 policies** (`apxinf.Pi05Policy` / `apxinf.AutoPolicy`) — compose a pre
-  pipeline + a bare-model handle (L1 `infer_rgb` by default) + a post unnormalize
-  step into one `infer(obs_dict) -> {actions, timing, ...}` call. `import apxinf`
+- **L2 policies** (`apxinf.Pi05Policy`, `apxinf.WallossPolicy`, or
+  `apxinf.AutoPolicy`) — own each model family's pre/post contract around a
+  bare-model handle and return deployable actions from one
+  `infer(obs_dict) -> {actions, timing, ...}` call. `import apxinf`
   stays CUDA-free; only `apxinf.Model` and a policy's `from_pretrained` pull in
   `apxinf_py`.
 

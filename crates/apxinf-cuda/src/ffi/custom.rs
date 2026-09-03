@@ -11,6 +11,72 @@ extern "C" {
         seed: u32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_quantize_bf16_e4m3(
+        input: *const c_void,
+        output: *mut c_void,
+        count: i64,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_dynamic_quantize_rows_bf16_e4m3(
+        input: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        input_cols: i32,
+        output_cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_dynamic_rms_norm_quantize_rows_bf16_e4m3(
+        input: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        input_cols: i32,
+        output_cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_dynamic_swiglu_quantize_rows_bf16_e4m3(
+        gate_up: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        input_cols: i32,
+        inner: i32,
+        output_cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_dynamic_bias_residual_rms_norm_quantize_rows_bf16_e4m3(
+        projection: *const c_void,
+        bias: *const c_void,
+        residual: *const c_void,
+        weight: *const c_void,
+        hidden: *mut c_void,
+        normalized: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        output_cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_slice_columns_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        input_cols: i32,
+        output_cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_cast_f16_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        count: i64,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
 
     pub fn apxinf_token_sampling_workspace_sizes(
         vocab_size: u32,
@@ -367,6 +433,23 @@ extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_gather_rows_bf16(
+        input: *const c_void,
+        indices: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_replace_rows_bf16(
+        base: *const c_void,
+        replacement: *const c_void,
+        row_map: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_euler_update_bf16(
         state: *const c_void,
         velocity: *const c_void,
@@ -382,7 +465,62 @@ extern "C" {
         inner: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_swiglu_bf16(
+        gate_up: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        inner: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_swiglu_quant_f16_e4m3(
+        gate_up: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        inner: i32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_gqa_qkv_mrope_cache_f16(
+        qkv: *const c_void,
+        bias: *const c_void,
+        position_ids: *const u32,
+        q: *mut c_void,
+        k_cache: *mut c_void,
+        v_cache: *mut c_void,
+        tokens: i32,
+        q_heads: i32,
+        kv_heads: i32,
+        head_dim: i32,
+        theta: f32,
+        section_h: i32,
+        section_w: i32,
+        cache_offset: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_vision_qkv_rope_f16(
+        qkv: *const c_void,
+        bias: *const c_void,
+        position_ids: *const u32,
+        q: *mut c_void,
+        k: *mut c_void,
+        v: *mut c_void,
+        tokens: i32,
+        heads: i32,
+        head_dim: i32,
+        theta: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_bias_residual_bf16(
+        projection: *const c_void,
+        bias: *const c_void,
+        residual: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_bias_residual_f16_bf16(
         projection: *const c_void,
         bias: *const c_void,
         residual: *const c_void,
@@ -398,6 +536,16 @@ extern "C" {
         rows: i32,
         cols: i32,
         eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_rms_norm_quant_bf16_e4m3(
+        input: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
     pub fn apxinf_static_layer_norm_bf16(
@@ -420,6 +568,19 @@ extern "C" {
         rows: i32,
         cols: i32,
         eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_bias_residual_rms_norm_quant_f16_bf16_e4m3(
+        projection: *const c_void,
+        bias: *const c_void,
+        residual: *const c_void,
+        weight: *const c_void,
+        hidden: *mut c_void,
+        normalized: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
     pub fn apxinf_static_bias_residual_layer_norm_bf16(
@@ -490,6 +651,36 @@ extern "C" {
         projection_width: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_static_gqa_qkv_mrope_cache_bf16(
+        qkv: *const c_void,
+        bias: *const c_void,
+        position_ids: *const u32,
+        q: *mut c_void,
+        k_cache: *mut c_void,
+        v_cache: *mut c_void,
+        tokens: i32,
+        q_heads: i32,
+        kv_heads: i32,
+        head_dim: i32,
+        theta: f32,
+        section_h: i32,
+        section_w: i32,
+        cache_offset: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_vision_qkv_rope_bf16(
+        qkv: *const c_void,
+        bias: *const c_void,
+        position_ids: *const u32,
+        q: *mut c_void,
+        k: *mut c_void,
+        v: *mut c_void,
+        tokens: i32,
+        heads: i32,
+        head_dim: i32,
+        theta: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_mqa_bf16(
         q: *const c_void,
         k: *const c_void,
@@ -508,6 +699,18 @@ extern "C" {
         output: *mut c_void,
         tokens_per_batch: i32,
         batches: i32,
+        heads: i32,
+        head_dim: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub fn apxinf_static_segmented_mha_bf16(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        offsets: *const c_void,
+        output: *mut c_void,
+        segments: i32,
+        max_tokens: i32,
         heads: i32,
         head_dim: i32,
         stream: cudaStream_t,

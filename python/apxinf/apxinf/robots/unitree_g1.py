@@ -41,6 +41,7 @@ def build_unitree_g1_policy(
     use_delta_joint_actions: bool = True,
     adapt_to_pi: bool = True,
     state_key: str = G1_STATE_KEY,
+    prompt_key: str = "prompt",
     image_keys: Sequence[str] = G1_CAMERAS,
     discrete_state: bool = True,
     action_dim: Optional[int] = None,
@@ -79,6 +80,7 @@ def build_unitree_g1_policy(
         image_keys=tuple(image_keys),
         action_dim=None,  # keep full model width; the g1_encode step truncates to 16
         state_key=state_key,
+        prompt_key=prompt_key,
         discrete_state=discrete_state,
         **from_pretrained_kwargs,
     )
@@ -103,6 +105,7 @@ def build_unitree_g1_policy(
         input_pipeline=input_pipeline,
         output_pipeline=output_pipeline,
         image_keys=tuple(image_keys),
+        prompt_key=prompt_key,
         state_key=state_key,
         action_dim=G1_ROBOT_DIM if action_dim is None else int(action_dim),
         metadata={"robot": "unitree_g1", **(metadata or {})},

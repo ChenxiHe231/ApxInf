@@ -60,6 +60,17 @@ def _read_model_type(model_dir: Path) -> str:
             f"(known: {available_policies()})"
         )
     document = json.loads(config_path.read_text())
+    # The published WallOSS checkpoint retains Qwen2.5-VL's generic
+    # ``model_type``. Its two execution experts plus action head are the stable
+    # architecture discriminator; do not register every qwen2_5_vl as WallOSS.
+    if (
+        document.get("model_type") == "qwen2_5_vl"
+        and isinstance(document.get("experts"), list)
+        and len(document["experts"]) == 2
+        and "action_hidden_size" in document
+        and "noise_scheduler" in document
+    ):
+        return "walloss"
     for key in _MODEL_TYPE_KEYS:
         value = document.get(key)
         if isinstance(value, str) and value:

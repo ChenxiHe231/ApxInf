@@ -13,7 +13,8 @@ Both transports drive the *same* rollout loop through a small :class:`Backend`
 abstraction, so the LIBERO harness (rollout constants, the resumable fsync'd
 JSONL ledger, timing split) is shared verbatim. Native observation conversion
 lives in ``scripts/libero_observation.py`` so evaluation and calibration cannot
-silently diverge on camera orientation, resize, or robot-state layout.
+silently diverge on camera orientation or robot-state layout. Model-specific
+resize remains inside the selected policy.
 
 ``--suite`` selects one LIBERO task suite (``libero_10`` / ``libero_90`` /
 ``libero_spatial`` / ``libero_object`` / ``libero_goal``) or ``all``. The ledger
@@ -49,9 +50,9 @@ from typing import Optional, Protocol, Tuple
 import numpy as np
 
 if __package__:
-    from .libero_observation import make_env, quat_to_axis_angle, resize_images
+    from .libero_observation import libero_images, libero_state, make_env
 else:
-    from libero_observation import make_env, quat_to_axis_angle, resize_images
+    from libero_observation import libero_images, libero_state, make_env
 
 # --- rollout protocol constants (OpenPI's public PI0.5 LIBERO configuration) ---
 LIBERO_ACTION_DIM = 7
@@ -326,24 +327,27 @@ class InProcessBackend:
             sys.path.insert(0, str(package_dir))
         from apxinf import AutoPolicy
 
+        options = {
+            "checkpoint": args.checkpoint,
+            "calibration": args.calibration,
+            "tactics": args.tactics,
+            "tokenizer_path": args.tokenizer,
+            "norm_key": args.norm_key,
+            "action_horizon": args.action_horizon,
+            "num_views": args.num_views,
+            "num_flow_steps": args.num_flow_steps,
+            "flow_start_time": args.flow_start_time,
+            "discrete_state": args.discrete_state,
+            "seed": args.model_seed if args.model_seed is not None else args.seed,
+        }
         self._policy = AutoPolicy.from_pretrained(
             args.model_dir,
             model_type=args.model_type,
-            checkpoint=args.checkpoint,
             device=args.device,
             precision=args.precision,
-            calibration=args.calibration,
-            tactics=args.tactics,
-            tokenizer_path=args.tokenizer,
-            norm_key=args.norm_key,
             action_dim=(args.action_dim or None),
-            action_horizon=args.action_horizon,
-            num_views=args.num_views,
-            num_flow_steps=args.num_flow_steps,
-            flow_start_time=args.flow_start_time,
-            seed=args.seed,
-            discrete_state=args.discrete_state,
             metadata={"precision": args.precision, "policy": "libero"},
+            **{name: value for name, value in options.items() if value is not None},
         )
         self.metadata = dict(getattr(self._policy, "metadata", {}))
 
@@ -388,11 +392,13 @@ def run_episode(
     seed: int,
     warm_start: bool,
     warm_start_alpha: float,
+    replan_steps: int = REPLAN_STEPS,
+    settle_gripper: float = -1.0,
 ) -> dict:
     episode_started = time.perf_counter()
     env.reset()
     observation = env.set_init_state(initial_state)
-    dummy_action = [0.0] * 6 + [-1.0]
+    dummy_action = [0.0] * 6 + [settle_gripper]
     for _ in range(WAIT_STEPS):
         observation, _, _, _ = env.step(dummy_action)
 
@@ -402,7 +408,7 @@ def run_episode(
     replans = 0
     # Timing is split into four non-overlapping segments so the delivery report
     # can attribute latency:
-    #   preprocess  = client-side camera resize + state assembly (this process)
+    #   preprocess  = client-side camera orientation + state assembly (this process)
     #   model       = pure bare-model infer_rgb (backend timing)
     #   server_proc = server/policy pre/post processor pipeline (backend timing)
     #   transport   = round_trip - server compute (~0 for in-process)
@@ -422,23 +428,17 @@ def run_episode(
     while action_steps < MAX_STEPS:
         if not action_plan:
             preprocess_started = time.perf_counter()
-            images = resize_images(
+            images = libero_images(
                 observation["agentview_image"],
                 observation["robot0_eye_in_hand_image"],
             )
-            state = np.concatenate(
-                (
-                    observation["robot0_eef_pos"],
-                    quat_to_axis_angle(observation["robot0_eef_quat"]),
-                    observation["robot0_gripper_qpos"],
-                )
-            ).astype(np.float32, copy=False)
+            state = libero_state(observation)
             preprocess_seconds += time.perf_counter() - preprocess_started
 
             noise = None
             if warm_start and previous_normalized_chunk is not None:
                 shift = np.empty_like(previous_normalized_chunk)
-                replan = min(REPLAN_STEPS, shift.shape[0])
+                replan = min(replan_steps, shift.shape[0])
                 if replan < shift.shape[0]:
                     shift[: shift.shape[0] - replan] = previous_normalized_chunk[replan:]
                 shift[shift.shape[0] - replan :] = previous_normalized_chunk[-1]
@@ -465,10 +465,10 @@ def run_episode(
             if (
                 actions.ndim != 2
                 or actions.shape[1] != LIBERO_ACTION_DIM
-                or actions.shape[0] < REPLAN_STEPS
+                or actions.shape[0] < replan_steps
             ):
                 raise ValueError(
-                    f"expected actions (>= {REPLAN_STEPS}, {LIBERO_ACTION_DIM}), "
+                    f"expected actions (>= {replan_steps}, {LIBERO_ACTION_DIM}), "
                     f"got {actions.shape}"
                 )
             if not np.isfinite(actions).all():
@@ -495,7 +495,7 @@ def run_episode(
             )
             if first_action_checksum is None:
                 first_action_checksum = float(np.abs(actions).sum())
-            action_plan.extend(actions[:REPLAN_STEPS])
+            action_plan.extend(actions[:replan_steps])
             replans += 1
 
         action = action_plan.popleft()
@@ -548,6 +548,23 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--trials-per-task", type=int, default=10)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--model-seed",
+        type=int,
+        help="in-process model sampling seed (default: reuse --seed)",
+    )
+    parser.add_argument(
+        "--replan-steps",
+        type=int,
+        default=REPLAN_STEPS,
+        help=f"actions executed from each predicted chunk (default: {REPLAN_STEPS})",
+    )
+    parser.add_argument(
+        "--settle-gripper",
+        type=float,
+        default=-1.0,
+        help="seventh action used during the initial settle steps (default: -1)",
+    )
     parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--results-jsonl", required=True, type=pathlib.Path)
     parser.add_argument("--summary-json", required=True, type=pathlib.Path)
@@ -564,7 +581,7 @@ def parse_args() -> argparse.Namespace:
     in_process.add_argument("--calibration", type=pathlib.Path)
     in_process.add_argument("--tactics", type=pathlib.Path, help=argparse.SUPPRESS)
     in_process.add_argument("--tokenizer", type=pathlib.Path)
-    in_process.add_argument("--norm-key", default="actions")
+    in_process.add_argument("--norm-key")
     in_process.add_argument("--action-dim", type=int, default=7, help="0 keeps the full vector")
     in_process.add_argument(
         "--num-views",
@@ -595,7 +612,7 @@ def parse_args() -> argparse.Namespace:
         help="override the checkpoint's chunk length (default: its config.json "
         f"value; must be >= the {REPLAN_STEPS}-step replan stride)",
     )
-    in_process.add_argument("--discrete-state", action="store_true")
+    in_process.add_argument("--discrete-state", action="store_true", default=None)
 
     warm = parser.add_argument_group("warm start")
     warm.add_argument(
@@ -647,11 +664,13 @@ def parse_args() -> argparse.Namespace:
                 "--action-horizon applies to --backend in-process; for the websocket "
                 "backend pass it to pi05_openpi_websocket_server.py instead"
             )
-        if args.action_horizon < REPLAN_STEPS:
+        if args.action_horizon < args.replan_steps:
             parser.error(
-                f"--action-horizon must be >= {REPLAN_STEPS} (the rollout consumes "
-                f"{REPLAN_STEPS} actions per chunk)"
+                f"--action-horizon must be >= {args.replan_steps} (the rollout consumes "
+                f"{args.replan_steps} actions per chunk)"
             )
+    if args.replan_steps <= 0:
+        parser.error("--replan-steps must be positive")
     if args.trials_per_task <= 0 or args.trials_per_task > 50:
         parser.error("--trials-per-task must be in 1..=50")
     return args
@@ -743,6 +762,8 @@ def main() -> None:
                                     args.seed,
                                     args.warm_start,
                                     args.warm_start_alpha,
+                                    args.replan_steps,
+                                    args.settle_gripper,
                                 )
                                 record["attempt"] = attempt
                                 record["precision"] = args.precision

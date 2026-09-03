@@ -82,8 +82,10 @@ class RobotPreset:
     #: Deployable action width. ``None`` keeps the model's full vector — correct
     #: when a robot output step does the truncation itself (G1's 32→16 encode).
     action_dim: Optional[int] = None
-    #: Whether state is discretized into the prompt. Off means state is *dropped*.
-    discrete_state: bool = False
+    #: Optional policy override for state string encoding. ``None`` leaves the
+    #: choice to the checkpoint's concrete policy; state representation is a
+    #: model semantic, not solely an embodiment property.
+    discrete_state: Optional[bool] = None
     #: Factory that loads the checkpoint and wires this robot's pre/post steps.
     builder: Callable[..., Policy] = _build_generic
     #: One-line description for ``--help`` and the served metadata.
@@ -127,8 +129,8 @@ class RobotPreset:
 
 
 #: Franka Panda under LIBERO's key convention (the 7-DoF sim benchmark):
-#: 2 cameras, 7-dim action. Mirrors openpi ``LiberoInputs``. State is dropped by
-#: default, matching the numerics of the existing serving link.
+#: 2 cameras, 7-dim action. Mirrors openpi ``LiberoInputs``. State encoding is
+#: checkpoint-specific: PI0.5 drops it by default, while WallOSS discretizes it.
 FRANKA_LIBERO = RobotPreset(
     name="franka_libero",
     slots=(
@@ -137,7 +139,7 @@ FRANKA_LIBERO = RobotPreset(
     ),
     state_key="observation/state",
     action_dim=7,
-    discrete_state=False,
+    discrete_state=None,
     summary="Franka Panda, LIBERO keys: 2 cameras, 7-dim action (6 EEF deltas + gripper)",
 )
 
@@ -191,6 +193,7 @@ def build_robot_policy(
     *,
     image_keys: Optional[Sequence[str]] = None,
     state_key: Optional[str] = None,
+    prompt_key: Optional[str] = None,
     action_dim: Optional[int] = None,
     discrete_state: Optional[bool] = None,
     metadata: Optional[Mapping[str, Any]] = None,
@@ -199,9 +202,9 @@ def build_robot_policy(
     """Load ``model_dir`` under the named preset, with per-argument overrides.
 
     Each override defaults to the preset's value; passing one replaces just that
-    field. ``image_keys`` and ``state_key`` exist because a deployed client may
-    already speak a fixed dialect — they let a server match an installed robot
-    stack without editing the preset (and without touching the client).
+    field. ``image_keys``, ``state_key``, and ``prompt_key`` exist because a
+    deployed client may already speak a fixed dialect — they let a server match
+    an installed robot stack without editing the preset or touching the client.
 
     The resulting wire contract is published in the policy ``metadata``
     (``robot`` / ``image_keys`` / ``state_key`` / ``discrete_state``), which the
@@ -210,19 +213,22 @@ def build_robot_policy(
     preset = get_robot_preset(robot)
     keys = tuple(image_keys) if image_keys is not None else preset.image_keys
     state = state_key if state_key is not None else preset.state_key
+    prompt = prompt_key if prompt_key is not None else preset.prompt_key
     discrete = preset.discrete_state if discrete_state is None else bool(discrete_state)
     width = preset.action_dim if action_dim is None else action_dim
-
-    return preset.builder(
-        model_dir,
-        image_keys=keys,
-        state_key=state,
-        discrete_state=discrete,
-        action_dim=width,
-        metadata={
+    policy_kwargs = {
+        "image_keys": keys,
+        "state_key": state,
+        "prompt_key": prompt,
+        "action_dim": width,
+        "metadata": {
             "robot": preset.name,
             "robot_slots": [list(pair) for pair in zip(VIEW_SLOTS, keys)],
             **(dict(metadata) if metadata else {}),
         },
-        **{**dict(preset.builder_kwargs), **kwargs},
-    )
+        **dict(preset.builder_kwargs),
+        **kwargs,
+    }
+    if discrete is not None:
+        policy_kwargs["discrete_state"] = discrete
+    return preset.builder(model_dir, **policy_kwargs)

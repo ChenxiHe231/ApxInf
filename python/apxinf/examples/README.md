@@ -13,15 +13,22 @@ meaningless — the point is the call shape).
 | Example | Shows |
 |---|---|
 | [`pi05policy_infer.py`](pi05policy_infer.py) | Concrete `Pi05Policy.from_pretrained` — model-specific knobs (`action_dim`, `image_keys`). |
-| [`autopolicy_infer.py`](autopolicy_infer.py) | Generic `AutoPolicy.from_pretrained` — dispatch by `config.json` model type. |
-| [`openpi_server.py`](openpi_server.py) | Serve a policy in-process over OpenPI's websocket protocol (`apxinf.serving`). |
+| [`autopolicy_infer.py`](autopolicy_infer.py) | Generic `AutoPolicy.from_pretrained` — dispatch by `config.json` model type and pass concrete-policy options as JSON. |
+| [`openpi_server.py`](openpi_server.py) | Serve any registered policy over OpenPI's websocket protocol (`apxinf.serving`). |
 | [`openpi_client.py`](openpi_client.py) | Connect an OpenPI client, read metadata, send one observation, read actions. |
+
+Examples are organized by user workflow, not model family. A new model should
+work through `autopolicy_infer.py` and `openpi_server.py`; use
+`--policy-options` for arguments understood by its concrete policy. Add a
+model-specific example only when it demonstrates a genuinely distinct workflow.
 
 ## Dependencies
 
-- The two `*_infer.py` and `openpi_server.py` need the **`apxinf_py` CUDA
+- The `*_infer.py` examples and servers need the **`apxinf_py` CUDA
   binding** (`maturin develop --features cuda` in [`crates/apxinf-py`](../../../crates/apxinf-py))
-  and a checkpoint directory (model + tokenizer + `norm_stats.json`).
+  and a compatible checkpoint directory.
+- Using a WallOSS checkpoint additionally needs `pip install -e "python/apxinf[walloss]"`
+  for its Qwen2.5-VL tokenizer/image processor and serialized normalizers.
 - `openpi_server.py` also needs the transport deps
   ([`scripts/requirements-pi05-websocket.txt`](../../../scripts/requirements-pi05-websocket.txt)).
 - `openpi_client.py` needs the upstream `openpi_client` package and a running
@@ -39,4 +46,27 @@ python examples/openpi_client.py --host 127.0.0.1 --port 8000
 # Or skip the network and call the policy in-process
 python examples/pi05policy_infer.py --model-dir /path/to/checkpoint
 python examples/autopolicy_infer.py --model-dir /path/to/checkpoint
+
+# WallOSS uses the same generic commands. Policy-specific options are data.
+python examples/autopolicy_infer.py \
+  --model-dir /path/to/wall-oss-0.5 \
+  --action-dim 7 \
+  --policy-options '{"norm_key":"x2_normal"}'
+
+python examples/openpi_server.py \
+  --model-dir /path/to/wall-oss-0.5 \
+  --robot franka_libero \
+  --policy-options '{"norm_key":"x2_normal"}'
 ```
+
+Without `--robot` or `--action-dim`, both generic launchers keep the action width
+inferred from the checkpoint weights (currently deployed WallOSS checkpoints may
+be either 7 or 26 channels). A user-supplied `--action-dim` wins; otherwise a
+named robot preset supplies its deployable width; otherwise the checkpoint width
+is used. Prefix trimming is valid only when the selected normalizer and the
+checkpoint's leading-channel layout match the target robot. Non-prefix layouts
+need a robot adapter rather than a different `--action-dim`.
+
+WallOSS state-token binning is likewise loaded from checkpoint metadata
+(`config.json`, then legacy `config.yml`) and falls back to 256 only when absent.
+An explicit `"state_bins"` in `--policy-options` has highest precedence.

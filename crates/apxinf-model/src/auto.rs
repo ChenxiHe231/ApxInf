@@ -180,6 +180,10 @@ impl LoadedModel {
         self.vla()?.calibration_amax(request)
     }
 
+    pub fn calibration_plan(&self) -> Result<Vec<String>> {
+        self.vla()?.calibration_plan()
+    }
+
     pub fn prepare(&self, spec: &InferenceSpec) -> Result<Box<dyn PreparedInference>> {
         self.vla()?.prepare(spec)
     }

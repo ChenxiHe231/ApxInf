@@ -171,6 +171,98 @@ struct Fp8Gemm {
 };
 
 template <
+    typename TileShape, typename ClusterShape, bool WithBias,
+    typename MainloopSchedule = cutlass::gemm::collective::KernelScheduleAuto,
+    typename EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto>
+struct Fp8RowwiseGemm {
+  using ElementInput = cutlass::float_e4m3_t;
+  using ElementOutput = cutlass::bfloat16_t;
+  using ElementAccumulator = float;
+  using LayoutA = cutlass::layout::RowMajor;
+  // Dynamic weights are packed output-major as contiguous [N, K]. The GEMM
+  // consumes the same allocation as logical B=[K, N] through ColumnMajor.
+  using LayoutB = cutlass::layout::ColumnMajor;
+  using LayoutD = cutlass::layout::RowMajor;
+  static constexpr int AlignmentInput = 16;
+  static constexpr int AlignmentOutput = 8;
+
+  using Accumulator = cutlass::epilogue::fusion::Sm90AccFetch;
+  using ScaleA = cutlass::epilogue::fusion::Sm90ColBroadcast<
+      0, TileShape, float, float, Stride<_1, _0, _0>>;
+  using ScaleB = cutlass::epilogue::fusion::Sm90RowBroadcast<
+      0, TileShape, float, float, Stride<_0, _1, _0>>;
+  using Bias = cutlass::epilogue::fusion::Sm90RowBroadcast<
+      0, TileShape, ElementOutput, ElementOutput, Stride<_0, _1, _0>>;
+  using MultiplyB = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, float, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using ScaledAccumulator = cutlass::epilogue::fusion::Sm90EVT<
+      MultiplyB, ScaleB, Accumulator>;
+  using MultiplyA = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiplies, ElementOutput, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using MultiplyAddBias = cutlass::epilogue::fusion::Sm90Compute<
+      cutlass::multiply_add, ElementOutput, float,
+      cutlass::FloatRoundStyle::round_to_nearest>;
+  using FusionOperation = std::conditional_t<
+      WithBias,
+      cutlass::epilogue::fusion::Sm90EVT<
+          MultiplyAddBias, ScaleA, ScaledAccumulator, Bias>,
+      cutlass::epilogue::fusion::Sm90EVT<
+          MultiplyA, ScaleA, ScaledAccumulator>>;
+
+  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+      cutlass::arch::Sm100,
+      cutlass::arch::OpClassTensorOp,
+      TileShape,
+      ClusterShape,
+      cutlass::epilogue::collective::EpilogueTileAuto,
+      ElementAccumulator,
+      float,
+      void,
+      LayoutD,
+      AlignmentOutput,
+      ElementOutput,
+      LayoutD,
+      AlignmentOutput,
+      EpilogueSchedule,
+      FusionOperation>::CollectiveOp;
+  using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+      cutlass::arch::Sm100,
+      cutlass::arch::OpClassTensorOp,
+      ElementInput,
+      LayoutA,
+      AlignmentInput,
+      ElementInput,
+      LayoutB,
+      AlignmentInput,
+      ElementAccumulator,
+      TileShape,
+      ClusterShape,
+      cutlass::gemm::collective::StageCountAutoCarveout<
+          static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+      MainloopSchedule>::CollectiveOp;
+  using Kernel = cutlass::gemm::kernel::GemmUniversal<
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
+  using Device = cutlass::gemm::device::GemmUniversalAdapter<Kernel>;
+
+  static typename FusionOperation::Arguments fusion_arguments(
+      const float* activation_scales, const float* weight_scales,
+      const void* bias) {
+    typename ScaleA::Arguments scale_a{activation_scales};
+    typename ScaleB::Arguments scale_b{weight_scales};
+    typename ScaledAccumulator::Arguments scaled_accumulator{scale_b, {}, {}};
+    if constexpr (WithBias) {
+      typename Bias::Arguments bias_args{
+          static_cast<const ElementOutput*>(bias)};
+      return {scale_a, scaled_accumulator, bias_args, {}};
+    } else {
+      return {scale_a, scaled_accumulator, {}};
+    }
+  }
+};
+
+template <
     typename TileShape, typename ClusterShape, int Stages = 0,
     typename MainloopSchedule = cutlass::gemm::collective::KernelScheduleAuto>
 struct Fp8GemmGeGlu {
@@ -270,6 +362,53 @@ int launch(
 }
 
 template <typename Gemm>
+int launch_rowwise(
+    const void* activation, const void* weight_nk,
+    const float* activation_scales, const float* weight_scales,
+    const void* bias, void* output, int m, int n, int k,
+    cudaStream_t stream) {
+  using Device = typename Gemm::Device;
+  using Kernel = typename Gemm::Kernel;
+  using ElementInput = typename Gemm::ElementInput;
+  using ElementOutput = typename Gemm::ElementOutput;
+  using StrideA = typename Kernel::StrideA;
+  using StrideB = typename Kernel::StrideB;
+  using StrideC = typename Kernel::StrideC;
+  using StrideD = typename Kernel::StrideD;
+
+  StrideA stride_a = cutlass::make_cute_packed_stride(
+      StrideA{}, cute::make_shape(m, k, 1));
+  StrideB stride_b = cutlass::make_cute_packed_stride(
+      StrideB{}, cute::make_shape(n, k, 1));
+  StrideC stride_c = cutlass::make_cute_packed_stride(
+      StrideC{}, cute::make_shape(m, n, 1));
+  StrideD stride_d = cutlass::make_cute_packed_stride(
+      StrideD{}, cute::make_shape(m, n, 1));
+  typename Kernel::MainloopArguments mainloop{
+      static_cast<const ElementInput*>(activation), stride_a,
+      static_cast<const ElementInput*>(weight_nk), stride_b};
+  ElementOutput* output_ptr = static_cast<ElementOutput*>(output);
+  typename Kernel::EpilogueArguments epilogue{
+      Gemm::fusion_arguments(
+          activation_scales, weight_scales, bias),
+      output_ptr, stride_c, output_ptr, stride_d};
+  cutlass::KernelHardwareInfo hardware;
+  cudaError_t cuda_status = cudaDeviceGetAttribute(
+      &hardware.sm_count, cudaDevAttrMultiProcessorCount, 0);
+  if (cuda_status != cudaSuccess) return -8;
+  typename Kernel::Arguments arguments{
+      cutlass::gemm::GemmUniversalMode::kGemm,
+      {m, n, k, 1}, mainloop, epilogue, hardware, {}};
+
+  Device operation;
+  if (operation.can_implement(arguments) != cutlass::Status::kSuccess) return -1;
+  if (operation.get_workspace_size(arguments) != 0) return -4;
+  if (operation.initialize(arguments, nullptr, stream) != cutlass::Status::kSuccess)
+    return -2;
+  return operation.run(stream) == cutlass::Status::kSuccess ? 0 : -3;
+}
+
+template <typename Gemm>
 int launch_geglu(
     const void* activation, const void* up_weight, const void* gate,
     void* output, int m, int n, int k, int full_n, float alpha,
@@ -348,6 +487,85 @@ int fp8_gemm_f16(
     default:
       return -5;
   }
+}
+
+int fp8_rowwise_gemm_bf16(
+    const void* activation, const void* weight_nk,
+    const float* activation_scales, const float* weight_scales,
+    const void* bias, void* output, int m, int n, int k, int tactic,
+    cudaStream_t stream) {
+  if (activation == nullptr || weight_nk == nullptr ||
+      activation_scales == nullptr || weight_scales == nullptr ||
+      output == nullptr || m <= 0 || n <= 0 || k <= 0 ||
+      n % 16 != 0 || k % 16 != 0) {
+    return -6;
+  }
+#define APXINF_ROWWISE_CASE(ID, TM, TN, TK, CM, CN, CK)                    \
+  case ID:                                                                 \
+    if (bias != nullptr) {                                                  \
+      return launch_rowwise<Fp8RowwiseGemm<                                 \
+          Shape<TM, TN, TK>, Shape<CM, CN, CK>, true>>(                    \
+          activation, weight_nk, activation_scales, weight_scales, bias,   \
+          output, m, n, k, stream);                                        \
+    }                                                                      \
+    return launch_rowwise<Fp8RowwiseGemm<                                  \
+        Shape<TM, TN, TK>, Shape<CM, CN, CK>, false>>(                     \
+        activation, weight_nk, activation_scales, weight_scales, nullptr,  \
+        output, m, n, k, stream)
+#define APXINF_ROWWISE_SCHEDULED_CASE(                                    \
+    ID, TM, TN, TK, CM, CN, CK, MAINLOOP, EPILOGUE)                       \
+  case ID:                                                                 \
+    if (bias != nullptr) {                                                  \
+      return launch_rowwise<Fp8RowwiseGemm<                                 \
+          Shape<TM, TN, TK>, Shape<CM, CN, CK>, true, MAINLOOP,            \
+          EPILOGUE>>(                                                       \
+          activation, weight_nk, activation_scales, weight_scales, bias,   \
+          output, m, n, k, stream);                                        \
+    }                                                                      \
+    return launch_rowwise<Fp8RowwiseGemm<                                  \
+        Shape<TM, TN, TK>, Shape<CM, CN, CK>, false, MAINLOOP,             \
+        EPILOGUE>>(                                                         \
+        activation, weight_nk, activation_scales, weight_scales, nullptr,  \
+        output, m, n, k, stream)
+  switch (tactic) {
+    APXINF_ROWWISE_CASE(0, _64, _64, _128, _1, _4, _1);
+    APXINF_ROWWISE_CASE(1, _64, _64, _128, _1, _1, _1);
+    APXINF_ROWWISE_CASE(2, _128, _128, _128, _2, _1, _1);
+    APXINF_ROWWISE_CASE(3, _256, _128, _64, _2, _2, _1);
+    APXINF_ROWWISE_CASE(4, _128, _256, _128, _1, _2, _1);
+    APXINF_ROWWISE_CASE(5, _256, _128, _128, _2, _1, _1);
+    APXINF_ROWWISE_CASE(6, _256, _256, _128, _2, _2, _1);
+    APXINF_ROWWISE_SCHEDULED_CASE(
+        7, _128, _256, _128, _2, _1, _1,
+        cutlass::gemm::collective::KernelScheduleAuto,
+        cutlass::epilogue::TmaWarpSpecialized2Sm);
+    APXINF_ROWWISE_CASE(8, _256, _128, _128, _2, _2, _1);
+    APXINF_ROWWISE_SCHEDULED_CASE(
+        9, _256, _256, _128, _2, _1, _1,
+        cutlass::gemm::collective::KernelScheduleAuto,
+        cutlass::epilogue::TmaWarpSpecialized2Sm);
+    APXINF_ROWWISE_CASE(10, _256, _128, _64, _2, _2, _1);
+    APXINF_ROWWISE_SCHEDULED_CASE(
+        11, _64, _64, _128, _1, _1, _1,
+        cutlass::gemm::KernelTmaWarpSpecialized1SmSm100,
+        cutlass::epilogue::TmaWarpSpecialized1Sm);
+    APXINF_ROWWISE_SCHEDULED_CASE(
+        12, _64, _64, _128, _1, _4, _1,
+        cutlass::gemm::KernelTmaWarpSpecialized1SmSm100,
+        cutlass::epilogue::TmaWarpSpecialized1Sm);
+    APXINF_ROWWISE_SCHEDULED_CASE(
+        13, _64, _128, _128, _1, _2, _1,
+        cutlass::gemm::KernelTmaWarpSpecialized1SmSm100,
+        cutlass::epilogue::TmaWarpSpecialized1Sm);
+    APXINF_ROWWISE_SCHEDULED_CASE(
+        14, _128, _128, _128, _2, _1, _1,
+        cutlass::gemm::KernelTmaWarpSpecialized1SmSm100,
+        cutlass::epilogue::TmaWarpSpecialized1Sm);
+    default:
+      return -7;
+  }
+#undef APXINF_ROWWISE_SCHEDULED_CASE
+#undef APXINF_ROWWISE_CASE
 }
 
 int fp8_gemm_geglu_e4m3(

@@ -250,6 +250,47 @@ fn embedding_bf16_matches_fp32_reference() {
     assert_bf16_close_elementwise(&download_bf16_as_fp32(&out).unwrap(), &expected);
 }
 
+#[test]
+fn embedding_bf16_lookup_can_be_captured() {
+    let ctx = CudaContext::new(0).expect("CUDA device required");
+    let (vocab, embed_dim) = (16usize, 8usize);
+    let seq = [3u32, 0u32, 15u32];
+    let table = (0..vocab * embed_dim)
+        .map(|i| (i as f32) * 0.01 - 1.0)
+        .collect::<Vec<_>>();
+    let t_table = upload_fp32_as_bf16(&ctx, &table, vec![vocab, embed_dim]).unwrap();
+    let ids_bytes = seq
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect::<Vec<_>>();
+    let ids = CudaBuffer::alloc(ids_bytes.len(), 0).unwrap();
+    ids.copy_from_host(&ids_bytes).unwrap();
+    let workspace = crate::workspace::GraphWorkspace::new(4096, 0).unwrap();
+
+    let eager = crate::workspace::prepare_with_workspace(&workspace, || {
+        lookup(&ctx, &t_table, &ids, seq.len())
+    })
+    .unwrap();
+    ctx.synchronize().unwrap();
+    drop(eager);
+
+    crate::graph::begin(&ctx, crate::graph::CaptureMode::ThreadLocal).unwrap();
+    let captured =
+        crate::workspace::with_workspace(&workspace, || lookup(&ctx, &t_table, &ids, seq.len()))
+            .unwrap();
+    let graph = crate::graph::end(&ctx).unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+
+    let actual = download_bf16_as_fp32(&captured).unwrap();
+    let mut expected = Vec::with_capacity(seq.len() * embed_dim);
+    for &token in &seq {
+        let offset = token as usize * embed_dim;
+        expected.extend_from_slice(&table[offset..offset + embed_dim]);
+    }
+    assert_bf16_close_elementwise(&actual, &expected);
+}
+
 // ── Causal mask ───────────────────────────────────────────────────
 
 #[test]

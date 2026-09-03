@@ -45,7 +45,7 @@ from .calibration import (
     QuantizedOperator,
     adapt_records,
 )
-from .policies import AutoPolicy, Pi05Policy, Policy
+from .policies import AutoPolicy, Pi05Policy, Policy, WallossPolicy
 from .robots import (
     ROBOT_PRESETS,
     RobotPreset,
@@ -71,6 +71,7 @@ __all__ = [
     "Policy",
     # L2 policies
     "Pi05Policy",
+    "WallossPolicy",
     "AutoPolicy",
     # offline calibration framework
     "CalibrationContext",

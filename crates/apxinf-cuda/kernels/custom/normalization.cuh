@@ -144,6 +144,28 @@ __global__ void rms_norm_quant_f16_e4m3_kernel(
   }
 }
 
+__global__ void rms_norm_quant_bf16_e4m3_kernel(
+    const __nv_bfloat16* input, const __nv_bfloat16* weight,
+    __nv_fp8_e4m3* output, int rows, int cols, float eps,
+    float inverse_scale) {
+  __shared__ float scratch[8];
+  const int row = blockIdx.x;
+  float square_sum = 0.0f;
+  for (int col = threadIdx.x; col < cols; col += blockDim.x) {
+    const float value = __bfloat162float(
+        input[static_cast<int64_t>(row) * cols + col]);
+    square_sum += value * value;
+  }
+  const float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  for (int col = threadIdx.x; col < cols; col += blockDim.x) {
+    const int64_t index = static_cast<int64_t>(row) * cols + col;
+    float value = __bfloat162float(input[index]) * inverse_rms *
+                  __bfloat162float(weight[col]) * inverse_scale;
+    value = fminf(448.0f, fmaxf(-448.0f, value));
+    output[index] = static_cast<__nv_fp8_e4m3>(value);
+  }
+}
+
 __global__ void layer_norm_quant_f16_e4m3_kernel(
     const half* input, const half* weight, const half* bias,
     __nv_fp8_e4m3* output, int rows, int cols, float eps,
@@ -254,6 +276,5 @@ __global__ void ada_rms_norm_bf16_kernel(
         __bfloat162float(style[cols + col]));
   }
 }
-
 
 

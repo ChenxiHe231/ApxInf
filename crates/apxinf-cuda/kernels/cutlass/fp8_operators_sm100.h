@@ -9,6 +9,12 @@ int fp8_gemm_f16(
     const void* activation, const void* weight, void* output,
     int m, int n, int k, float alpha, int tactic, cudaStream_t stream);
 
+int fp8_rowwise_gemm_bf16(
+    const void* activation, const void* weight_nk,
+    const float* activation_scales, const float* weight_scales,
+    const void* bias, void* output, int m, int n, int k, int tactic,
+    cudaStream_t stream);
+
 int fp8_gemm_geglu_e4m3(
     const void* activation, const void* packed_weight, const void* gate,
     void* output, int m, int n, int k, int full_n, float alpha,

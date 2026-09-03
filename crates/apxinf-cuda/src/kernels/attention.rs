@@ -539,7 +539,196 @@ pub fn split_qkv_bias_bf16(
     })
 }
 
-#[cfg(apxinf_fa2_sm80)]
+#[allow(clippy::too_many_arguments)]
+pub fn split_gqa_qkv_mrope_cache_bf16(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    position_ids: &CudaBuffer,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    theta: f32,
+    sections: [usize; 3],
+    cache_tokens: usize,
+    caches: Option<(&Tensor, &Tensor, usize)>,
+) -> Result<QkvTensors> {
+    let (tokens, width) = matrix_shape(qkv, "GQA QKV mRoPE")?;
+    let q_width = q_heads * head_dim;
+    let kv_width = kv_heads * head_dim;
+    let expected_width = q_width + 2 * kv_width;
+    if !matches!(qkv.dtype(), DType::BF16 | DType::F16)
+        || width != expected_width
+        || q_heads == 0
+        || kv_heads == 0
+        || q_heads % kv_heads != 0
+        || head_dim == 0
+        || head_dim > 256
+        || head_dim % 2 != 0
+        || !theta.is_finite()
+        || theta <= 0.0
+        || sections[1] + sections[2] > head_dim / 2
+        || position_ids.len() < tokens * 3 * std::mem::size_of::<u32>()
+        || bias.is_some_and(|value| {
+            value.dtype() != DType::BF16 || value.shape().dims() != [expected_width]
+        })
+    {
+        return Err(Error::Other(
+            "static inference BF16 GQA QKV mRoPE shape mismatch".into(),
+        ));
+    }
+    let q = bf16_output(ctx, tokens, q_width)?;
+    let owned_k = caches
+        .is_none()
+        .then(|| bf16_output(ctx, cache_tokens * kv_heads, head_dim))
+        .transpose()?;
+    let owned_v = caches
+        .is_none()
+        .then(|| bf16_output(ctx, cache_tokens * kv_heads, head_dim))
+        .transpose()?;
+    let (k_ptr, v_ptr, cache_offset) = if let Some((k, v, offset)) = caches {
+        let expected_shape = [cache_tokens, kv_heads, head_dim];
+        if k.dtype() != DType::BF16
+            || v.dtype() != DType::BF16
+            || k.shape().dims() != expected_shape
+            || v.shape().dims() != expected_shape
+            || offset + tokens > cache_tokens
+        {
+            return Err(Error::Other(
+                "static inference BF16 GQA QKV cache shape mismatch".into(),
+            ));
+        }
+        (gpu_ptr(k)?, gpu_ptr(v)?, offset)
+    } else {
+        if tokens > cache_tokens {
+            return Err(Error::Other(
+                "static inference BF16 GQA QKV cache is too short".into(),
+            ));
+        }
+        (
+            owned_k.as_ref().unwrap().ptr(),
+            owned_v.as_ref().unwrap().ptr(),
+            0,
+        )
+    };
+    let status = unsafe {
+        let launch = if qkv.dtype() == DType::F16 {
+            ffi::apxinf_static_gqa_qkv_mrope_cache_f16
+        } else {
+            ffi::apxinf_static_gqa_qkv_mrope_cache_bf16
+        };
+        launch(
+            gpu_ptr(qkv)?,
+            optional_ptr(bias)?,
+            position_ids.ptr().cast(),
+            q.ptr(),
+            k_ptr,
+            v_ptr,
+            tokens as i32,
+            q_heads as i32,
+            kv_heads as i32,
+            head_dim as i32,
+            theta,
+            sections[1] as i32,
+            sections[2] as i32,
+            cache_offset as i32,
+            ctx.stream().handle(),
+        )
+    };
+    ffi::check_cuda(status).map_err(Error::Cuda)?;
+    let q = make_gpu_tensor(
+        Shape::new(vec![tokens, q_heads, head_dim]),
+        DType::BF16,
+        ctx.device_id(),
+        q,
+    );
+    if let (Some(k), Some(v)) = (owned_k, owned_v) {
+        Ok(QkvTensors {
+            q,
+            k: make_gpu_tensor(
+                Shape::new(vec![cache_tokens, kv_heads, head_dim]),
+                DType::BF16,
+                ctx.device_id(),
+                k,
+            ),
+            v: make_gpu_tensor(
+                Shape::new(vec![cache_tokens, kv_heads, head_dim]),
+                DType::BF16,
+                ctx.device_id(),
+                v,
+            ),
+        })
+    } else {
+        Ok(QkvTensors {
+            q,
+            k: caches.unwrap().0.clone(),
+            v: caches.unwrap().1.clone(),
+        })
+    }
+}
+
+pub fn split_vision_qkv_rope_bf16(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    position_ids: &CudaBuffer,
+    heads: usize,
+    head_dim: usize,
+    theta: f32,
+) -> Result<QkvTensors> {
+    let (tokens, width) = matrix_shape(qkv, "vision QKV RoPE")?;
+    let projection_width = heads * head_dim;
+    let expected_width = 3 * projection_width;
+    if !matches!(qkv.dtype(), DType::BF16 | DType::F16)
+        || width != expected_width
+        || heads == 0
+        || head_dim == 0
+        || head_dim > 256
+        || head_dim % 4 != 0
+        || !theta.is_finite()
+        || theta <= 0.0
+        || position_ids.len() < tokens * 2 * std::mem::size_of::<u32>()
+        || bias.is_some_and(|value| {
+            value.dtype() != DType::BF16 || value.shape().dims() != [expected_width]
+        })
+    {
+        return Err(Error::Other(
+            "static inference BF16 vision QKV RoPE shape mismatch".into(),
+        ));
+    }
+    let q = bf16_output(ctx, tokens, projection_width)?;
+    let k = bf16_output(ctx, tokens, projection_width)?;
+    let v = bf16_output(ctx, tokens, projection_width)?;
+    let status = unsafe {
+        let launch = if qkv.dtype() == DType::F16 {
+            ffi::apxinf_static_vision_qkv_rope_f16
+        } else {
+            ffi::apxinf_static_vision_qkv_rope_bf16
+        };
+        launch(
+            gpu_ptr(qkv)?,
+            optional_ptr(bias)?,
+            position_ids.ptr().cast(),
+            q.ptr(),
+            k.ptr(),
+            v.ptr(),
+            tokens as i32,
+            heads as i32,
+            head_dim as i32,
+            theta,
+            ctx.stream().handle(),
+        )
+    };
+    ffi::check_cuda(status).map_err(Error::Cuda)?;
+    let shape = Shape::new(vec![tokens, heads, head_dim]);
+    Ok(QkvTensors {
+        q: make_gpu_tensor(shape.clone(), DType::BF16, ctx.device_id(), q),
+        k: make_gpu_tensor(shape.clone(), DType::BF16, ctx.device_id(), k),
+        v: make_gpu_tensor(shape, DType::BF16, ctx.device_id(), v),
+    })
+}
+
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 #[allow(clippy::too_many_arguments)]
 fn fa2_attention(
     ctx: &CudaContext,
@@ -592,7 +781,48 @@ fn fa2_attention(
     ))
 }
 
-#[cfg(apxinf_fa2_sm80)]
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fa2_attention_causal(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    query_tokens: usize,
+    key_tokens: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    let output = output_buffer(ctx, q.size_in_bytes())?;
+    let softmax_lse = output_buffer(ctx, query_heads * query_tokens * std::mem::size_of::<f32>())?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_fa2_bf16_causal(
+            gpu_ptr(q)?,
+            gpu_ptr(k)?,
+            gpu_ptr(v)?,
+            output.ptr(),
+            softmax_lse.ptr(),
+            1,
+            query_tokens as i32,
+            key_tokens as i32,
+            query_heads as i32,
+            kv_heads as i32,
+            head_dim as i32,
+            (head_dim as f32).sqrt().recip(),
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        q.shape().clone(),
+        DType::BF16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 fn fa2_splitkv_enabled(
     query_tokens: usize,
     key_tokens: usize,
@@ -606,12 +836,12 @@ fn fa2_splitkv_enabled(
     query_tokens <= 64
         && key_tokens > query_tokens
         && query_heads > kv_heads
-        && head_dim == 256
+        && matches!(head_dim, 128 | 256)
 }
 
-#[cfg(apxinf_fa2_sm80)]
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 #[allow(clippy::too_many_arguments)]
-fn fa2_attention_splitkv(
+pub(crate) fn fa2_attention_splitkv(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -622,6 +852,7 @@ fn fa2_attention_splitkv(
     query_heads: usize,
     kv_heads: usize,
     head_dim: usize,
+    causal: bool,
 ) -> Result<Tensor> {
     let output = output_buffer(ctx, q.size_in_bytes())?;
     let lse_elements = batches
@@ -666,25 +897,46 @@ fn fa2_attention_splitkv(
             })?,
     )?;
     unsafe {
-        ffi::check_cuda(ffi::apxinf_static_fa2_bf16_splitkv(
-            gpu_ptr(q)?,
-            gpu_ptr(k)?,
-            gpu_ptr(v)?,
-            output.ptr(),
-            softmax_lse.ptr(),
-            softmax_lse_accum.ptr(),
-            o_accum.ptr(),
-            batches as i32,
-            query_tokens as i32,
-            key_tokens as i32,
-            query_heads as i32,
-            kv_heads as i32,
-            head_dim as i32,
-            (head_dim as f32).sqrt().recip(),
-            ctx.caps().multiprocessor_count as i32,
-            ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
+        let status = if causal {
+            ffi::apxinf_static_fa2_bf16_causal_splitkv(
+                gpu_ptr(q)?,
+                gpu_ptr(k)?,
+                gpu_ptr(v)?,
+                output.ptr(),
+                softmax_lse.ptr(),
+                softmax_lse_accum.ptr(),
+                o_accum.ptr(),
+                batches as i32,
+                query_tokens as i32,
+                key_tokens as i32,
+                query_heads as i32,
+                kv_heads as i32,
+                head_dim as i32,
+                (head_dim as f32).sqrt().recip(),
+                ctx.caps().multiprocessor_count as i32,
+                ctx.stream().handle(),
+            )
+        } else {
+            ffi::apxinf_static_fa2_bf16_splitkv(
+                gpu_ptr(q)?,
+                gpu_ptr(k)?,
+                gpu_ptr(v)?,
+                output.ptr(),
+                softmax_lse.ptr(),
+                softmax_lse_accum.ptr(),
+                o_accum.ptr(),
+                batches as i32,
+                query_tokens as i32,
+                key_tokens as i32,
+                query_heads as i32,
+                kv_heads as i32,
+                head_dim as i32,
+                (head_dim as f32).sqrt().recip(),
+                ctx.caps().multiprocessor_count as i32,
+                ctx.stream().handle(),
+            )
+        };
+        ffi::check_cuda(status).map_err(Error::Cuda)?;
     }
     Ok(make_gpu_tensor(
         q.shape().clone(),
@@ -753,7 +1005,7 @@ pub fn mqa_bf16(
     {
         if fa2_splitkv_enabled(q_shape[0], key_tokens, q_shape[1], 1, q_shape[2]) {
             return fa2_attention_splitkv(
-                ctx, q, k, v, 1, q_shape[0], key_tokens, q_shape[1], 1, q_shape[2],
+                ctx, q, k, v, 1, q_shape[0], key_tokens, q_shape[1], 1, q_shape[2], false,
             );
         }
         return fa2_attention(
@@ -790,6 +1042,48 @@ pub fn mqa_bf16(
     ))
 }
 
+pub fn causal_gqa_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
+) -> Result<Tensor> {
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if [q, k, v]
+        .into_iter()
+        .any(|tensor| tensor.dtype() != DType::BF16)
+        || q_shape.len() != 3
+        || k_shape.len() != 3
+        || v.shape() != k.shape()
+        || k_shape[0] < key_tokens
+        || k_shape[2] != q_shape[2]
+        || k_shape[1] == 0
+        || q_shape[1] % k_shape[1] != 0
+        || key_tokens < q_shape[0]
+    {
+        return Err(Error::Other(
+            "static inference causal BF16 GQA shape mismatch".into(),
+        ));
+    }
+    #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
+    {
+        if fa2_splitkv_enabled(q_shape[0], key_tokens, q_shape[1], k_shape[1], q_shape[2]) {
+            return fa2_attention_splitkv(
+                ctx, q, k, v, 1, q_shape[0], key_tokens, q_shape[1], k_shape[1], q_shape[2], true,
+            );
+        }
+        return fa2_attention_causal(
+            ctx, q, k, v, q_shape[0], key_tokens, q_shape[1], k_shape[1], q_shape[2],
+        );
+    }
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
+    Err(Error::Other(
+        "causal BF16 GQA requires the FA2 backend".into(),
+    ))
+}
+
 pub fn mha_bf16(
     ctx: &CudaContext,
     q: &Tensor,
@@ -812,7 +1106,7 @@ pub fn mha_bf16(
             "static inference BF16 MHA shape mismatch".into(),
         ));
     }
-    #[cfg(apxinf_fa2_sm80)]
+    #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
     {
         return fa2_attention(
             ctx,
@@ -827,7 +1121,7 @@ pub fn mha_bf16(
             shape[2],
         );
     }
-    #[cfg(apxinf_cutlass_fmha)]
+    #[cfg(all(apxinf_cutlass_fmha, not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))))]
     if tokens_per_batch == 256 && shape[1] == 16 && shape[2] == 72 {
         let output = output_buffer(ctx, q.size_in_bytes())?;
         unsafe {
@@ -878,9 +1172,9 @@ pub fn mha_bf16(
             ));
         }
     }
-    #[cfg(not(apxinf_fa2_sm80))]
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     let output = output_buffer(ctx, q.size_in_bytes())?;
-    #[cfg(not(apxinf_fa2_sm80))]
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     unsafe {
         ffi::check_cuda(ffi::apxinf_static_mha_bf16(
             gpu_ptr(q)?,
@@ -895,7 +1189,108 @@ pub fn mha_bf16(
         ))
         .map_err(Error::Cuda)?;
     }
-    #[cfg(not(apxinf_fa2_sm80))]
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
+    Ok(make_gpu_tensor(
+        q.shape().clone(),
+        DType::BF16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+pub fn segmented_mha_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    offsets: &crate::buffer::CudaBuffer,
+    host_offsets: &[u32],
+    segments: usize,
+    max_tokens: usize,
+) -> Result<Tensor> {
+    let shape = q.shape().dims();
+    if [q, k, v]
+        .into_iter()
+        .any(|tensor| tensor.dtype() != DType::BF16)
+        || shape.len() != 3
+        || k.shape() != q.shape()
+        || v.shape() != q.shape()
+        || segments == 0
+        || host_offsets.len() != segments + 1
+        || max_tokens == 0
+        || shape[2] > 256
+    {
+        return Err(Error::Other(
+            "segmented BF16 MHA requires matching [tokens,heads,head_dim] tensors".into(),
+        ));
+    }
+    super::contracts::require_buffers(
+        ctx,
+        "segmented BF16 MHA",
+        &[(
+            "offsets",
+            offsets,
+            (segments + 1) * std::mem::size_of::<u32>(),
+        )],
+    )?;
+    #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
+    {
+        let output = output_buffer(ctx, q.size_in_bytes())?;
+        let softmax_lse = output_buffer(ctx, shape[0] * shape[1] * std::mem::size_of::<f32>())?;
+        let row_bytes = shape[1] * shape[2] * DType::BF16.size_in_bytes();
+        let lse_row_bytes = shape[1] * std::mem::size_of::<f32>();
+        for bounds in host_offsets.windows(2) {
+            let start = bounds[0] as usize;
+            let tokens = (bounds[1] - bounds[0]) as usize;
+            unsafe {
+                ffi::check_cuda(ffi::apxinf_static_fa2_bf16(
+                    gpu_ptr(q)?.cast::<u8>().add(start * row_bytes).cast(),
+                    gpu_ptr(k)?.cast::<u8>().add(start * row_bytes).cast(),
+                    gpu_ptr(v)?.cast::<u8>().add(start * row_bytes).cast(),
+                    output.ptr().cast::<u8>().add(start * row_bytes).cast(),
+                    softmax_lse
+                        .ptr()
+                        .cast::<u8>()
+                        .add(start * lse_row_bytes)
+                        .cast(),
+                    1,
+                    tokens as i32,
+                    tokens as i32,
+                    shape[1] as i32,
+                    shape[1] as i32,
+                    shape[2] as i32,
+                    (shape[2] as f32).sqrt().recip(),
+                    ctx.stream().handle(),
+                ))
+                .map_err(Error::Cuda)?;
+            }
+        }
+        return Ok(make_gpu_tensor(
+            q.shape().clone(),
+            DType::BF16,
+            ctx.device_id(),
+            output,
+        ));
+    }
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
+    let output = output_buffer(ctx, q.size_in_bytes())?;
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_segmented_mha_bf16(
+            gpu_ptr(q)?,
+            gpu_ptr(k)?,
+            gpu_ptr(v)?,
+            offsets.ptr(),
+            output.ptr(),
+            segments as i32,
+            max_tokens as i32,
+            shape[1] as i32,
+            shape[2] as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    #[cfg(not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
     Ok(make_gpu_tensor(
         q.shape().clone(),
         DType::BF16,

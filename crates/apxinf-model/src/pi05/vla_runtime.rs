@@ -661,6 +661,21 @@ impl Pi05VlaRuntime {
 }
 
 impl VlaRuntime for Pi05VlaRuntime {
+    fn contract(&self) -> crate::VlaContract {
+        crate::VlaContract {
+            action_shape: [self.config.action_horizon, self.config.action_dim],
+            patch_shape: [
+                self.config.num_views * self.config.patches_per_view(),
+                3 * self.config.patch_size * self.config.patch_size,
+            ],
+            max_token_len: self.config.max_token_len,
+            num_views: self.config.num_views,
+            image_size: self.config.image_size,
+            patch_size: self.config.patch_size,
+            accepts_rgb_u8: true,
+        }
+    }
+
     fn infer(&self, request: &VlaRequest<'_>) -> Result<Action> {
         let observation = request.observation;
         observation.validate()?;
@@ -710,6 +725,12 @@ impl VlaRuntime for Pi05VlaRuntime {
             unreachable!("calibration plan is always eager")
         };
         prepared.calibrate_eager(inputs, request)
+    }
+
+    fn calibration_plan(&self) -> Result<Vec<String>> {
+        Ok(super::Pi05CalibrationPlan::for_config(&self.config)
+            .sites()
+            .to_vec())
     }
 }
 

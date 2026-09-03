@@ -7,9 +7,11 @@ builder so no dataset / simulator is needed to see the API work.
 
 from __future__ import annotations
 
+import argparse
+import json
 import pathlib
 import sys
-from typing import Any, Dict, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -20,6 +22,42 @@ import numpy as np
 _APXINF_PKG = pathlib.Path(__file__).resolve().parents[1]
 if _APXINF_PKG.is_dir() and str(_APXINF_PKG) not in sys.path:
     sys.path.insert(0, str(_APXINF_PKG))
+
+
+def json_object(value: str) -> Dict[str, Any]:
+    """Parse a JSON object for model-specific ``AutoPolicy`` options."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise argparse.ArgumentTypeError(f"invalid JSON: {error.msg}") from error
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("expected a JSON object")
+    return parsed
+
+
+def policy_kwargs(
+    options: Mapping[str, Any],
+    *,
+    device: str,
+    precision: str,
+    action_dim: int = 0,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Merge generic CLI flags with concrete-policy options.
+
+    Dedicated flags win over duplicate JSON keys. Server-owned metadata wins
+    over caller metadata while preserving unrelated caller fields.
+    """
+    kwargs = dict(options)
+    if metadata is not None:
+        caller_metadata = kwargs.pop("metadata", {})
+        if not isinstance(caller_metadata, dict):
+            raise ValueError("policy-options metadata must be a JSON object")
+        kwargs["metadata"] = {**caller_metadata, **metadata}
+    kwargs.update(device=device, precision=precision)
+    if action_dim:
+        kwargs["action_dim"] = action_dim
+    return kwargs
 
 
 def synthetic_observation(

@@ -16,6 +16,10 @@ pub struct ResidualNormTensors {
     pub hidden: Tensor,
     pub normalized: Tensor,
 }
+pub struct DynamicResidualNormTensors {
+    pub hidden: Tensor,
+    pub normalized: super::quantization::DynamicFp8Tensor,
+}
 use crate::workspace::{fp8_emulation_required, may_prepare_native_resources, output_buffer};
 
 pub(crate) fn fp8_fused_tuning_key(
@@ -178,6 +182,38 @@ pub fn bias_residual_bf16(
     Ok(matrix_tensor(ctx, rows, cols, output))
 }
 
+pub fn bias_residual_f16_bf16(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+) -> Result<Tensor> {
+    let (rows, cols) = matrix_shape(projection, "mixed bias residual")?;
+    if projection.dtype() != DType::F16
+        || residual.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || bias.is_some_and(|value| value.dtype() != DType::BF16 || value.shape().dims() != [cols])
+    {
+        return Err(Error::Other(
+            "static inference mixed bias residual has incompatible dtype or shape".into(),
+        ));
+    }
+    let output = bf16_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_bias_residual_f16_bf16(
+            gpu_ptr(projection)?,
+            optional_ptr(bias)?,
+            gpu_ptr(residual)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, cols, output))
+}
+
 pub fn bias_residual_rms_bf16(
     ctx: &CudaContext,
     projection: &Tensor,
@@ -218,6 +254,126 @@ pub fn bias_residual_rms_bf16(
     Ok(ResidualNormTensors {
         hidden: matrix_tensor(ctx, rows, cols, hidden),
         normalized: matrix_tensor(ctx, rows, cols, normalized),
+    })
+}
+
+/// Fuse BF16 bias/residual addition, RMSNorm, and dynamic per-row E4M3
+/// quantization for the next rowwise GEMM.
+pub fn bias_residual_rms_quantize_rows_bf16_e4m3(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    output_cols: usize,
+) -> Result<DynamicResidualNormTensors> {
+    let (rows, cols) = matrix_shape(projection, "dynamic residual RMSNorm quantization")?;
+    if projection.dtype() != DType::BF16
+        || residual.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || weight.shape().dims() != [cols]
+        || bias.is_some_and(|value| value.dtype() != DType::BF16 || value.shape().dims() != [cols])
+        || output_cols < cols
+        || !eps.is_finite()
+        || eps <= 0.0
+    {
+        return Err(Error::Other(
+            "dynamic residual RMSNorm quantization has incompatible input".into(),
+        ));
+    }
+    let hidden = bf16_output(ctx, rows, cols)?;
+    let normalized = output_buffer(
+        ctx,
+        rows.checked_mul(output_cols)
+            .ok_or_else(|| Error::Other("dynamic residual RMSNorm output size overflow".into()))?,
+    )?;
+    let scales = output_buffer(ctx, rows * DType::F32.size_in_bytes())?;
+    unsafe {
+        ffi::check_cuda(
+            ffi::apxinf_dynamic_bias_residual_rms_norm_quantize_rows_bf16_e4m3(
+                gpu_ptr(projection)?,
+                optional_ptr(bias)?,
+                gpu_ptr(residual)?,
+                gpu_ptr(weight)?,
+                hidden.ptr(),
+                normalized.ptr(),
+                scales.ptr(),
+                rows as i32,
+                cols as i32,
+                output_cols as i32,
+                eps,
+                ctx.stream().handle(),
+            ),
+        )
+        .map_err(Error::Cuda)?;
+    }
+    Ok(DynamicResidualNormTensors {
+        hidden: matrix_tensor(ctx, rows, cols, hidden),
+        normalized: super::quantization::DynamicFp8Tensor {
+            values: make_gpu_tensor(
+                Shape::new(vec![rows, output_cols]),
+                DType::F8E4M3,
+                ctx.device_id(),
+                normalized,
+            ),
+            scales: make_gpu_tensor(Shape::new(vec![rows]), DType::F32, ctx.device_id(), scales),
+        },
+    })
+}
+
+pub fn bias_residual_rms_quant_f16_bf16_e4m3(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<ResidualNormTensors> {
+    let (rows, cols) = matrix_shape(projection, "mixed residual RMSNorm quantization")?;
+    if projection.dtype() != DType::F16
+        || residual.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || weight.shape().dims() != [cols]
+        || bias.is_some_and(|value| value.dtype() != DType::BF16 || value.shape().dims() != [cols])
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return Err(Error::Other(
+            "static inference mixed residual RMSNorm quantization has incompatible input".into(),
+        ));
+    }
+    let hidden = bf16_output(ctx, rows, cols)?;
+    let normalized = fp8_output(ctx, rows, cols)?;
+    unsafe {
+        ffi::check_cuda(
+            ffi::apxinf_static_bias_residual_rms_norm_quant_f16_bf16_e4m3(
+                gpu_ptr(projection)?,
+                optional_ptr(bias)?,
+                gpu_ptr(residual)?,
+                gpu_ptr(weight)?,
+                hidden.ptr(),
+                normalized.ptr(),
+                rows as i32,
+                cols as i32,
+                eps,
+                scale,
+                ctx.stream().handle(),
+            ),
+        )
+        .map_err(Error::Cuda)?;
+    }
+    Ok(ResidualNormTensors {
+        hidden: matrix_tensor(ctx, rows, cols, hidden),
+        normalized: make_gpu_tensor(
+            Shape::new(vec![rows, cols]),
+            DType::F8E4M3,
+            ctx.device_id(),
+            normalized,
+        ),
     })
 }
 

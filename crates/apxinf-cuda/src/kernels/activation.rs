@@ -9,6 +9,7 @@ use super::contracts::{
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
 use crate::ffi;
+use crate::workspace::output_buffer;
 
 /// Allocation-free SiLU into caller-owned decode storage.
 pub fn silu_into(
@@ -87,7 +88,7 @@ pub fn silu(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
     let count = input.numel() as u32;
 
     let out_bytes = input.size_in_bytes();
-    let out_buf = CudaBuffer::alloc_zeros(out_bytes, device_id).map_err(Error::Cuda)?;
+    let out_buf = output_buffer(ctx, out_bytes)?;
 
     unsafe {
         let res = match input.dtype() {
@@ -119,8 +120,12 @@ pub fn gelu_tanh(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
     let count = input.numel() as u32;
     let out_buf = CudaBuffer::alloc_zeros(input.size_in_bytes(), device_id).map_err(Error::Cuda)?;
     unsafe {
-        let res =
-            ffi::apxinf_gelu_tanh_bf16(gpu_ptr(input)?, out_buf.ptr(), count, ctx.stream().handle());
+        let res = ffi::apxinf_gelu_tanh_bf16(
+            gpu_ptr(input)?,
+            out_buf.ptr(),
+            count,
+            ctx.stream().handle(),
+        );
         ffi::check_cuda(res).map_err(Error::Cuda)?;
     }
     Ok(make_gpu_tensor(
@@ -188,6 +193,124 @@ pub fn geglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
         .map_err(Error::Cuda)?;
     }
     Ok(matrix_tensor(ctx, rows, inner, output))
+}
+
+pub fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
+    let (rows, twice_inner) = matrix_shape(gate_up, "SwiGLU")?;
+    if gate_up.dtype() != DType::BF16 || twice_inner % 2 != 0 {
+        return Err(Error::Other(
+            "static inference BF16 SwiGLU expects [rows,2*inner]".into(),
+        ));
+    }
+    let inner = twice_inner / 2;
+    let output = bf16_output(ctx, rows, inner)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_swiglu_bf16(
+            gpu_ptr(gate_up)?,
+            output.ptr(),
+            rows as i32,
+            inner as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, inner, output))
+}
+
+/// Fuse optional bias, SwiGLU, and dynamic per-row E4M3 quantization.
+pub fn swiglu_quantize_rows_bf16_e4m3(
+    ctx: &CudaContext,
+    gate_up: &Tensor,
+    bias: Option<&Tensor>,
+    logical_inner: usize,
+    output_cols: usize,
+) -> Result<super::quantization::DynamicFp8Tensor> {
+    let (rows, input_cols) = matrix_shape(gate_up, "dynamic SwiGLU quantization")?;
+    if gate_up.dtype() != DType::BF16
+        || logical_inner == 0
+        || input_cols < 2 * logical_inner
+        || output_cols < logical_inner
+        || bias.is_some_and(|value| {
+            value.dtype() != DType::BF16 || value.shape().dims() != [2 * logical_inner]
+        })
+    {
+        return Err(Error::Other(
+            "dynamic SwiGLU quantization has incompatible input".into(),
+        ));
+    }
+    let values = output_buffer(
+        ctx,
+        rows.checked_mul(output_cols)
+            .ok_or_else(|| Error::Other("dynamic SwiGLU output size overflow".into()))?,
+    )?;
+    let scales = output_buffer(ctx, rows * DType::F32.size_in_bytes())?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_dynamic_swiglu_quantize_rows_bf16_e4m3(
+            gpu_ptr(gate_up)?,
+            optional_ptr(bias)?,
+            values.ptr(),
+            scales.ptr(),
+            rows as i32,
+            input_cols as i32,
+            logical_inner as i32,
+            output_cols as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(super::quantization::DynamicFp8Tensor {
+        values: make_gpu_tensor(
+            Shape::new(vec![rows, output_cols]),
+            DType::F8E4M3,
+            ctx.device_id(),
+            values,
+        ),
+        scales: make_gpu_tensor(Shape::new(vec![rows]), DType::F32, ctx.device_id(), scales),
+    })
+}
+
+pub fn swiglu_quant_f16_e4m3(
+    ctx: &CudaContext,
+    gate_up: &Tensor,
+    bias: Option<&Tensor>,
+    scale: f32,
+) -> Result<Tensor> {
+    let (rows, twice_inner) = matrix_shape(gate_up, "SwiGLU quantization")?;
+    if gate_up.dtype() != DType::F16 || twice_inner % 2 != 0 || !scale.is_finite() || scale <= 0.0 {
+        return Err(Error::Other(
+            "static inference quantized SwiGLU expects FP16 [rows,2*inner] and a positive scale"
+                .into(),
+        ));
+    }
+    let inner = twice_inner / 2;
+    if bias
+        .is_some_and(|value| value.dtype() != DType::BF16 || value.shape().dims() != [twice_inner])
+    {
+        return Err(Error::Other(
+            "static inference quantized SwiGLU bias must be BF16 [2*inner]".into(),
+        ));
+    }
+    let output = fp8_output(ctx, rows, inner)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_static_swiglu_quant_f16_e4m3(
+            gpu_ptr(gate_up)?,
+            bias.map(gpu_ptr)
+                .transpose()?
+                .unwrap_or(std::ptr::null_mut()),
+            output.ptr(),
+            rows as i32,
+            inner as i32,
+            scale,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, inner]),
+        DType::F8E4M3,
+        ctx.device_id(),
+        output,
+    ))
 }
 pub fn bias_gelu_quant_f16_e4m3(
     ctx: &CudaContext,

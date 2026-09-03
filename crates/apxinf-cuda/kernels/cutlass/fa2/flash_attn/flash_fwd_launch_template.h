@@ -76,6 +76,12 @@ DEFINE_FLASH_FORWARD_KERNEL(flash_fwd_splitkv_combine_kernel, int kBlockM, int L
     FLASH_NAMESPACE::combine_attn_seqk_parallel<Kernel_traits, kBlockM, Log_max_splits, Is_even_K>(params);
 }
 
+inline bool flash_stream_is_capturing(cudaStream_t stream) {
+    cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+    C10_CUDA_CHECK(cudaStreamIsCapturing(stream, &status));
+    return status != cudaStreamCaptureStatusNone;
+}
+
 template<typename Kernel_traits, bool Is_dropout, bool Is_causal>
 void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     constexpr size_t smem_size = Kernel_traits::kSmemSize;
@@ -105,7 +111,7 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                             // auto kernel = &flash_fwd_kernel<Kernel_traits, false, Is_causal, false, false, true, true, false>;
                             // printf("IsEvenMNConst = %d, IsEvenKConst = %d, Is_local = %d, Is_causal = %d, ReturnSoftmaxConst = %d, Is_dropout = %d\n", int(IsEvenMNConst), int(IsEvenKConst), int(Is_local), int(Is_causal), int(ReturnSoftmaxConst), int(Is_dropout));
                             // auto kernel = &flash_fwd_kernel<Kernel_traits, false, Is_causal, false, true, true, false>;
-                            if (smem_size >= 48 * 1024) {
+                            if (smem_size >= 48 * 1024 && !flash_stream_is_capturing(stream)) {
                                 C10_CUDA_CHECK(cudaFuncSetAttribute(
                                     kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                             }
@@ -145,7 +151,7 @@ void run_flash_splitkv_fwd(Flash_fwd_params &params, cudaStream_t stream) {
                                 auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, Is_local && !Is_causal, Has_alibi, IsEvenMNConst && !Append_KV && IsEvenKConst && !Is_local && Kernel_traits::kHeadDim <= 128, IsEvenKConst, Is_softcap, Split, Append_KV>;
                                 // auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, false, true, Split, Append_KV>;
                                 // auto kernel = &flash_fwd_splitkv_kernel<Kernel_traits, Is_causal, false, IsEvenKConst>;
-                                if (smem_size >= 48 * 1024) {
+                                if (smem_size >= 48 * 1024 && !flash_stream_is_capturing(stream)) {
                                     C10_CUDA_CHECK(cudaFuncSetAttribute(
                                         kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));
                                 }

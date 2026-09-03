@@ -10,10 +10,10 @@
 //!   vision→patches runs inside the Rust CUDA graph.
 //!
 //! **L0** [`Model::infer_patches`] (caller supplies pre-computed `patches`,
-//! equivalent to a Rust `Observation(Patches)`) is implemented but **not part of
-//! the public API**: it is exposed to Python only under the private
-//! `_infer_patches` name for L0/L1 consistency tests, and may change or be
-//! removed without notice.
+//! equivalent to a Rust `Observation(Patches)`) is exposed under the private
+//! `_infer_patches` name. It is the model-policy bridge for families such as
+//! WallOSS whose preprocessing stays in Python, and remains outside the public
+//! end-user API.
 //!
 //! Both return the **normalized-domain** action as a `float32` numpy array of
 //! shape `[action_horizon, action_dim]`. Inference accepts optional exact
@@ -22,9 +22,9 @@
 //! `*_seeded` variants remain available for explicitly keyed replay. No processor
 //! lives here.
 //!
-//! The pi05 runtime is only registered on CUDA devices, so real inference
+//! The VLA runtimes are only registered on CUDA devices, so real inference
 //! requires the `cuda` feature and a CUDA machine; without it the module still
-//! imports and reports shape contracts, but `load` errors for pi05.
+//! imports and reports shape contracts, but model loading errors.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -39,10 +39,9 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use apxinf_core::{Device, RngKey, Shape, Tensor};
-use apxinf_model::pi05::Pi05CalibrationPlan;
 use apxinf_model::{
     AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
-    SyntheticWeights, VisionObservation, VlaRequest,
+    SyntheticWeights, VisionObservation, VlaContract, VlaRequest,
 };
 
 /// Map any Rust error into a Python `RuntimeError`.
@@ -111,7 +110,7 @@ fn load_config(checkpoint: &Path) -> PyResult<Pi05Config> {
     }
 }
 
-/// A loaded pi05 model handle. Holds the runtime plus the resolved config used
+/// A loaded VLA model handle. Holds the runtime plus the resolved config used
 /// for shape-contract queries and input validation.
 ///
 /// The pi05 runtime uses `Rc`/`RefCell` internally and is therefore not `Send`;
@@ -119,19 +118,37 @@ fn load_config(checkpoint: &Path) -> PyResult<Pi05Config> {
 #[pyclass(unsendable)]
 pub struct Model {
     model: LoadedModel,
-    config: Pi05Config,
+    contract: VlaContract,
     device: Device,
     sampling_seed: Cell<u64>,
     sampling_draw: Cell<u64>,
 }
 
 impl Model {
+    fn require_rgb_contract(&self, method: &str) -> PyResult<VlaContract> {
+        if self.contract.accepts_rgb_u8 {
+            Ok(self.contract)
+        } else {
+            Err(PyValueError::new_err(format!(
+                "apxinf_py.{method}: loaded model accepts preprocessed patches, not RGB"
+            )))
+        }
+    }
+
     fn patch_rows(&self) -> usize {
-        self.config.num_views * self.config.patches_per_view()
+        self.contract.patch_shape[0]
     }
 
     fn patch_width(&self) -> usize {
-        3 * self.config.patch_size * self.config.patch_size
+        self.contract.patch_shape[1]
+    }
+
+    fn action_shape(&self) -> [usize; 2] {
+        self.contract.action_shape
+    }
+
+    fn max_token_len_value(&self) -> usize {
+        self.contract.max_token_len
     }
 
     fn validate_tokens(&self, token_ids: &[u32]) -> PyResult<()> {
@@ -140,11 +157,12 @@ impl Model {
                 "apxinf_py.infer: token_ids must be non-empty",
             ));
         }
-        if token_ids.len() > self.config.max_token_len {
+        let max_token_len = self.max_token_len_value();
+        if token_ids.len() > max_token_len {
             return Err(PyValueError::new_err(format!(
                 "apxinf_py.infer: token_ids length {} exceeds max_token_len {}",
                 token_ids.len(),
-                self.config.max_token_len
+                max_token_len
             )));
         }
         Ok(())
@@ -153,7 +171,7 @@ impl Model {
     /// Validate `noise` shape and build a CPU f32 tensor. The runtime normalizes
     /// f32 CPU tensors to its input dtype, so numpy f32 is accepted directly.
     fn noise_tensor(&self, noise: PyReadonlyArray2<'_, f32>) -> PyResult<Tensor> {
-        let expected = [self.config.action_horizon, self.config.action_dim];
+        let expected = self.action_shape();
         let shape = noise.shape();
         if shape.len() != 2 || shape[0] != expected[0] || shape[1] != expected[1] {
             return Err(PyValueError::new_err(format!(
@@ -167,13 +185,27 @@ impl Model {
         Tensor::from_f32(Shape::new(vec![expected[0], expected[1]]), data).map_err(runtime_err)
     }
 
+    fn action_mask_tensor(&self, mask: PyReadonlyArray2<'_, f32>) -> PyResult<Tensor> {
+        let expected = self.action_shape();
+        let shape = mask.shape();
+        if shape != expected {
+            return Err(PyValueError::new_err(format!(
+                "apxinf_py.infer: action_mask expected shape {:?}, got {:?}",
+                expected, shape
+            )));
+        }
+        let data = mask.as_slice().map_err(|_| {
+            PyValueError::new_err("apxinf_py.infer: action_mask must be C-contiguous float32")
+        })?;
+        Tensor::from_f32(Shape::new(expected.to_vec()), data).map_err(runtime_err)
+    }
+
     fn action_array<'py>(
         &self,
         py: Python<'py>,
         flat: Vec<f32>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        let horizon = self.config.action_horizon;
-        let dim = self.config.action_dim;
+        let [horizon, dim] = self.action_shape();
         if flat.len() != horizon * dim {
             return Err(PyRuntimeError::new_err(format!(
                 "apxinf_py.infer: model returned {} values, expected {} ({}x{})",
@@ -230,7 +262,7 @@ impl Model {
 
 #[pymethods]
 impl Model {
-    /// Load a pi05 checkpoint through the unified `AutoModel` frontend.
+    /// Load a VLA checkpoint through the unified `AutoModel` frontend.
     ///
     /// * `model` — model name, e.g. `"pi05"`.
     /// * `path` — checkpoint directory or index file.
@@ -271,53 +303,55 @@ impl Model {
         sampling_seed: u64,
     ) -> PyResult<Self> {
         let device = parse_device(device)?;
-        let mut config = load_config(&path)?;
-        // Only hand the loader an explicit config when the caller actually
-        // overrode something; otherwise it reads `config.json` itself, exactly
-        // as before.
-        let mut overridden = false;
-        if let Some(horizon) = action_horizon {
-            config.action_horizon = horizon;
-            overridden = true;
-        }
-        if let Some(views) = num_views {
-            if views == 0 || views > config.num_views {
-                return Err(PyValueError::new_err(format!(
-                    "apxinf_py.load: num_views={views} must be in 1..={} (the \
-                     checkpoint's view count); a checkpoint cannot serve more \
-                     cameras than it was trained on",
-                    config.num_views
-                )));
+        // These are PI0.5 deployment overrides. When absent, the binding does
+        // not inspect a concrete model config at all; AutoModel and the selected
+        // loader own detection and parsing. A non-PI0.5 loader rejects the
+        // explicit config below rather than being detected here by name.
+        let config = if action_horizon.is_some()
+            || num_views.is_some()
+            || num_flow_steps.is_some()
+            || flow_start_time.is_some()
+        {
+            let mut config = load_config(&path)?;
+            if let Some(horizon) = action_horizon {
+                config.action_horizon = horizon;
             }
-            config.num_views = views;
-            overridden = true;
-        }
-        if let Some(steps) = num_flow_steps {
-            config.num_flow_steps = steps;
-            overridden = true;
-        }
-        if let Some(start_time) = flow_start_time {
-            config.flow_start_time = start_time;
-            overridden = true;
-        }
-        // Validate once, after every override, so a combination that is
-        // individually valid but jointly is not still fails here.
-        if overridden {
+            if let Some(views) = num_views {
+                if views == 0 || views > config.num_views {
+                    return Err(PyValueError::new_err(format!(
+                        "apxinf_py.load: num_views={views} must be in 1..={} (the \
+                         checkpoint's view count); a checkpoint cannot serve more \
+                         cameras than it was trained on",
+                        config.num_views
+                    )));
+                }
+                config.num_views = views;
+            }
+            if let Some(steps) = num_flow_steps {
+                config.num_flow_steps = steps;
+            }
+            if let Some(start_time) = flow_start_time {
+                config.flow_start_time = start_time;
+            }
             config.validate().map_err(runtime_err)?;
-        }
+            Some(config)
+        } else {
+            None
+        };
         let options = LoadOptions {
             model_name: Some(model.to_owned()),
             precision: parse_precision(precision)?,
             calibration_path: calibration,
             tuning_path: tactics,
             autotune,
-            config: overridden.then(|| config.clone()),
+            config,
             ..LoadOptions::default()
         };
         let loaded = AutoModel::load_model(device, &path, &options).map_err(runtime_err)?;
+        let contract = loaded.vla().map_err(runtime_err)?.contract();
         Ok(Self {
             model: loaded,
-            config,
+            contract,
             device,
             sampling_seed: Cell::new(sampling_seed),
             sampling_draw: Cell::new(0),
@@ -415,9 +449,10 @@ impl Model {
             ..LoadOptions::default()
         };
         let loaded = AutoModel::load_model(device, Path::new(""), &options).map_err(runtime_err)?;
+        let contract = loaded.vla().map_err(runtime_err)?.contract();
         Ok(Self {
             model: loaded,
-            config,
+            contract,
             device,
             sampling_seed: Cell::new(sampling_seed),
             sampling_draw: Cell::new(0),
@@ -434,13 +469,14 @@ impl Model {
     ///   uses the model's internal device-side sampling stream.
     ///
     /// Returns the normalized-domain action, `float32` `[action_horizon, action_dim]`.
-    #[pyo3(name = "_infer_patches", signature = (patches, token_ids, noise=None))]
+    #[pyo3(name = "_infer_patches", signature = (patches, token_ids, noise=None, action_mask=None))]
     fn infer_patches<'py>(
         &self,
         py: Python<'py>,
         patches: PyReadonlyArray2<'py, f32>,
         token_ids: PyReadonlyArray1<'py, u32>,
         noise: Option<PyReadonlyArray2<'py, f32>>,
+        action_mask: Option<PyReadonlyArray2<'py, f32>>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
         let expected = [self.patch_rows(), self.patch_width()];
         let shape = patches.shape();
@@ -469,6 +505,10 @@ impl Model {
         let observation = Observation {
             vision: VisionObservation::Patches(patch_tensor),
             token_ids: tokens,
+            state: None,
+            action_mask: action_mask
+                .map(|value| self.action_mask_tensor(value))
+                .transpose()?,
         };
         match noise {
             Some(noise) => {
@@ -518,6 +558,8 @@ impl Model {
         let observation = Observation {
             vision: VisionObservation::Patches(patch_tensor),
             token_ids: tokens,
+            state: None,
+            action_mask: None,
         };
         self.run_generated(py, observation, RngKey::new(seed, sequence, draw))
     }
@@ -542,9 +584,9 @@ impl Model {
         token_ids: PyReadonlyArray1<'py, u32>,
         noise: Option<PyReadonlyArray2<'py, f32>>,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let contract = self.require_rgb_contract("infer_rgb")?;
         let layout = parse_layout(layout)?;
-        let expected_bytes =
-            self.config.num_views * self.config.image_size * self.config.image_size * 3;
+        let expected_bytes = contract.num_views * contract.image_size * contract.image_size * 3;
         let bytes = rgb_u8
             .as_slice()
             .map_err(|_| {
@@ -555,9 +597,9 @@ impl Model {
             return Err(PyValueError::new_err(format!(
                 "apxinf_py.infer_rgb: rgb_u8 expected {} bytes ({} views x {}x{}x3), got {}",
                 expected_bytes,
-                self.config.num_views,
-                self.config.image_size,
-                self.config.image_size,
+                contract.num_views,
+                contract.image_size,
+                contract.image_size,
                 bytes.len()
             )));
         }
@@ -571,6 +613,8 @@ impl Model {
         let observation = Observation {
             vision: VisionObservation::RgbU8 { bytes, layout },
             token_ids: tokens,
+            state: None,
+            action_mask: None,
         };
         match noise {
             Some(noise) => {
@@ -590,9 +634,9 @@ impl Model {
         token_ids: PyReadonlyArray1<'_, u32>,
         noise: PyReadonlyArray2<'_, f32>,
     ) -> PyResult<BTreeMap<String, f32>> {
+        let contract = self.require_rgb_contract("_calibrate_rgb")?;
         let layout = parse_layout(layout)?;
-        let expected_bytes =
-            self.config.num_views * self.config.image_size * self.config.image_size * 3;
+        let expected_bytes = contract.num_views * contract.image_size * contract.image_size * 3;
         let bytes = rgb_u8
             .as_slice()
             .map_err(|_| {
@@ -618,6 +662,8 @@ impl Model {
         let observation = Observation {
             vision: VisionObservation::RgbU8 { bytes, layout },
             token_ids: tokens,
+            state: None,
+            action_mask: None,
         };
         self.model
             .calibration_amax(&VlaRequest::provided(&observation, &noise))
@@ -626,8 +672,8 @@ impl Model {
 
     /// Stable logical sites required by this model's static-FP8 execution plan.
     #[pyo3(name = "_calibration_plan")]
-    fn calibration_plan(&self) -> Vec<String> {
-        Pi05CalibrationPlan::for_config(&self.config).sites().to_vec()
+    fn calibration_plan(&self) -> PyResult<Vec<String>> {
+        self.model.calibration_plan().map_err(runtime_err)
     }
 
     /// Seeded L1 inference. This avoids creating or transferring a host noise
@@ -643,9 +689,9 @@ impl Model {
         sequence: u64,
         draw: u64,
     ) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let contract = self.require_rgb_contract("infer_rgb_seeded")?;
         let layout = parse_layout(layout)?;
-        let expected_bytes =
-            self.config.num_views * self.config.image_size * self.config.image_size * 3;
+        let expected_bytes = contract.num_views * contract.image_size * contract.image_size * 3;
         let bytes = rgb_u8
             .as_slice()
             .map_err(|_| {
@@ -658,9 +704,9 @@ impl Model {
             return Err(PyValueError::new_err(format!(
                 "apxinf_py.infer_rgb_seeded: rgb_u8 expected {} bytes ({} views x {}x{}x3), got {}",
                 expected_bytes,
-                self.config.num_views,
-                self.config.image_size,
-                self.config.image_size,
+                contract.num_views,
+                contract.image_size,
+                contract.image_size,
                 bytes.len()
             )));
         }
@@ -676,6 +722,8 @@ impl Model {
         let observation = Observation {
             vision: VisionObservation::RgbU8 { bytes, layout },
             token_ids: tokens,
+            state: None,
+            action_mask: None,
         };
         self.run_generated(py, observation, RngKey::new(seed, sequence, draw))
     }
@@ -701,60 +749,48 @@ impl Model {
 
     #[getter]
     fn action_dim(&self) -> usize {
-        self.config.action_dim
+        self.action_shape()[1]
     }
 
     #[getter]
     fn action_horizon(&self) -> usize {
-        self.config.action_horizon
-    }
-
-    #[getter]
-    fn num_flow_steps(&self) -> usize {
-        self.config.num_flow_steps
-    }
-
-    #[getter]
-    fn flow_start_time(&self) -> f32 {
-        self.config.flow_start_time
+        self.action_shape()[0]
     }
 
     #[getter]
     fn num_views(&self) -> usize {
-        self.config.num_views
+        self.contract.num_views
     }
 
     #[getter]
     fn image_size(&self) -> usize {
-        self.config.image_size
+        self.contract.image_size
     }
 
     #[getter]
     fn patch_size(&self) -> usize {
-        self.config.patch_size
+        self.contract.patch_size
     }
 
     #[getter]
     fn patches_per_view(&self) -> usize {
-        self.config.patches_per_view()
+        self.patch_rows() / self.num_views()
     }
 
     #[getter]
     fn max_token_len(&self) -> usize {
-        self.config.max_token_len
+        self.max_token_len_value()
     }
 
     fn __repr__(&self) -> String {
         format!(
-            "Model(device={}, action=[{}, {}], flow_steps={}, flow_start={}, views={}, image={}, patch={})",
+            "Model(device={}, action=[{}, {}], views={}, image={}, patch={})",
             self.device(),
-            self.config.action_horizon,
-            self.config.action_dim,
-            self.config.num_flow_steps,
-            self.config.flow_start_time,
-            self.config.num_views,
-            self.config.image_size,
-            self.config.patch_size,
+            self.action_horizon(),
+            self.action_dim(),
+            self.num_views(),
+            self.image_size(),
+            self.patch_size(),
         )
     }
 }

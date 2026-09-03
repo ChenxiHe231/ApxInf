@@ -42,33 +42,30 @@ Reported latency is P50 over 30 samples after 10 warm-up iterations
 import numpy as np
 from apxinf import AutoPolicy
 
-policy = AutoPolicy.from_pretrained(
-    "<path-to-model>", precision="bf16", action_dim=7, autotune=True
-)
+policy = AutoPolicy.from_pretrained("<path-to-model>", precision="bf16")
 
 result = policy.infer({
     "observation/image":       np.zeros((256, 256, 3), np.uint8),
     "observation/wrist_image": np.zeros((256, 256, 3), np.uint8),
-    "observation/state":       np.zeros(8, np.float32),
+    "observation/state":       np.zeros(policy.action_dim, np.float32),
     "prompt":                  "put both moka pots on the stove",
 })
 
-result["actions"]   # (H, 7) float32, unnormalized
+result["actions"]   # (H, policy.action_dim) float32, unnormalized
 result["timing"]    # model_ms / total_ms
 policy.close()
 ```
 
 `<path-to-model>` is a checkpoint directory (`model.safetensors`, `config.json`,
-`norm_stats.json`, `*tokenizer.model`); none ships with this package. Resize,
-tokenization, normalization, and the flow sampler all run inside `infer` — pass
-raw frames.
+and that model's tokenizer/normalizer assets); none ships with this package.
+Resize, tokenization, normalization, and the flow sampler all run inside `infer`
+— pass raw frames.
 
 ### Serve it with OpenPI compatible websocket server
 
 ```bash
-python scripts/pi05_openpi_websocket_server.py \
-  --model-dir <path-to-model> --robot franka_libero --precision bf16 \
-  --autotune --port 8000
+python python/apxinf/examples/openpi_server.py \
+  --model-dir <path-to-model> --robot franka_libero --precision bf16 --port 8000
 ```
 
 An unmodified `openpi-client` connects to it:
@@ -138,16 +135,18 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install maturin
 maturin develop --release --features cuda -m crates/apxinf-py/Cargo.toml
 pip install -e "python/apxinf[tokenizer,serving]"
+# For WallOSS checkpoints, use its processor extra instead:
+# pip install -e "python/apxinf[walloss,serving]"
 ```
 
 `maturin develop` compiles the binding into the *active* environment, so a venv
-or conda env has to be activated first. The `[tokenizer,serving]` extras pull
-the only runtime dependencies — numpy, Pillow, sentencepiece, msgpack,
-websockets; there is no separate requirements file to install.
+or conda env has to be activated first. The extras keep model-specific processor
+dependencies opt-in: PI0.5 uses `tokenizer`, while WallOSS uses `walloss`; both
+can add `serving` for msgpack/websockets.
 
 `--features cuda` is a Cargo feature, not a CUDA installation: it compiles the
 CUDA backend into the binding, and it is required — the PI0.5 runtime is only
-registered on CUDA devices.
+registered on CUDA devices, as is WallOSS.
 
 The build queries the visible GPU for its compute capability and compiles the
 kernels for exactly that architecture, so build on the machine you deploy to;
@@ -204,9 +203,7 @@ serving contract, the pipelines, and the layer boundary:
 policy = AutoPolicy.from_pretrained(
     "<path-to-model>",
     precision="bf16",
-    action_dim=7,           # deployable width; None keeps the model's full vector
-    action_horizon=10,      # a sequence length, so it outranks config.json
-    discrete_state=False,   # inject state into the prompt, or drop it
+    action_dim=None,        # default: infer the model's full vector from checkpoint weights
 )
 
 policy.metadata             # model_type, action_horizon, image_keys, state_key, ...
@@ -248,19 +245,18 @@ a mismatch produces wrong actions, not an error.
 
 | Preset | Cameras | State | Action |
 |---|---|---|---|
-| `franka_libero` | `observation/image`, `observation/wrist_image` | 8-dim, dropped | 7-dim EEF delta |
+| `franka_libero` | `observation/image`, `observation/wrist_image` | `observation/state`; encoding is checkpoint-specific | 7-dim EEF delta |
 | `unitree_g1` | 3 views | 16-dim, discretized into the prompt | delta joints, 32→16 encode |
 
-`--help` lists every preset with its slot→key mapping. If your client already
-speaks a fixed dialect, match it with `--image-keys`, `--state-key`,
-`--action-dim`, `--discrete-state` instead of editing the client. To register a
-new robot, see [Adding an embodiment](../../doc/adding-an-embodiment.md).
+`--help` lists every preset. If an installed client uses different keys, pass
+the concrete policy fields through `--policy-options` (for example
+`{"image_keys":[...],"state_key":"state"}`) or register a named preset; do not
+edit the generic server. See [Adding an embodiment](../../doc/adding-an-embodiment.md).
 
-The server serves the checkpoint's native chunk length unless `--action-horizon`
-says otherwise, and publishes the wire contract it settled on in its
-connect-time metadata, so a client can assert it rather than guess.
-`--random-weights` starts a checkpoint-free server for transport and latency
-measurement.
+The server keeps the checkpoint's native action width unless the user supplies
+`--action-dim` or selects a preset with a deployable width. It publishes the
+resolved wire contract in connect-time metadata so the client can assert it
+rather than guess.
 
 
 ## Precisions

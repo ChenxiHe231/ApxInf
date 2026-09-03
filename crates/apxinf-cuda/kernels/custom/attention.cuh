@@ -871,5 +871,68 @@ __global__ void mha_bf16_kernel(
   }
 }
 
+// Variable-length self-attention over a packed token matrix. Each z-grid
+// slice owns one segment described by offsets[segment..segment+2].
+__global__ void segmented_mha_bf16_kernel(
+    const __nv_bfloat16* q, const __nv_bfloat16* k,
+    const __nv_bfloat16* v, const uint32_t* offsets,
+    __nv_bfloat16* output, int heads, int head_dim) {
+  extern __shared__ float shared[];
+  const int segment = blockIdx.z;
+  const int begin = static_cast<int>(offsets[segment]);
+  const int end = static_cast<int>(offsets[segment + 1]);
+  const int tokens = end - begin;
+  const int query = blockIdx.x;
+  if (query >= tokens) return;
+  float* scores = shared;
+  float* warp_sums = scores + tokens;
+  const int head = blockIdx.y;
+  const int global_query = begin + query;
+  const int tid = threadIdx.x;
+  const int lane = tid & 31;
+  const int warp = tid >> 5;
+  const int warps = blockDim.x >> 5;
+  const __nv_bfloat16* query_ptr =
+      q + (global_query * heads + head) * head_dim;
+  const float scale = rsqrtf(static_cast<float>(head_dim));
+  for (int token = 0; token < tokens; ++token) {
+    const __nv_bfloat16* key =
+        k + ((begin + token) * heads + head) * head_dim;
+    float dot = tid < head_dim
+        ? __bfloat162float(query_ptr[tid]) * __bfloat162float(key[tid])
+        : 0.0f;
+    dot = warp_sum(dot);
+    if (lane == 0) warp_sums[warp] = dot;
+    __syncthreads();
+    if (warp == 0) {
+      float total = lane < warps ? warp_sums[lane] : 0.0f;
+      total = warp_sum(total);
+      if (lane == 0) scores[token] = total * scale;
+    }
+    __syncthreads();
+  }
+  if (tid == 0) {
+    float maximum = -3.402823466e+38F;
+    for (int token = 0; token < tokens; ++token)
+      maximum = fmaxf(maximum, scores[token]);
+    float denominator = 0.0f;
+    for (int token = 0; token < tokens; ++token) {
+      scores[token] = expf(scores[token] - maximum);
+      denominator += scores[token];
+    }
+    for (int token = 0; token < tokens; ++token)
+      scores[token] /= denominator;
+  }
+  __syncthreads();
+  if (tid < head_dim) {
+    float accumulator = 0.0f;
+    for (int token = 0; token < tokens; ++token) {
+      accumulator += scores[token] * __bfloat162float(
+          v[((begin + token) * heads + head) * head_dim + tid]);
+    }
+    output[(global_query * heads + head) * head_dim + tid] =
+        __float2bfloat16(accumulator);
+  }
+}
 
 

@@ -154,6 +154,35 @@ __global__ void concat_rows_bf16_kernel(
   }
 }
 
+__global__ void gather_rows_bf16_kernel(
+    const __nv_bfloat16* input, const uint32_t* indices,
+    __nv_bfloat16* output, int rows, int cols) {
+  const int64_t count = static_cast<int64_t>(rows) * cols;
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    const int row = static_cast<int>(index / cols);
+    const int col = static_cast<int>(index % cols);
+    output[index] = input[static_cast<int64_t>(indices[row]) * cols + col];
+  }
+}
+
+__global__ void replace_rows_bf16_kernel(
+    const __nv_bfloat16* base, const __nv_bfloat16* replacement,
+    const uint32_t* row_map, __nv_bfloat16* output, int rows, int cols) {
+  const int64_t count = static_cast<int64_t>(rows) * cols;
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    const int row = static_cast<int>(index / cols);
+    const int col = static_cast<int>(index % cols);
+    const uint32_t replacement_row = row_map[row];
+    output[index] = replacement_row == 0xffffffffu
+        ? base[index]
+        : replacement[static_cast<int64_t>(replacement_row) * cols + col];
+  }
+}
+
 __global__ void euler_update_bf16_kernel(
     const __nv_bfloat16* state, const __nv_bfloat16* velocity,
     __nv_bfloat16* output, int64_t count, float dt) {
@@ -180,5 +209,3 @@ __global__ void bias_position_bf16_kernel(
     output[index] = __float2bfloat16(value);
   }
 }
-
-

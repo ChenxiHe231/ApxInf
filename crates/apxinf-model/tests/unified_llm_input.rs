@@ -7,7 +7,7 @@ use apxinf_loader::ModelConfig;
 use apxinf_model::{
     register, Action, AutoModel, GenerationOptions, GenerationRequest, ImageInput, InferenceSpec,
     LlmCapabilities, LlmInput, LlmTrait, LoadOptions, LoadedModel, PreparedInference, SamplingMode,
-    VlaRequest, VlaRuntime,
+    VlaContract, VlaRequest, VlaRuntime,
 };
 
 #[derive(Default)]
@@ -77,6 +77,18 @@ fn load_generation_config_test_model(
 struct DummyVlaModel;
 
 impl VlaRuntime for DummyVlaModel {
+    fn contract(&self) -> VlaContract {
+        VlaContract {
+            action_shape: [1, 1],
+            patch_shape: [1, 1],
+            max_token_len: 1,
+            num_views: 1,
+            image_size: 1,
+            patch_size: 1,
+            accepts_rgb_u8: false,
+        }
+    }
+
     fn infer(&self, _request: &VlaRequest<'_>) -> Result<Action> {
         unreachable!("generation-config routing test does not run VLA inference")
     }
