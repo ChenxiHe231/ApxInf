@@ -627,6 +627,15 @@ pub fn gemm_fp8_geglu_fused(
             },
         });
     }
+    if let Some(weight) = packed_weight.dual_geglu_auto_interleaved {
+        super::validate_geglu_weight(
+            "FP8 dual GeGLU auto-interleaved weight",
+            weight,
+            DType::F8E4M3,
+            b,
+            expected_device,
+        )?;
+    }
 
     if crate::workspace::fp8_emulation_required(ctx)? {
         return Ok(None);
@@ -647,9 +656,17 @@ pub fn gemm_fp8_geglu_fused(
         (Some(&primary_weight), automatic_interleaved.as_ref())
     };
 
-    let plain_key = tuning_key(ctx, m, full_n, k);
-    let mut plain_plan = None;
     let key = geglu_tuning_key(ctx, m, full_n, k);
+    let plain_key = tuning_key(ctx, m, full_n, k);
+    // Resolve a cold key's decomposed GEMM dependency before GeGLU tuning
+    // acquires the session-wide, non-reentrant tuning lock.
+    let mut plain_plan = if ctx.tuning().lookup_gemm_exact(&key).is_none() {
+        plain_weight
+            .map(|weight| resolve_fp8_plan(ctx, &plain_key, &activation_buffer, weight, alpha))
+            .transpose()?
+    } else {
+        None
+    };
     let default = default_fp8_geglu_tactic(
         ctx,
         &key,
@@ -659,9 +676,6 @@ pub fn gemm_fp8_geglu_fused(
     let plan = ctx
         .gemm_plans()
         .resolve_or_tune(ctx, &key, default, |preferred| {
-            plain_plan = plain_weight
-                .map(|weight| resolve_fp8_plan(ctx, &plain_key, &activation_buffer, weight, alpha))
-                .transpose()?;
             autotune_request_fp8_geglu(
                 ctx,
                 &key,

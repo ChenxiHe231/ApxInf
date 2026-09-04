@@ -177,3 +177,30 @@ fn dtype_name(dtype: super::TuningDType) -> &'static str {
         super::TuningDType::I32 => "i32",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_thor_geglu_report_uses_complete_operator_keys() {
+        let report: Value = serde_json::from_str(include_str!(
+            "../../../../configs/tuning/nvidia/thor-sm110/tuning_report.json"
+        ))
+        .unwrap();
+        for run in report["runs"].as_array().unwrap() {
+            let backend = run["winner"]["backend"].as_str().unwrap();
+            if !backend.contains("geglu") {
+                continue;
+            }
+            let key = &run["key"];
+            assert_eq!(key["epilogue"], "geglu", "{backend}");
+            let expected_output = match key["op"].as_str().unwrap() {
+                "bf16" => "bf16",
+                "fp8_f16" => "f8e4m3",
+                op => panic!("unexpected GeGLU report op {op}"),
+            };
+            assert_eq!(key["output_dtype"], expected_output, "{backend}");
+        }
+    }
+}

@@ -518,6 +518,24 @@ pub fn gemm_bf16_geglu_fused(
             },
         });
     }
+    if let Some(weight) = bf16_dual_geglu_auto_interleaved {
+        super::validate_geglu_weight(
+            "BF16 dual GeGLU auto-interleaved weight",
+            weight,
+            DType::BF16,
+            b,
+            expected_device,
+        )?;
+    }
+    if let Some(weight) = bf16_sm89_geglu_interleaved {
+        super::validate_geglu_weight(
+            "BF16 SM89 GeGLU interleaved weight",
+            weight,
+            DType::BF16,
+            b,
+            expected_device,
+        )?;
+    }
     super::observe_bf16(activation, packed_weight)?;
 
     let (m, k, full_n) = (a[0], a[1], b[1]);
@@ -538,9 +556,18 @@ pub fn gemm_bf16_geglu_fused(
         (Some(&primary_weight), automatic_interleaved.as_ref())
     };
 
-    let plain_key = tuning_key(ctx, m, full_n, k);
-    let mut plain_plan = None;
     let key = geglu_tuning_key(ctx, m, full_n, k);
+    let plain_key = tuning_key(ctx, m, full_n, k);
+    // A cold GeGLU key may tune both the complete operator and its decomposed
+    // GEMM candidate. Resolve that dependency before the outer tuning session
+    // takes its non-reentrant lock.
+    let mut plain_plan = if ctx.tuning().lookup_gemm_exact(&key).is_none() {
+        plain_weight
+            .map(|weight| resolve_bf16_plan(ctx, &plain_key, &activation_buffer, weight))
+            .transpose()?
+    } else {
+        None
+    };
     let default = default_bf16_geglu_tactic(
         ctx,
         &key,
@@ -551,9 +578,6 @@ pub fn gemm_bf16_geglu_fused(
     let plan = ctx
         .gemm_plans()
         .resolve_or_tune(ctx, &key, default, |preferred| {
-            plain_plan = plain_weight
-                .map(|weight| resolve_bf16_plan(ctx, &plain_key, &activation_buffer, weight))
-                .transpose()?;
             autotune_request_bf16_geglu(
                 ctx,
                 &key,

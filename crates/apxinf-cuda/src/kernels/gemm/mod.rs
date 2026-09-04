@@ -100,6 +100,29 @@ pub(super) fn observe_bf16(activation: &Tensor, weight: &Tensor) -> Result<()> {
     })
 }
 
+pub(super) fn validate_geglu_weight(
+    name: &str,
+    weight: &Tensor,
+    expected_dtype: DType,
+    expected_shape: &[usize],
+    expected_device: Device,
+) -> Result<()> {
+    if weight.dtype() != expected_dtype || weight.shape().dims() != expected_shape {
+        return Err(Error::Other(format!(
+            "{name} must be {expected_dtype} {expected_shape:?}, got {} {:?}",
+            weight.dtype(),
+            weight.shape().dims()
+        )));
+    }
+    if weight.device() != expected_device {
+        return Err(Error::DeviceMismatch {
+            expected: expected_device,
+            got: weight.device(),
+        });
+    }
+    Ok(())
+}
+
 pub fn matmul(ctx: &CudaContext, activation: &Tensor, weight: &Tensor) -> Result<Tensor> {
     if activation.dtype() != weight.dtype() {
         return Err(Error::DTypeMismatch {
@@ -235,4 +258,34 @@ pub fn write_ex(
             dtype, trans_a, trans_b, m, n, k, alpha, a, lda, b, ldb, beta, output, ldc,
         )
         .map_err(apxinf_core::Error::Cuda)
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn geglu_weight_contract_checks_dtype_shape_and_device() {
+        let weight = Tensor::zeros(vec![2, 4], DType::BF16);
+        assert!(
+            validate_geglu_weight("test weight", &weight, DType::BF16, &[2, 4], Device::Cpu,)
+                .is_ok()
+        );
+        assert!(
+            validate_geglu_weight("test weight", &weight, DType::F8E4M3, &[2, 4], Device::Cpu,)
+                .is_err()
+        );
+        assert!(
+            validate_geglu_weight("test weight", &weight, DType::BF16, &[4, 2], Device::Cpu,)
+                .is_err()
+        );
+        assert!(validate_geglu_weight(
+            "test weight",
+            &weight,
+            DType::BF16,
+            &[2, 4],
+            Device::Cuda(0),
+        )
+        .is_err());
+    }
 }
