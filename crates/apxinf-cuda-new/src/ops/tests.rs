@@ -160,8 +160,8 @@ fn gpu_e2e_graph_replay_overwrites_sentinel_and_matches_numeric_result() {
         None,
     )
     .unwrap();
-    let instance = super::execution::prepare(&ctx, normalized).unwrap();
-    let mut graph = instance.capture().unwrap();
+    let mut instance = super::execution::prepare(&ctx, normalized).unwrap();
+    let graph = crate::capture(&ctx, || instance.enqueue()).unwrap();
 
     let sentinel: Vec<u8> = (0..m * n)
         .flat_map(|_| bf16::from_f32(-123.0).to_bits().to_ne_bytes())
