@@ -185,12 +185,12 @@ impl CudaBuffer {
             .as_gpu()
             .ok_or_else(|| "CUDA tensor has no GPU storage".to_string())?;
         let owner = handle
-            .owner()
-            .cloned()
+            ._prevent_leak
+            .clone()
             .ok_or_else(|| "CUDA tensor storage has no owning allocation".to_string())?;
         Ok(Self {
-            ptr: handle.ptr() as *mut c_void,
-            len: handle.len(),
+            ptr: handle.ptr as *mut c_void,
+            len: handle.len,
             device,
             owner,
         })
@@ -199,12 +199,12 @@ impl CudaBuffer {
     /// Turn an owned CUDA allocation into a Tensor while preserving ownership.
     pub(crate) fn into_tensor(self, shape: Shape, dtype: DType) -> Tensor {
         let device = Device::Cuda(self.device);
-        // SAFETY: `self` owns the allocation and is retained by the handle.
-        let handle = unsafe {
-            GpuStorageHandle::from_raw_parts(self.ptr as usize, self.len, Some(Arc::new(self)))
+        let handle = GpuStorageHandle {
+            ptr: self.ptr as usize,
+            len: self.len,
+            _prevent_leak: Some(Arc::new(self)),
         };
-        // SAFETY: `as_tensor` validates the allocation size and metadata.
-        unsafe { Tensor::from_raw_parts(shape, dtype, device, Storage::Gpu { device, handle }) }
+        Tensor::from_raw_parts(shape, dtype, device, Storage::Gpu { device, handle })
     }
 
     /// Borrow this allocation as a tensor while retaining shared ownership.
