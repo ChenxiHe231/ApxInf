@@ -40,6 +40,7 @@ std::shared_ptr<State> tune(const Spec& spec,const apxinf_gemm_policy_t& policy,
  std::shared_ptr<State> winner;float best=std::numeric_limits<float>::infinity();Events events;int checked=0,rejected=0;std::vector<std::string> diagnostics;
  for(const auto& impl:implementations){
   if(!impl.supports(spec)){diagnostics.push_back(std::string(impl.name)+"=skip(contract)");continue;}
+  if(!supports_alignment(impl,spec)){diagnostics.push_back(std::string(impl.name)+"=skip(alignment)");continue;}
   if(policy.graph_safe&&!impl.graph_safe){diagnostics.push_back(std::string(impl.name)+"=skip(graph-safe)");continue;}
   if(policy.deterministic&&!impl.deterministic){diagnostics.push_back(std::string(impl.name)+"=skip(determinism)");continue;}
   std::vector<int> configs;impl.enumerate_configs(spec,configs);

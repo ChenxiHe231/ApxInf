@@ -34,6 +34,13 @@ typedef struct {
   uint32_t accumulation_dtype;
   uint32_t output_dtype;
   uint32_t quantization;
+  /* Largest guaranteed power-of-two byte alignment, capped at 256. */
+  uint32_t a_alignment;
+  uint32_t b_alignment;
+  uint32_t bias_alignment;
+  uint32_t a_scales_alignment;
+  uint32_t b_scales_alignment;
+  uint32_t output_alignment;
   int64_t m;
   int64_t n;
   int64_t k;

@@ -65,6 +65,88 @@ fn gemm_rejects_partially_overlapping_output_storage() {
     assert!(error.to_string().contains("overlaps read-only A storage"));
 }
 
+#[test]
+fn gemm_rejects_storage_misaligned_for_its_dtype() {
+    let ctx = CudaContext::new(0).unwrap();
+    let backing = CudaBuffer::alloc(9, 0).unwrap();
+    let a = backing
+        .view(1, 8)
+        .unwrap()
+        .as_tensor(Shape::new(vec![2, 2]), DType::BF16)
+        .unwrap();
+    let b = tensor(0, vec![2, 2], &[1.0; 4]);
+    let mut out = tensor(0, vec![2, 2], &[0.0; 4]);
+
+    let error = gemm(&ctx, GemmArgs::new(&a, &b, &mut out)).unwrap_err();
+    assert!(error.to_string().contains("2-byte dtype"), "{error}");
+}
+
+#[test]
+fn gpu_e2e_candidate_alignment_is_selected_and_keyed_from_actual_bindings() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (64, 64, 64);
+    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
+    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
+
+    // Seed the in-memory plan cache with the naturally aligned binding class.
+    let mut aligned_out = zeros_tensor(0, vec![m, n], DType::F16);
+    let mut aligned_args = GemmArgs::new(&a, &b, &mut aligned_out);
+    aligned_args.quantization = GemmQuantization::Fp8UnitScale;
+    aligned_args.policy.allow_fallback = false;
+    let aligned = super::contracts::normalize(
+        &ctx,
+        aligned_args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+    )
+    .unwrap();
+    assert!(aligned.spec.output_alignment >= 16);
+    let aligned_instance = super::execution::prepare(&ctx, aligned).unwrap();
+    eprintln!("GPU_ALIGNMENT_ALIGNED {}", aligned_instance.summary());
+
+    // Offset by two bytes: valid for F16, but below CUTLASS's 16-byte output
+    // requirement.  This must form a different plan key and skip CUTLASS.
+    let output_bytes = m * n * DType::F16.size_in_bytes();
+    let backing = CudaBuffer::alloc(output_bytes + 2, 0).unwrap();
+    let mut misaligned_out = backing
+        .view(2, output_bytes)
+        .unwrap()
+        .as_tensor(Shape::new(vec![m, n]), DType::F16)
+        .unwrap();
+    let mut misaligned_args = GemmArgs::new(&a, &b, &mut misaligned_out);
+    misaligned_args.quantization = GemmQuantization::Fp8UnitScale;
+    misaligned_args.policy.allow_fallback = false;
+    let misaligned = super::contracts::normalize(
+        &ctx,
+        misaligned_args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(misaligned.spec.output_alignment, 2);
+    let mut instance = super::execution::prepare(&ctx, misaligned).unwrap();
+    let summary = instance.summary().to_owned();
+    eprintln!("GPU_ALIGNMENT_MISALIGNED {summary}");
+    assert!(summary.contains("cutlass-fp8=skip(alignment)"), "{summary}");
+    assert!(
+        summary.contains("cublasLt+custom-epilogue=skip(alignment)"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("cublasLt-native-fp8+custom-epilogue=skip(alignment)"),
+        "{summary}"
+    );
+    assert!(!summary.contains("source=memory"), "alignment key aliased: {summary}");
+
+    instance.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+    assert!(f16_values(&misaligned_out)
+        .iter()
+        .all(|&value| value == k as f32));
+}
+
 fn values(tensor: &Tensor) -> Vec<f32> {
     let buffer = CudaBuffer::from_tensor(tensor).unwrap();
     let mut bytes = vec![0; buffer.len()];

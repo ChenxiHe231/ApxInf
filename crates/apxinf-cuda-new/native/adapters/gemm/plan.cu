@@ -13,8 +13,23 @@ using apxinf::gemm::APXINF_GEMM_SEMANTIC_GEMM_BIAS;
 using apxinf::gemm::APXINF_GEMM_SEMANTIC_GEMM_GEGLU;
 using apxinf::gemm::APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU;
 
+bool valid_alignment_class(uint32_t alignment) {
+  return alignment <= 256 &&
+         (alignment == 0 || (alignment & (alignment - 1)) == 0);
+}
+
+void validate_recorded_alignment(const void* pointer, uint32_t alignment,
+                                 const char* name) {
+  if (pointer != nullptr &&
+      (alignment == 0 ||
+       reinterpret_cast<uintptr_t>(pointer) % alignment != 0)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  std::string(name) + " does not satisfy plan alignment");
+  }
+}
+
 void validate_spec(const apxinf::gemm::Spec& spec) {
-  if (spec.version != 2 || spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
+  if (spec.version != 3 || spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
       spec.a_dtype > APXINF_DTYPE_I8 || spec.b_dtype > APXINF_DTYPE_I8 ||
       spec.accumulation_dtype > APXINF_DTYPE_I32 ||
       spec.output_dtype > APXINF_DTYPE_E4M3 ||
@@ -24,6 +39,21 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
       !std::isfinite(spec.alpha) || !std::isfinite(spec.output_scale) ||
       spec.output_scale <= 0.0F) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid GEMM Spec");
+  }
+  for (uint32_t alignment : {
+           spec.a_alignment, spec.b_alignment, spec.bias_alignment,
+           spec.a_scales_alignment, spec.b_scales_alignment,
+           spec.output_alignment}) {
+    if (!valid_alignment_class(alignment)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid GEMM binding alignment class");
+    }
+  }
+  if (spec.a_alignment < apxinf::gemm::dtype_bytes(spec.a_dtype) ||
+      spec.b_alignment < apxinf::gemm::dtype_bytes(spec.b_dtype) ||
+      spec.output_alignment < apxinf::gemm::dtype_bytes(spec.output_dtype)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "GEMM binding violates dtype alignment");
   }
   if ((spec.a_dtype == APXINF_DTYPE_I8 ||
        spec.b_dtype == APXINF_DTYPE_I8) &&
@@ -98,6 +128,16 @@ void validate_bindings(const apxinf::gemm::Spec& spec,
   if (!needs_bias && bindings.bias != nullptr) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "unexpected GEMM bias");
   }
+  validate_recorded_alignment(bindings.a, spec.a_alignment, "GEMM A binding");
+  validate_recorded_alignment(bindings.b, spec.b_alignment, "GEMM B binding");
+  validate_recorded_alignment(bindings.bias, spec.bias_alignment,
+                              "GEMM bias binding");
+  validate_recorded_alignment(bindings.a_scales, spec.a_scales_alignment,
+                              "GEMM A scales binding");
+  validate_recorded_alignment(bindings.b_scales, spec.b_scales_alignment,
+                              "GEMM B scales binding");
+  validate_recorded_alignment(bindings.output, spec.output_alignment,
+                              "GEMM output binding");
 }
 
 const apxinf::gemm::Implementation* find_implementation(const Recipe& recipe,

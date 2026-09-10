@@ -172,6 +172,20 @@ fn required_bytes(dtype: DType, shape: &[usize]) -> Result<usize> {
         .ok_or_else(|| invalid("GEMM size overflow"))
 }
 
+const MAX_RECORDED_ALIGNMENT: usize = 256;
+
+fn alignment_class(ptr: *const std::ffi::c_void) -> u32 {
+    let address = ptr as usize;
+    if address == 0 {
+        0
+    } else {
+        (1usize
+            << address
+                .trailing_zeros()
+                .min(MAX_RECORDED_ALIGNMENT.trailing_zeros())) as u32
+    }
+}
+
 fn checked_device_range(ptr: *mut std::ffi::c_void, len: usize) -> Result<Range<usize>> {
     let start = ptr as usize;
     if len != 0 && start == 0 {
@@ -216,6 +230,13 @@ pub(crate) fn tensor_storage(
     let buffer = CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?;
     if buffer.len() < expected_bytes {
         return Err(invalid("GEMM storage is too small"));
+    }
+    let dtype_alignment = expected_dtype.size_in_bytes();
+    if (buffer.ptr() as usize) % dtype_alignment != 0 {
+        return Err(invalid(format!(
+            "GEMM tensor storage is not aligned to its {}-byte dtype",
+            dtype_alignment
+        )));
     }
     Ok(buffer)
 }
@@ -372,12 +393,18 @@ pub(crate) fn normalize(
     Ok(Normalized {
         api,
         spec: abi::Spec {
-            version: 2,
+            version: 3,
             a_dtype: dtype(args.a.dtype())?,
             b_dtype: dtype(args.b.dtype())?,
             accumulation_dtype: dtype(args.policy.accumulation_dtype)?,
             output_dtype: dtype(args.out.dtype())?,
             quantization,
+            a_alignment: alignment_class(bindings.a),
+            b_alignment: alignment_class(bindings.b),
+            bias_alignment: alignment_class(bindings.bias),
+            a_scales_alignment: alignment_class(bindings.a_scales.cast::<std::ffi::c_void>()),
+            b_scales_alignment: alignment_class(bindings.b_scales.cast::<std::ffi::c_void>()),
+            output_alignment: alignment_class(bindings.output.cast_const()),
             m: m as i64,
             n: n as i64,
             k: k as i64,

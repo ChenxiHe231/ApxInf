@@ -15,7 +15,7 @@ std::string tuning_key(const Spec& spec,
   check_cuda(cudaDriverGetVersion(&driver_version));
 
   std::ostringstream key;
-  key << "gemm-recipe-v2|" << APXINF_GEMM_BUILD_ID << '|'
+  key << "gemm-recipe-v3|" << APXINF_GEMM_BUILD_ID << '|'
       << APXINF_GEMM_SM << '|' << runtime_version << '|' << driver_version
       << '|' << cublasLtGetVersion() << '|';
   for (const auto byte : properties.uuid.bytes) {
@@ -26,7 +26,10 @@ std::string tuning_key(const Spec& spec,
       << spec.version << '|' << static_cast<uint32_t>(spec.semantic) << '|' << spec.m << '|'
       << spec.n << '|' << spec.k << '|' << spec.a_dtype << '|'
       << spec.b_dtype << '|' << spec.accumulation_dtype << '|'
-      << spec.output_dtype << '|' << spec.quantization;
+      << spec.output_dtype << '|' << spec.quantization << '|'
+      << spec.a_alignment << '|' << spec.b_alignment << '|'
+      << spec.bias_alignment << '|' << spec.a_scales_alignment << '|'
+      << spec.b_scales_alignment << '|' << spec.output_alignment;
 
   uint32_t alpha_bits = 0;
   uint32_t output_scale_bits = 0;
