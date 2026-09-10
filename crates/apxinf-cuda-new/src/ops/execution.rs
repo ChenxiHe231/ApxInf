@@ -144,10 +144,7 @@ impl PreparedExecution {
     }
 }
 
-pub(crate) fn prepare(
-    ctx: &CudaContext,
-    normalized: Normalized,
-) -> Result<PreparedExecution> {
+pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized) -> Result<PreparedExecution> {
     let Normalized {
         api,
         spec,
@@ -206,7 +203,7 @@ pub(crate) fn prepare(
         status::check((api.instance_create)(plan.raw, &bindings, &mut raw))?;
     }
     #[cfg(test)]
-    PREPARED_EXECUTION_CREATE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    PREPARED_EXECUTION_CREATE_COUNT.with(|count| count.set(count.get() + 1));
     let exec = Rc::new(SharedExecution {
         raw,
         _plan: plan,
@@ -232,15 +229,16 @@ pub(crate) fn execute(ctx: &CudaContext, normalized: Normalized) -> Result<()> {
 }
 
 #[cfg(test)]
-static PREPARED_EXECUTION_CREATE_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static PREPARED_EXECUTION_CREATE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn reset_prepared_execution_create_count() {
-    PREPARED_EXECUTION_CREATE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+    PREPARED_EXECUTION_CREATE_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn prepared_execution_create_count() -> usize {
-    PREPARED_EXECUTION_CREATE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    PREPARED_EXECUTION_CREATE_COUNT.with(std::cell::Cell::get)
 }

@@ -417,3 +417,26 @@ fn scaled_fp8_and_w8a8_use_the_canonical_kn_weight_contract() {
     assert!(int8_values[..n].iter().all(|&value| value == 16.0));
     assert!(int8_values[n..].iter().all(|&value| value == 8.0));
 }
+
+#[test]
+fn prepared_execution_reuses_one_native_instance_across_enqueues() {
+    let ctx = CudaContext::new(0).unwrap();
+    let a = tensor(0, vec![2, 3], &[1.0; 6]);
+    let b = tensor(0, vec![3, 4], &[1.0; 12]);
+    let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.policy.online_tune = false;
+
+    super::execution::reset_prepared_execution_create_count();
+    let mut prepared = prepare_gemm(&ctx, args).unwrap();
+    assert_eq!(super::execution::prepared_execution_create_count(), 1);
+
+    prepared.enqueue().unwrap();
+    prepared.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+
+    // Native instance creation includes provider resource creation and warmup.
+    // Repeated hot-path submissions must not run that preparation again.
+    assert_eq!(super::execution::prepared_execution_create_count(), 1);
+    assert!(values(&out).iter().all(|&value| value == 3.0));
+}

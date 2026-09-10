@@ -1,5 +1,9 @@
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda::{capture, ops::{prepare_gemm, GemmArgs}, CudaBuffer, CudaContext};
+use apxinf_cuda::{
+    capture,
+    ops::{prepare_gemm, GemmArgs},
+    CudaBuffer, CudaContext,
+};
 use half::bf16;
 
 fn bf16_tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
