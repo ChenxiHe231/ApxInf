@@ -140,6 +140,7 @@ impl Tensor {
     }
 
     /// Create a tensor containing signed INT8 values.
+    #[cfg(feature = "quantized-dtypes")]
     pub fn from_i8(shape: impl Into<Shape>, data: &[i8]) -> Result<Self> {
         Self::from_raw(
             shape.into(),
@@ -150,6 +151,7 @@ impl Tensor {
     }
 
     /// Create a tensor containing signed INT32 values.
+    #[cfg(feature = "quantized-dtypes")]
     pub fn from_i32(shape: impl Into<Shape>, data: &[i32]) -> Result<Self> {
         Self::from_raw(
             shape.into(),
@@ -232,12 +234,14 @@ impl Tensor {
         Ok(self.storage.as_cpu().unwrap())
     }
 
+    #[cfg(feature = "quantized-dtypes")]
     pub fn as_i8(&self) -> Result<&[i8]> {
         self.ensure_cpu()?;
         self.ensure_dtype(DType::I8)?;
         Ok(bytemuck::cast_slice(self.storage.as_cpu().unwrap()))
     }
 
+    #[cfg(feature = "quantized-dtypes")]
     pub fn as_i32(&self) -> Result<&[i32]> {
         self.ensure_cpu()?;
         self.ensure_dtype(DType::I32)?;
@@ -254,9 +258,11 @@ impl Tensor {
             DType::F8E4M3 => Err(Error::Other(
                 "raw E4M3 conversion requires an explicit quantization scale".into(),
             )),
+            #[cfg(feature = "quantized-dtypes")]
             DType::I8 => Err(Error::Other(
                 "raw INT8 conversion requires an explicit quantization scale".into(),
             )),
+            #[cfg(feature = "quantized-dtypes")]
             DType::I32 => Ok(self.as_i32()?.iter().map(|&x| x as f32).collect()),
         }
     }
