@@ -362,10 +362,13 @@ pub(crate) fn normalize(
     let projection_dtype = if has_row_channel_scales {
         args.out.dtype()
     } else if args.a.dtype() == DType::F8E4M3 {
-        if args.out.dtype() == DType::F32 {
-            DType::F32
-        } else {
+        if args.out.dtype() == DType::F16 {
             DType::F16
+        } else {
+            // BF16 and F32 both have a wider exponent range than F16. Using
+            // F16 here can turn a finite result into infinity before the
+            // requested output conversion.
+            DType::F32
         }
     } else {
         args.a.dtype()

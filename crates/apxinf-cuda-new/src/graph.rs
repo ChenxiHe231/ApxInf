@@ -21,9 +21,11 @@ pub struct CapturedGraph {
 
 impl CapturedGraph {
     pub fn replay(&self) -> Result<()> {
-        self.stream.with_current_device(|| unsafe {
-            ffi::check_cuda(ffi::cudaGraphLaunch(self.exec, self.stream.handle()))
-        }).map_err(Error::Cuda)
+        self.stream
+            .with_current_device(|| unsafe {
+                ffi::check_cuda(ffi::cudaGraphLaunch(self.exec, self.stream.handle()))
+            })
+            .map_err(Error::Cuda)
     }
 }
 
@@ -46,7 +48,7 @@ fn begin(ctx: &CudaContext, mode: CaptureMode) -> std::result::Result<(), String
     unsafe {
         ffi::check_cuda(ffi::cudaStreamBeginCapture(ctx.stream().handle(), mode))?;
     }
-    crate::workspace::begin_capture_retention();
+    crate::workspace::begin_capture_retention(ctx.device_id(), ctx.stream().handle() as usize);
     Ok(())
 }
 
@@ -54,9 +56,8 @@ fn end(ctx: &CudaContext) -> std::result::Result<CapturedGraph, String> {
     let device_status = ctx.stream().set_current_device();
     let stream = ctx.stream().handle();
     let mut graph: ffi::cudaGraph_t = std::ptr::null_mut();
-    let end_status = device_status.and_then(|_| unsafe {
-        ffi::check_cuda(ffi::cudaStreamEndCapture(stream, &mut graph))
-    });
+    let end_status = device_status
+        .and_then(|_| unsafe { ffi::check_cuda(ffi::cudaStreamEndCapture(stream, &mut graph)) });
     let retained = crate::workspace::end_capture_retention();
     end_status?;
     let mut exec: ffi::cudaGraphExec_t = std::ptr::null_mut();
@@ -85,12 +86,11 @@ fn end(ctx: &CudaContext) -> std::result::Result<CapturedGraph, String> {
 
 /// Capture asynchronous work submitted by `operation` into a CUDA Graph.
 /// Prepared executions used by the closure are retained by the graph.
-pub fn capture(
-    ctx: &CudaContext,
-    operation: impl FnOnce() -> Result<()>,
-) -> Result<CapturedGraph> {
+pub fn capture(ctx: &CudaContext, operation: impl FnOnce() -> Result<()>) -> Result<CapturedGraph> {
     if crate::workspace::is_capturing() {
-        return Err(Error::Other("nested CUDA Graph capture is not supported".into()));
+        return Err(Error::Other(
+            "nested CUDA Graph capture is not supported".into(),
+        ));
     }
     begin(ctx, CaptureMode::ThreadLocal).map_err(Error::Cuda)?;
     let operation_result = catch_unwind(AssertUnwindSafe(operation));

@@ -49,3 +49,33 @@ fn public_prepared_execution_can_be_captured_and_replayed() {
 
     assert!(values(&out).iter().all(|&value| value == 3.0));
 }
+
+#[test]
+fn capture_rejects_prepared_execution_from_another_stream() {
+    let capture_ctx = CudaContext::new(0).unwrap();
+    let execution_ctx = CudaContext::new(0).unwrap();
+    let a = bf16_tensor(0, vec![2, 3], &[1.0; 6]);
+    let b = bf16_tensor(0, vec![3, 4], &[1.0; 12]);
+    let mut out = bf16_tensor(0, vec![2, 4], &[0.0; 8]);
+
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.policy.online_tune = false;
+    let mut prepared = prepare_gemm(&execution_ctx, args).unwrap();
+    let error = match capture(&capture_ctx, || prepared.enqueue()) {
+        Ok(_) => panic!("capture accepted an execution bound to another stream"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("multi-stream capture is not supported"),
+        "unexpected error: {error}"
+    );
+
+    // A failed mismatched capture must not poison later capture on the bound
+    // stream.
+    let graph = capture(&execution_ctx, || prepared.enqueue()).unwrap();
+    graph.replay().unwrap();
+    execution_ctx.synchronize().unwrap();
+    assert!(values(&out).iter().all(|&value| value == 3.0));
+}

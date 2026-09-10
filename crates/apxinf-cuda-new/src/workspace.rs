@@ -75,7 +75,14 @@ thread_local! {
     static ACTIVE_WORKSPACE: Cell<*const GraphWorkspace> = const { Cell::new(std::ptr::null()) };
     static PREPARING: Cell<bool> = const { Cell::new(false) };
     static CAPTURE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static CAPTURE_TARGET: Cell<Option<CaptureTarget>> = const { Cell::new(None) };
     static CAPTURED_GEMM_INSTANCES: std::cell::RefCell<Vec<std::rc::Rc<crate::ops::execution::SharedExecution>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone, Copy)]
+struct CaptureTarget {
+    device: usize,
+    stream: usize,
 }
 
 struct ActiveWorkspaceGuard {
@@ -142,18 +149,32 @@ pub(crate) fn is_preparing_workspace() -> bool {
     PREPARING.with(Cell::get)
 }
 
-pub(crate) fn begin_capture_retention() {
+pub(crate) fn begin_capture_retention(device: usize, stream: usize) {
     CAPTURED_GEMM_INSTANCES.with(|instances| instances.borrow_mut().clear());
+    CAPTURE_TARGET.with(|target| target.set(Some(CaptureTarget { device, stream })));
     CAPTURE_ACTIVE.with(|active| active.set(true));
 }
 
 pub(crate) fn end_capture_retention() -> Vec<std::rc::Rc<crate::ops::execution::SharedExecution>> {
     CAPTURE_ACTIVE.with(|active| active.set(false));
+    CAPTURE_TARGET.with(|target| target.set(None));
     CAPTURED_GEMM_INSTANCES.with(|instances| std::mem::take(&mut *instances.borrow_mut()))
 }
 
 pub(crate) fn is_capturing() -> bool {
     CAPTURE_ACTIVE.with(Cell::get)
+}
+
+pub(crate) fn validate_capture_target(device: usize, stream: usize) -> Result<()> {
+    CAPTURE_TARGET.with(|target| match target.get() {
+        Some(active) if active.device != device || active.stream != stream => Err(Error::Other(
+            format!(
+                "prepared execution is bound to CUDA device {device} stream 0x{stream:x}, but the active capture targets CUDA device {} stream 0x{:x}; multi-stream capture is not supported",
+                active.device, active.stream
+            ),
+        )),
+        _ => Ok(()),
+    })
 }
 
 pub(crate) fn output_buffer(ctx: &CudaContext, bytes: usize) -> Result<CudaBuffer> {
@@ -192,9 +213,7 @@ pub(crate) fn lookup_gemm_instance(
     })
 }
 
-pub(crate) fn retain_gemm_instance(
-    instance: &std::rc::Rc<crate::ops::execution::SharedExecution>,
-) {
+pub(crate) fn retain_gemm_instance(instance: &std::rc::Rc<crate::ops::execution::SharedExecution>) {
     if CAPTURE_ACTIVE.with(Cell::get) {
         CAPTURED_GEMM_INSTANCES.with(|instances| {
             let mut instances = instances.borrow_mut();

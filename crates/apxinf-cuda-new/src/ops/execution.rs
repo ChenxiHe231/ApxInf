@@ -138,6 +138,10 @@ impl PreparedExecution {
     }
 
     pub fn enqueue(&mut self) -> Result<()> {
+        crate::workspace::validate_capture_target(
+            self.exec.stream.device(),
+            self.exec.stream.handle() as usize,
+        )?;
         self.exec.stream.set_current_device().map_err(Error::Cuda)?;
         crate::workspace::retain_gemm_instance(&self.exec);
         unsafe { status::check((self.exec.enqueue)(self.exec.raw)) }

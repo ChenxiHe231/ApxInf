@@ -17,12 +17,7 @@ unsafe extern "C" {
     ) -> usize;
 }
 
-fn hardware_fingerprint(
-    uuid: [u8; 16],
-    sms: i32,
-    memory: u64,
-    performance: bool,
-) -> String {
+fn hardware_fingerprint(uuid: [u8; 16], sms: i32, memory: u64, performance: bool) -> String {
     let mut output = vec![0 as c_char; 512];
     let length = unsafe {
         apxinf_gemm_test_hardware_fingerprint(
@@ -62,7 +57,10 @@ fn performance_mismatch_is_compatible_but_not_fully_tuned() {
     let uuid = [0x42; 16];
     let full = hardware_fingerprint(uuid, 14, 32 << 30, true);
     let reduced = hardware_fingerprint(uuid, 7, 16 << 30, true);
-    assert_ne!(full, reduced, "different performance profiles need retuning");
+    assert_ne!(
+        full, reduced,
+        "different performance profiles need retuning"
+    );
     assert_eq!(
         hardware_fingerprint(uuid, 14, 32 << 30, false),
         hardware_fingerprint(uuid, 7, 16 << 30, false),
@@ -205,7 +203,10 @@ fn gpu_e2e_candidate_alignment_is_selected_and_keyed_from_actual_bindings() {
         summary.contains("cublasLt-native-fp8+custom-epilogue=skip(alignment)"),
         "{summary}"
     );
-    assert!(!summary.contains("source=memory"), "alignment key aliased: {summary}");
+    assert!(
+        !summary.contains("source=memory"),
+        "alignment key aliased: {summary}"
+    );
 
     instance.enqueue().unwrap();
     ctx.synchronize().unwrap();
@@ -266,6 +267,48 @@ fn fp8_unit_scale_f32_output_does_not_round_through_f16() {
 }
 
 #[test]
+fn fp8_unit_scale_bf16_output_does_not_round_through_f16() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (1, 16, 16);
+    // BF16 can represent this dot product exactly, while F16 overflows it.
+    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x7e; m * k]);
+    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x7e; k * n]);
+    let mut out = zeros_tensor(0, vec![m, n], DType::BF16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.policy.online_tune = true;
+    args.policy.allow_fallback = false;
+
+    let normalized = super::contracts::normalize(
+        &ctx,
+        args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+    )
+    .unwrap();
+    let mut instance = super::execution::prepare(&ctx, normalized).unwrap();
+    let summary = instance.summary();
+    assert!(
+        summary.contains("cublas+custom-epilogue#0=pass"),
+        "{summary}"
+    );
+    assert!(
+        summary
+            .split(',')
+            .any(|entry| entry.contains("cublasLt+custom-epilogue") && entry.contains("=pass")),
+        "{summary}"
+    );
+
+    instance.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+
+    let expected = 448.0 * 448.0 * k as f32;
+    assert_eq!(expected, 3_211_264.0);
+    assert!(values(&out).iter().all(|&value| value == expected));
+}
+
+#[test]
 fn gpu_e2e_registered_backends_execute_and_report_verdicts() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, n) = (64, 64, 64);
@@ -312,7 +355,10 @@ fn gpu_e2e_registered_backends_execute_and_report_verdicts() {
         let passed = summary
             .split(',')
             .any(|entry| entry.contains(backend) && entry.contains("=pass"));
-        assert!(passed, "GPU backend has no passing tactic: {backend}; {summary}");
+        assert!(
+            passed,
+            "GPU backend has no passing tactic: {backend}; {summary}"
+        );
     }
 
     instance.enqueue().unwrap();
@@ -451,7 +497,12 @@ fn compatible_recipe_is_only_a_retuning_hint() {
         for entry in std::fs::read_dir(&cache_dir).unwrap() {
             let path = entry.unwrap().path();
             let contents = std::fs::read_to_string(&path).unwrap();
-            if contents.lines().next().unwrap_or_default().contains("|performance|") {
+            if contents
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .contains("|performance|")
+            {
                 std::fs::remove_file(path).unwrap();
             }
         }

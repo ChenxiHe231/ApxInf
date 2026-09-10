@@ -33,9 +33,9 @@ void allocate_common_resources(State& state, bool native_fp8) {
                 ? APXINF_DTYPE_F32
                 : (spec.a_dtype == APXINF_DTYPE_E4M3 ||
                    spec.b_dtype == APXINF_DTYPE_E4M3)
-                      ? (spec.output_dtype == APXINF_DTYPE_F32
-                             ? APXINF_DTYPE_F32
-                             : APXINF_DTYPE_F16)
+                      ? (spec.output_dtype == APXINF_DTYPE_F16
+                             ? APXINF_DTYPE_F16
+                             : APXINF_DTYPE_F32)
                       : spec.a_dtype;
 
   if (unpack) {
