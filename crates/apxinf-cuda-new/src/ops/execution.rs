@@ -122,53 +122,32 @@ impl Drop for SharedExecution {
     }
 }
 
-pub(crate) struct ExecutionInstance<'ctx> {
+/// A fully prepared GEMM execution bound to fixed tensor addresses.
+///
+/// Preparation selects the candidate, creates provider resources and performs
+/// any required warmup. Executors should retain this object and call
+/// [`enqueue`](Self::enqueue) on their hot path. Enqueue is asynchronous; the
+/// executor owns synchronization or CUDA Graph replay.
+pub struct PreparedExecution {
     exec: Rc<SharedExecution>,
-    ctx: &'ctx CudaContext,
 }
 
-impl<'ctx> ExecutionInstance<'ctx> {
+impl PreparedExecution {
     pub fn summary(&self) -> &str {
         &self.exec.summary
     }
 
     pub fn enqueue(&mut self) -> Result<()> {
-        self.ctx
-            .stream()
-            .set_current_device()
-            .map_err(Error::Cuda)?;
+        self.exec.stream.set_current_device().map_err(Error::Cuda)?;
+        crate::workspace::retain_gemm_instance(&self.exec);
         unsafe { status::check((self.exec.enqueue)(self.exec.raw)) }
     }
-
-    pub fn capture(mut self) -> Result<ExecutionGraph<'ctx>> {
-        crate::graph::begin(self.ctx, crate::graph::CaptureMode::ThreadLocal)
-            .map_err(Error::Cuda)?;
-        let launch = self.enqueue();
-        let graph = crate::graph::end(self.ctx);
-        launch?;
-        Ok(ExecutionGraph {
-            graph: graph.map_err(Error::Cuda)?,
-            instance: self,
-        })
-    }
 }
 
-/// A graph retains its instance, plan, bindings, tensors and native resources.
-pub(crate) struct ExecutionGraph<'ctx> {
-    graph: crate::graph::CapturedGraph,
-    instance: ExecutionInstance<'ctx>,
-}
-
-impl ExecutionGraph<'_> {
-    pub fn replay(&mut self) -> Result<()> {
-        self.graph.replay().map_err(Error::Cuda)
-    }
-}
-
-pub(crate) fn prepare<'ctx>(
-    ctx: &'ctx CudaContext,
+pub(crate) fn prepare(
+    ctx: &CudaContext,
     normalized: Normalized,
-) -> Result<ExecutionInstance<'ctx>> {
+) -> Result<PreparedExecution> {
     let Normalized {
         api,
         spec,
@@ -197,7 +176,7 @@ pub(crate) fn prepare<'ctx>(
         api.name, spec, bindings, policy.workspace_limit, policy.graph_safe, policy.deterministic
     );
     if let Some(exec) = crate::workspace::lookup_gemm_instance(&instance_key) {
-        return Ok(ExecutionInstance { exec, ctx });
+        return Ok(PreparedExecution { exec });
     }
     if !crate::workspace::may_prepare_native_resources() {
         return Err(invalid(
@@ -226,6 +205,8 @@ pub(crate) fn prepare<'ctx>(
     unsafe {
         status::check((api.instance_create)(plan.raw, &bindings, &mut raw))?;
     }
+    #[cfg(test)]
+    PREPARED_EXECUTION_CREATE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let exec = Rc::new(SharedExecution {
         raw,
         _plan: plan,
@@ -237,7 +218,7 @@ pub(crate) fn prepare<'ctx>(
         _not_send: PhantomData,
     });
     crate::workspace::store_gemm_instance(instance_key, Rc::clone(&exec));
-    Ok(ExecutionInstance { exec, ctx })
+    Ok(PreparedExecution { exec })
 }
 
 pub(crate) fn execute(ctx: &CudaContext, normalized: Normalized) -> Result<()> {
@@ -248,4 +229,18 @@ pub(crate) fn execute(ctx: &CudaContext, normalized: Normalized) -> Result<()> {
     } else {
         ctx.synchronize().map_err(Error::Cuda)
     }
+}
+
+#[cfg(test)]
+static PREPARED_EXECUTION_CREATE_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_prepared_execution_create_count() {
+    PREPARED_EXECUTION_CREATE_COUNT.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn prepared_execution_create_count() -> usize {
+    PREPARED_EXECUTION_CREATE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }

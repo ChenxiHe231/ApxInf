@@ -9,7 +9,16 @@ pub struct GemmGegluArgs<'a> {
 }
 
 pub fn gemm_geglu(ctx: &CudaContext, args: GemmGegluArgs<'_>) -> Result<()> {
-    execution::execute(
+    let mut execution = prepare_gemm_geglu(ctx, args)?;
+    execution.enqueue()?;
+    ctx.synchronize().map_err(apxinf_core::Error::Cuda)
+}
+
+pub fn prepare_gemm_geglu(
+    ctx: &CudaContext,
+    args: GemmGegluArgs<'_>,
+) -> Result<execution::PreparedExecution> {
+    execution::prepare(
         ctx,
         normalize(
             ctx,

@@ -185,21 +185,27 @@ pub(crate) fn lookup_gemm_instance(
                 .get(key)
                 .cloned();
             if let Some(instance) = &instance {
-                if CAPTURE_ACTIVE.with(Cell::get) {
-                    CAPTURED_GEMM_INSTANCES.with(|instances| {
-                        let mut instances = instances.borrow_mut();
-                        if !instances
-                            .iter()
-                            .any(|stored| std::rc::Rc::ptr_eq(stored, instance))
-                        {
-                            instances.push(std::rc::Rc::clone(instance));
-                        }
-                    });
-                }
+                retain_gemm_instance(instance);
             }
             instance
         }
     })
+}
+
+pub(crate) fn retain_gemm_instance(
+    instance: &std::rc::Rc<crate::ops::execution::SharedExecution>,
+) {
+    if CAPTURE_ACTIVE.with(Cell::get) {
+        CAPTURED_GEMM_INSTANCES.with(|instances| {
+            let mut instances = instances.borrow_mut();
+            if !instances
+                .iter()
+                .any(|stored| std::rc::Rc::ptr_eq(stored, instance))
+            {
+                instances.push(std::rc::Rc::clone(instance));
+            }
+        });
+    }
 }
 
 pub(crate) fn store_gemm_instance(

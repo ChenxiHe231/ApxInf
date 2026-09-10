@@ -9,10 +9,11 @@ mod gemm_gelu;
 
 pub use crate::workspace::GraphWorkspace;
 pub use contracts::{GemmArgs, GemmPolicy, GemmQuantization};
-pub use gemm::gemm;
-pub use gemm_bias::{gemm_bias, GemmBiasArgs};
-pub use gemm_geglu::{gemm_geglu, GemmGegluArgs};
-pub use gemm_gelu::{gemm_bias_gelu, GemmBiasGeluArgs};
+pub use execution::PreparedExecution;
+pub use gemm::{gemm, prepare_gemm};
+pub use gemm_bias::{gemm_bias, prepare_gemm_bias, GemmBiasArgs};
+pub use gemm_geglu::{gemm_geglu, prepare_gemm_geglu, GemmGegluArgs};
+pub use gemm_gelu::{gemm_bias_gelu, prepare_gemm_bias_gelu, GemmBiasGeluArgs};
 
 pub fn prepare_with_workspace<T>(
     workspace: &GraphWorkspace,

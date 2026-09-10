@@ -225,7 +225,7 @@ fn bf16_gemm_numeric_recipe_and_graph() {
     cached_args.policy.allow_fallback = false;
     gemm(&ctx, cached_args).unwrap();
 
-    let mut graph = instance.capture().unwrap();
+    let graph = crate::capture(&ctx, || instance.enqueue()).unwrap();
     graph.replay().unwrap();
     ctx.synchronize().unwrap();
     assert_eq!(values(&out), actual);
@@ -247,10 +247,10 @@ fn captured_graph_retains_workspace_instance_and_tensor_storage() {
 
     prepare_with_workspace(&workspace, || gemm(&ctx, GemmArgs::new(&a, &b, &mut out))).unwrap();
 
-    crate::graph::begin(&ctx, crate::graph::CaptureMode::ThreadLocal).unwrap();
-    let capture = with_workspace(&workspace, || gemm(&ctx, GemmArgs::new(&a, &b, &mut out)));
-    let graph = crate::graph::end(&ctx).unwrap();
-    capture.unwrap();
+    let graph = crate::capture(&ctx, || {
+        with_workspace(&workspace, || gemm(&ctx, GemmArgs::new(&a, &b, &mut out)))
+    })
+    .unwrap();
 
     drop(workspace);
     drop(a);

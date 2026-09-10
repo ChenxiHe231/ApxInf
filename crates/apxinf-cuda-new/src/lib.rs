@@ -7,7 +7,7 @@ mod workspace;
 
 pub use buffer::{CudaBuffer, CudaDeviceAddress, HostMappedBuffer};
 pub use context::CudaContext;
-pub use graph::CapturedGraph;
+pub use graph::{capture, CapturedGraph};
 pub use ops::GraphWorkspace;
 pub use stream::CudaStream;
 
