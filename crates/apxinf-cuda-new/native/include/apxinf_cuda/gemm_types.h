@@ -1,0 +1,63 @@
+#pragma once
+
+#include <stdint.h>
+
+#include "status.h"
+#include "types.h"
+
+typedef enum {
+  APXINF_DTYPE_F32 = 0,
+  APXINF_DTYPE_F16 = 1,
+  APXINF_DTYPE_BF16 = 2,
+  APXINF_DTYPE_E4M3 = 3,
+  APXINF_DTYPE_I8 = 4,
+  APXINF_DTYPE_I32 = 5,
+} apxinf_dtype_t;
+
+typedef enum {
+  APXINF_GEMM_LAYOUT_KN = 0,
+  APXINF_GEMM_LAYOUT_NK = 1,
+  APXINF_GEMM_LAYOUT_GATE_UP_INTERLEAVED_256 = 2,
+} apxinf_gemm_layout_t;
+
+typedef enum {
+  APXINF_GEMM_QUANT_NONE = 0,
+  APXINF_GEMM_QUANT_FP8_UNIT_SCALE = 1,
+  APXINF_GEMM_QUANT_FP8_ROW_CHANNEL = 2,
+  APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL = 3,
+} apxinf_gemm_quantization_t;
+
+typedef struct {
+  uint32_t version;
+  uint32_t a_dtype;
+  uint32_t b_dtype;
+  uint32_t accumulation_dtype;
+  uint32_t output_dtype;
+  uint32_t quantization;
+  int64_t m;
+  int64_t n;
+  int64_t k;
+  float alpha;
+  float output_scale;
+} apxinf_gemm_spec_t;
+
+typedef struct {
+  uint64_t workspace_limit;
+  uint32_t online_tune;
+  uint32_t allow_fallback;
+  uint32_t graph_safe;
+  uint32_t deterministic;
+  const char* cache_dir;
+} apxinf_gemm_policy_t;
+
+typedef struct {
+  const void* a;
+  const void* b;
+  const void* bias;
+  const float* a_scales;
+  const float* b_scales;
+  void* output;
+  apxinf_cuda_stream_t stream;
+} apxinf_gemm_bindings_t;
+
+typedef apxinf_gemm_bindings_t apxinf_gemm_tuning_bindings_t;

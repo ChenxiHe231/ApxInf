@@ -43,18 +43,19 @@ pub fn upload_fp32_as_bf16(
     buf.copy_from_host(&bytes)
         .map_err(apxinf_core::Error::Cuda)?;
 
-    let handle = GpuStorageHandle {
-        ptr: buf.ptr() as usize,
-        len: buf.len(),
-        _prevent_leak: Some(std::sync::Arc::new(buf)),
+    // SAFETY: `buf` owns this CUDA allocation and is retained by the handle.
+    let handle = unsafe {
+        GpuStorageHandle::from_raw_parts(
+            buf.ptr() as usize,
+            buf.len(),
+            Some(std::sync::Arc::new(buf)),
+        )
     };
     let device = Device::Cuda(device_id);
-    Ok(Tensor::from_raw_parts(
-        shape,
-        DType::BF16,
-        device,
-        Storage::Gpu { device, handle },
-    ))
+    // SAFETY: shape, dtype, device and allocation length were validated above.
+    Ok(unsafe {
+        Tensor::from_raw_parts(shape, DType::BF16, device, Storage::Gpu { device, handle })
+    })
 }
 
 /// Download a bf16 GPU tensor and upcast to fp32 on host.

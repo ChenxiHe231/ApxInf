@@ -550,6 +550,26 @@ fn transpose_2d(tensor: &Tensor) -> Result<Tensor> {
             }
             Tensor::from_f8_e4m3(vec![cols, rows], &dst)
         }
+        DType::I8 => {
+            let src = tensor.as_i8()?;
+            let mut dst = vec![0i8; src.len()];
+            for row in 0..rows {
+                for col in 0..cols {
+                    dst[col * rows + row] = src[row * cols + col];
+                }
+            }
+            Tensor::from_i8(vec![cols, rows], &dst)
+        }
+        DType::I32 => {
+            let src = tensor.as_i32()?;
+            let mut dst = vec![0i32; src.len()];
+            for row in 0..rows {
+                for col in 0..cols {
+                    dst[col * rows + row] = src[row * cols + col];
+                }
+            }
+            Tensor::from_i32(vec![cols, rows], &dst)
+        }
     }
 }
 
@@ -578,6 +598,9 @@ fn add_one(tensor: Tensor) -> Result<Tensor> {
         }
         DType::F8E4M3 => Err(Error::Other(
             "π0.5 RMSNorm parameters cannot be stored as unscaled FP8".into(),
+        )),
+        DType::I8 | DType::I32 => Err(Error::Other(
+            "π0.5 RMSNorm parameters cannot be stored as integer tensors".into(),
         )),
     }
 }
