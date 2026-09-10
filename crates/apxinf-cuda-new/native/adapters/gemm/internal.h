@@ -98,6 +98,7 @@ inline bool has_row_channel_scales(const Spec& spec) {
 struct State;
 using LaunchFn = cudaError_t (*)(State&, const apxinf_gemm_bindings_t&);
 using CreateStateFn = void (*)(State&, const State* blueprint);
+using BindStateFn = void (*)(State&, const apxinf_gemm_bindings_t&);
 using ReleaseResourcesFn = void (*)(State&) noexcept;
 using DestroyStateFn = void (*)(State&) noexcept;
 
@@ -126,6 +127,7 @@ struct Implementation {
   ResourceRequirementsFn resource_requirements;
   void (*enumerate_configs)(const Spec&, std::vector<int>&);
   CreateStateFn create_state;
+  BindStateFn bind_state;
   ReleaseResourcesFn release_resources;
   DestroyStateFn destroy_state;
   LaunchFn launch;
@@ -215,6 +217,8 @@ void prepare_cutlass_fp8_gemm(State& state, const State* blueprint);
 void prepare_cutlass_geglu(State& state, const State* blueprint);
 size_t cutlass_fp8_resource_requirements(const Spec& spec);
 size_t cutlass_geglu_resource_requirements(const Spec& spec);
+void bind_cutlass_geglu(State& state,
+                        const apxinf_gemm_bindings_t& bindings);
 void release_cutlass_resources(State& state) noexcept;
 void destroy_cutlass(State& state) noexcept;
 cudaError_t launch_cutlass_fp8_gemm(
@@ -223,6 +227,7 @@ cudaError_t launch_cutlass_fp8_geglu(
     State& state, const apxinf_gemm_bindings_t& bindings);
 cudaError_t launch_cutlass_bf16_geglu(
     State& state, const apxinf_gemm_bindings_t& bindings);
+uint64_t cutlass_weight_prepack_count(const State& state);
 
 TuningKeys tuning_keys(const Spec& spec,
                        const apxinf_gemm_policy_t& policy,

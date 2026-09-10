@@ -146,6 +146,11 @@ impl PreparedExecution {
         crate::workspace::retain_gemm_instance(&self.exec);
         unsafe { status::check((self.exec.enqueue)(self.exec.raw)) }
     }
+
+    #[cfg(test)]
+    pub(crate) fn weight_prepack_count(&self) -> u64 {
+        unsafe { abi::apxinf_gemm_instance_weight_prepack_count(self.exec.raw) }
+    }
 }
 
 pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<PreparedExecution> {
@@ -281,4 +286,45 @@ pub(crate) fn reset_prepared_execution_create_count() {
 #[cfg(test)]
 pub(crate) fn prepared_execution_create_count() -> usize {
     PREPARED_EXECUTION_CREATE_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn seed_recipe(
+    ctx: &CudaContext,
+    normalized: &Normalized<'_>,
+    provider_id: u32,
+    implementation_id: u32,
+    implementation_version: u32,
+    configuration: i32,
+) -> Result<()> {
+    let cache = normalized
+        .policy
+        .cache_dir
+        .as_ref()
+        .ok_or_else(|| invalid("test recipe seeding requires a cache directory"))?;
+    let cache = CString::new(cache.as_str()).map_err(|_| invalid("cache path contains NUL"))?;
+    let policy = abi::Policy {
+        workspace_limit: normalized.policy.workspace_limit as u64,
+        online_tune: normalized.policy.online_tune as u32,
+        allow_fallback: normalized.policy.allow_fallback as u32,
+        graph_safe: normalized.policy.graph_safe as u32,
+        deterministic: normalized.policy.deterministic as u32,
+        execution_mode: match normalized.policy.execution_mode {
+            super::GemmExecutionMode::Eager => 0,
+            super::GemmExecutionMode::GraphReplay => 1,
+        },
+        cache_dir: cache.as_ptr(),
+    };
+    unsafe {
+        status::check(abi::apxinf_gemm_test_seed_recipe(
+            &normalized.spec,
+            &policy,
+            super::contracts::Semantic::GemmGeglu as u32,
+            ctx.device_id() as i32,
+            provider_id,
+            implementation_id,
+            implementation_version,
+            configuration,
+        ))
+    }
 }

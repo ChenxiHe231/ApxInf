@@ -67,6 +67,9 @@ typedef struct {
 typedef struct {
   const void* a;
   const void* b;
+  /* A prepared-weight identity is (b allocation address, b_version). */
+  uint64_t b_version;
+  uint32_t b_is_immutable;
   const void* bias;
   const float* a_scales;
   const float* b_scales;

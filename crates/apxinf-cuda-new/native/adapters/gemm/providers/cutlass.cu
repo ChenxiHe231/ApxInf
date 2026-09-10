@@ -12,12 +12,19 @@ namespace {
 struct CutlassGegluState {
   void* packed_weight = nullptr;
   size_t packed_weight_bytes = 0;
+  const void* packed_weight_source = nullptr;
+  uint64_t packed_weight_version = 0;
+  uint64_t prepack_count = 0;
+  bool packed_weight_ready = false;
 
   ~CutlassGegluState() { release_resources(); }
 
   void release_resources() noexcept {
     if (packed_weight != nullptr) cudaFree(packed_weight);
     packed_weight = nullptr;
+    packed_weight_source = nullptr;
+    packed_weight_version = 0;
+    packed_weight_ready = false;
   }
 };
 
@@ -25,8 +32,8 @@ CutlassGegluState& provider(State& state) {
   return *static_cast<CutlassGegluState*>(state.provider_state);
 }
 
-const void* pack_geglu_weight(State& state,
-                              const apxinf_gemm_bindings_t& bindings) {
+void pack_geglu_weight(State& state,
+                       const apxinf_gemm_bindings_t& bindings) {
   auto& resources = provider(state);
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
   const auto& spec = state.spec;
@@ -35,7 +42,7 @@ const void* pack_geglu_weight(State& state,
   apxinf::cuda::custom::pack_gate_up<<<blocks, 256, 0, stream>>>(
       bindings.b, resources.packed_weight, spec.b_dtype, spec.k, spec.n);
   check_cuda(cudaGetLastError());
-  return resources.packed_weight;
+  ++resources.prepack_count;
 }
 
 void check_cutlass_status(int status) {
@@ -63,6 +70,24 @@ void prepare_cutlass_geglu(State& state, const State*) {
                         resources->packed_weight_bytes));
   state.resource_bytes = resources->packed_weight_bytes;
   state.provider_state = resources.release();
+}
+
+void bind_cutlass_geglu(State& state,
+                        const apxinf_gemm_bindings_t& bindings) {
+  if (bindings.b_is_immutable == 0) return;
+  auto& resources = provider(state);
+  if (resources.packed_weight_ready) {
+    if (resources.packed_weight_source != bindings.b ||
+        resources.packed_weight_version != bindings.b_version) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "prepared CUTLASS weight identity changed");
+    }
+    return;
+  }
+  pack_geglu_weight(state, bindings);
+  resources.packed_weight_source = bindings.b;
+  resources.packed_weight_version = bindings.b_version;
+  resources.packed_weight_ready = true;
 }
 
 void release_cutlass_resources(State& state) noexcept {
@@ -96,7 +121,18 @@ cudaError_t launch_cutlass_fp8_geglu(
 #ifdef APXINF_GEMM_CUTLASS
   const auto& spec = state.spec;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
-  const void* weight = pack_geglu_weight(state, bindings);
+  auto& resources = provider(state);
+  if (bindings.b_is_immutable != 0) {
+    if (!resources.packed_weight_ready ||
+        resources.packed_weight_source != bindings.b ||
+        resources.packed_weight_version != bindings.b_version) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "CUTLASS immutable weight was not prepared for these bindings");
+    }
+  } else {
+    pack_geglu_weight(state, bindings);
+  }
+  const void* weight = resources.packed_weight;
   check_cutlass_status(
       apxinf::cuda::cutlass_ops::fp8_dual_geglu_detail::production_dual_geglu(
           bindings.a, weight, bindings.output, spec.m, spec.n / 2, spec.k,
@@ -114,7 +150,18 @@ cudaError_t launch_cutlass_bf16_geglu(
 #ifdef APXINF_GEMM_CUTLASS
   const auto& spec = state.spec;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
-  const void* weight = pack_geglu_weight(state, bindings);
+  auto& resources = provider(state);
+  if (bindings.b_is_immutable != 0) {
+    if (!resources.packed_weight_ready ||
+        resources.packed_weight_source != bindings.b ||
+        resources.packed_weight_version != bindings.b_version) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "CUTLASS immutable weight was not prepared for these bindings");
+    }
+  } else {
+    pack_geglu_weight(state, bindings);
+  }
+  const void* weight = resources.packed_weight;
   check_cutlass_status(apxinf::cuda::cutlass_ops::bf16_dual_geglu_detail::
                            production_dual_geglu_bf16(
                                bindings.a, weight, bindings.output, spec.m,
@@ -125,6 +172,12 @@ cudaError_t launch_cutlass_bf16_geglu(
   (void)bindings;
   return cudaErrorNotSupported;
 #endif
+}
+
+uint64_t cutlass_weight_prepack_count(const State& state) {
+  if (state.provider_state == nullptr) return 0;
+  return static_cast<const CutlassGegluState*>(state.provider_state)
+      ->prepack_count;
 }
 
 }  // namespace apxinf::gemm

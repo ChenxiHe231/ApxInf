@@ -41,6 +41,8 @@ pub(crate) struct Policy {
 pub(crate) struct Bindings {
     pub a: *const c_void,
     pub b: *const c_void,
+    pub b_version: u64,
+    pub b_is_immutable: u32,
     pub bias: *const c_void,
     pub a_scales: *const f32,
     pub b_scales: *const f32,
@@ -84,4 +86,17 @@ unsafe extern "C" {
     pub(crate) fn apxinf_gemm_instance_destroy(instance: Instance);
     pub(crate) fn apxinf_gemm_plan_destroy(plan: Plan);
     pub(crate) fn apxinf_gemm_plan_summary(plan: Plan) -> *const c_char;
+    pub(crate) fn apxinf_gemm_instance_weight_prepack_count(instance: Instance) -> u64;
+
+    #[cfg(test)]
+    pub(crate) fn apxinf_gemm_test_seed_recipe(
+        spec: *const Spec,
+        policy: *const Policy,
+        semantic: u32,
+        device: i32,
+        provider_id: u32,
+        implementation_id: u32,
+        implementation_version: u32,
+        configuration: i32,
+    ) -> i32;
 }

@@ -141,6 +141,11 @@ void validate_bindings(const apxinf::gemm::Spec& spec,
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "GEMM scale binding contradicts the plan scale predicate");
   }
+  if (bindings.b_is_immutable > 1 ||
+      (bindings.b_is_immutable == 0 && bindings.b_version != 0)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid GEMM immutable-weight identity");
+  }
   validate_recorded_alignment(bindings.a, spec.a_alignment, "GEMM A binding");
   validate_recorded_alignment(bindings.b, spec.b_alignment, "GEMM B binding");
   validate_recorded_alignment(bindings.bias, spec.bias_alignment,
@@ -439,6 +444,10 @@ apxinf_status_t instance_create(
         *blueprint.implementation, blueprint.configuration, blueprint.spec,
         plan->policy, blueprint.device, &blueprint);
     instance->bindings = *bindings;
+    if (instance->state->implementation->bind_state != nullptr) {
+      instance->state->implementation->bind_state(*instance->state,
+                                                  instance->bindings);
+    }
 
     void* scratch = nullptr;
     auto warmup_bindings = instance->bindings;
@@ -478,6 +487,51 @@ apxinf_status_t enqueue(apxinf_gemm_instance* instance) {
 
 void instance_destroy(apxinf_gemm_instance* instance) {
   delete instance;
+}
+
+extern "C" uint64_t apxinf_gemm_instance_weight_prepack_count(
+    apxinf_gemm_instance* instance) {
+  if (instance == nullptr || instance->state->implementation->provider_id != 3) {
+    return 0;
+  }
+  return apxinf::gemm::cutlass_weight_prepack_count(*instance->state);
+}
+
+// Private test hook used to select a provider without running the very large
+// provider-independent CPU reference required by production GeGLU shapes.
+extern "C" apxinf_status_t apxinf_gemm_test_seed_recipe(
+    const apxinf_gemm_spec_t* spec,
+    const apxinf_gemm_policy_t* policy,
+    uint32_t semantic,
+    int device,
+    uint32_t provider_id,
+    uint32_t implementation_id,
+    uint32_t implementation_version,
+    int32_t configuration) {
+  return apxinf::gemm::abi_boundary([&] {
+    if (spec == nullptr || policy == nullptr || policy->cache_dir == nullptr ||
+        semantic > static_cast<uint32_t>(APXINF_GEMM_SEMANTIC_GEMM_BIAS)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid test recipe seed arguments");
+    }
+    apxinf::gemm::Spec normalized{};
+    static_cast<apxinf_gemm_spec_t&>(normalized) = *spec;
+    normalized.semantic = static_cast<apxinf::gemm::Semantic>(semantic);
+    validate_spec(normalized);
+    const Recipe recipe{provider_id, implementation_id,
+                        implementation_version, configuration};
+    if (find_implementation(recipe, normalized, device) == nullptr) {
+      throw Failure(APXINF_STATUS_UNSUPPORTED,
+                    "test recipe candidate is unavailable");
+    }
+    const auto keys =
+        apxinf::gemm::tuning_keys(normalized, *policy, device);
+    std::ostringstream serialized;
+    serialized << provider_id << ' ' << implementation_id << ' '
+               << implementation_version << ' ' << configuration;
+    apxinf::gemm::write_recipe(policy->cache_dir, keys.performance,
+                               serialized.str());
+  });
 }
 
 void plan_destroy(apxinf_gemm_plan* plan) {

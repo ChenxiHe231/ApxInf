@@ -11,10 +11,7 @@ pub fn gemm(ctx: &CudaContext, args: GemmArgs<'_>) -> Result<()> {
     )
 }
 
-pub fn prepare_gemm(
-    ctx: &CudaContext,
-    args: GemmArgs<'_>,
-) -> Result<execution::PreparedExecution> {
+pub fn prepare_gemm(ctx: &CudaContext, args: GemmArgs<'_>) -> Result<execution::PreparedExecution> {
     execution::prepare(
         ctx,
         normalize(ctx, args, Semantic::Gemm, execution::PlanApi::gemm(), None)?,

@@ -82,7 +82,7 @@ size_t common_resource_requirements(const Spec& spec, bool native_fp8) {
   const bool needs_postprocess =
       spec.semantic != APXINF_GEMM_SEMANTIC_GEMM ||
       has_row_channel_scales(spec) || spec.output_dtype != projection_dtype ||
-      spec.output_scale != 1.0F;
+      spec.output_scale_is_unit == 0;
   if (needs_postprocess) {
     bytes += static_cast<size_t>(spec.m * spec.n) *
              dtype_bytes(projection_dtype);

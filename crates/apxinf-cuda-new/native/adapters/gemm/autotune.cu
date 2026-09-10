@@ -185,6 +185,9 @@ std::shared_ptr<State> tune(
     try {
         auto candidate =
             prepare(implementation, configuration, spec, policy, device);
+        if (implementation.bind_state != nullptr) {
+          implementation.bind_state(*candidate, bindings);
+        }
         poison(bindings, output_bytes);
         check_cuda(implementation.launch(*candidate, bindings));
         const auto actual = read_output(

@@ -1447,3 +1447,113 @@ fn gpu_e2e_cached_plan_rebuilds_and_drops_provider_private_instances() {
         assert!(values(&out).iter().all(|&value| value == 16.0));
     }
 }
+
+#[test]
+fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (522, 2048, 32768);
+    let a = zeros_tensor(0, vec![m, k], DType::F8E4M3);
+    let b = zeros_tensor(0, vec![k, n], DType::F8E4M3);
+    let mut out = zeros_tensor(0, vec![m, n / 2], DType::F8E4M3);
+    let cache_dir = std::env::temp_dir().join(format!(
+        "apxinf-geglu-prepack-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cache_dir_string = cache_dir.to_string_lossy().into_owned();
+
+    let normalized = {
+        let mut args = GemmArgs::new(&a, &b, &mut out).with_immutable_weight(WeightVersion::new(7));
+        args.quantization = GemmQuantization::Fp8UnitScale;
+        args.policy.online_tune = false;
+        args.policy.allow_fallback = false;
+        args.policy.cache_dir = Some(cache_dir_string.clone());
+        super::contracts::normalize(
+            &ctx,
+            args,
+            super::contracts::Semantic::GemmGeglu,
+            super::execution::PlanApi::gemm_geglu(),
+            None,
+        )
+        .unwrap()
+    };
+    // Provider 3, implementation 2, version 2 is the FP8 CUTLASS GeGLU
+    // candidate. Seeding avoids an enormous CPU-reference autotune while
+    // keeping instance construction and public enqueue/capture paths real.
+    super::execution::seed_recipe(&ctx, &normalized, 3, 2, 2, 0).unwrap();
+    drop(normalized);
+
+    let workspace = GraphWorkspace::new(1, 0).unwrap();
+    super::execution::reset_prepared_execution_create_count();
+    let (mut first, same_version, changed_version) = prepare_with_workspace(&workspace, || {
+        let first = {
+            let mut args =
+                GemmArgs::new(&a, &b, &mut out).with_immutable_weight(WeightVersion::new(7));
+            args.quantization = GemmQuantization::Fp8UnitScale;
+            args.policy.online_tune = false;
+            args.policy.allow_fallback = false;
+            args.policy.cache_dir = Some(cache_dir_string.clone());
+            prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: args })?
+        };
+
+        let same = {
+            let mut args =
+                GemmArgs::new(&a, &b, &mut out).with_immutable_weight(WeightVersion::new(7));
+            args.quantization = GemmQuantization::Fp8UnitScale;
+            args.policy.online_tune = false;
+            args.policy.allow_fallback = false;
+            args.policy.cache_dir = Some(cache_dir_string.clone());
+            prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: args })?
+        };
+        let changed = {
+            let mut args =
+                GemmArgs::new(&a, &b, &mut out).with_immutable_weight(WeightVersion::new(8));
+            args.quantization = GemmQuantization::Fp8UnitScale;
+            args.policy.online_tune = false;
+            args.policy.allow_fallback = false;
+            args.policy.cache_dir = Some(cache_dir_string.clone());
+            prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: args })?
+        };
+        Ok((first, same, changed))
+    })
+    .unwrap();
+
+    assert_eq!(super::execution::prepared_execution_create_count(), 2);
+    assert_eq!(first.weight_prepack_count(), 1);
+    assert_eq!(same_version.weight_prepack_count(), 1);
+    assert_eq!(changed_version.weight_prepack_count(), 1);
+
+    first.enqueue().unwrap();
+    first.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(first.weight_prepack_count(), 1);
+
+    let graph = crate::capture(&ctx, || first.enqueue()).unwrap();
+    graph.replay().unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(first.weight_prepack_count(), 1);
+
+    drop((graph, first, same_version, changed_version));
+    drop(workspace);
+
+    // Without the explicit immutability/version contract, each launch must
+    // conservatively repack because the caller may have changed B in place.
+    let mut mutable_args = GemmArgs::new(&a, &b, &mut out);
+    mutable_args.quantization = GemmQuantization::Fp8UnitScale;
+    mutable_args.policy.online_tune = false;
+    mutable_args.policy.allow_fallback = false;
+    mutable_args.policy.cache_dir = Some(cache_dir_string);
+    let mut mutable = prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: mutable_args }).unwrap();
+    assert_eq!(mutable.weight_prepack_count(), 1); // instance warmup
+    mutable.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(mutable.weight_prepack_count(), 2);
+
+    drop(mutable);
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}

@@ -14,6 +14,25 @@ pub enum GemmExecutionMode {
     GraphReplay,
 }
 
+/// Caller-managed version of an immutable GEMM weight allocation.
+///
+/// A version is meaningful together with the weight tensor's allocation
+/// identity. Supplying it asserts that the allocation's contents will not be
+/// changed while a prepared execution using that version is alive. Increment
+/// the version before preparing again after changing the contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WeightVersion(u64);
+
+impl WeightVersion {
+    pub const fn new(version: u64) -> Self {
+        Self(version)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GemmPolicy {
     /// Accumulation precision is part of the GEMM key, not a candidate detail.
@@ -55,6 +74,13 @@ pub struct GemmArgs<'a> {
     pub alpha: f32,
     pub output_scale: f32,
     pub policy: GemmPolicy,
+    /// Explicit opt-in for candidate-specific prepared-weight caching.
+    ///
+    /// `None` means the weight may change between launches, so candidates
+    /// must not retain a transformed copy. The token never replaces allocation
+    /// identity: both the tensor address and this version identify a prepared
+    /// weight.
+    pub weight_version: Option<WeightVersion>,
 }
 
 /// Original FP32 operands used by the crate's deterministic candidate
@@ -120,6 +146,7 @@ impl<'a> GemmArgs<'a> {
             alpha: 1.0,
             output_scale: 1.0,
             policy: GemmPolicy::default(),
+            weight_version: None,
         }
     }
 
@@ -141,6 +168,7 @@ impl<'a> GemmArgs<'a> {
             alpha: 1.0,
             output_scale: 1.0,
             policy: GemmPolicy::default(),
+            weight_version: None,
         }
     }
 
@@ -166,7 +194,15 @@ impl<'a> GemmArgs<'a> {
             alpha: 1.0,
             output_scale: 1.0,
             policy,
+            weight_version: None,
         }
+    }
+
+    /// Assert that `b` is immutable for the lifetime of prepared executions
+    /// created from these arguments and attach its caller-managed version.
+    pub fn with_immutable_weight(mut self, version: WeightVersion) -> Self {
+        self.weight_version = Some(version);
+        self
     }
 }
 
@@ -390,6 +426,8 @@ pub(crate) fn normalize<'a>(
     let mut bindings = abi::Bindings {
         a: storage[0].ptr(),
         b: storage[1].ptr(),
+        b_version: args.weight_version.map_or(0, WeightVersion::get),
+        b_is_immutable: u32::from(args.weight_version.is_some()),
         bias: std::ptr::null(),
         a_scales: std::ptr::null(),
         b_scales: std::ptr::null(),
