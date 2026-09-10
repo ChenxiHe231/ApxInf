@@ -145,6 +145,15 @@ struct Recipe {
   int32_t configuration;
 };
 
+struct TuningKeys {
+  // A recipe under this key is fully tuned for an equivalent performance
+  // profile and may be restored directly.
+  std::string performance;
+  // A recipe under this key only proves execution compatibility. It may be
+  // tried first, but all candidates must still be tuned on this device.
+  std::string compatible_hint;
+};
+
 struct State {
   Spec spec{};
   int configuration = 0;
@@ -182,7 +191,7 @@ cudaError_t launch_postprocess(State& state,
                                const apxinf_gemm_bindings_t& bindings,
                                void* projection);
 
-std::string tuning_key(const Spec& spec,
+TuningKeys tuning_keys(const Spec& spec,
                        const apxinf_gemm_policy_t& policy,
                        int device);
 std::string read_recipe(const std::string& directory, const std::string& key);
@@ -199,7 +208,8 @@ std::shared_ptr<State> tune(const Spec& spec,
                             const apxinf_gemm_policy_t& policy,
                             const apxinf_gemm_tuning_bindings_t& bindings,
                             int device,
-                            std::string& report);
+                            std::string& report,
+                            const Recipe* preferred = nullptr);
 
 }  // namespace apxinf::gemm
 

@@ -2,6 +2,73 @@ use super::*;
 use crate::{CudaBuffer, CudaContext};
 use apxinf_core::{DType, Shape, Tensor};
 use half::bf16;
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_int};
+
+unsafe extern "C" {
+    fn apxinf_gemm_test_hardware_fingerprint(
+        uuid: *const u8,
+        uuid_size: usize,
+        multiprocessor_count: i32,
+        total_global_memory: u64,
+        performance: c_int,
+        output: *mut c_char,
+        capacity: usize,
+    ) -> usize;
+}
+
+fn hardware_fingerprint(
+    uuid: [u8; 16],
+    sms: i32,
+    memory: u64,
+    performance: bool,
+) -> String {
+    let mut output = vec![0 as c_char; 512];
+    let length = unsafe {
+        apxinf_gemm_test_hardware_fingerprint(
+            uuid.as_ptr(),
+            uuid.len(),
+            sms,
+            memory,
+            if performance { 1 } else { 0 },
+            output.as_mut_ptr(),
+            output.len(),
+        )
+    };
+    assert!(length < output.len());
+    unsafe { CStr::from_ptr(output.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn uuid_does_not_partition_persistent_tuning_cache() {
+    let first = [0x11; 16];
+    let second = [0xee; 16];
+    assert_eq!(
+        hardware_fingerprint(first, 14, 32 << 30, true),
+        hardware_fingerprint(second, 14, 32 << 30, true),
+        "equivalent GPUs with different UUIDs must share tuned recipes"
+    );
+    assert_eq!(
+        hardware_fingerprint(first, 14, 32 << 30, false),
+        hardware_fingerprint(second, 14, 32 << 30, false)
+    );
+}
+
+#[test]
+fn performance_mismatch_is_compatible_but_not_fully_tuned() {
+    let uuid = [0x42; 16];
+    let full = hardware_fingerprint(uuid, 14, 32 << 30, true);
+    let reduced = hardware_fingerprint(uuid, 7, 16 << 30, true);
+    assert_ne!(full, reduced, "different performance profiles need retuning");
+    assert_eq!(
+        hardware_fingerprint(uuid, 14, 32 << 30, false),
+        hardware_fingerprint(uuid, 7, 16 << 30, false),
+        "the previous winner remains an execution-compatible tuning hint"
+    );
+}
 
 fn tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
     let host: Vec<_> = values.iter().map(|value| bf16::from_f32(*value)).collect();
@@ -346,6 +413,87 @@ fn bf16_gemm_numeric_recipe_and_graph() {
     graph.replay().unwrap();
     ctx.synchronize().unwrap();
     assert_eq!(values(&out), actual);
+}
+
+#[test]
+fn compatible_recipe_is_only_a_retuning_hint() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "apxinf-compatible-recipe-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&cache_dir).unwrap();
+    let cache = cache_dir.to_string_lossy().into_owned();
+
+    let run = |ctx: &CudaContext, online_tune: bool| {
+        let a = tensor(0, vec![2, 3], &[1.0; 6]);
+        let b = tensor(0, vec![3, 4], &[1.0; 12]);
+        let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.policy.cache_dir = Some(cache.clone());
+        args.policy.online_tune = online_tune;
+        args.policy.allow_fallback = false;
+        super::execution::prepare(
+            ctx,
+            super::contracts::normalize(
+                ctx,
+                args,
+                super::contracts::Semantic::Gemm,
+                super::execution::PlanApi::gemm(),
+                None,
+            )?,
+        )
+    };
+    let remove_performance_recipe = || {
+        for entry in std::fs::read_dir(&cache_dir).unwrap() {
+            let path = entry.unwrap().path();
+            let contents = std::fs::read_to_string(&path).unwrap();
+            if contents.lines().next().unwrap_or_default().contains("|performance|") {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+    };
+
+    let first = run(&CudaContext::new(0).unwrap(), true).unwrap();
+    assert!(first.summary().contains("tuned preferred=0"));
+    drop(first);
+    remove_performance_recipe();
+
+    let retuned = run(&CudaContext::new(0).unwrap(), true).unwrap();
+    assert!(
+        retuned.summary().contains("tuned preferred=1"),
+        "compatible winner must be tried first but still fully tuned: {}",
+        retuned.summary()
+    );
+    drop(retuned);
+    remove_performance_recipe();
+
+    for entry in std::fs::read_dir(&cache_dir).unwrap() {
+        let path = entry.unwrap().path();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let key = contents.lines().next().unwrap_or_default();
+        if key.contains("|compatible-hint") {
+            std::fs::write(path, format!("{key}\n999 999 999 999\n")).unwrap();
+        }
+    }
+    let invalid_hint = run(&CudaContext::new(0).unwrap(), true).unwrap();
+    assert!(
+        invalid_hint.summary().contains("tuned preferred=0"),
+        "missing or version-incompatible candidates must be filtered: {}",
+        invalid_hint.summary()
+    );
+    drop(invalid_hint);
+    remove_performance_recipe();
+
+    let miss = match run(&CudaContext::new(0).unwrap(), false) {
+        Ok(_) => panic!("compatible hint was incorrectly accepted as fully tuned"),
+        Err(error) => error,
+    };
+    assert!(miss.to_string().contains("recipe miss"));
+    std::fs::remove_dir_all(cache_dir).unwrap();
 }
 
 #[test]

@@ -244,8 +244,9 @@ apxinf_status_t plan_create(
     }
 
     apxinf::gemm::check_cuda(cudaSetDevice(runtime->device));
-    const std::string key =
-        apxinf::gemm::tuning_key(normalized_spec, *policy, runtime->device);
+    const auto keys =
+        apxinf::gemm::tuning_keys(normalized_spec, *policy, runtime->device);
+    const std::string& key = keys.performance;
     std::lock_guard<std::mutex> lock(runtime->gemm_mutex);
     if (const auto cached = runtime->gemm_plans.find(key);
         cached != runtime->gemm_plans.end()) {
@@ -261,6 +262,8 @@ apxinf_status_t plan_create(
 
     Recipe recipe{};
     bool recipe_found = false;
+    Recipe compatible_hint{};
+    bool compatible_hint_found = false;
     std::string source = "recipe";
     if (const auto cached = runtime->gemm_recipes.find(key);
         cached != runtime->gemm_recipes.end()) {
@@ -276,6 +279,25 @@ apxinf_status_t plan_create(
           recipe.implementation_version >> recipe.configuration);
     }
 
+    // A compatibility hint may come from a device with a different
+    // performance profile. It is never restored as a fully tuned plan: it is
+    // only moved to the front of the next complete tuning pass.
+    if (!recipe_found) {
+      const std::string serialized = apxinf::gemm::read_recipe(
+          policy->cache_dir != nullptr ? policy->cache_dir : "",
+          keys.compatible_hint);
+      std::istringstream input(serialized);
+      compatible_hint_found = static_cast<bool>(
+          input >> compatible_hint.provider_id >>
+          compatible_hint.implementation_id >>
+          compatible_hint.implementation_version >>
+          compatible_hint.configuration);
+      if (compatible_hint_found &&
+          find_implementation(compatible_hint, normalized_spec) == nullptr) {
+        compatible_hint_found = false;
+      }
+    }
+
     std::shared_ptr<State> state;
     if (recipe_found) {
       if (const auto* implementation = find_implementation(recipe, normalized_spec)) {
@@ -285,13 +307,19 @@ apxinf_status_t plan_create(
         } catch (const Failure&) {
           cudaGetLastError();
         }
+        if (state == nullptr) {
+          compatible_hint = recipe;
+          compatible_hint_found = true;
+        }
       }
     }
 
     if (state == nullptr) {
       if (policy->online_tune && tuning_bindings != nullptr) {
         state = apxinf::gemm::tune(normalized_spec, *policy, *tuning_bindings,
-                                   runtime->device, source);
+                                   runtime->device, source,
+                                   compatible_hint_found ? &compatible_hint
+                                                         : nullptr);
       } else if (policy->allow_fallback) {
         state = fallback(normalized_spec, *policy, runtime->device);
         source = "fallback";
@@ -313,6 +341,9 @@ apxinf_status_t plan_create(
         apxinf::gemm::write_recipe(
             policy->cache_dir != nullptr ? policy->cache_dir : "", key,
             serialized.str());
+        apxinf::gemm::write_recipe(
+            policy->cache_dir != nullptr ? policy->cache_dir : "",
+            keys.compatible_hint, serialized.str());
       }
     }
 
