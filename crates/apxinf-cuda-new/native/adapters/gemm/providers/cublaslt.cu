@@ -1,23 +1,60 @@
-#include "../internal.h"
+#include "vendor.h"
 #include "../../../kernels/custom/gemm.cuh"
 
 namespace apxinf::gemm {
 namespace {
 
-cudaDataType_t projection_cuda_dtype(const State& state) {
-  if (state.projection_dtype == APXINF_DTYPE_I32) return CUDA_R_32I;
-  if (state.projection_dtype == APXINF_DTYPE_F32) return CUDA_R_32F;
-  if (state.projection_dtype == APXINF_DTYPE_F16) return CUDA_R_16F;
+struct CublasLtState {
+  vendor::CommonResources common;
+  cublasLtHandle_t handle = nullptr;
+  cublasLtMatmulDesc_t operation = nullptr;
+  cublasLtMatrixLayout_t a_layout = nullptr;
+  cublasLtMatrixLayout_t b_layout = nullptr;
+  cublasLtMatrixLayout_t output_layout = nullptr;
+  cublasLtMatmulAlgo_t algorithm{};
+  bool has_algorithm = false;
+  void* workspace = nullptr;
+  size_t workspace_bytes = 0;
+
+  ~CublasLtState() {
+    release_resources();
+    if (a_layout != nullptr) cublasLtMatrixLayoutDestroy(a_layout);
+    if (b_layout != nullptr) cublasLtMatrixLayoutDestroy(b_layout);
+    if (output_layout != nullptr) cublasLtMatrixLayoutDestroy(output_layout);
+    if (operation != nullptr) cublasLtMatmulDescDestroy(operation);
+    if (handle != nullptr) cublasLtDestroy(handle);
+  }
+
+  void release_resources() noexcept {
+    if (workspace != nullptr) cudaFree(workspace);
+    workspace = nullptr;
+    common.release();
+  }
+};
+
+CublasLtState& provider(State& state) {
+  return *static_cast<CublasLtState*>(state.provider_state);
+}
+
+const CublasLtState& provider(const State& state) {
+  return *static_cast<const CublasLtState*>(state.provider_state);
+}
+
+cudaDataType_t projection_cuda_dtype(const vendor::CommonResources& common) {
+  if (common.projection_dtype == APXINF_DTYPE_I32) return CUDA_R_32I;
+  if (common.projection_dtype == APXINF_DTYPE_F32) return CUDA_R_32F;
+  if (common.projection_dtype == APXINF_DTYPE_F16) return CUDA_R_16F;
   return CUDA_R_16BF;
 }
 
-}  // namespace
-
-void prepare_cublaslt(State& state) {
+void prepare_cublaslt_impl(State& state,
+                           const State* blueprint,
+                           bool native_fp8) {
+  auto resources = std::make_unique<CublasLtState>();
   const auto& spec = state.spec;
-  const bool native_fp8 = state.implementation->implementation_id == 2;
-  allocate_common_resources(state, native_fp8);
-  const cudaDataType_t projection_type = projection_cuda_dtype(state);
+  vendor::allocate_common_resources(spec, resources->common, native_fp8);
+  const cudaDataType_t projection_type =
+      projection_cuda_dtype(resources->common);
   const cudaDataType_t input_type =
       spec.a_dtype == APXINF_DTYPE_I8
           ? CUDA_R_8I
@@ -29,29 +66,38 @@ void prepare_cublaslt(State& state) {
       spec.a_dtype == APXINF_DTYPE_I8 ? CUDA_R_32I : CUDA_R_32F;
   const cublasOperation_t transpose = CUBLAS_OP_N;
 
-  check_cublas(cublasLtCreate(&state.cublaslt));
-  check_cublas(cublasLtMatmulDescCreate(&state.operation, compute_type,
+  check_cublas(cublasLtCreate(&resources->handle));
+  check_cublas(cublasLtMatmulDescCreate(&resources->operation, compute_type,
                                         scale_type));
   check_cublas(cublasLtMatmulDescSetAttribute(
-      state.operation, CUBLASLT_MATMUL_DESC_TRANSA, &transpose,
+      resources->operation, CUBLASLT_MATMUL_DESC_TRANSA, &transpose,
       sizeof(transpose)));
   check_cublas(cublasLtMatrixLayoutCreate(
-      &state.a_layout, input_type, transpose == CUBLAS_OP_T ? spec.k : spec.n,
+      &resources->a_layout, input_type,
+      transpose == CUBLAS_OP_T ? spec.k : spec.n,
       transpose == CUBLAS_OP_T ? spec.n : spec.k,
       transpose == CUBLAS_OP_T ? spec.k : spec.n));
-  check_cublas(cublasLtMatrixLayoutCreate(&state.b_layout, input_type, spec.k,
-                                          spec.m, spec.k));
-  check_cublas(cublasLtMatrixLayoutCreate(&state.output_layout,
+  check_cublas(cublasLtMatrixLayoutCreate(
+      &resources->b_layout, input_type, spec.k, spec.m, spec.k));
+  check_cublas(cublasLtMatrixLayoutCreate(&resources->output_layout,
                                           projection_type, spec.n, spec.m,
                                           spec.n));
 
-  if (state.has_algorithm) {
+  if (blueprint != nullptr && blueprint->provider_state != nullptr) {
+    const auto& source = provider(*blueprint);
+    resources->algorithm = source.algorithm;
+    resources->has_algorithm = source.has_algorithm;
+    resources->workspace_bytes = source.workspace_bytes;
+  }
+
+  if (resources->has_algorithm) {
     cublasLtMatmulHeuristicResult_t checked{};
     check_cublas(cublasLtMatmulAlgoCheck(
-        state.cublaslt, state.operation, state.a_layout, state.b_layout,
-        state.output_layout, state.output_layout, &state.algorithm, &checked));
+        resources->handle, resources->operation, resources->a_layout,
+        resources->b_layout, resources->output_layout,
+        resources->output_layout, &resources->algorithm, &checked));
     check_cublas(checked.state);
-    state.workspace_bytes = checked.workspaceSize;
+    resources->workspace_bytes = checked.workspaceSize;
   } else {
     cublasLtMatmulPreference_t preference = nullptr;
     check_cublas(cublasLtMatmulPreferenceCreate(&preference));
@@ -66,9 +112,9 @@ void prepare_cublaslt(State& state) {
     cublasLtMatmulHeuristicResult_t candidates[8]{};
     int candidate_count = 0;
     status = cublasLtMatmulAlgoGetHeuristic(
-        state.cublaslt, state.operation, state.a_layout, state.b_layout,
-        state.output_layout, state.output_layout, preference, 8, candidates,
-        &candidate_count);
+        resources->handle, resources->operation, resources->a_layout,
+        resources->b_layout, resources->output_layout,
+        resources->output_layout, preference, 8, candidates, &candidate_count);
     cublasLtMatmulPreferenceDestroy(preference);
     check_cublas(status);
     if (state.configuration >= candidate_count ||
@@ -76,35 +122,61 @@ void prepare_cublaslt(State& state) {
       throw Failure(APXINF_STATUS_UNSUPPORTED,
                     "cuBLASLt heuristic is unavailable");
     }
-    state.algorithm = candidates[state.configuration].algo;
-    state.has_algorithm = true;
-    state.workspace_bytes = candidates[state.configuration].workspaceSize;
+    resources->algorithm = candidates[state.configuration].algo;
+    resources->has_algorithm = true;
+    resources->workspace_bytes =
+        candidates[state.configuration].workspaceSize;
   }
 
-  if (state.workspace_bytes != 0) {
-    check_cuda(cudaMalloc(&state.workspace, state.workspace_bytes));
-    state.resource_bytes += state.workspace_bytes;
+  if (resources->workspace_bytes != 0) {
+    check_cuda(cudaMalloc(&resources->workspace, resources->workspace_bytes));
   }
+  state.resource_bytes =
+      resources->common.resource_bytes + resources->workspace_bytes;
+  state.provider_state = resources.release();
+}
+
+}  // namespace
+
+void prepare_cublaslt(State& state, const State* blueprint) {
+  prepare_cublaslt_impl(state, blueprint, false);
+}
+
+void prepare_cublaslt_native_fp8(State& state, const State* blueprint) {
+  prepare_cublaslt_impl(state, blueprint, true);
+}
+
+void release_cublaslt_resources(State& state) noexcept {
+  if (state.provider_state != nullptr) provider(state).release_resources();
+}
+
+void destroy_cublaslt(State& state) noexcept {
+  delete static_cast<CublasLtState*>(state.provider_state);
+  state.provider_state = nullptr;
 }
 
 cudaError_t launch_cublaslt(State& state,
                             const apxinf_gemm_bindings_t& bindings) {
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
   const auto& spec = state.spec;
+  auto& resources = provider(state);
   const void* activation = bindings.a;
   const void* weight = bindings.b;
-  if (state.unpack_a != nullptr) {
+  if (resources.common.unpack_a != nullptr) {
     check_cuda(apxinf::cuda::custom::unpack_gemm(
-        activation, state.unpack_a, state.projection_dtype, spec.a_dtype,
+        activation, resources.common.unpack_a,
+        resources.common.projection_dtype, spec.a_dtype,
         spec.m, spec.k, APXINF_GEMM_LAYOUT_KN, stream));
     check_cuda(apxinf::cuda::custom::unpack_gemm(
-        weight, state.unpack_b, state.projection_dtype, spec.b_dtype, spec.k,
-        spec.n, APXINF_GEMM_LAYOUT_KN, stream));
-    activation = state.unpack_a;
-    weight = state.unpack_b;
+        weight, resources.common.unpack_b,
+        resources.common.projection_dtype, spec.b_dtype, spec.k, spec.n,
+        APXINF_GEMM_LAYOUT_KN, stream));
+    activation = resources.common.unpack_a;
+    weight = resources.common.unpack_b;
   }
-  void* projection =
-      state.projection != nullptr ? state.projection : bindings.output;
+  void* projection = resources.common.projection != nullptr
+                         ? resources.common.projection
+                         : bindings.output;
   const float alpha =
       has_row_channel_scales(spec) ? 1.0F : spec.alpha;
   const float beta = 0.0F;
@@ -117,11 +189,13 @@ cudaError_t launch_cublaslt(State& state,
                                  ? static_cast<const void*>(&integer_beta)
                                  : static_cast<const void*>(&beta);
   check_cublas(cublasLtMatmul(
-      state.cublaslt, state.operation, alpha_pointer, weight, state.a_layout,
-      activation, state.b_layout, beta_pointer, projection,
-      state.output_layout, projection, state.output_layout, &state.algorithm,
-      state.workspace, state.workspace_bytes, stream));
-  return launch_postprocess(state, bindings, projection);
+      resources.handle, resources.operation, alpha_pointer, weight,
+      resources.a_layout, activation, resources.b_layout, beta_pointer,
+      projection, resources.output_layout, projection,
+      resources.output_layout, &resources.algorithm, resources.workspace,
+      resources.workspace_bytes, stream));
+  return vendor::launch_postprocess(spec, resources.common, bindings,
+                                    projection);
 }
 
 }  // namespace apxinf::gemm

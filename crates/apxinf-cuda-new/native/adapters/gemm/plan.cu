@@ -189,22 +189,10 @@ std::shared_ptr<State> fallback(const apxinf::gemm::Spec& spec,
 }
 
 void release_instance_resources(State& state) {
-  if (state.workspace != nullptr) {
-    apxinf::gemm::check_cuda(cudaFree(state.workspace));
-    state.workspace = nullptr;
-  }
-  if (state.projection != nullptr) {
-    apxinf::gemm::check_cuda(cudaFree(state.projection));
-    state.projection = nullptr;
-  }
-  if (state.unpack_a != nullptr) {
-    apxinf::gemm::check_cuda(cudaFree(state.unpack_a));
-    state.unpack_a = nullptr;
-  }
-  if (state.unpack_b != nullptr) {
-    apxinf::gemm::check_cuda(cudaFree(state.unpack_b));
-    state.unpack_b = nullptr;
-  }
+  // The framework only requests compaction. Each provider knows which
+  // allocations are transient and which recipe data must survive so that a
+  // later execution instance can be reconstructed.
+  state.implementation->release_resources(state);
 }
 
 }  // namespace

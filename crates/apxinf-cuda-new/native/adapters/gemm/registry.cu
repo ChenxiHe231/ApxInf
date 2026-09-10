@@ -79,20 +79,26 @@ bool supports_cutlass_fp8(const Spec& spec) {
          spec.k % 16 == 0 && spec.output_scale == 1.0F;
 }
 
-bool supports_cutlass_geglu(const Spec& spec) {
+bool supports_cutlass_fp8_geglu(const Spec& spec) {
   const bool exact_shape = (spec.m == 522 || spec.m == 533) &&
                            spec.n == 32768 && spec.k == 2048;
-  const bool valid_dtype =
-      (spec.a_dtype == APXINF_DTYPE_E4M3 &&
-       spec.output_dtype == APXINF_DTYPE_E4M3 &&
-       spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE) ||
-      (spec.a_dtype == APXINF_DTYPE_BF16 &&
-       spec.output_dtype == APXINF_DTYPE_BF16 && spec.alpha == 1.0F &&
-       spec.output_scale == 1.0F &&
-       spec.quantization == APXINF_GEMM_QUANT_NONE);
-  return exact_shape && valid_dtype &&
+  return exact_shape && spec.a_dtype == APXINF_DTYPE_E4M3 &&
+         spec.b_dtype == APXINF_DTYPE_E4M3 &&
+         spec.output_dtype == APXINF_DTYPE_E4M3 &&
+         spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
          spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU &&
-         spec.a_dtype == spec.b_dtype;
+         spec.output_scale == 1.0F;
+}
+
+bool supports_cutlass_bf16_geglu(const Spec& spec) {
+  const bool exact_shape = (spec.m == 522 || spec.m == 533) &&
+                           spec.n == 32768 && spec.k == 2048;
+  return exact_shape && spec.a_dtype == APXINF_DTYPE_BF16 &&
+         spec.b_dtype == APXINF_DTYPE_BF16 &&
+         spec.output_dtype == APXINF_DTYPE_BF16 && spec.alpha == 1.0F &&
+         spec.output_scale == 1.0F &&
+         spec.quantization == APXINF_GEMM_QUANT_NONE &&
+         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU;
 }
 
 void cutlass_configurations(const Spec&,
@@ -140,45 +146,62 @@ bool supports_device(const Implementation& implementation,
 const std::vector<Implementation>& registry(Semantic semantic) {
   static const std::vector<Implementation> vendor_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
-       supports_vendor, vendor_alignment, one_configuration, prepare_cublas, launch_cublas},
+       supports_vendor, vendor_alignment, one_configuration, prepare_cublas,
+       release_cublas_resources, destroy_cublas, launch_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
-       supports_vendor, cublaslt_alignment, cublaslt_configurations, prepare_cublaslt,
+       supports_vendor, cublaslt_alignment, cublaslt_configurations,
+       prepare_cublaslt, release_cublaslt_resources, destroy_cublaslt,
        launch_cublaslt},
   };
   // Keep GEMM+bias as a separate L3 tuning domain even though its current L1
   // candidates happen to be the same vendor implementations.
   static const std::vector<Implementation> gemm_bias_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
-       supports_vendor, vendor_alignment, one_configuration, prepare_cublas, launch_cublas},
+       supports_vendor, vendor_alignment, one_configuration, prepare_cublas,
+       release_cublas_resources, destroy_cublas, launch_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
-       supports_vendor, cublaslt_alignment, cublaslt_configurations, prepare_cublaslt,
+       supports_vendor, cublaslt_alignment, cublaslt_configurations,
+       prepare_cublaslt, release_cublaslt_resources, destroy_cublaslt,
        launch_cublaslt},
   };
   static const std::vector<Implementation> gemm_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
-       supports_vendor, vendor_alignment, one_configuration, prepare_cublas, launch_cublas},
+       supports_vendor, vendor_alignment, one_configuration, prepare_cublas,
+       release_cublas_resources, destroy_cublas, launch_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
-       supports_vendor, cublaslt_alignment, cublaslt_configurations, prepare_cublaslt,
+       supports_vendor, cublaslt_alignment, cublaslt_configurations,
+       prepare_cublaslt, release_cublaslt_resources, destroy_cublaslt,
        launch_cublaslt},
       {kProviderCublasLt, 2, 1, "cublasLt-native-fp8+custom-epilogue",
-       kDeviceFeatureNativeFp8, true, false, supports_native_fp8, cublaslt_alignment, cublaslt_configurations,
-       prepare_cublaslt, launch_cublaslt},
+       kDeviceFeatureNativeFp8, true, false, supports_native_fp8,
+       cublaslt_alignment, cublaslt_configurations,
+       prepare_cublaslt_native_fp8, release_cublaslt_resources,
+       destroy_cublaslt, launch_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
       {kProviderCutlass, 1, 1, "cutlass-fp8", kDeviceFeatureCutlassSm100, true, true,
-       supports_cutlass_fp8, cutlass_fp8_alignment, cutlass_configurations, prepare_cutlass,
-       launch_cutlass},
+       supports_cutlass_fp8, cutlass_fp8_alignment, cutlass_configurations,
+       prepare_cutlass_fp8_gemm, release_cutlass_resources, destroy_cutlass,
+       launch_cutlass_fp8_gemm},
 #endif
   };
   static const std::vector<Implementation> gemm_geglu_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
-       supports_vendor, vendor_alignment, one_configuration, prepare_cublas, launch_cublas},
+       supports_vendor, vendor_alignment, one_configuration, prepare_cublas,
+       release_cublas_resources, destroy_cublas, launch_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
-       supports_vendor, cublaslt_alignment, cublaslt_configurations, prepare_cublaslt,
+       supports_vendor, cublaslt_alignment, cublaslt_configurations,
+       prepare_cublaslt, release_cublaslt_resources, destroy_cublaslt,
        launch_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
       {kProviderCutlass, 2, 1, "cutlass-dual-geglu", kDeviceFeatureCutlassSm100, true, true,
-       supports_cutlass_geglu, cutlass_geglu_alignment, one_configuration, prepare_cutlass,
-       launch_cutlass},
+       supports_cutlass_fp8_geglu, cutlass_geglu_alignment, one_configuration,
+       prepare_cutlass_geglu, release_cutlass_resources, destroy_cutlass,
+       launch_cutlass_fp8_geglu},
+      {kProviderCutlass, 3, 1, "cutlass-bf16-dual-geglu",
+       kDeviceFeatureCutlassSm100, true, true, supports_cutlass_bf16_geglu,
+       cutlass_geglu_alignment, one_configuration, prepare_cutlass_geglu,
+       release_cutlass_resources, destroy_cutlass,
+       launch_cutlass_bf16_geglu},
 #endif
   };
   switch (semantic) {
@@ -192,6 +215,13 @@ const std::vector<Implementation>& registry(Semantic semantic) {
       return gemm_bias_entries;
   }
   throw Failure(APXINF_STATUS_INTERNAL_ERROR, "unknown GEMM semantic registry");
+}
+
+State::~State() {
+  cudaSetDevice(device);
+  if (implementation != nullptr && implementation->destroy_state != nullptr) {
+    implementation->destroy_state(*this);
+  }
 }
 
 std::shared_ptr<State> prepare(const Implementation& implementation,
@@ -227,13 +257,8 @@ std::shared_ptr<State> prepare(const Implementation& implementation,
   state->configuration = configuration;
   state->implementation = &implementation;
   state->device = device;
-  if (blueprint != nullptr) {
-    state->algorithm = blueprint->algorithm;
-    state->has_algorithm = blueprint->has_algorithm;
-    state->workspace_bytes = blueprint->workspace_bytes;
-  }
   check_cuda(cudaSetDevice(device));
-  implementation.create_state(*state);
+  implementation.create_state(*state, blueprint);
   if (state->resource_bytes > policy.workspace_limit) {
     throw Failure(APXINF_STATUS_UNSUPPORTED, "workspace policy exceeded");
   }

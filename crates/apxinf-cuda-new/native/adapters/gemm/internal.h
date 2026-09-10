@@ -97,6 +97,9 @@ inline bool has_row_channel_scales(const Spec& spec) {
 
 struct State;
 using LaunchFn = cudaError_t (*)(State&, const apxinf_gemm_bindings_t&);
+using CreateStateFn = void (*)(State&, const State* blueprint);
+using ReleaseResourcesFn = void (*)(State&) noexcept;
+using DestroyStateFn = void (*)(State&) noexcept;
 
 struct AlignmentRequirements {
   uint32_t a = 1;
@@ -120,7 +123,9 @@ struct Implementation {
   bool (*supports)(const Spec&);
   AlignmentFn alignment_requirements;
   void (*enumerate_configs)(const Spec&, std::vector<int>&);
-  void (*create_state)(State&);
+  CreateStateFn create_state;
+  ReleaseResourcesFn release_resources;
+  DestroyStateFn destroy_state;
   LaunchFn launch;
 };
 
@@ -179,37 +184,34 @@ struct State {
   int configuration = 0;
   int device = 0;
   const Implementation* implementation = nullptr;
-  cublasLtHandle_t cublaslt = nullptr;
-  cublasHandle_t cublas = nullptr;
-  cublasLtMatmulDesc_t operation = nullptr;
-  cublasLtMatrixLayout_t a_layout = nullptr;
-  cublasLtMatrixLayout_t b_layout = nullptr;
-  cublasLtMatrixLayout_t output_layout = nullptr;
-  cublasLtMatmulAlgo_t algorithm{};
-  bool has_algorithm = false;
-  void* workspace = nullptr;
-  void* projection = nullptr;
-  void* unpack_a = nullptr;
-  void* unpack_b = nullptr;
-  size_t workspace_bytes = 0;
+  // Opaque provider-owned state. The common planner never knows which
+  // handles, descriptors, algorithms or temporary buffers a provider needs.
+  void* provider_state = nullptr;
   size_t resource_bytes = 0;
-  uint32_t projection_dtype = APXINF_DTYPE_F16;
 
   ~State();
 };
 
 const std::vector<Implementation>& registry(Semantic semantic);
-void prepare_cublas(State& state);
+void prepare_cublas(State& state, const State* blueprint);
+void release_cublas_resources(State& state) noexcept;
+void destroy_cublas(State& state) noexcept;
 cudaError_t launch_cublas(State& state, const apxinf_gemm_bindings_t& bindings);
-void prepare_cublaslt(State& state);
+void prepare_cublaslt(State& state, const State* blueprint);
+void prepare_cublaslt_native_fp8(State& state, const State* blueprint);
+void release_cublaslt_resources(State& state) noexcept;
+void destroy_cublaslt(State& state) noexcept;
 cudaError_t launch_cublaslt(State& state, const apxinf_gemm_bindings_t& bindings);
-void prepare_cutlass(State& state);
-cudaError_t launch_cutlass(State& state, const apxinf_gemm_bindings_t& bindings);
-
-void allocate_common_resources(State& state, bool native_fp8);
-cudaError_t launch_postprocess(State& state,
-                               const apxinf_gemm_bindings_t& bindings,
-                               void* projection);
+void prepare_cutlass_fp8_gemm(State& state, const State* blueprint);
+void prepare_cutlass_geglu(State& state, const State* blueprint);
+void release_cutlass_resources(State& state) noexcept;
+void destroy_cutlass(State& state) noexcept;
+cudaError_t launch_cutlass_fp8_gemm(
+    State& state, const apxinf_gemm_bindings_t& bindings);
+cudaError_t launch_cutlass_fp8_geglu(
+    State& state, const apxinf_gemm_bindings_t& bindings);
+cudaError_t launch_cutlass_bf16_geglu(
+    State& state, const apxinf_gemm_bindings_t& bindings);
 
 TuningKeys tuning_keys(const Spec& spec,
                        const apxinf_gemm_policy_t& policy,

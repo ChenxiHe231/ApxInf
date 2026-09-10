@@ -912,3 +912,31 @@ fn prepared_execution_reuses_one_native_instance_across_enqueues() {
     assert_eq!(super::execution::prepared_execution_create_count(), 1);
     assert!(values(&out).iter().all(|&value| value == 3.0));
 }
+
+#[test]
+fn gpu_e2e_cached_plan_rebuilds_and_drops_provider_private_instances() {
+    let ctx = CudaContext::new(0).unwrap();
+    let a = tensor(0, vec![8, 16], &[1.0; 8 * 16]);
+    let b = tensor(0, vec![16, 8], &[1.0; 16 * 8]);
+
+    for iteration in 0..4 {
+        let mut out = tensor(0, vec![8, 8], &[0.0; 8 * 8]);
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.policy.online_tune = true;
+        args.policy.allow_fallback = false;
+
+        let mut prepared = prepare_gemm(&ctx, args).unwrap();
+        if iteration != 0 {
+            assert!(
+                prepared.summary().contains("source=memory"),
+                "provider recipe was not rebuilt from the compacted plan: {}",
+                prepared.summary()
+            );
+        }
+        prepared.enqueue().unwrap();
+        ctx.synchronize().unwrap();
+        drop(prepared);
+
+        assert!(values(&out).iter().all(|&value| value == 16.0));
+    }
+}
