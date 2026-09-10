@@ -43,6 +43,39 @@ pub struct GemmArgs<'a> {
     pub alpha: f32,
     pub output_scale: f32,
     pub policy: GemmPolicy,
+    /// Optional pre-quantization FP32 operands used only while autotuning.
+    ///
+    /// When omitted, validation reconstructs FP32 values from the supplied
+    /// inference tensors and therefore measures implementation error only.
+    /// Supplying this reference also includes the initial quantization loss.
+    pub reference: Option<GemmReference<'a>>,
+}
+
+/// Original FP32 operands for provider-independent autotune validation.
+///
+/// The slices use the same canonical row-major shapes as the inference
+/// tensors: `a=[M,K]`, `b=[K,N]`, and (for fused bias semantics) `bias=[N]`.
+/// They are consumed synchronously during plan creation and are never retained
+/// by the execution instance.
+#[derive(Clone, Copy)]
+pub struct GemmReference<'a> {
+    pub a: &'a [f32],
+    pub b: &'a [f32],
+    pub bias: Option<&'a [f32]>,
+}
+
+impl<'a> GemmReference<'a> {
+    pub fn new(a: &'a [f32], b: &'a [f32]) -> Self {
+        Self { a, b, bias: None }
+    }
+
+    pub fn with_bias(a: &'a [f32], b: &'a [f32], bias: &'a [f32]) -> Self {
+        Self {
+            a,
+            b,
+            bias: Some(bias),
+        }
+    }
 }
 
 /// Quantization contract for the operands supplied to one GEMM call.
@@ -82,6 +115,7 @@ impl<'a> GemmArgs<'a> {
             alpha: 1.0,
             output_scale: 1.0,
             policy: GemmPolicy::default(),
+            reference: None,
         }
     }
 
@@ -103,6 +137,7 @@ impl<'a> GemmArgs<'a> {
             alpha: 1.0,
             output_scale: 1.0,
             policy: GemmPolicy::default(),
+            reference: None,
         }
     }
 
@@ -128,6 +163,7 @@ impl<'a> GemmArgs<'a> {
             alpha: 1.0,
             output_scale: 1.0,
             policy,
+            reference: None,
         }
     }
 }
@@ -140,12 +176,13 @@ pub(crate) enum Semantic {
     GemmBias = 3,
 }
 
-pub(crate) struct Normalized {
+pub(crate) struct Normalized<'a> {
     pub api: super::execution::PlanApi,
     pub spec: abi::Spec,
     pub policy: GemmPolicy,
     pub bindings: abi::Bindings,
     pub storage: Vec<CudaBuffer>,
+    pub reference: Option<GemmReference<'a>>,
 }
 
 pub(crate) fn invalid(message: impl Into<String>) -> Error {
@@ -241,13 +278,13 @@ pub(crate) fn tensor_storage(
     Ok(buffer)
 }
 
-pub(crate) fn normalize(
+pub(crate) fn normalize<'a>(
     ctx: &CudaContext,
-    args: GemmArgs<'_>,
+    args: GemmArgs<'a>,
     semantic: Semantic,
     api: super::execution::PlanApi,
     bias: Option<&Tensor>,
-) -> Result<Normalized> {
+) -> Result<Normalized<'a>> {
     let a_shape = args.a.shape().dims();
     let b_shape = args.b.shape().dims();
     if a_shape.len() != 2 || b_shape.len() != 2 {
@@ -276,6 +313,32 @@ pub(crate) fn normalize(
     let needs_bias = matches!(semantic, Semantic::GemmBias | Semantic::GemmBiasGelu);
     if bias.is_some() != needs_bias {
         return Err(invalid("fused operands do not match the semantic operator"));
+    }
+    if let Some(reference) = args.reference {
+        let expected_a = m
+            .checked_mul(k)
+            .ok_or_else(|| invalid("GEMM reference A size overflow"))?;
+        let expected_b = k
+            .checked_mul(n)
+            .ok_or_else(|| invalid("GEMM reference B size overflow"))?;
+        if reference.a.len() != expected_a
+            || reference.b.len() != expected_b
+            || reference.bias.is_some() != needs_bias
+            || reference.bias.is_some_and(|values| values.len() != n)
+        {
+            return Err(invalid(
+                "original FP32 reference operands do not match the L3 semantic",
+            ));
+        }
+        if reference
+            .a
+            .iter()
+            .chain(reference.b)
+            .chain(reference.bias.into_iter().flatten())
+            .any(|value| !value.is_finite())
+        {
+            return Err(invalid("original FP32 reference operands must be finite"));
+        }
     }
 
     let (quantization, row_scales, channel_scales) = match args.quantization {
@@ -421,6 +484,7 @@ pub(crate) fn normalize(
         policy: args.policy,
         bindings,
         storage,
+        reference: args.reference,
     })
 }
 

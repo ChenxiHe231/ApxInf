@@ -695,6 +695,167 @@ fn quantization_contract_becomes_part_of_the_gemm_key() {
 }
 
 #[test]
+fn original_fp32_reference_requires_the_l3_semantic_operands() {
+    let ctx = CudaContext::new(0).unwrap();
+    let a = tensor(0, vec![2, 3], &[1.0; 6]);
+    let b = tensor(0, vec![3, 4], &[1.0; 12]);
+    let bias = tensor(0, vec![4], &[0.0; 4]);
+    let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.reference = Some(GemmReference::new(&[1.0; 5], &[1.0; 12]));
+    let error = gemm(&ctx, args).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("reference operands do not match"));
+
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.reference = Some(GemmReference::new(&[1.0; 6], &[1.0; 12]));
+    let error = gemm_bias(
+        &ctx,
+        GemmBiasArgs {
+            gemm: args,
+            bias: &bias,
+        },
+    )
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("reference operands do not match"));
+}
+
+#[test]
+fn cpu_fp32_reference_covers_every_l3_semantic() {
+    let ctx = CudaContext::new(0).unwrap();
+    let raw_a = vec![1.0; 6];
+    let raw_b = vec![1.0; 12];
+    let raw_bias = vec![0.25, -0.25, 0.5, -0.5];
+    let a = tensor(0, vec![2, 3], &raw_a);
+    let b = tensor(0, vec![3, 4], &raw_b);
+    let bias = tensor(0, vec![4], &raw_bias);
+
+    let mut gemm_out = tensor(0, vec![2, 4], &[0.0; 8]);
+    let mut args = GemmArgs::new(&a, &b, &mut gemm_out);
+    args.reference = Some(GemmReference::new(&raw_a, &raw_b));
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = false;
+    let prepared = prepare_gemm(&ctx, args).unwrap();
+    assert!(prepared.summary().contains("reference=original-fp32"));
+    assert!(prepared.summary().contains("max_element="));
+    assert!(prepared.summary().contains("rel_l2="));
+    assert!(prepared.summary().contains("cosine="));
+
+    let mut bias_out = tensor(0, vec![2, 4], &[0.0; 8]);
+    let mut args = GemmArgs::new(&a, &b, &mut bias_out);
+    args.reference = Some(GemmReference::with_bias(&raw_a, &raw_b, &raw_bias));
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = false;
+    let prepared = prepare_gemm_bias(
+        &ctx,
+        GemmBiasArgs {
+            gemm: args,
+            bias: &bias,
+        },
+    )
+    .unwrap();
+    assert!(prepared.summary().contains("reference=original-fp32"));
+
+    let mut gelu_out = tensor(0, vec![2, 4], &[0.0; 8]);
+    let mut args = GemmArgs::new(&a, &b, &mut gelu_out);
+    args.reference = Some(GemmReference::with_bias(&raw_a, &raw_b, &raw_bias));
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = false;
+    let prepared = prepare_gemm_bias_gelu(
+        &ctx,
+        GemmBiasGeluArgs {
+            gemm: args,
+            bias: &bias,
+        },
+    )
+    .unwrap();
+    assert!(prepared.summary().contains("reference=original-fp32"));
+
+    let mut geglu_out = tensor(0, vec![2, 2], &[0.0; 4]);
+    let mut args = GemmArgs::new(&a, &b, &mut geglu_out);
+    args.reference = Some(GemmReference::new(&raw_a, &raw_b));
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = false;
+    let prepared = prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: args }).unwrap();
+    assert!(prepared.summary().contains("reference=original-fp32"));
+}
+
+#[test]
+fn fp8_reference_distinguishes_full_quantization_error() {
+    let (m, k, n) = (2, 16, 8);
+    let fp8_bytes_a = vec![0x38; m * k]; // E4M3 1.0
+    let fp8_bytes_b = vec![0x38; k * n];
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &fp8_bytes_a);
+    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &fp8_bytes_b);
+    let mut out = zeros_tensor(0, vec![m, n], DType::BF16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    let original_a = vec![1.2; m * k];
+    let original_b = vec![1.0; k * n];
+    args.reference = Some(GemmReference::new(&original_a, &original_b));
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = false;
+    let error = match prepare_gemm(&ctx, args) {
+        Ok(_) => panic!("quantization loss unexpectedly passed the fixed thresholds"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("fixed FP32 reference contract"));
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &fp8_bytes_a);
+    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &fp8_bytes_b);
+    let mut out = zeros_tensor(0, vec![m, n], DType::BF16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = false;
+    let prepared = prepare_gemm(&ctx, args).unwrap();
+    assert!(prepared.summary().contains("reference=dequantized-input"));
+}
+
+#[test]
+fn bf16_and_fp8_share_the_original_fp32_reference_contract() {
+    let (m, k, n) = (2, 16, 8);
+    let raw_a = vec![1.0; m * k];
+    let raw_b = vec![1.0; k * n];
+
+    let bf16_ctx = CudaContext::new(0).unwrap();
+    let bf16_a = tensor(0, vec![m, k], &raw_a);
+    let bf16_b = tensor(0, vec![k, n], &raw_b);
+    let mut bf16_out = zeros_tensor(0, vec![m, n], DType::BF16);
+    let mut bf16_args = GemmArgs::new(&bf16_a, &bf16_b, &mut bf16_out);
+    bf16_args.reference = Some(GemmReference::new(&raw_a, &raw_b));
+    bf16_args.policy.allow_fallback = false;
+    bf16_args.policy.graph_safe = false;
+    let mut bf16 = prepare_gemm(&bf16_ctx, bf16_args).unwrap();
+    assert!(bf16.summary().contains("reference=original-fp32"));
+    bf16.enqueue().unwrap();
+    bf16_ctx.synchronize().unwrap();
+
+    let fp8_ctx = CudaContext::new(0).unwrap();
+    let fp8_a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
+    let fp8_b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
+    let mut fp8_out = zeros_tensor(0, vec![m, n], DType::BF16);
+    let mut fp8_args = GemmArgs::new(&fp8_a, &fp8_b, &mut fp8_out);
+    fp8_args.quantization = GemmQuantization::Fp8UnitScale;
+    fp8_args.reference = Some(GemmReference::new(&raw_a, &raw_b));
+    fp8_args.policy.allow_fallback = false;
+    fp8_args.policy.graph_safe = false;
+    let mut fp8 = prepare_gemm(&fp8_ctx, fp8_args).unwrap();
+    assert!(fp8.summary().contains("reference=original-fp32"));
+    fp8.enqueue().unwrap();
+    fp8_ctx.synchronize().unwrap();
+
+    assert_eq!(values(&bf16_out), values(&fp8_out));
+    assert!(values(&bf16_out).iter().all(|&value| value == k as f32));
+}
+
+#[test]
 fn scaled_fp8_and_w8a8_use_the_canonical_kn_weight_contract() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, n) = (2, 16, 8);

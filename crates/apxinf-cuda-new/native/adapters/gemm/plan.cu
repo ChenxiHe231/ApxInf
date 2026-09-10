@@ -235,10 +235,47 @@ apxinf_status_t plan_create(
     validate_spec(normalized_spec);
     validate_policy(*policy);
     if (tuning_bindings != nullptr) {
-      validate_bindings(normalized_spec, *tuning_bindings, false);
+      validate_bindings(normalized_spec, tuning_bindings->execution, false);
+      if (tuning_bindings->reference_kind >
+          APXINF_GEMM_REFERENCE_ORIGINAL_FP32) {
+        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                      "invalid GEMM reference kind");
+      }
+      const bool needs_bias =
+          semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
+          semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU;
+      if (tuning_bindings->reference_kind ==
+          APXINF_GEMM_REFERENCE_ORIGINAL_FP32) {
+        const uint64_t a_count = static_cast<uint64_t>(normalized_spec.m) *
+                                 static_cast<uint64_t>(normalized_spec.k);
+        const uint64_t b_count = static_cast<uint64_t>(normalized_spec.k) *
+                                 static_cast<uint64_t>(normalized_spec.n);
+        if (tuning_bindings->original_a == nullptr ||
+            tuning_bindings->original_b == nullptr ||
+            tuning_bindings->original_a_len != a_count ||
+            tuning_bindings->original_b_len != b_count ||
+            (needs_bias &&
+             (tuning_bindings->original_bias == nullptr ||
+              tuning_bindings->original_bias_len !=
+                  static_cast<uint64_t>(normalized_spec.n))) ||
+            (!needs_bias &&
+             (tuning_bindings->original_bias != nullptr ||
+              tuning_bindings->original_bias_len != 0))) {
+          throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                        "invalid original FP32 GEMM reference operands");
+        }
+      } else if (tuning_bindings->original_a != nullptr ||
+                 tuning_bindings->original_a_len != 0 ||
+                 tuning_bindings->original_b != nullptr ||
+                 tuning_bindings->original_b_len != 0 ||
+                 tuning_bindings->original_bias != nullptr ||
+                 tuning_bindings->original_bias_len != 0) {
+        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                      "unexpected original FP32 GEMM reference operands");
+      }
       cudaStreamCaptureStatus capture_status;
       apxinf::gemm::check_cuda(cudaStreamIsCapturing(
-          static_cast<cudaStream_t>(tuning_bindings->stream),
+          static_cast<cudaStream_t>(tuning_bindings->execution.stream),
           &capture_status));
       if (capture_status != cudaStreamCaptureStatusNone) {
         throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
@@ -296,7 +333,8 @@ apxinf_status_t plan_create(
           compatible_hint.implementation_version >>
           compatible_hint.configuration);
       if (compatible_hint_found &&
-          find_implementation(compatible_hint, normalized_spec) == nullptr) {
+          find_implementation(compatible_hint, normalized_spec,
+                              runtime->device) == nullptr) {
         compatible_hint_found = false;
       }
     }

@@ -1,6 +1,6 @@
 use std::ffi::{c_char, c_void};
 
-use super::gemm::{Bindings, Policy, Spec};
+use super::gemm::{Bindings, Policy, Spec, TuningBindings};
 use super::types::Runtime;
 
 pub(crate) type Plan = *mut c_void;
@@ -11,7 +11,7 @@ unsafe extern "C" {
         runtime: Runtime,
         spec: *const Spec,
         policy: *const Policy,
-        tuning_bindings: *const Bindings,
+        tuning_bindings: *const TuningBindings,
         plan: *mut Plan,
     ) -> i32;
     pub(crate) fn apxinf_gemm_bias_instance_create(

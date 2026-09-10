@@ -17,7 +17,7 @@ pub(crate) struct PlanApi {
         Runtime,
         *const abi::Spec,
         *const abi::Policy,
-        *const abi::Bindings,
+        *const abi::TuningBindings,
         *mut abi::Plan,
     ) -> i32,
     instance_create:
@@ -148,13 +148,14 @@ impl PreparedExecution {
     }
 }
 
-pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized) -> Result<PreparedExecution> {
+pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<PreparedExecution> {
     let Normalized {
         api,
         spec,
         policy: options,
         bindings,
         storage,
+        reference,
     } = normalized;
     let cache = options
         .cache_dir
@@ -171,6 +172,31 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized) -> Result<Prepa
         cache_dir: cache
             .as_ref()
             .map_or(std::ptr::null(), |path| path.as_ptr()),
+    };
+    let tuning_bindings = if let Some(reference) = reference {
+        abi::TuningBindings {
+            execution: bindings,
+            original_a: reference.a.as_ptr(),
+            original_a_len: reference.a.len() as u64,
+            original_b: reference.b.as_ptr(),
+            original_b_len: reference.b.len() as u64,
+            original_bias: reference
+                .bias
+                .map_or(std::ptr::null(), |bias| bias.as_ptr()),
+            original_bias_len: reference.bias.map_or(0, |bias| bias.len()) as u64,
+            reference_kind: 1,
+        }
+    } else {
+        abi::TuningBindings {
+            execution: bindings,
+            original_a: std::ptr::null(),
+            original_a_len: 0,
+            original_b: std::ptr::null(),
+            original_b_len: 0,
+            original_bias: std::ptr::null(),
+            original_bias_len: 0,
+            reference_kind: 0,
+        }
     };
     let instance_key = format!(
         "{}|{:?}|{:?}|{}|{}|{}",
@@ -191,7 +217,7 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized) -> Result<Prepa
             ctx.runtime(),
             &spec,
             &policy,
-            &bindings,
+            &tuning_bindings,
             &mut plan,
         ))?;
     }
@@ -222,7 +248,7 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized) -> Result<Prepa
     Ok(PreparedExecution { exec })
 }
 
-pub(crate) fn execute(ctx: &CudaContext, normalized: Normalized) -> Result<()> {
+pub(crate) fn execute(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<()> {
     let mut instance = prepare(ctx, normalized)?;
     instance.enqueue()?;
     if crate::workspace::is_capturing() {

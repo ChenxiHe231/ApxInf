@@ -160,6 +160,20 @@ struct TuningKeys {
   std::string compatible_hint;
 };
 
+struct ReferenceOutput {
+  std::vector<float> values;
+  const char* kind = "dequantized-input";
+};
+
+struct AccuracyMetrics {
+  bool finite = false;
+  bool valid = false;
+  double max_absolute_error = 0.0;
+  double max_scaled_element_error = 0.0;
+  double relative_l2 = 0.0;
+  double cosine = 0.0;
+};
+
 struct State {
   Spec spec{};
   int configuration = 0;
@@ -216,6 +230,11 @@ std::shared_ptr<State> tune(const Spec& spec,
                             int device,
                             std::string& report,
                             const Recipe* preferred = nullptr);
+ReferenceOutput cpu_reference(
+    const Spec& spec, const apxinf_gemm_tuning_bindings_t& bindings);
+AccuracyMetrics compare_reference(const std::vector<float>& expected,
+                                  const std::vector<float>& actual);
+std::string format_accuracy(const AccuracyMetrics& metrics);
 
 }  // namespace apxinf::gemm
 

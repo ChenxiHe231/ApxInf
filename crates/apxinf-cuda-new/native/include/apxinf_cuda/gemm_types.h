@@ -67,4 +67,20 @@ typedef struct {
   apxinf_cuda_stream_t stream;
 } apxinf_gemm_bindings_t;
 
-typedef apxinf_gemm_bindings_t apxinf_gemm_tuning_bindings_t;
+typedef enum {
+  /* Reconstruct FP32 operands from the inference tensors and their scales. */
+  APXINF_GEMM_REFERENCE_DEQUANTIZED_INPUT = 0,
+  /* Use caller-provided, pre-quantization FP32 operands. */
+  APXINF_GEMM_REFERENCE_ORIGINAL_FP32 = 1,
+} apxinf_gemm_reference_kind_t;
+
+typedef struct {
+  apxinf_gemm_bindings_t execution;
+  const float* original_a;
+  uint64_t original_a_len;
+  const float* original_b;
+  uint64_t original_b_len;
+  const float* original_bias;
+  uint64_t original_bias_len;
+  uint32_t reference_kind;
+} apxinf_gemm_tuning_bindings_t;

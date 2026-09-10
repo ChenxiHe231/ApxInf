@@ -46,6 +46,20 @@ pub(crate) struct Bindings {
     pub stream: CudaStream,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TuningBindings {
+    pub execution: Bindings,
+    pub original_a: *const f32,
+    pub original_a_len: u64,
+    pub original_b: *const f32,
+    pub original_b_len: u64,
+    pub original_bias: *const f32,
+    pub original_bias_len: u64,
+    /// 0 reconstructs inputs from the inference bindings; 1 uses originals.
+    pub reference_kind: u32,
+}
+
 pub(crate) type Plan = *mut c_void;
 pub(crate) type Instance = *mut c_void;
 
@@ -54,7 +68,7 @@ unsafe extern "C" {
         runtime: Runtime,
         spec: *const Spec,
         policy: *const Policy,
-        tuning_bindings: *const Bindings,
+        tuning_bindings: *const TuningBindings,
         plan: *mut Plan,
     ) -> i32;
     pub(crate) fn apxinf_gemm_instance_create(
