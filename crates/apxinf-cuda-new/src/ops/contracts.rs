@@ -362,7 +362,11 @@ pub(crate) fn normalize(
     let projection_dtype = if has_row_channel_scales {
         args.out.dtype()
     } else if args.a.dtype() == DType::F8E4M3 {
-        DType::F16
+        if args.out.dtype() == DType::F32 {
+            DType::F32
+        } else {
+            DType::F16
+        }
     } else {
         args.a.dtype()
     };

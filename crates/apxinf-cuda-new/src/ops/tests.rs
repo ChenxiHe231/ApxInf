@@ -168,6 +168,36 @@ fn f16_values(tensor: &Tensor) -> Vec<f32> {
         .collect()
 }
 
+fn f32_values(tensor: &Tensor) -> Vec<f32> {
+    assert_eq!(tensor.dtype(), DType::F32);
+    let buffer = CudaBuffer::from_tensor(tensor).unwrap();
+    let mut bytes = vec![0; buffer.len()];
+    buffer.copy_to_host(&mut bytes).unwrap();
+    bytes
+        .chunks_exact(4)
+        .map(|value| f32::from_ne_bytes(value.try_into().unwrap()))
+        .collect()
+}
+
+#[test]
+fn fp8_unit_scale_f32_output_does_not_round_through_f16() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (1, 16, 16);
+    // E4M3 448 is 0x7e. The dot product is finite in F32 but overflows F16.
+    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x7e; m * k]);
+    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x7e; k * n]);
+    let mut out = zeros_tensor(0, vec![m, n], DType::F32);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.policy.online_tune = false;
+
+    gemm(&ctx, args).unwrap();
+
+    let expected = 448.0 * 448.0 * k as f32;
+    assert_eq!(expected, 3_211_264.0);
+    assert!(f32_values(&out).iter().all(|&value| value == expected));
+}
+
 #[test]
 fn gpu_e2e_registered_backends_execute_and_report_verdicts() {
     let ctx = CudaContext::new(0).unwrap();
