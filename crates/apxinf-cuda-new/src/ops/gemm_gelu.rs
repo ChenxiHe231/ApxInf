@@ -10,9 +10,16 @@ pub struct GemmBiasGeluArgs<'a> {
 }
 
 pub fn gemm_bias_gelu(ctx: &CudaContext, args: GemmBiasGeluArgs<'_>) -> Result<()> {
-    let mut execution = prepare_gemm_bias_gelu(ctx, args)?;
-    execution.enqueue()?;
-    ctx.synchronize().map_err(apxinf_core::Error::Cuda)
+    execution::execute(
+        ctx,
+        normalize(
+            ctx,
+            args.gemm,
+            Semantic::GemmBiasGelu,
+            execution::PlanApi::gemm_bias_gelu(),
+            Some(args.bias),
+        )?,
+    )
 }
 
 pub fn prepare_gemm_bias_gelu(
