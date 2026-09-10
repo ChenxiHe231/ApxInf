@@ -547,6 +547,152 @@ fn compatible_recipe_is_only_a_retuning_hint() {
     std::fs::remove_dir_all(cache_dir).unwrap();
 }
 
+fn scratch_cache_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "apxinf-{}-{}-{}",
+        label,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A plan is shared by every caller whose Spec matches, and alpha is no longer
+/// part of that Spec. Executing the same shape twice with different alphas
+/// must therefore still scale each result independently: if alpha were cached
+/// inside the plan the second execution would silently reuse the first one.
+#[test]
+fn gpu_e2e_alpha_is_bound_per_execution_not_baked_into_the_plan() {
+    let cache_dir = scratch_cache_dir("gemm-alpha-binding");
+    let cache = cache_dir.to_string_lossy().into_owned();
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (5, 11, 8);
+    let a_values: Vec<f32> = (0..m * k)
+        .map(|i| ((i * 5 % 13) as f32 - 6.0) / 8.0)
+        .collect();
+    let b_values: Vec<f32> = (0..k * n)
+        .map(|i| ((i * 3 % 11) as f32 - 5.0) / 8.0)
+        .collect();
+    let a = tensor(0, vec![m, k], &a_values);
+    let b = tensor(0, vec![k, n], &b_values);
+
+    let run = |alpha: f32| {
+        let mut out = tensor(0, vec![m, n], &vec![0.0; m * n]);
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.alpha = alpha;
+        args.policy.cache_dir = Some(cache.clone());
+        let mut instance = super::execution::prepare(
+            &ctx,
+            super::contracts::normalize(
+                &ctx,
+                args,
+                super::contracts::Semantic::Gemm,
+                super::execution::PlanApi::gemm(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let summary = instance.summary().to_owned();
+        instance.enqueue().unwrap();
+        ctx.synchronize().unwrap();
+        (values(&out), summary)
+    };
+    let expected = |alpha: f32| -> Vec<f32> {
+        let mut values = vec![0.0f32; m * n];
+        for row in 0..m {
+            for column in 0..n {
+                values[row * n + column] = alpha
+                    * (0..k)
+                        .map(|inner| a_values[row * k + inner] * b_values[inner * n + column])
+                        .sum::<f32>();
+            }
+        }
+        values
+    };
+
+    let (doubled, first) = run(2.0);
+    let (tripled, second) = run(3.0);
+    eprintln!("GPU_E2E_ALPHA first=[{first}] second=[{second}]");
+    for (index, want) in expected(2.0).into_iter().enumerate() {
+        assert!(
+            (doubled[index] - want).abs() < 0.02,
+            "alpha=2 element {index} is {} but should be {want}",
+            doubled[index]
+        );
+    }
+    for (index, want) in expected(3.0).into_iter().enumerate() {
+        assert!(
+            (tripled[index] - want).abs() < 0.02,
+            "alpha=3 element {index} is {} but should be {want} \
+             (a shared plan reused the previous alpha)",
+            tripled[index]
+        );
+    }
+    assert_ne!(
+        doubled, tripled,
+        "alpha must change the numeric result even when the plan is shared"
+    );
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}
+
+/// Only the unit/non-unit scale predicate belongs to the tuning key, so calls
+/// that differ solely by alpha must land on one recipe instead of tuning once
+/// per calibration scale.
+#[test]
+fn gpu_e2e_scale_values_do_not_fragment_the_tuning_cache() {
+    let cache_dir = scratch_cache_dir("gemm-scale-fragmentation");
+    let cache = cache_dir.to_string_lossy().into_owned();
+    let (m, k, n) = (6, 9, 12);
+    let run = |ctx: &CudaContext, alpha: f32, online_tune: bool| -> String {
+        let a = tensor(0, vec![m, k], &vec![0.5; m * k]);
+        let b = tensor(0, vec![k, n], &vec![0.25; k * n]);
+        let mut out = tensor(0, vec![m, n], &vec![0.0; m * n]);
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.alpha = alpha;
+        args.policy.cache_dir = Some(cache.clone());
+        args.policy.online_tune = online_tune;
+        args.policy.allow_fallback = false;
+        let instance = super::execution::prepare(
+            ctx,
+            super::contracts::normalize(
+                ctx,
+                args,
+                super::contracts::Semantic::Gemm,
+                super::execution::PlanApi::gemm(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        instance.summary().to_owned()
+    };
+
+    let ctx = CudaContext::new(0).unwrap();
+    let tuned = run(&ctx, 2.0, true);
+    assert!(
+        tuned.contains("source=tuned"),
+        "the first call must actually tune: {tuned}"
+    );
+    let reused = run(&ctx, 3.0, true);
+    assert!(
+        reused.contains("source=memory"),
+        "a different alpha must hit the same tuned plan: {reused}"
+    );
+    // A fresh runtime has no in-memory plan, so this proves the persisted
+    // recipe is shared too and that tuning is not repeated.
+    let restored = run(&CudaContext::new(0).unwrap(), 4.0, false);
+    assert!(
+        restored.contains("source=recipe"),
+        "a different alpha must restore the persisted recipe: {restored}"
+    );
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}
+
 #[test]
 fn captured_graph_retains_workspace_instance_and_tensor_storage() {
     let ctx = CudaContext::new(0).unwrap();

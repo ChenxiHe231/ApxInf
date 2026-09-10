@@ -20,8 +20,9 @@ pub(crate) struct Spec {
     pub m: i64,
     pub n: i64,
     pub k: i64,
-    pub alpha: f32,
-    pub output_scale: f32,
+    /// Structural predicates only: the scale values live in [`Bindings`].
+    pub alpha_is_unit: u32,
+    pub output_scale_is_unit: u32,
 }
 
 #[repr(C)]
@@ -44,6 +45,8 @@ pub(crate) struct Bindings {
     pub b_scales: *const f32,
     pub output: *mut c_void,
     pub stream: CudaStream,
+    pub alpha: f32,
+    pub output_scale: f32,
 }
 
 #[repr(C)]

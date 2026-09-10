@@ -53,12 +53,10 @@ std::string common_key(const Spec& spec,
       << spec.bias_alignment << '|' << spec.a_scales_alignment << '|'
       << spec.b_scales_alignment << '|' << spec.output_alignment;
 
-  uint32_t alpha_bits = 0;
-  uint32_t output_scale_bits = 0;
-  std::memcpy(&alpha_bits, &spec.alpha, sizeof(alpha_bits));
-  std::memcpy(&output_scale_bits, &spec.output_scale,
-              sizeof(output_scale_bits));
-  key << '|' << alpha_bits << '|' << output_scale_bits << '|'
+  // Only the unit/non-unit predicates matter for selection. The scale values
+  // themselves are execution bindings and must not fragment the cache.
+  key << '|' << (spec.alpha_is_unit != 0 ? 1 : 0) << '|'
+      << (spec.output_scale_is_unit != 0 ? 1 : 0) << '|'
       << policy.workspace_limit << '|' << policy.graph_safe << '|'
       << policy.deterministic;
   return key.str();

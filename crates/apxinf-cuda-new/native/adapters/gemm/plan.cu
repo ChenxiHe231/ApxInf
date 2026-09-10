@@ -36,8 +36,7 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
       spec.quantization > APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL || spec.m <= 0 ||
       spec.n <= 0 || spec.k <= 0 || spec.m > INT32_MAX ||
       spec.n > INT32_MAX || spec.k > INT32_MAX ||
-      !std::isfinite(spec.alpha) || !std::isfinite(spec.output_scale) ||
-      spec.output_scale <= 0.0F) {
+      spec.alpha_is_unit > 1 || spec.output_scale_is_unit > 1) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid GEMM Spec");
   }
   for (uint32_t alignment : {
@@ -127,6 +126,19 @@ void validate_bindings(const apxinf::gemm::Spec& spec,
   }
   if (!needs_bias && bindings.bias != nullptr) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "unexpected GEMM bias");
+  }
+  if (!std::isfinite(bindings.alpha) ||
+      !std::isfinite(bindings.output_scale) ||
+      bindings.output_scale <= 0.0F) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid GEMM scale binding");
+  }
+  // The Spec only records whether each scale is unit. A binding that
+  // contradicts that predicate would silently execute on a candidate selected
+  // for the other case, so it is rejected instead.
+  if ((bindings.alpha == 1.0F) != (spec.alpha_is_unit != 0) ||
+      (bindings.output_scale == 1.0F) != (spec.output_scale_is_unit != 0)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "GEMM scale binding contradicts the plan scale predicate");
   }
   validate_recorded_alignment(bindings.a, spec.a_alignment, "GEMM A binding");
   validate_recorded_alignment(bindings.b, spec.b_alignment, "GEMM B binding");

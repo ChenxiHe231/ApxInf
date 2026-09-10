@@ -52,7 +52,7 @@ void allocate_common_resources(const Spec& spec,
       spec.semantic != APXINF_GEMM_SEMANTIC_GEMM ||
       has_row_channel_scales(spec) ||
       spec.output_dtype != resources.projection_dtype ||
-      spec.output_scale != 1.0F;
+      spec.output_scale_is_unit == 0;
   if (needs_postprocess) {
     const size_t bytes =
         spec.m * spec.n * dtype_bytes(resources.projection_dtype);
@@ -84,8 +84,8 @@ cudaError_t launch_postprocess(const Spec& spec,
       bindings.a_scales, bindings.b_scales, spec.m, spec.n,
       static_cast<int>(spec.semantic),
       has_row_channel_scales(spec) ? 1 : 0,
-      has_row_channel_scales(spec) ? spec.alpha : 1.0F,
-      spec.output_scale);
+      has_row_channel_scales(spec) ? bindings.alpha : 1.0F,
+      bindings.output_scale);
   return cudaGetLastError();
 }
 

@@ -76,7 +76,7 @@ cudaError_t launch_cutlass_fp8_gemm(
   using namespace apxinf::cuda::cutlass_ops;
   check_cutlass_status(fp8_gemm_f16(
       bindings.a, bindings.b, bindings.output, spec.m, spec.n, spec.k,
-      spec.alpha, state.configuration, stream));
+      bindings.alpha, state.configuration, stream));
   return cudaSuccess;
 #else
   (void)state;
@@ -94,7 +94,7 @@ cudaError_t launch_cutlass_fp8_geglu(
   check_cutlass_status(
       apxinf::cuda::cutlass_ops::fp8_dual_geglu_detail::production_dual_geglu(
           bindings.a, weight, bindings.output, spec.m, spec.n / 2, spec.k,
-          spec.n, spec.alpha, spec.output_scale, stream));
+          spec.n, bindings.alpha, bindings.output_scale, stream));
   return cudaSuccess;
 #else
   (void)state;

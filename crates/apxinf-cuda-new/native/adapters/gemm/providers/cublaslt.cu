@@ -178,7 +178,7 @@ cudaError_t launch_cublaslt(State& state,
                          ? resources.common.projection
                          : bindings.output;
   const float alpha =
-      has_row_channel_scales(spec) ? 1.0F : spec.alpha;
+      has_row_channel_scales(spec) ? 1.0F : bindings.alpha;
   const float beta = 0.0F;
   const int32_t integer_alpha = 1;
   const int32_t integer_beta = 0;

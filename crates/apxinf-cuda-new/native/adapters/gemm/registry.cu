@@ -76,7 +76,7 @@ bool supports_cutlass_fp8(const Spec& spec) {
          spec.output_dtype == APXINF_DTYPE_F16 &&
          spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
          spec.n % 16 == 0 &&
-         spec.k % 16 == 0 && spec.output_scale == 1.0F;
+         spec.k % 16 == 0 && spec.output_scale_is_unit != 0;
 }
 
 bool supports_cutlass_fp8_geglu(const Spec& spec) {
@@ -87,7 +87,7 @@ bool supports_cutlass_fp8_geglu(const Spec& spec) {
          spec.output_dtype == APXINF_DTYPE_E4M3 &&
          spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
          spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU &&
-         spec.output_scale == 1.0F;
+         spec.output_scale_is_unit != 0;
 }
 
 bool supports_cutlass_bf16_geglu(const Spec& spec) {
@@ -95,8 +95,10 @@ bool supports_cutlass_bf16_geglu(const Spec& spec) {
                            spec.n == 32768 && spec.k == 2048;
   return exact_shape && spec.a_dtype == APXINF_DTYPE_BF16 &&
          spec.b_dtype == APXINF_DTYPE_BF16 &&
-         spec.output_dtype == APXINF_DTYPE_BF16 && spec.alpha == 1.0F &&
-         spec.output_scale == 1.0F &&
+         spec.output_dtype == APXINF_DTYPE_BF16 &&
+         // This kernel has no alpha epilogue at all, so a non-unit alpha is a
+         // contract mismatch rather than a slower path.
+         spec.alpha_is_unit != 0 && spec.output_scale_is_unit != 0 &&
          spec.quantization == APXINF_GEMM_QUANT_NONE &&
          spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU;
 }

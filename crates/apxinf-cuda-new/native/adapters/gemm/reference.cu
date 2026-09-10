@@ -76,43 +76,45 @@ std::vector<float> project(const Spec& spec, const std::vector<float>& a,
   return projection;
 }
 
-std::vector<float> reference_gemm(const Spec& spec,
-                                  const std::vector<float>& projection) {
+std::vector<float> reference_gemm(const std::vector<float>& projection,
+                                  float alpha, float output_scale) {
   std::vector<float> output(projection.size());
   for (size_t index = 0; index < output.size(); ++index) {
-    output[index] = spec.alpha * projection[index] / spec.output_scale;
+    output[index] = alpha * projection[index] / output_scale;
   }
   return output;
 }
 
 std::vector<float> reference_gemm_bias(
     const Spec& spec, const std::vector<float>& projection,
-    const std::vector<float>& bias, bool apply_gelu) {
+    const std::vector<float>& bias, bool apply_gelu, float alpha,
+    float output_scale) {
   std::vector<float> output(projection.size());
   for (int64_t row = 0; row < spec.m; ++row) {
     for (int64_t column = 0; column < spec.n; ++column) {
       const size_t index = static_cast<size_t>(row * spec.n + column);
-      float value = spec.alpha * projection[index] + bias[column];
+      float value = alpha * projection[index] + bias[column];
       if (apply_gelu) value = gelu(value);
-      output[index] = value / spec.output_scale;
+      output[index] = value / output_scale;
     }
   }
   return output;
 }
 
 std::vector<float> reference_gemm_geglu(
-    const Spec& spec, const std::vector<float>& projection) {
+    const Spec& spec, const std::vector<float>& projection, float alpha,
+    float output_scale) {
   const int64_t width = spec.n / 2;
   std::vector<float> output(static_cast<size_t>(spec.m * width));
   for (int64_t row = 0; row < spec.m; ++row) {
     for (int64_t column = 0; column < width; ++column) {
-      const float gate = spec.alpha *
-                         projection[static_cast<size_t>(row * spec.n + column)];
+      const float gate =
+          alpha * projection[static_cast<size_t>(row * spec.n + column)];
       const float up =
-          spec.alpha * projection[static_cast<size_t>(row * spec.n +
-                                                       column + width)];
+          alpha * projection[static_cast<size_t>(row * spec.n +
+                                                 column + width)];
       output[static_cast<size_t>(row * width + column)] =
-          gelu(gate) * up / spec.output_scale;
+          gelu(gate) * up / output_scale;
     }
   }
   return output;
@@ -173,14 +175,21 @@ ReferenceOutput cpu_reference(
   const auto projection = project(spec, a, b);
   ReferenceOutput result;
   result.kind = original ? "original-fp32" : "dequantized-input";
+  // The reference must reproduce the scales the candidate will actually be
+  // launched with, which now live in the execution bindings.
+  const float alpha = bindings.execution.alpha;
+  const float output_scale = bindings.execution.output_scale;
   if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM) {
-    result.values = reference_gemm(spec, projection);
+    result.values = reference_gemm(projection, alpha, output_scale);
   } else if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS) {
-    result.values = reference_gemm_bias(spec, projection, bias, false);
+    result.values =
+        reference_gemm_bias(spec, projection, bias, false, alpha, output_scale);
   } else if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU) {
-    result.values = reference_gemm_bias(spec, projection, bias, true);
+    result.values =
+        reference_gemm_bias(spec, projection, bias, true, alpha, output_scale);
   } else {
-    result.values = reference_gemm_geglu(spec, projection);
+    result.values =
+        reference_gemm_geglu(spec, projection, alpha, output_scale);
   }
   return result;
 }

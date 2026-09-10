@@ -44,8 +44,13 @@ typedef struct {
   int64_t m;
   int64_t n;
   int64_t k;
-  float alpha;
-  float output_scale;
+  /* Structural scale predicates, not scale values.  Some candidates only
+     implement the unit case, so "is this scale exactly one" belongs to the
+     operation identity while the scale itself is a per-call binding.  Keeping
+     the value out of the Spec is what lets one tuned plan serve every layer
+     that differs only by its calibration scale. */
+  uint32_t alpha_is_unit;
+  uint32_t output_scale_is_unit;
 } apxinf_gemm_spec_t;
 
 typedef struct {
@@ -65,6 +70,10 @@ typedef struct {
   const float* b_scales;
   void* output;
   apxinf_cuda_stream_t stream;
+  /* Numeric scales are per-call data: they change the result but never which
+     candidate is fastest, so they are bound at execution time. */
+  float alpha;
+  float output_scale;
 } apxinf_gemm_bindings_t;
 
 typedef enum {

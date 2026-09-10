@@ -420,6 +420,8 @@ pub(crate) fn normalize<'a>(
         b_scales: std::ptr::null(),
         output: output_buffer.ptr(),
         stream: ctx.stream().handle(),
+        alpha: args.alpha,
+        output_scale: args.output_scale,
     };
 
     let projection_dtype = if has_row_channel_scales {
@@ -478,8 +480,10 @@ pub(crate) fn normalize<'a>(
             m: m as i64,
             n: n as i64,
             k: k as i64,
-            alpha: args.alpha,
-            output_scale: args.output_scale,
+            // Only the unit/non-unit distinction selects a candidate, so two
+            // calls that differ only by scale share one tuned recipe.
+            alpha_is_unit: u32::from(args.alpha == 1.0),
+            output_scale_is_unit: u32::from(args.output_scale == 1.0),
         },
         policy: args.policy,
         bindings,
