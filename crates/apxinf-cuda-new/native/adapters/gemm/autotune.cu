@@ -40,6 +40,7 @@ std::shared_ptr<State> tune(const Spec& spec,const apxinf_gemm_policy_t& policy,
  struct Candidate{const Implementation* implementation;int configuration;};
  std::vector<Candidate> candidates;std::vector<std::string> diagnostics;
  for(const auto& impl:implementations){
+  if(!supports_device(impl,device)){diagnostics.push_back(std::string(impl.name)+"=skip(device)");continue;}
   if(!impl.supports(spec)){diagnostics.push_back(std::string(impl.name)+"=skip(contract)");continue;}
   if(!supports_alignment(impl,spec)){diagnostics.push_back(std::string(impl.name)+"=skip(alignment)");continue;}
   if(policy.graph_safe&&!impl.graph_safe){diagnostics.push_back(std::string(impl.name)+"=skip(graph-safe)");continue;}

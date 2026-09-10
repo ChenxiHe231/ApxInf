@@ -1,11 +1,15 @@
 use std::env;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[path = "build_support/cuda_arch.rs"]
 mod cuda_arch;
 
-use cuda_arch::{is_cutlass_sm100_family, select_cuda_arch, ArchSource};
+use cuda_arch::{
+    gencode_args, is_cutlass_sm100_family, select_cuda_arch, target_features, ArchSelection,
+    ArchSource,
+};
 
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
 const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
@@ -36,16 +40,16 @@ fn collect_inputs(root: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-fn build_id(native: &Path, target: &str, nvcc_arch: &str, cutlass_arch: &str) -> String {
+fn build_id(native: &Path, target: &str, selection: &ArchSelection) -> String {
     let mut hash = FNV1A_128_OFFSET;
-    for value in [
-        "apxinf-gemm-pilot-v1",
-        env!("CARGO_PKG_VERSION"),
-        target,
-        nvcc_arch,
-        cutlass_arch,
-    ] {
+    for value in ["apxinf-gemm-pilot-v1", env!("CARGO_PKG_VERSION"), target] {
         hash_bytes(&mut hash, value.as_bytes());
+        hash_bytes(&mut hash, &[0]);
+    }
+    for arch in &selection.targets {
+        hash_bytes(&mut hash, arch.nvcc_arch.as_bytes());
+        hash_bytes(&mut hash, &[0]);
+        hash_bytes(&mut hash, arch.cutlass_arch.as_bytes());
         hash_bytes(&mut hash, &[0]);
     }
     let mut files = Vec::new();
@@ -68,6 +72,34 @@ fn build_id(native: &Path, target: &str, nvcc_arch: &str, cutlass_arch: &str) ->
         hash_bytes(&mut hash, &[0xff]);
     }
     format!("gemm-kb1-{hash:032x}")
+}
+
+fn write_arch_header(out: &Path, selection: &ArchSelection) -> PathBuf {
+    let path = out.join("apxinf_cuda_arches.h");
+    let mut header = String::from(
+        "#pragma once\n#include <cstddef>\n#include <cstdint>\nnamespace apxinf::gemm {\n\
+         constexpr uint64_t kDeviceFeatureNativeFp8 = UINT64_C(1) << 0;\n\
+         constexpr uint64_t kDeviceFeatureCutlassSm100 = UINT64_C(1) << 1;\n\
+         struct CompiledTarget { int sm; uint64_t features; };\n\
+         constexpr CompiledTarget kCompiledTargets[] = {\n",
+    );
+    for target in &selection.targets {
+        let features = target_features(target);
+        writeln!(header, "  {{{}, UINT64_C({features})}},", target.sm()).unwrap();
+    }
+    header.push_str(
+        "};\n\
+         inline const CompiledTarget* compiled_target(int sm) {\n\
+           for (const auto& target : kCompiledTargets) {\n\
+             if (target.sm == sm) return &target;\n\
+           }\n\
+           return nullptr;\n\
+         }\n\
+         }  // namespace apxinf::gemm\n",
+    );
+    std::fs::write(&path, header)
+        .unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    path
 }
 
 fn rerun_tree(root: &Path) {
@@ -153,30 +185,29 @@ fn main() {
             "CUDA architecture selection failed: {error}\nSet APXINF_CUDA_ARCH explicitly when cross-compiling"
         )
     });
-    match selection.source {
-        ArchSource::Explicit => println!(
-            "cargo:warning=GEMM target: {} (explicit), CUTLASS: {}",
-            selection.nvcc_arch, selection.cutlass_arch
-        ),
-        ArchSource::Detected { device_count } => println!(
-            "cargo:warning=GEMM target: {} ({device_count} detected device(s)), CUTLASS: {}",
-            selection.nvcc_arch, selection.cutlass_arch
-        ),
+    match &selection.source {
+        ArchSource::Explicit => println!("cargo:warning=GEMM targets selected explicitly"),
+        ArchSource::Detected { device } => {
+            println!("cargo:warning=GEMM target detected from current CUDA device {device}")
+        }
     }
+    let target_summary = selection
+        .targets
+        .iter()
+        .map(|target| format!("{} (CUTLASS {})", target.nvcc_arch, target.cutlass_arch))
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("cargo:warning=GEMM targets: {target_summary}");
 
-    let id = env::var("APXINF_KERNEL_BUILD_ID").unwrap_or_else(|_| {
-        build_id(
-            &native,
-            &target,
-            &selection.nvcc_arch,
-            &selection.cutlass_arch,
-        )
-    });
+    let id = env::var("APXINF_KERNEL_BUILD_ID")
+        .unwrap_or_else(|_| build_id(&native, &target, &selection));
     assert!(
-        !id.chars().any(|character| matches!(character, '\n' | '\r' | '"')),
+        !id.chars()
+            .any(|character| matches!(character, '\n' | '\r' | '"')),
         "invalid kernel build ID"
     );
     println!("cargo:rustc-env=APXINF_KERNEL_BUILD_ID={id}");
+    write_arch_header(&out, &selection);
 
     let adapters = native.join("adapters");
     let mut generic_sources = [
@@ -195,7 +226,11 @@ fn main() {
     .to_vec();
     let cutlass_root = native.join("kernels/cutlass");
     let mut cutlass_sources = Vec::new();
-    if is_cutlass_sm100_family(&selection.cutlass_arch) {
+    if selection
+        .targets
+        .iter()
+        .any(|target| is_cutlass_sm100_family(&target.cutlass_arch))
+    {
         let operators = cutlass_root.join("ops/gemm");
         cutlass_sources.extend(
             [
@@ -226,11 +261,20 @@ fn main() {
         cutlass_root.join("include"),
         cutlass_root.join("tools/util/include"),
     ];
-    let sm = selection
-        .nvcc_arch
-        .trim_start_matches("sm_")
-        .trim_end_matches('a');
     let has_cutlass = !cutlass_sources.is_empty();
+    let generic_codegen = gencode_args(
+        selection
+            .targets
+            .iter()
+            .map(|target| target.nvcc_arch.clone()),
+    );
+    let cutlass_codegen = gencode_args(
+        selection
+            .targets
+            .iter()
+            .filter(|target| is_cutlass_sm100_family(&target.cutlass_arch))
+            .map(|target| target.cutlass_arch.clone()),
+    );
     let mut objects = Vec::new();
     for (index, source) in generic_sources
         .drain(..)
@@ -250,17 +294,14 @@ fn main() {
             .arg("-o")
             .arg(&object)
             .args(["--compiler-options", "-fPIC", "-O3", "-std=c++17"])
-            .arg(format!(
-                "-arch={}",
-                if is_cutlass {
-                    &selection.cutlass_arch
-                } else {
-                    &selection.nvcc_arch
-                }
-            ))
             .arg(format!("-I{}", native.join("include").display()))
-            .arg(format!("-DAPXINF_GEMM_SM={sm}"))
+            .arg(format!("-I{}", out.display()))
             .arg(format!("-DAPXINF_GEMM_BUILD_ID=\"{id}\""));
+        command.args(if is_cutlass {
+            &cutlass_codegen
+        } else {
+            &generic_codegen
+        });
         for include in cuda_includes.iter().filter(|path| path.is_dir()) {
             command.arg(format!("-I{}", include.display()));
         }

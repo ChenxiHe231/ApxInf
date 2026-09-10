@@ -8,6 +8,7 @@
 #include <cublasLt.h>
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include "apxinf_cuda_arches.h"
 
 #include <algorithm>
 #include <cstring>
@@ -113,6 +114,7 @@ struct Implementation {
   uint32_t implementation_id;
   uint32_t implementation_version;
   const char* name;
+  uint64_t required_device_features;
   bool graph_safe;
   bool deterministic;
   bool (*supports)(const Spec&);
@@ -121,6 +123,10 @@ struct Implementation {
   void (*create_state)(State&);
   LaunchFn launch;
 };
+
+bool supports_device(const Implementation& implementation,
+                     int device,
+                     std::string* reason = nullptr);
 
 inline bool supports_alignment(const Implementation& implementation,
                                const Spec& spec) {

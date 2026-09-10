@@ -105,46 +105,78 @@ void cutlass_configurations(const Spec&,
 
 }  // namespace
 
+bool supports_device(const Implementation& implementation,
+                     int device,
+                     std::string* reason) {
+  cudaDeviceProp properties{};
+  const auto status = cudaGetDeviceProperties(&properties, device);
+  if (status != cudaSuccess) {
+    if (reason != nullptr) {
+      *reason = std::string("cannot query CUDA device: ") +
+                cudaGetErrorString(status);
+    }
+    return false;
+  }
+  const int sm = properties.major * 10 + properties.minor;
+  const auto* target = compiled_target(sm);
+  if (target == nullptr) {
+    if (reason != nullptr) {
+      *reason = "SM " + std::to_string(sm) +
+                " is not present in this GEMM build";
+    }
+    return false;
+  }
+  if ((target->features & implementation.required_device_features) !=
+      implementation.required_device_features) {
+    if (reason != nullptr) {
+      *reason = "SM " + std::to_string(sm) +
+                " lacks a capability required by this candidate";
+    }
+    return false;
+  }
+  return true;
+}
+
 const std::vector<Implementation>& registry(Semantic semantic) {
   static const std::vector<Implementation> vendor_entries = {
-      {kProviderCublas, 1, 1, "cublas+custom-epilogue", true, true,
+      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
        supports_vendor, vendor_alignment, one_configuration, prepare_cublas, launch_cublas},
-      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", true, false,
+      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
        supports_vendor, cublaslt_alignment, cublaslt_configurations, prepare_cublaslt,
        launch_cublaslt},
   };
   // Keep GEMM+bias as a separate L3 tuning domain even though its current L1
   // candidates happen to be the same vendor implementations.
   static const std::vector<Implementation> gemm_bias_entries = {
-      {kProviderCublas, 1, 1, "cublas+custom-epilogue", true, true,
+      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
        supports_vendor, vendor_alignment, one_configuration, prepare_cublas, launch_cublas},
-      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", true, false,
+      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
        supports_vendor, cublaslt_alignment, cublaslt_configurations, prepare_cublaslt,
        launch_cublaslt},
   };
   static const std::vector<Implementation> gemm_entries = {
-      {kProviderCublas, 1, 1, "cublas+custom-epilogue", true, true,
+      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
        supports_vendor, vendor_alignment, one_configuration, prepare_cublas, launch_cublas},
-      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", true, false,
+      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
        supports_vendor, cublaslt_alignment, cublaslt_configurations, prepare_cublaslt,
        launch_cublaslt},
       {kProviderCublasLt, 2, 1, "cublasLt-native-fp8+custom-epilogue",
-       true, false, supports_native_fp8, cublaslt_alignment, cublaslt_configurations,
+       kDeviceFeatureNativeFp8, true, false, supports_native_fp8, cublaslt_alignment, cublaslt_configurations,
        prepare_cublaslt, launch_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
-      {kProviderCutlass, 1, 1, "cutlass-fp8", true, true,
+      {kProviderCutlass, 1, 1, "cutlass-fp8", kDeviceFeatureCutlassSm100, true, true,
        supports_cutlass_fp8, cutlass_fp8_alignment, cutlass_configurations, prepare_cutlass,
        launch_cutlass},
 #endif
   };
   static const std::vector<Implementation> gemm_geglu_entries = {
-      {kProviderCublas, 1, 1, "cublas+custom-epilogue", true, true,
+      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
        supports_vendor, vendor_alignment, one_configuration, prepare_cublas, launch_cublas},
-      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", true, false,
+      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
        supports_vendor, cublaslt_alignment, cublaslt_configurations, prepare_cublaslt,
        launch_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
-      {kProviderCutlass, 2, 1, "cutlass-dual-geglu", true, true,
+      {kProviderCutlass, 2, 1, "cutlass-dual-geglu", kDeviceFeatureCutlassSm100, true, true,
        supports_cutlass_geglu, cutlass_geglu_alignment, one_configuration, prepare_cutlass,
        launch_cutlass},
 #endif
@@ -168,6 +200,12 @@ std::shared_ptr<State> prepare(const Implementation& implementation,
                                const apxinf_gemm_policy_t& policy,
                                int device,
                                const State* blueprint) {
+  std::string device_reason;
+  if (!supports_device(implementation, device, &device_reason)) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "candidate is incompatible with this device: " +
+                      device_reason);
+  }
   if (!implementation.supports(spec)) {
     throw Failure(APXINF_STATUS_UNSUPPORTED, "candidate contract mismatch");
   }

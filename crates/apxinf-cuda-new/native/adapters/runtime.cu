@@ -27,10 +27,13 @@ extern "C" apxinf_status_t apxinf_runtime_create(int32_t device,
     apxinf::gemm::check_cuda(cudaSetDevice(device));
     cudaDeviceProp properties{};
     apxinf::gemm::check_cuda(cudaGetDeviceProperties(&properties, device));
-    if (properties.major * 10 + properties.minor != APXINF_GEMM_SM) {
+    const int sm = properties.major * 10 + properties.minor;
+    if (apxinf::gemm::compiled_target(sm) == nullptr) {
       throw apxinf::gemm::Failure(
           APXINF_STATUS_UNSUPPORTED,
-          "device does not match the single-target GEMM build");
+          "current device SM " + std::to_string(sm) +
+              " is not included in this GEMM build; rebuild with "
+              "APXINF_CUDA_ARCH including this exact architecture");
     }
     auto runtime = std::make_unique<apxinf_runtime>();
     runtime->device = device;

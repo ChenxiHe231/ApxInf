@@ -141,13 +141,15 @@ void validate_bindings(const apxinf::gemm::Spec& spec,
 }
 
 const apxinf::gemm::Implementation* find_implementation(const Recipe& recipe,
-                                                        const apxinf::gemm::Spec& spec) {
+                                                        const apxinf::gemm::Spec& spec,
+                                                        int device) {
   for (const auto& implementation :
        apxinf::gemm::registry(spec.semantic)) {
     if (implementation.provider_id == recipe.provider_id &&
         implementation.implementation_id == recipe.implementation_id &&
         implementation.implementation_version ==
             recipe.implementation_version &&
+        apxinf::gemm::supports_device(implementation, device) &&
         implementation.supports(spec)) {
       std::vector<int> configurations;
       implementation.enumerate_configs(spec, configurations);
@@ -165,7 +167,8 @@ std::shared_ptr<State> fallback(const apxinf::gemm::Spec& spec,
                                 int device) {
   for (const auto& implementation :
        apxinf::gemm::registry(spec.semantic)) {
-    if (!implementation.supports(spec) ||
+    if (!apxinf::gemm::supports_device(implementation, device) ||
+        !implementation.supports(spec) ||
         (policy.graph_safe && !implementation.graph_safe) ||
         (policy.deterministic && !implementation.deterministic)) {
       continue;
@@ -300,7 +303,8 @@ apxinf_status_t plan_create(
 
     std::shared_ptr<State> state;
     if (recipe_found) {
-      if (const auto* implementation = find_implementation(recipe, normalized_spec)) {
+      if (const auto* implementation =
+              find_implementation(recipe, normalized_spec, runtime->device)) {
         try {
           state = apxinf::gemm::prepare(*implementation, recipe.configuration,
                                        normalized_spec, *policy, runtime->device);
