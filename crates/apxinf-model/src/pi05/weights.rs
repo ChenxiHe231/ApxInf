@@ -550,10 +550,6 @@ fn transpose_2d(tensor: &Tensor) -> Result<Tensor> {
             }
             Tensor::from_f8_e4m3(vec![cols, rows], &dst)
         }
-        DType::I8 | DType::I32 => Err(Error::Other(format!(
-            "π0.5 linear weights do not support {} storage",
-            tensor.dtype()
-        ))),
     }
 }
 
@@ -583,10 +579,6 @@ fn add_one(tensor: Tensor) -> Result<Tensor> {
         DType::F8E4M3 => Err(Error::Other(
             "π0.5 RMSNorm parameters cannot be stored as unscaled FP8".into(),
         )),
-        DType::I8 | DType::I32 => Err(Error::Other(format!(
-            "π0.5 RMSNorm parameters do not support {} storage",
-            tensor.dtype()
-        ))),
     }
 }
 
