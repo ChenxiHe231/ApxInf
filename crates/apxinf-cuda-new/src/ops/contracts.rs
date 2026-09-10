@@ -4,6 +4,16 @@ use std::ops::Range;
 use crate::ffi::abi::gemm as abi;
 use crate::{CudaBuffer, CudaContext};
 
+/// Execution path whose latency autotuning should optimize.
+///
+/// This is deliberately separate from `graph_safe`: the latter is a
+/// candidate eligibility requirement, while this selects what is measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GemmExecutionMode {
+    Eager,
+    GraphReplay,
+}
+
 #[derive(Clone, Debug)]
 pub struct GemmPolicy {
     /// Accumulation precision is part of the GEMM key, not a candidate detail.
@@ -13,6 +23,7 @@ pub struct GemmPolicy {
     pub allow_fallback: bool,
     pub graph_safe: bool,
     pub deterministic: bool,
+    pub execution_mode: GemmExecutionMode,
     pub cache_dir: Option<String>,
 }
 
@@ -25,6 +36,7 @@ impl Default for GemmPolicy {
             allow_fallback: true,
             graph_safe: true,
             deterministic: false,
+            execution_mode: GemmExecutionMode::Eager,
             cache_dir: None,
         }
     }

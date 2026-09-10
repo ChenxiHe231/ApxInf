@@ -148,10 +148,12 @@ bool supports_device(const Implementation& implementation,
 const std::vector<Implementation>& registry(Semantic semantic) {
   static const std::vector<Implementation> vendor_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
-       supports_vendor, vendor_alignment, one_configuration, prepare_cublas,
+       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       one_configuration, prepare_cublas,
        release_cublas_resources, destroy_cublas, launch_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
-       supports_vendor, cublaslt_alignment, cublaslt_configurations,
+       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       cublaslt_configurations,
        prepare_cublaslt, release_cublaslt_resources, destroy_cublaslt,
        launch_cublaslt},
   };
@@ -159,49 +161,59 @@ const std::vector<Implementation>& registry(Semantic semantic) {
   // candidates happen to be the same vendor implementations.
   static const std::vector<Implementation> gemm_bias_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
-       supports_vendor, vendor_alignment, one_configuration, prepare_cublas,
+       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       one_configuration, prepare_cublas,
        release_cublas_resources, destroy_cublas, launch_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
-       supports_vendor, cublaslt_alignment, cublaslt_configurations,
+       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       cublaslt_configurations,
        prepare_cublaslt, release_cublaslt_resources, destroy_cublaslt,
        launch_cublaslt},
   };
   static const std::vector<Implementation> gemm_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
-       supports_vendor, vendor_alignment, one_configuration, prepare_cublas,
+       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       one_configuration, prepare_cublas,
        release_cublas_resources, destroy_cublas, launch_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
-       supports_vendor, cublaslt_alignment, cublaslt_configurations,
+       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       cublaslt_configurations,
        prepare_cublaslt, release_cublaslt_resources, destroy_cublaslt,
        launch_cublaslt},
       {kProviderCublasLt, 2, 1, "cublasLt-native-fp8+custom-epilogue",
        kDeviceFeatureNativeFp8, true, false, supports_native_fp8,
-       cublaslt_alignment, cublaslt_configurations,
+       cublaslt_alignment, cublaslt_native_fp8_resource_requirements,
+       cublaslt_configurations,
        prepare_cublaslt_native_fp8, release_cublaslt_resources,
        destroy_cublaslt, launch_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
       {kProviderCutlass, 1, 1, "cutlass-fp8", kDeviceFeatureCutlassSm100, true, true,
-       supports_cutlass_fp8, cutlass_fp8_alignment, cutlass_configurations,
+       supports_cutlass_fp8, cutlass_fp8_alignment,
+       cutlass_fp8_resource_requirements, cutlass_configurations,
        prepare_cutlass_fp8_gemm, release_cutlass_resources, destroy_cutlass,
        launch_cutlass_fp8_gemm},
 #endif
   };
   static const std::vector<Implementation> gemm_geglu_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
-       supports_vendor, vendor_alignment, one_configuration, prepare_cublas,
+       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       one_configuration, prepare_cublas,
        release_cublas_resources, destroy_cublas, launch_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
-       supports_vendor, cublaslt_alignment, cublaslt_configurations,
+       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       cublaslt_configurations,
        prepare_cublaslt, release_cublaslt_resources, destroy_cublaslt,
        launch_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
       {kProviderCutlass, 2, 1, "cutlass-dual-geglu", kDeviceFeatureCutlassSm100, true, true,
-       supports_cutlass_fp8_geglu, cutlass_geglu_alignment, one_configuration,
+       supports_cutlass_fp8_geglu, cutlass_geglu_alignment,
+       cutlass_geglu_resource_requirements, one_configuration,
        prepare_cutlass_geglu, release_cutlass_resources, destroy_cutlass,
        launch_cutlass_fp8_geglu},
       {kProviderCutlass, 3, 1, "cutlass-bf16-dual-geglu",
        kDeviceFeatureCutlassSm100, true, true, supports_cutlass_bf16_geglu,
-       cutlass_geglu_alignment, one_configuration, prepare_cutlass_geglu,
+       cutlass_geglu_alignment, cutlass_geglu_resource_requirements,
+       one_configuration, prepare_cutlass_geglu,
        release_cutlass_resources, destroy_cutlass,
        launch_cutlass_bf16_geglu},
 #endif
@@ -254,11 +266,19 @@ std::shared_ptr<State> prepare(const Implementation& implementation,
                   "candidate is not deterministic");
   }
 
+  const size_t required = implementation.resource_requirements(spec);
+  if (required > policy.workspace_limit) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "workspace policy exceeded before allocation: requires at least " +
+                      std::to_string(required) + " bytes");
+  }
+
   auto state = std::make_shared<State>();
   state->spec = spec;
   state->configuration = configuration;
   state->implementation = &implementation;
   state->device = device;
+  state->resource_limit = policy.workspace_limit;
   check_cuda(cudaSetDevice(device));
   implementation.create_state(*state, blueprint);
   if (state->resource_bytes > policy.workspace_limit) {
@@ -268,3 +288,59 @@ std::shared_ptr<State> prepare(const Implementation& implementation,
 }
 
 }  // namespace apxinf::gemm
+
+namespace {
+bool test_create_called = false;
+
+bool test_supports(const apxinf::gemm::Spec&) { return true; }
+apxinf::gemm::AlignmentRequirements test_alignment(
+    const apxinf::gemm::Spec&) {
+  return {};
+}
+size_t test_resource_requirements(const apxinf::gemm::Spec&) { return 4096; }
+void test_configs(const apxinf::gemm::Spec&, std::vector<int>& values) {
+  values.push_back(0);
+}
+void test_create(apxinf::gemm::State&, const apxinf::gemm::State*) {
+  test_create_called = true;
+}
+void test_release(apxinf::gemm::State&) noexcept {}
+void test_destroy(apxinf::gemm::State&) noexcept {}
+cudaError_t test_launch(apxinf::gemm::State&,
+                        const apxinf_gemm_bindings_t&) {
+  return cudaSuccess;
+}
+}  // namespace
+
+// Private regression hook: proves fixed resource requirements are rejected
+// before provider construction (and therefore before provider allocation).
+extern "C" int apxinf_gemm_test_resource_prefilter(int device) {
+  using namespace apxinf::gemm;
+  test_create_called = false;
+  const Implementation implementation = {
+      999,
+      1,
+      1,
+      "resource-prefilter-test",
+      0,
+      true,
+      true,
+      test_supports,
+      test_alignment,
+      test_resource_requirements,
+      test_configs,
+      test_create,
+      test_release,
+      test_destroy,
+      test_launch};
+  Spec spec{};
+  spec.semantic = Semantic::kGemm;
+  apxinf_gemm_policy_t policy{};
+  policy.workspace_limit = 4095;
+  try {
+    prepare(implementation, 0, spec, policy, device);
+  } catch (const Failure& failure) {
+    return failure.status == APXINF_STATUS_UNSUPPORTED && !test_create_called;
+  }
+  return 0;
+}

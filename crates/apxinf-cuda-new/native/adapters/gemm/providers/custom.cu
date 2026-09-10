@@ -3,6 +3,19 @@
 
 namespace apxinf::gemm::vendor {
 
+uint32_t common_projection_dtype(const Spec& spec) {
+  return spec.a_dtype == APXINF_DTYPE_I8
+             ? APXINF_DTYPE_I32
+             : has_row_channel_scales(spec)
+                   ? APXINF_DTYPE_F32
+                   : (spec.a_dtype == APXINF_DTYPE_E4M3 ||
+                      spec.b_dtype == APXINF_DTYPE_E4M3)
+                         ? (spec.output_dtype == APXINF_DTYPE_F16
+                                ? APXINF_DTYPE_F16
+                                : APXINF_DTYPE_F32)
+                         : spec.a_dtype;
+}
+
 CommonResources::~CommonResources() {
   release();
 }
@@ -26,17 +39,7 @@ void allocate_common_resources(const Spec& spec,
       (has_row_channel_scales(spec) && !native_fp8 &&
        spec.a_dtype != APXINF_DTYPE_I8);
 
-  resources.projection_dtype =
-      spec.a_dtype == APXINF_DTYPE_I8
-          ? APXINF_DTYPE_I32
-          : has_row_channel_scales(spec)
-                ? APXINF_DTYPE_F32
-                : (spec.a_dtype == APXINF_DTYPE_E4M3 ||
-                   spec.b_dtype == APXINF_DTYPE_E4M3)
-                      ? (spec.output_dtype == APXINF_DTYPE_F16
-                             ? APXINF_DTYPE_F16
-                             : APXINF_DTYPE_F32)
-                      : spec.a_dtype;
+  resources.projection_dtype = common_projection_dtype(spec);
 
   if (unpack) {
     const size_t a_bytes =
@@ -59,6 +62,32 @@ void allocate_common_resources(const Spec& spec,
     check_cuda(cudaMalloc(&resources.projection, bytes));
     resources.resource_bytes += bytes;
   }
+}
+
+size_t common_resource_requirements(const Spec& spec, bool native_fp8) {
+  const bool unpack =
+      ((spec.a_dtype == APXINF_DTYPE_E4M3 ||
+        spec.b_dtype == APXINF_DTYPE_E4M3) &&
+       !native_fp8) ||
+      (has_row_channel_scales(spec) && !native_fp8 &&
+       spec.a_dtype != APXINF_DTYPE_I8);
+  const uint32_t projection_dtype = common_projection_dtype(spec);
+  size_t bytes = 0;
+  if (unpack) {
+    bytes += static_cast<size_t>(spec.m * spec.k) *
+             dtype_bytes(projection_dtype);
+    bytes += static_cast<size_t>(spec.k * spec.n) *
+             dtype_bytes(projection_dtype);
+  }
+  const bool needs_postprocess =
+      spec.semantic != APXINF_GEMM_SEMANTIC_GEMM ||
+      has_row_channel_scales(spec) || spec.output_dtype != projection_dtype ||
+      spec.output_scale != 1.0F;
+  if (needs_postprocess) {
+    bytes += static_cast<size_t>(spec.m * spec.n) *
+             dtype_bytes(projection_dtype);
+  }
+  return bytes;
 }
 
 cudaError_t launch_postprocess(const Spec& spec,

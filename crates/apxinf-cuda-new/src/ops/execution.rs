@@ -169,6 +169,10 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<P
         allow_fallback: options.allow_fallback as u32,
         graph_safe: options.graph_safe as u32,
         deterministic: options.deterministic as u32,
+        execution_mode: match options.execution_mode {
+            super::GemmExecutionMode::Eager => 0,
+            super::GemmExecutionMode::GraphReplay => 1,
+        },
         cache_dir: cache
             .as_ref()
             .map_or(std::ptr::null(), |path| path.as_ptr()),
@@ -199,8 +203,14 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<P
         }
     };
     let instance_key = format!(
-        "{}|{:?}|{:?}|{}|{}|{}",
-        api.name, spec, bindings, policy.workspace_limit, policy.graph_safe, policy.deterministic
+        "{}|{:?}|{:?}|{}|{}|{}|{}",
+        api.name,
+        spec,
+        bindings,
+        policy.workspace_limit,
+        policy.graph_safe,
+        policy.deterministic,
+        policy.execution_mode
     );
     if let Some(exec) = crate::workspace::lookup_gemm_instance(&instance_key) {
         return Ok(PreparedExecution { exec });

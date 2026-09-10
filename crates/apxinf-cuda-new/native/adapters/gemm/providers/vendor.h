@@ -25,6 +25,8 @@ struct CommonResources {
 void allocate_common_resources(const Spec& spec,
                                CommonResources& resources,
                                bool native_fp8);
+uint32_t common_projection_dtype(const Spec& spec);
+size_t common_resource_requirements(const Spec& spec, bool native_fp8);
 cudaError_t launch_postprocess(const Spec& spec,
                                CommonResources& resources,
                                const apxinf_gemm_bindings_t& bindings,

@@ -40,7 +40,7 @@ std::string common_key(const Spec& spec,
                        int driver_version,
                        const cudaDeviceProp& properties) {
   std::ostringstream key;
-  key << "gemm-recipe-v4|" << APXINF_GEMM_BUILD_ID << '|'
+  key << "gemm-recipe-v5|" << APXINF_GEMM_BUILD_ID << '|'
       << properties.major * 10 + properties.minor << '|' << runtime_version << '|'
       << driver_version
       << '|' << cublasLtGetVersion() << '|'
@@ -58,7 +58,7 @@ std::string common_key(const Spec& spec,
   key << '|' << (spec.alpha_is_unit != 0 ? 1 : 0) << '|'
       << (spec.output_scale_is_unit != 0 ? 1 : 0) << '|'
       << policy.workspace_limit << '|' << policy.graph_safe << '|'
-      << policy.deterministic;
+      << policy.deterministic << '|' << policy.execution_mode;
   return key.str();
 }
 

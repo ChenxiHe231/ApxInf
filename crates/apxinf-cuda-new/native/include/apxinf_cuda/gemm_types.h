@@ -59,6 +59,8 @@ typedef struct {
   uint32_t allow_fallback;
   uint32_t graph_safe;
   uint32_t deterministic;
+  /* 0: eager launch latency, 1: instantiated CUDA Graph replay latency. */
+  uint32_t execution_mode;
   const char* cache_dir;
 } apxinf_gemm_policy_t;
 

@@ -28,6 +28,11 @@ CublasState& provider(State& state) {
 
 }  // namespace
 
+size_t cublas_resource_requirements(const Spec& spec) {
+  return vendor::common_resource_requirements(spec, false) +
+         4 * 1024 * 1024;
+}
+
 void prepare_cublas(State& state, const State*) {
   auto resources = std::make_unique<CublasState>();
   vendor::allocate_common_resources(state.spec, resources->common, false);

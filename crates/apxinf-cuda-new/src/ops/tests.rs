@@ -15,6 +15,7 @@ unsafe extern "C" {
         output: *mut c_char,
         capacity: usize,
     ) -> usize;
+    fn apxinf_gemm_test_resource_prefilter(device: c_int) -> c_int;
 }
 
 fn hardware_fingerprint(uuid: [u8; 16], sms: i32, memory: u64, performance: bool) -> String {
@@ -66,6 +67,46 @@ fn performance_mismatch_is_compatible_but_not_fully_tuned() {
         hardware_fingerprint(uuid, 7, 16 << 30, false),
         "the previous winner remains an execution-compatible tuning hint"
     );
+}
+
+#[test]
+fn workspace_budget_rejects_before_provider_create() {
+    assert_eq!(unsafe { apxinf_gemm_test_resource_prefilter(0) }, 1);
+}
+
+#[test]
+fn eager_and_graph_replay_have_separate_tuning_results() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "apxinf-execution-mode-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&cache_dir).unwrap();
+    let cache = cache_dir.to_string_lossy().into_owned();
+    let ctx = CudaContext::new(0).unwrap();
+    let a = tensor(0, vec![2, 16], &[1.0; 32]);
+    let b = tensor(0, vec![16, 8], &[1.0; 128]);
+
+    let prepare = |mode, online_tune| {
+        let mut out = zeros_tensor(0, vec![2, 8], DType::BF16);
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.policy.cache_dir = Some(cache.clone());
+        args.policy.execution_mode = mode;
+        args.policy.online_tune = online_tune;
+        args.policy.allow_fallback = false;
+        prepare_gemm(&ctx, args).map(|prepared| prepared.summary().to_owned())
+    };
+
+    let eager = prepare(GemmExecutionMode::Eager, true).unwrap();
+    assert!(eager.contains("mode=eager"), "{eager}");
+    let miss = prepare(GemmExecutionMode::GraphReplay, false).unwrap_err();
+    assert!(miss.to_string().contains("recipe miss"));
+    let graph = prepare(GemmExecutionMode::GraphReplay, true).unwrap();
+    assert!(graph.contains("mode=graph-replay"), "{graph}");
+    std::fs::remove_dir_all(cache_dir).unwrap();
 }
 
 fn tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {

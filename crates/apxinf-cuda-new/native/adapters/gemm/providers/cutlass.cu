@@ -47,6 +47,12 @@ void check_cutlass_status(int status) {
 
 }  // namespace
 
+size_t cutlass_fp8_resource_requirements(const Spec&) { return 0; }
+
+size_t cutlass_geglu_resource_requirements(const Spec& spec) {
+  return static_cast<size_t>(spec.k * spec.n) * dtype_bytes(spec.b_dtype);
+}
+
 void prepare_cutlass_fp8_gemm(State&, const State*) {}
 
 void prepare_cutlass_geglu(State& state, const State*) {

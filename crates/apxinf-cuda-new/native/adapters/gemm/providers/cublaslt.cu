@@ -47,12 +47,19 @@ cudaDataType_t projection_cuda_dtype(const vendor::CommonResources& common) {
   return CUDA_R_16BF;
 }
 
+size_t common_requirement(const Spec& spec, bool native_fp8) {
+  return vendor::common_resource_requirements(spec, native_fp8);
+}
+
 void prepare_cublaslt_impl(State& state,
                            const State* blueprint,
                            bool native_fp8) {
   auto resources = std::make_unique<CublasLtState>();
   const auto& spec = state.spec;
-  vendor::allocate_common_resources(spec, resources->common, native_fp8);
+  resources->common.projection_dtype =
+      vendor::common_projection_dtype(spec);
+  const size_t fixed_bytes = common_requirement(spec, native_fp8);
+  const size_t available_workspace = state.resource_limit - fixed_bytes;
   const cudaDataType_t projection_type =
       projection_cuda_dtype(resources->common);
   const cudaDataType_t input_type =
@@ -101,7 +108,7 @@ void prepare_cublaslt_impl(State& state,
   } else {
     cublasLtMatmulPreference_t preference = nullptr;
     check_cublas(cublasLtMatmulPreferenceCreate(&preference));
-    const size_t workspace_limit = 32 * 1024 * 1024;
+    const size_t workspace_limit = available_workspace;
     cublasStatus_t status = cublasLtMatmulPreferenceSetAttribute(
         preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
         &workspace_limit, sizeof(workspace_limit));
@@ -128,6 +135,15 @@ void prepare_cublaslt_impl(State& state,
         candidates[state.configuration].workspaceSize;
   }
 
+  if (resources->workspace_bytes > available_workspace) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "cuBLASLt workspace policy exceeded");
+  }
+
+  // Descriptor and heuristic queries do not allocate provider device
+  // scratch. Allocate common buffers only after the full requirement is
+  // known to fit the caller's policy.
+  vendor::allocate_common_resources(spec, resources->common, native_fp8);
   if (resources->workspace_bytes != 0) {
     check_cuda(cudaMalloc(&resources->workspace, resources->workspace_bytes));
   }
@@ -137,6 +153,14 @@ void prepare_cublaslt_impl(State& state,
 }
 
 }  // namespace
+
+size_t cublaslt_resource_requirements(const Spec& spec) {
+  return common_requirement(spec, false);
+}
+
+size_t cublaslt_native_fp8_resource_requirements(const Spec& spec) {
+  return common_requirement(spec, true);
+}
 
 void prepare_cublaslt(State& state, const State* blueprint) {
   prepare_cublaslt_impl(state, blueprint, false);

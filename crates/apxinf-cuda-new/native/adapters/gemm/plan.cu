@@ -103,7 +103,8 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
 
 void validate_policy(const apxinf_gemm_policy_t& policy) {
   if (policy.online_tune > 1 || policy.allow_fallback > 1 ||
-      policy.graph_safe > 1 || policy.deterministic > 1) {
+      policy.graph_safe > 1 || policy.deterministic > 1 ||
+      policy.execution_mode > 1) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid GEMM Policy");
   }
 }
@@ -181,7 +182,8 @@ std::shared_ptr<State> fallback(const apxinf::gemm::Spec& spec,
        apxinf::gemm::registry(spec.semantic)) {
     if (!apxinf::gemm::supports_device(implementation, device) ||
         !implementation.supports(spec) ||
-        (policy.graph_safe && !implementation.graph_safe) ||
+        ((policy.graph_safe || policy.execution_mode == 1) &&
+         !implementation.graph_safe) ||
         (policy.deterministic && !implementation.deterministic)) {
       continue;
     }

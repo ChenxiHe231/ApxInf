@@ -111,6 +111,7 @@ struct AlignmentRequirements {
 };
 
 using AlignmentFn = AlignmentRequirements (*)(const Spec&);
+using ResourceRequirementsFn = size_t (*)(const Spec&);
 
 struct Implementation {
   uint32_t provider_id;
@@ -122,6 +123,7 @@ struct Implementation {
   bool deterministic;
   bool (*supports)(const Spec&);
   AlignmentFn alignment_requirements;
+  ResourceRequirementsFn resource_requirements;
   void (*enumerate_configs)(const Spec&, std::vector<int>&);
   CreateStateFn create_state;
   ReleaseResourcesFn release_resources;
@@ -188,22 +190,31 @@ struct State {
   // handles, descriptors, algorithms or temporary buffers a provider needs.
   void* provider_state = nullptr;
   size_t resource_bytes = 0;
+  // Upper bound for provider-owned device scratch. Providers may query
+  // algorithms and construct descriptors first, but must not allocate device
+  // memory beyond this limit.
+  size_t resource_limit = 0;
 
   ~State();
 };
 
 const std::vector<Implementation>& registry(Semantic semantic);
 void prepare_cublas(State& state, const State* blueprint);
+size_t cublas_resource_requirements(const Spec& spec);
 void release_cublas_resources(State& state) noexcept;
 void destroy_cublas(State& state) noexcept;
 cudaError_t launch_cublas(State& state, const apxinf_gemm_bindings_t& bindings);
 void prepare_cublaslt(State& state, const State* blueprint);
 void prepare_cublaslt_native_fp8(State& state, const State* blueprint);
+size_t cublaslt_resource_requirements(const Spec& spec);
+size_t cublaslt_native_fp8_resource_requirements(const Spec& spec);
 void release_cublaslt_resources(State& state) noexcept;
 void destroy_cublaslt(State& state) noexcept;
 cudaError_t launch_cublaslt(State& state, const apxinf_gemm_bindings_t& bindings);
 void prepare_cutlass_fp8_gemm(State& state, const State* blueprint);
 void prepare_cutlass_geglu(State& state, const State* blueprint);
+size_t cutlass_fp8_resource_requirements(const Spec& spec);
+size_t cutlass_geglu_resource_requirements(const Spec& spec);
 void release_cutlass_resources(State& state) noexcept;
 void destroy_cutlass(State& state) noexcept;
 cudaError_t launch_cutlass_fp8_gemm(
