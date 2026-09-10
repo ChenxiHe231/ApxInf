@@ -75,6 +75,110 @@ fn values(tensor: &Tensor) -> Vec<f32> {
         .collect()
 }
 
+fn f16_values(tensor: &Tensor) -> Vec<f32> {
+    assert_eq!(tensor.dtype(), DType::F16);
+    let buffer = CudaBuffer::from_tensor(tensor).unwrap();
+    let mut bytes = vec![0; buffer.len()];
+    buffer.copy_to_host(&mut bytes).unwrap();
+    bytes
+        .chunks_exact(2)
+        .map(|value| half::f16::from_bits(u16::from_ne_bytes([value[0], value[1]])).to_f32())
+        .collect()
+}
+
+#[test]
+fn gpu_e2e_registered_backends_execute_and_report_verdicts() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (64, 64, 64);
+    // E4M3 1.0 is 0x38.  This contract is supported by cuBLAS, cuBLASLt,
+    // cuBLASLt native FP8, and the SM100-family CUTLASS implementation.
+    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
+    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
+    let mut out = zeros_tensor(0, vec![m, n], DType::F16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.policy.online_tune = true;
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+
+    let normalized = super::contracts::normalize(
+        &ctx,
+        args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+    )
+    .unwrap();
+    let mut instance = super::execution::prepare(&ctx, normalized).unwrap();
+    let summary = instance.summary().to_owned();
+    eprintln!("GPU_E2E_CANDIDATES {summary}");
+    for backend in [
+        "cublas+custom-epilogue#0=pass",
+        "cublasLt+custom-epilogue#",
+        "cublasLt-native-fp8+custom-epilogue#",
+        "cutlass-fp8#",
+    ] {
+        assert!(
+            summary.contains(backend),
+            "registered GPU backend was not explicitly exercised: {backend}; {summary}"
+        );
+    }
+    // cuBLASLt/CUTLASS may reject individual tactics, but each registered
+    // backend must have at least one numerically validated execution.
+    for backend in [
+        "cublasLt+custom-epilogue",
+        "cublasLt-native-fp8+custom-epilogue",
+        "cutlass-fp8",
+    ] {
+        let passed = summary
+            .split(',')
+            .any(|entry| entry.contains(backend) && entry.contains("=pass"));
+        assert!(passed, "GPU backend has no passing tactic: {backend}; {summary}");
+    }
+
+    instance.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+    assert!(f16_values(&out).iter().all(|&value| value == k as f32));
+}
+
+#[test]
+fn gpu_e2e_graph_replay_overwrites_sentinel_and_matches_numeric_result() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (7, 19, 22);
+    let a = tensor(0, vec![m, k], &vec![1.0; m * k]);
+    let b = tensor(0, vec![k, n], &vec![1.0; k * n]);
+    let mut out = tensor(0, vec![m, n], &vec![0.0; m * n]);
+    let observed = CudaBuffer::from_tensor(&out).unwrap();
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.policy.online_tune = false;
+
+    let normalized = super::contracts::normalize(
+        &ctx,
+        args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+    )
+    .unwrap();
+    let instance = super::execution::prepare(&ctx, normalized).unwrap();
+    let mut graph = instance.capture().unwrap();
+
+    let sentinel: Vec<u8> = (0..m * n)
+        .flat_map(|_| bf16::from_f32(-123.0).to_bits().to_ne_bytes())
+        .collect();
+    observed.copy_from_host(&sentinel).unwrap();
+    assert!(values(&out).iter().all(|&value| value == -123.0));
+
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    let actual = values(&out);
+    assert!(
+        actual.iter().all(|&value| value == k as f32),
+        "captured graph replay did not overwrite the sentinel: {actual:?}"
+    );
+    eprintln!("GPU_E2E_GRAPH replay overwrote sentinel and matched {k}");
+}
+
 #[test]
 fn bf16_gemm_numeric_recipe_and_graph() {
     let ctx = CudaContext::new(0).unwrap();

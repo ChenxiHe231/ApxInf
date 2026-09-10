@@ -33,9 +33,12 @@ std::shared_ptr<State> tune(const Spec& spec,const apxinf_gemm_policy_t& policy,
  const auto& implementations=registry(spec.semantic);
  auto reference=prepare(implementations.front(),0,spec,reference_policy,device);
  check_cuda(reference->implementation->launch(*reference,b));auto expected=read(out.p,count,spec.output_dtype,(cudaStream_t)b.stream);
- std::shared_ptr<State> winner;float best=std::numeric_limits<float>::infinity();Events events;int checked=0,rejected=0;
+ std::shared_ptr<State> winner;float best=std::numeric_limits<float>::infinity();Events events;int checked=0,rejected=0;std::vector<std::string> diagnostics;
  for(const auto& impl:implementations){
-  if(!impl.supports(spec))continue;if(policy.graph_safe&&!impl.graph_safe)continue;if(policy.deterministic&&!impl.deterministic)continue;std::vector<int> configs;impl.enumerate_configs(spec,configs);
+  if(!impl.supports(spec)){diagnostics.push_back(std::string(impl.name)+"=skip(contract)");continue;}
+  if(policy.graph_safe&&!impl.graph_safe){diagnostics.push_back(std::string(impl.name)+"=skip(graph-safe)");continue;}
+  if(policy.deterministic&&!impl.deterministic){diagnostics.push_back(std::string(impl.name)+"=skip(determinism)");continue;}
+  std::vector<int> configs;impl.enumerate_configs(spec,configs);
   for(int config:configs){
    try{
     auto candidate=prepare(impl,config,spec,policy,device);
@@ -44,19 +47,22 @@ std::shared_ptr<State> tune(const Spec& spec,const apxinf_gemm_policy_t& policy,
     for(size_t i=0;i<count;i++){if(!std::isfinite(expected[i])||!std::isfinite(actual[i])){valid=false;break;}double d=double(actual[i])-expected[i];error+=d*d;norm+=double(expected[i])*expected[i];}
     double tolerance=spec.output_dtype==3?0.035:0.012;
     valid=valid&&std::sqrt(error/std::max(norm,1e-20))<=tolerance;
-    ++checked;if(!valid){++rejected;continue;}
+    ++checked;if(!valid){++rejected;diagnostics.push_back(std::string(impl.name)+"#"+std::to_string(config)+"=reject(numeric)");continue;}
     if(policy.graph_safe)verify_graph(*candidate,b);
     for(int i=0;i<3;i++)check_cuda(impl.launch(*candidate,b));
     check_cuda(cudaEventRecord(events.start,(cudaStream_t)b.stream));
     for(int i=0;i<10;i++)check_cuda(impl.launch(*candidate,b));
     check_cuda(cudaEventRecord(events.stop,(cudaStream_t)b.stream));check_cuda(cudaEventSynchronize(events.stop));
     float ms;check_cuda(cudaEventElapsedTime(&ms,events.start,events.stop));ms/=10;
+    diagnostics.push_back(std::string(impl.name)+"#"+std::to_string(config)+"=pass");
     if(ms<best){best=ms;winner=candidate;}
-   }catch(const Failure&){++rejected;cudaGetLastError();}
+   }catch(const Failure& failure){++rejected;diagnostics.push_back(std::string(impl.name)+"#"+std::to_string(config)+"=reject("+failure.what()+")");cudaGetLastError();}
   }
  }
  if(!winner)throw Failure(APXINF_STATUS_UNSUPPORTED,"no validated GEMM candidate");
- report="tuned checked="+std::to_string(checked)+" rejected="+std::to_string(rejected)+" ms="+std::to_string(best);
+ report="tuned checked="+std::to_string(checked)+" rejected="+std::to_string(rejected)+" ms="+std::to_string(best)+" candidates=[";
+ for(size_t i=0;i<diagnostics.size();++i){if(i!=0)report+=",";report+=diagnostics[i];}
+ report+="]";
  return winner;
 }
 }
