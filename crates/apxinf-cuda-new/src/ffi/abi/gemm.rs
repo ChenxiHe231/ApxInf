@@ -32,7 +32,6 @@ pub(crate) struct Policy {
     pub allow_fallback: u32,
     pub graph_safe: u32,
     pub deterministic: u32,
-    pub execution_mode: u32,
     pub cache_dir: *const c_char,
 }
 

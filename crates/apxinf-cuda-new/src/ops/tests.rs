@@ -74,41 +74,6 @@ fn workspace_budget_rejects_before_provider_create() {
     assert_eq!(unsafe { apxinf_gemm_test_resource_prefilter(0) }, 1);
 }
 
-#[test]
-fn eager_and_graph_replay_have_separate_tuning_results() {
-    let cache_dir = std::env::temp_dir().join(format!(
-        "apxinf-execution-mode-cache-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir(&cache_dir).unwrap();
-    let cache = cache_dir.to_string_lossy().into_owned();
-    let ctx = CudaContext::new(0).unwrap();
-    let a = tensor(0, vec![2, 16], &[1.0; 32]);
-    let b = tensor(0, vec![16, 8], &[1.0; 128]);
-
-    let prepare = |mode, online_tune| {
-        let mut out = zeros_tensor(0, vec![2, 8], DType::BF16);
-        let mut args = GemmArgs::new(&a, &b, &mut out);
-        args.policy.cache_dir = Some(cache.clone());
-        args.policy.execution_mode = mode;
-        args.policy.online_tune = online_tune;
-        args.policy.allow_fallback = false;
-        prepare_gemm(&ctx, args).map(|prepared| prepared.summary().to_owned())
-    };
-
-    let eager = prepare(GemmExecutionMode::Eager, true).unwrap();
-    assert!(eager.contains("mode=eager"), "{eager}");
-    let miss = prepare(GemmExecutionMode::GraphReplay, false).unwrap_err();
-    assert!(miss.to_string().contains("recipe miss"));
-    let graph = prepare(GemmExecutionMode::GraphReplay, true).unwrap();
-    assert!(graph.contains("mode=graph-replay"), "{graph}");
-    std::fs::remove_dir_all(cache_dir).unwrap();
-}
-
 fn tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
     let host: Vec<_> = values.iter().map(|value| bf16::from_f32(*value)).collect();
     let bytes = unsafe {
@@ -632,6 +597,10 @@ fn gpu_e2e_registered_backends_execute_and_report_verdicts() {
     let mut instance = super::execution::prepare(&ctx, normalized).unwrap();
     let summary = instance.summary().to_owned();
     eprintln!("GPU_E2E_CANDIDATES {summary}");
+    assert!(
+        summary.contains("winner-graph=pass"),
+        "the eager winner was not validated through CUDA Graph replay: {summary}"
+    );
     for backend in [
         "cublas+custom-epilogue#0=pass",
         "cublasLt+custom-epilogue#",

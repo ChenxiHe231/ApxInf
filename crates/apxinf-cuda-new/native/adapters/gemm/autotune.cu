@@ -146,8 +146,7 @@ std::shared_ptr<State> tune(
                             "=skip(alignment)");
       continue;
     }
-    if ((policy.graph_safe || policy.execution_mode == 1) &&
-        !implementation.graph_safe) {
+    if (policy.graph_safe && !implementation.graph_safe) {
       diagnostics.push_back(std::string(implementation.name) +
                             "=skip(graph-safe)");
       continue;
@@ -204,35 +203,13 @@ std::shared_ptr<State> tune(
                                 format_accuracy(accuracy) + ")");
           continue;
         }
-        std::unique_ptr<CapturedExecution> graph;
-        if (policy.graph_safe || policy.execution_mode == 1) {
-          // Capture and instantiation are preparation costs. They are kept
-          // outside the timing interval even when replay is the target mode.
-          graph = std::make_unique<CapturedExecution>(*candidate, bindings);
-          poison(bindings, output_bytes);
-          graph->launch();
-          const auto graph_actual = read_output(
-              output.pointer, count, spec.output_dtype,
-              static_cast<cudaStream_t>(bindings.stream));
-          if (!compare_reference(reference.values, graph_actual).valid) {
-            throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                          "CUDA Graph replay failed numeric validation");
-          }
-        }
-        const auto launch_target = [&] {
-          if (policy.execution_mode == 1) {
-            graph->launch();
-          } else {
-            check_cuda(implementation.launch(*candidate, bindings));
-          }
-        };
         for (int iteration = 0; iteration < 3; ++iteration) {
-          launch_target();
+          check_cuda(implementation.launch(*candidate, bindings));
         }
         check_cuda(cudaEventRecord(events.start,
                                    static_cast<cudaStream_t>(bindings.stream)));
         for (int iteration = 0; iteration < 10; ++iteration) {
-          launch_target();
+          check_cuda(implementation.launch(*candidate, bindings));
         }
         check_cuda(cudaEventRecord(events.stop,
                                    static_cast<cudaStream_t>(bindings.stream)));
@@ -259,9 +236,23 @@ std::shared_ptr<State> tune(
     throw Failure(APXINF_STATUS_UNSUPPORTED,
                   "no candidate satisfies the fixed FP32 reference contract");
   }
+  if (policy.graph_safe) {
+    // Graph support is a correctness requirement, not a separate tuning
+    // objective. Select the fastest eager candidate first, then prove that
+    // the winner can be captured and that replay writes the correct output.
+    CapturedExecution graph(*winner, bindings);
+    poison(bindings, output_bytes);
+    graph.launch();
+    const auto graph_actual = read_output(
+        output.pointer, count, spec.output_dtype,
+        static_cast<cudaStream_t>(bindings.stream));
+    if (!compare_reference(reference.values, graph_actual).valid) {
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                    "CUDA Graph replay failed numeric validation");
+    }
+    diagnostics.push_back("winner-graph=pass");
+  }
   report = "tuned preferred=" + std::to_string(preferred_first) +
-           std::string(" mode=") +
-           (policy.execution_mode == 1 ? "graph-replay" : "eager") +
            " reference=" + std::string(reference.kind) +
            " checked=" + std::to_string(checked) +
            " rejected=" + std::to_string(rejected) +

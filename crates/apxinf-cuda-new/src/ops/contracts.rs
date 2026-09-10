@@ -4,16 +4,6 @@ use std::ops::Range;
 use crate::ffi::abi::gemm as abi;
 use crate::{CudaBuffer, CudaContext};
 
-/// Execution path whose latency autotuning should optimize.
-///
-/// This is deliberately separate from `graph_safe`: the latter is a
-/// candidate eligibility requirement, while this selects what is measured.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GemmExecutionMode {
-    Eager,
-    GraphReplay,
-}
-
 /// Caller-managed version of an immutable GEMM weight allocation.
 ///
 /// A version is meaningful together with the weight tensor's allocation
@@ -42,7 +32,6 @@ pub struct GemmPolicy {
     pub allow_fallback: bool,
     pub graph_safe: bool,
     pub deterministic: bool,
-    pub execution_mode: GemmExecutionMode,
     pub cache_dir: Option<String>,
 }
 
@@ -55,7 +44,6 @@ impl Default for GemmPolicy {
             allow_fallback: true,
             graph_safe: true,
             deterministic: false,
-            execution_mode: GemmExecutionMode::Eager,
             cache_dir: None,
         }
     }
