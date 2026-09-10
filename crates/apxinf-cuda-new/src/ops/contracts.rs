@@ -55,33 +55,26 @@ pub struct GemmArgs<'a> {
     pub alpha: f32,
     pub output_scale: f32,
     pub policy: GemmPolicy,
-    /// Optional pre-quantization FP32 operands used only while autotuning.
-    ///
-    /// When omitted, validation reconstructs FP32 values from the supplied
-    /// inference tensors and therefore measures implementation error only.
-    /// Supplying this reference also includes the initial quantization loss.
-    pub reference: Option<GemmReference<'a>>,
 }
 
-/// Original FP32 operands for provider-independent autotune validation.
-///
-/// The slices use the same canonical row-major shapes as the inference
-/// tensors: `a=[M,K]`, `b=[K,N]`, and (for fused bias semantics) `bias=[N]`.
-/// They are consumed synchronously during plan creation and are never retained
-/// by the execution instance.
+/// Original FP32 operands used by the crate's deterministic candidate
+/// validation suite. This is deliberately not part of the public execution
+/// contract: executors submit already-typed tensors and must not retain the
+/// pre-quantization training values merely to execute GEMM.
 #[derive(Clone, Copy)]
-pub struct GemmReference<'a> {
+pub(crate) struct ValidationReference<'a> {
     pub a: &'a [f32],
     pub b: &'a [f32],
     pub bias: Option<&'a [f32]>,
 }
 
-impl<'a> GemmReference<'a> {
-    pub fn new(a: &'a [f32], b: &'a [f32]) -> Self {
+#[cfg(test)]
+impl<'a> ValidationReference<'a> {
+    pub(crate) fn new(a: &'a [f32], b: &'a [f32]) -> Self {
         Self { a, b, bias: None }
     }
 
-    pub fn with_bias(a: &'a [f32], b: &'a [f32], bias: &'a [f32]) -> Self {
+    pub(crate) fn with_bias(a: &'a [f32], b: &'a [f32], bias: &'a [f32]) -> Self {
         Self {
             a,
             b,
@@ -127,7 +120,6 @@ impl<'a> GemmArgs<'a> {
             alpha: 1.0,
             output_scale: 1.0,
             policy: GemmPolicy::default(),
-            reference: None,
         }
     }
 
@@ -149,7 +141,6 @@ impl<'a> GemmArgs<'a> {
             alpha: 1.0,
             output_scale: 1.0,
             policy: GemmPolicy::default(),
-            reference: None,
         }
     }
 
@@ -175,7 +166,6 @@ impl<'a> GemmArgs<'a> {
             alpha: 1.0,
             output_scale: 1.0,
             policy,
-            reference: None,
         }
     }
 }
@@ -194,7 +184,7 @@ pub(crate) struct Normalized<'a> {
     pub policy: GemmPolicy,
     pub bindings: abi::Bindings,
     pub storage: Vec<CudaBuffer>,
-    pub reference: Option<GemmReference<'a>>,
+    pub(crate) validation_reference: Option<ValidationReference<'a>>,
 }
 
 pub(crate) fn invalid(message: impl Into<String>) -> Error {
@@ -326,33 +316,6 @@ pub(crate) fn normalize<'a>(
     if bias.is_some() != needs_bias {
         return Err(invalid("fused operands do not match the semantic operator"));
     }
-    if let Some(reference) = args.reference {
-        let expected_a = m
-            .checked_mul(k)
-            .ok_or_else(|| invalid("GEMM reference A size overflow"))?;
-        let expected_b = k
-            .checked_mul(n)
-            .ok_or_else(|| invalid("GEMM reference B size overflow"))?;
-        if reference.a.len() != expected_a
-            || reference.b.len() != expected_b
-            || reference.bias.is_some() != needs_bias
-            || reference.bias.is_some_and(|values| values.len() != n)
-        {
-            return Err(invalid(
-                "original FP32 reference operands do not match the L3 semantic",
-            ));
-        }
-        if reference
-            .a
-            .iter()
-            .chain(reference.b)
-            .chain(reference.bias.into_iter().flatten())
-            .any(|value| !value.is_finite())
-        {
-            return Err(invalid("original FP32 reference operands must be finite"));
-        }
-    }
-
     let (quantization, row_scales, channel_scales) = match args.quantization {
         GemmQuantization::None => {
             if matches!(args.a.dtype(), DType::F8E4M3 | DType::I8)
@@ -500,8 +463,44 @@ pub(crate) fn normalize<'a>(
         policy: args.policy,
         bindings,
         storage,
-        reference: args.reference,
+        validation_reference: None,
     })
+}
+
+#[cfg(test)]
+pub(crate) fn with_validation_reference<'a>(
+    mut normalized: Normalized<'a>,
+    reference: ValidationReference<'a>,
+) -> Result<Normalized<'a>> {
+    let expected_a = (normalized.spec.m as usize)
+        .checked_mul(normalized.spec.k as usize)
+        .ok_or_else(|| invalid("GEMM validation A size overflow"))?;
+    let expected_b = (normalized.spec.k as usize)
+        .checked_mul(normalized.spec.n as usize)
+        .ok_or_else(|| invalid("GEMM validation B size overflow"))?;
+    let needs_bias = !normalized.bindings.bias.is_null();
+    if reference.a.len() != expected_a
+        || reference.b.len() != expected_b
+        || reference.bias.is_some() != needs_bias
+        || reference
+            .bias
+            .is_some_and(|values| values.len() != normalized.spec.n as usize)
+    {
+        return Err(invalid(
+            "original FP32 validation operands do not match the L3 semantic",
+        ));
+    }
+    if reference
+        .a
+        .iter()
+        .chain(reference.b)
+        .chain(reference.bias.into_iter().flatten())
+        .any(|value| !value.is_finite())
+    {
+        return Err(invalid("original FP32 validation operands must be finite"));
+    }
+    normalized.validation_reference = Some(reference);
+    Ok(normalized)
 }
 
 #[cfg(test)]

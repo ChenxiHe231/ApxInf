@@ -8,7 +8,7 @@ mod gemm_geglu;
 mod gemm_gelu;
 
 pub use crate::workspace::GraphWorkspace;
-pub use contracts::{GemmArgs, GemmExecutionMode, GemmPolicy, GemmQuantization, GemmReference};
+pub use contracts::{GemmArgs, GemmExecutionMode, GemmPolicy, GemmQuantization};
 pub use execution::PreparedExecution;
 pub use gemm::{gemm, prepare_gemm};
 pub use gemm_bias::{gemm_bias, prepare_gemm_bias, GemmBiasArgs};

@@ -155,7 +155,7 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<P
         policy: options,
         bindings,
         storage,
-        reference,
+        validation_reference,
     } = normalized;
     let cache = options
         .cache_dir
@@ -177,7 +177,7 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<P
             .as_ref()
             .map_or(std::ptr::null(), |path| path.as_ptr()),
     };
-    let tuning_bindings = if let Some(reference) = reference {
+    let tuning_bindings = if let Some(reference) = validation_reference {
         abi::TuningBindings {
             execution: bindings,
             original_a: reference.a.as_ptr(),

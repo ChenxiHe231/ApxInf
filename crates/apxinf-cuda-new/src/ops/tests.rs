@@ -122,6 +122,14 @@ fn tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
     buffer.as_tensor(Shape::new(shape), DType::BF16).unwrap()
 }
 
+fn f32_tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
+    let bytes: Vec<_> = values
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    bytes_tensor(device, shape, DType::F32, &bytes)
+}
+
 fn zeros_tensor(device: usize, shape: Vec<usize>, dtype: DType) -> Tensor {
     let bytes = vec![0; shape.iter().product::<usize>() * dtype.size_in_bytes()];
     let buffer = CudaBuffer::alloc(bytes.len(), device).unwrap();
@@ -149,6 +157,255 @@ fn scales(device: usize, values: &[f32]) -> Tensor {
     buffer
         .as_tensor(Shape::new(vec![values.len()]), DType::F32)
         .unwrap()
+}
+
+fn decode_e4m3(bits: u8) -> Option<f32> {
+    let sign = if bits & 0x80 == 0 { 1.0 } else { -1.0 };
+    let exponent = (bits >> 3) & 0x0f;
+    let mantissa = bits & 0x07;
+    if exponent == 0x0f && mantissa == 0x07 {
+        return None;
+    }
+    let magnitude = if exponent == 0 {
+        (mantissa as f32) * 2.0_f32.powi(-9)
+    } else {
+        (1.0 + mantissa as f32 / 8.0) * 2.0_f32.powi(exponent as i32 - 7)
+    };
+    Some(sign * magnitude)
+}
+
+fn quantize_e4m3(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .map(|&value| {
+            let mut best = 0_u8;
+            let mut best_error = f32::INFINITY;
+            for candidate in 0_u16..=u8::MAX as u16 {
+                let bits = candidate as u8;
+                let Some(decoded) = decode_e4m3(bits) else {
+                    continue;
+                };
+                let error = (decoded - value).abs();
+                if error < best_error {
+                    best = bits;
+                    best_error = error;
+                }
+            }
+            best
+        })
+        .collect()
+}
+
+fn next_random(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+/// A deterministic mixture of zero, ordinary random, dynamic-range,
+/// cancellation, and FP8-boundary values. Boundary positions are staggered
+/// between A and B so their dot products remain finite in an F16 output.
+fn validation_matrix(
+    rows: usize,
+    columns: usize,
+    seed: u64,
+    boundary_on_rows: bool,
+    boundary_phase: usize,
+) -> Vec<f32> {
+    const RANDOM_VALUES: [f32; 9] = [-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0];
+    const DYNAMIC_VALUES: [f32; 9] = [-16.0, -4.0, -1.0, -0.25, 0.0, 0.25, 1.0, 4.0, 16.0];
+    let mut state = seed;
+    let mut values = Vec::with_capacity(rows * columns);
+    for row in 0..rows {
+        for column in 0..columns {
+            let random = next_random(&mut state) as usize;
+            let selector = (row * columns + column) % 5;
+            let boundary_index = if boundary_on_rows { row } else { column };
+            let value = if boundary_index % 16 == boundary_phase {
+                if column % 2 == 0 {
+                    448.0
+                } else {
+                    -448.0
+                }
+            } else {
+                match selector {
+                    0 => 0.0,
+                    1 => RANDOM_VALUES[random % RANDOM_VALUES.len()],
+                    2 => DYNAMIC_VALUES[random % DYNAMIC_VALUES.len()],
+                    3 => {
+                        let magnitude = RANDOM_VALUES[(random / 7) % RANDOM_VALUES.len()].abs();
+                        if column % 2 == 0 {
+                            magnitude
+                        } else {
+                            -magnitude
+                        }
+                    }
+                    _ => {
+                        if random & 1 == 0 {
+                            2.0
+                        } else {
+                            -2.0
+                        }
+                    }
+                }
+            };
+            values.push(value);
+        }
+    }
+    values
+}
+
+fn validation_bias(columns: usize, seed: u64) -> Vec<f32> {
+    let mut state = seed;
+    (0..columns)
+        .map(|column| {
+            let value = (next_random(&mut state) % 9) as f32 / 4.0;
+            if column % 3 == 0 {
+                0.0
+            } else if column % 2 == 0 {
+                value
+            } else {
+                -value
+            }
+        })
+        .collect()
+}
+
+fn assert_all_applicable_candidates_checked(summary: &str, expected_backends: &[&str]) {
+    assert!(summary.contains("reference=original-fp32"), "{summary}");
+    assert!(summary.contains("max_element="), "{summary}");
+    assert!(summary.contains("rel_l2="), "{summary}");
+    assert!(summary.contains("cosine="), "{summary}");
+    assert!(
+        !summary.contains("reject(numeric:"),
+        "an applicable candidate failed the shared FP32 reference: {summary}"
+    );
+    for backend in expected_backends {
+        assert!(
+            summary.contains(backend),
+            "candidate was not visited: {backend}; {summary}"
+        );
+    }
+}
+
+fn run_deterministic_reference_corpus(fp8: bool) {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (8, 16, 16);
+    let raw_a = validation_matrix(m, k, 0x5eed_a11c_e001, false, 0);
+    let raw_b = validation_matrix(k, n, 0x5eed_b22d_e002, true, 1);
+    let raw_geglu_b = validation_matrix(k, 2 * n, 0x5eed_b33e_e003, true, 1);
+    let raw_bias = validation_bias(n, 0x5eed_b1a5_e004);
+
+    let a = if fp8 {
+        bytes_tensor(0, vec![m, k], DType::F8E4M3, &quantize_e4m3(&raw_a))
+    } else {
+        tensor(0, vec![m, k], &raw_a)
+    };
+    let b = if fp8 {
+        bytes_tensor(0, vec![k, n], DType::F8E4M3, &quantize_e4m3(&raw_b))
+    } else {
+        tensor(0, vec![k, n], &raw_b)
+    };
+    let geglu_b = if fp8 {
+        bytes_tensor(
+            0,
+            vec![k, 2 * n],
+            DType::F8E4M3,
+            &quantize_e4m3(&raw_geglu_b),
+        )
+    } else {
+        tensor(0, vec![k, 2 * n], &raw_geglu_b)
+    };
+    let bias = if fp8 {
+        f32_tensor(0, vec![n], &raw_bias)
+    } else {
+        tensor(0, vec![n], &raw_bias)
+    };
+
+    let configure = |args: &mut GemmArgs<'_>| {
+        if fp8 {
+            args.quantization = GemmQuantization::Fp8UnitScale;
+        }
+        args.policy.allow_fallback = false;
+        args.policy.graph_safe = false;
+    };
+    let vendor_backends = ["cublas+custom-epilogue", "cublasLt+custom-epilogue"];
+
+    let mut gemm_out = zeros_tensor(0, vec![m, n], if fp8 { DType::F16 } else { DType::BF16 });
+    let mut args = GemmArgs::new(&a, &b, &mut gemm_out);
+    configure(&mut args);
+    let prepared = prepare_with_original_fp32(
+        &ctx,
+        args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+        super::contracts::ValidationReference::new(&raw_a, &raw_b),
+    )
+    .unwrap();
+    let expected = if fp8 {
+        vec![
+            "cublas+custom-epilogue",
+            "cublasLt+custom-epilogue",
+            "cublasLt-native-fp8+custom-epilogue",
+            "cutlass-fp8",
+        ]
+    } else {
+        vendor_backends.to_vec()
+    };
+    assert_all_applicable_candidates_checked(prepared.summary(), &expected);
+
+    for semantic in [
+        super::contracts::Semantic::GemmBias,
+        super::contracts::Semantic::GemmBiasGelu,
+    ] {
+        let mut out = zeros_tensor(0, vec![m, n], if fp8 { DType::F32 } else { DType::BF16 });
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        configure(&mut args);
+        let api = if semantic == super::contracts::Semantic::GemmBias {
+            super::execution::PlanApi::gemm_bias()
+        } else {
+            super::execution::PlanApi::gemm_bias_gelu()
+        };
+        let prepared = prepare_with_original_fp32(
+            &ctx,
+            args,
+            semantic,
+            api,
+            Some(&bias),
+            super::contracts::ValidationReference::with_bias(&raw_a, &raw_b, &raw_bias),
+        )
+        .unwrap();
+        assert_all_applicable_candidates_checked(prepared.summary(), &vendor_backends);
+    }
+
+    let mut geglu_out = zeros_tensor(0, vec![m, n], if fp8 { DType::F32 } else { DType::BF16 });
+    let mut args = GemmArgs::new(&a, &geglu_b, &mut geglu_out);
+    configure(&mut args);
+    let prepared = prepare_with_original_fp32(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmGeglu,
+        super::execution::PlanApi::gemm_geglu(),
+        None,
+        super::contracts::ValidationReference::new(&raw_a, &raw_geglu_b),
+    )
+    .unwrap();
+    assert_all_applicable_candidates_checked(prepared.summary(), &vendor_backends);
+}
+
+fn prepare_with_original_fp32<'a>(
+    ctx: &CudaContext,
+    args: GemmArgs<'a>,
+    semantic: super::contracts::Semantic,
+    api: super::execution::PlanApi,
+    bias: Option<&'a Tensor>,
+    reference: super::contracts::ValidationReference<'a>,
+) -> apxinf_core::Result<PreparedExecution> {
+    let normalized = super::contracts::normalize(ctx, args, semantic, api, bias)?;
+    let normalized = super::contracts::with_validation_reference(normalized, reference)?;
+    super::execution::prepare(ctx, normalized)
 }
 
 #[test]
@@ -882,32 +1139,51 @@ fn quantization_contract_becomes_part_of_the_gemm_key() {
 }
 
 #[test]
-fn original_fp32_reference_requires_the_l3_semantic_operands() {
+fn original_fp32_validation_requires_the_l3_semantic_operands() {
     let ctx = CudaContext::new(0).unwrap();
     let a = tensor(0, vec![2, 3], &[1.0; 6]);
     let b = tensor(0, vec![3, 4], &[1.0; 12]);
     let bias = tensor(0, vec![4], &[0.0; 4]);
     let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.reference = Some(GemmReference::new(&[1.0; 5], &[1.0; 12]));
-    let error = gemm(&ctx, args).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("reference operands do not match"));
-
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.reference = Some(GemmReference::new(&[1.0; 6], &[1.0; 12]));
-    let error = gemm_bias(
+    let args = GemmArgs::new(&a, &b, &mut out);
+    let normalized = super::contracts::normalize(
         &ctx,
-        GemmBiasArgs {
-            gemm: args,
-            bias: &bias,
-        },
+        args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
     )
-    .unwrap_err();
+    .unwrap();
+    let error = match super::contracts::with_validation_reference(
+        normalized,
+        super::contracts::ValidationReference::new(&[1.0; 5], &[1.0; 12]),
+    ) {
+        Ok(_) => panic!("invalid validation operands were accepted"),
+        Err(error) => error,
+    };
     assert!(error
         .to_string()
-        .contains("reference operands do not match"));
+        .contains("validation operands do not match"));
+
+    let args = GemmArgs::new(&a, &b, &mut out);
+    let normalized = super::contracts::normalize(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmBias,
+        super::execution::PlanApi::gemm_bias(),
+        Some(&bias),
+    )
+    .unwrap();
+    let error = match super::contracts::with_validation_reference(
+        normalized,
+        super::contracts::ValidationReference::new(&[1.0; 6], &[1.0; 12]),
+    ) {
+        Ok(_) => panic!("missing validation bias was accepted"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("validation operands do not match"));
 }
 
 #[test]
@@ -922,10 +1198,17 @@ fn cpu_fp32_reference_covers_every_l3_semantic() {
 
     let mut gemm_out = tensor(0, vec![2, 4], &[0.0; 8]);
     let mut args = GemmArgs::new(&a, &b, &mut gemm_out);
-    args.reference = Some(GemmReference::new(&raw_a, &raw_b));
     args.policy.allow_fallback = false;
     args.policy.graph_safe = false;
-    let prepared = prepare_gemm(&ctx, args).unwrap();
+    let prepared = prepare_with_original_fp32(
+        &ctx,
+        args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+        super::contracts::ValidationReference::new(&raw_a, &raw_b),
+    )
+    .unwrap();
     assert!(prepared.summary().contains("reference=original-fp32"));
     assert!(prepared.summary().contains("max_element="));
     assert!(prepared.summary().contains("rel_l2="));
@@ -933,41 +1216,58 @@ fn cpu_fp32_reference_covers_every_l3_semantic() {
 
     let mut bias_out = tensor(0, vec![2, 4], &[0.0; 8]);
     let mut args = GemmArgs::new(&a, &b, &mut bias_out);
-    args.reference = Some(GemmReference::with_bias(&raw_a, &raw_b, &raw_bias));
     args.policy.allow_fallback = false;
     args.policy.graph_safe = false;
-    let prepared = prepare_gemm_bias(
+    let prepared = prepare_with_original_fp32(
         &ctx,
-        GemmBiasArgs {
-            gemm: args,
-            bias: &bias,
-        },
+        args,
+        super::contracts::Semantic::GemmBias,
+        super::execution::PlanApi::gemm_bias(),
+        Some(&bias),
+        super::contracts::ValidationReference::with_bias(&raw_a, &raw_b, &raw_bias),
     )
     .unwrap();
     assert!(prepared.summary().contains("reference=original-fp32"));
 
     let mut gelu_out = tensor(0, vec![2, 4], &[0.0; 8]);
     let mut args = GemmArgs::new(&a, &b, &mut gelu_out);
-    args.reference = Some(GemmReference::with_bias(&raw_a, &raw_b, &raw_bias));
     args.policy.allow_fallback = false;
     args.policy.graph_safe = false;
-    let prepared = prepare_gemm_bias_gelu(
+    let prepared = prepare_with_original_fp32(
         &ctx,
-        GemmBiasGeluArgs {
-            gemm: args,
-            bias: &bias,
-        },
+        args,
+        super::contracts::Semantic::GemmBiasGelu,
+        super::execution::PlanApi::gemm_bias_gelu(),
+        Some(&bias),
+        super::contracts::ValidationReference::with_bias(&raw_a, &raw_b, &raw_bias),
     )
     .unwrap();
     assert!(prepared.summary().contains("reference=original-fp32"));
 
     let mut geglu_out = tensor(0, vec![2, 2], &[0.0; 4]);
     let mut args = GemmArgs::new(&a, &b, &mut geglu_out);
-    args.reference = Some(GemmReference::new(&raw_a, &raw_b));
     args.policy.allow_fallback = false;
     args.policy.graph_safe = false;
-    let prepared = prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: args }).unwrap();
+    let prepared = prepare_with_original_fp32(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmGeglu,
+        super::execution::PlanApi::gemm_geglu(),
+        None,
+        super::contracts::ValidationReference::new(&raw_a, &raw_b),
+    )
+    .unwrap();
     assert!(prepared.summary().contains("reference=original-fp32"));
+}
+
+#[test]
+fn deterministic_bf16_reference_corpus_validates_all_l3_candidate_domains() {
+    run_deterministic_reference_corpus(false);
+}
+
+#[test]
+fn deterministic_fp8_reference_corpus_quantizes_and_validates_all_l3_candidate_domains() {
+    run_deterministic_reference_corpus(true);
 }
 
 #[test]
@@ -984,10 +1284,16 @@ fn fp8_reference_distinguishes_full_quantization_error() {
     args.quantization = GemmQuantization::Fp8UnitScale;
     let original_a = vec![1.2; m * k];
     let original_b = vec![1.0; k * n];
-    args.reference = Some(GemmReference::new(&original_a, &original_b));
     args.policy.allow_fallback = false;
     args.policy.graph_safe = false;
-    let error = match prepare_gemm(&ctx, args) {
+    let error = match prepare_with_original_fp32(
+        &ctx,
+        args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+        super::contracts::ValidationReference::new(&original_a, &original_b),
+    ) {
         Ok(_) => panic!("quantization loss unexpectedly passed the fixed thresholds"),
         Err(error) => error,
     };
@@ -1016,10 +1322,17 @@ fn bf16_and_fp8_share_the_original_fp32_reference_contract() {
     let bf16_b = tensor(0, vec![k, n], &raw_b);
     let mut bf16_out = zeros_tensor(0, vec![m, n], DType::BF16);
     let mut bf16_args = GemmArgs::new(&bf16_a, &bf16_b, &mut bf16_out);
-    bf16_args.reference = Some(GemmReference::new(&raw_a, &raw_b));
     bf16_args.policy.allow_fallback = false;
     bf16_args.policy.graph_safe = false;
-    let mut bf16 = prepare_gemm(&bf16_ctx, bf16_args).unwrap();
+    let mut bf16 = prepare_with_original_fp32(
+        &bf16_ctx,
+        bf16_args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+        super::contracts::ValidationReference::new(&raw_a, &raw_b),
+    )
+    .unwrap();
     assert!(bf16.summary().contains("reference=original-fp32"));
     bf16.enqueue().unwrap();
     bf16_ctx.synchronize().unwrap();
@@ -1030,10 +1343,17 @@ fn bf16_and_fp8_share_the_original_fp32_reference_contract() {
     let mut fp8_out = zeros_tensor(0, vec![m, n], DType::BF16);
     let mut fp8_args = GemmArgs::new(&fp8_a, &fp8_b, &mut fp8_out);
     fp8_args.quantization = GemmQuantization::Fp8UnitScale;
-    fp8_args.reference = Some(GemmReference::new(&raw_a, &raw_b));
     fp8_args.policy.allow_fallback = false;
     fp8_args.policy.graph_safe = false;
-    let mut fp8 = prepare_gemm(&fp8_ctx, fp8_args).unwrap();
+    let mut fp8 = prepare_with_original_fp32(
+        &fp8_ctx,
+        fp8_args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+        super::contracts::ValidationReference::new(&raw_a, &raw_b),
+    )
+    .unwrap();
     assert!(fp8.summary().contains("reference=original-fp32"));
     fp8.enqueue().unwrap();
     fp8_ctx.synchronize().unwrap();
