@@ -35,14 +35,26 @@ impl Tensor {
         })
     }
 
-    /// Create a tensor directly from components (used by device backends).
+    /// Create a tensor directly from components.
+    ///
+    /// This compatibility constructor is retained while the existing CUDA
+    /// backend and `apxinf-cuda-new` coexist. New device backends should call
+    /// [`Tensor::from_raw_parts_unchecked`] so the raw-storage safety boundary
+    /// remains explicit at their call site.
+    pub fn from_raw_parts(shape: Shape, dtype: DType, device: Device, storage: Storage) -> Self {
+        // This method intentionally preserves the legacy API. The old backend
+        // owns its allocation through `GpuStorageHandle::_prevent_leak`.
+        unsafe { Self::from_raw_parts_unchecked(shape, dtype, device, storage) }
+    }
+
+    /// Create a tensor directly from backend-owned storage.
     ///
     /// # Safety
     ///
     /// `storage` must belong to `device`, remain valid for the returned
     /// tensor's lifetime, and contain at least `shape.numel() *
     /// dtype.size_in_bytes()` accessible bytes without arithmetic overflow.
-    pub unsafe fn from_raw_parts(
+    pub unsafe fn from_raw_parts_unchecked(
         shape: Shape,
         dtype: DType,
         device: Device,

@@ -19,11 +19,18 @@ pub enum Storage {
 
 /// Opaque handle to GPU memory. CUDA backends construct these and retain the
 /// owning allocation so device memory stays live while the tensor is live.
+///
+/// The public fields are retained during the `apxinf-cuda-new` migration so
+/// the existing CUDA backend keeps building unchanged. New backends should use
+/// [`GpuStorageHandle::from_raw_parts`] and the accessor methods instead.
 #[derive(Clone)]
 pub struct GpuStorageHandle {
-    ptr: usize,
-    len: usize,
-    owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Raw CUDA device pointer, cast to `usize`.
+    pub ptr: usize,
+    /// Total allocated bytes on device.
+    pub len: usize,
+    /// Retains the backend allocation owner until the last handle is dropped.
+    pub _prevent_leak: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl GpuStorageHandle {
@@ -40,7 +47,11 @@ impl GpuStorageHandle {
         len: usize,
         owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Self {
-        Self { ptr, len, owner }
+        Self {
+            ptr,
+            len,
+            _prevent_leak: owner,
+        }
     }
 
     pub fn ptr(&self) -> usize {
@@ -52,7 +63,7 @@ impl GpuStorageHandle {
     }
 
     pub fn owner(&self) -> Option<&Arc<dyn std::any::Any + Send + Sync>> {
-        self.owner.as_ref()
+        self._prevent_leak.as_ref()
     }
 }
 

@@ -206,7 +206,9 @@ impl CudaBuffer {
         };
         // SAFETY: the handle and tensor use the same CUDA device, and the
         // allocation size was validated by `as_tensor`.
-        unsafe { Tensor::from_raw_parts(shape, dtype, device, Storage::Gpu { device, handle }) }
+        unsafe {
+            Tensor::from_raw_parts_unchecked(shape, dtype, device, Storage::Gpu { device, handle })
+        }
     }
 
     /// Borrow this allocation as a tensor while retaining shared ownership.
