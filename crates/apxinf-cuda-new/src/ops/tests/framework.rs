@@ -1028,3 +1028,59 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     drop(mutable);
     std::fs::remove_dir_all(cache_dir).unwrap();
 }
+
+fn run_persisted_choice_process_stage(cache_dir: &str, stage: &str) {
+    let ctx = CudaContext::new(0).unwrap();
+    let b_values = [1.0, 2.0, 0.0, -1.0, 2.0, 1.0];
+    let write_a = [1.0; 6];
+    let write_expected = [3.0, 2.0, 3.0, 2.0];
+    let read_a = [1.0, 2.0, -1.0, 0.0, 3.0, 1.0];
+    let read_expected = [-1.0, -1.0, 2.0, -2.0];
+    let (a_values, expected): (&[f32], &[f32]) = if stage == "write" {
+        (&write_a, &write_expected)
+    } else {
+        (&read_a, &read_expected)
+    };
+    let a = tensor(0, vec![2, 3], a_values);
+    let b = tensor(0, vec![3, 2], &b_values);
+    let mut out = tensor(0, vec![2, 2], &[0.0; 4]);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.policy.cache_dir = Some(cache_dir.to_owned());
+    args.policy.online_tune = stage == "write";
+    args.policy.allow_fallback = false;
+    gemm(&ctx, args).unwrap();
+    assert_eq!(values(&out), expected);
+}
+
+#[test]
+fn persisted_choice_reloads_in_a_fresh_process() {
+    const STAGE_ENV: &str = "APXINF_TEST_PERSISTED_CHOICE_STAGE";
+    const CACHE_ENV: &str = "APXINF_TEST_PERSISTED_CHOICE_CACHE";
+    if let Ok(stage) = std::env::var(STAGE_ENV) {
+        let cache_dir = std::env::var(CACHE_ENV).unwrap();
+        run_persisted_choice_process_stage(&cache_dir, &stage);
+        return;
+    }
+
+    let cache_dir = scratch_cache_dir("fresh-process-recipe");
+    let executable = std::env::current_exe().unwrap();
+    let test_name = "ops::tests::framework::persisted_choice_reloads_in_a_fresh_process";
+    for stage in ["write", "read"] {
+        let output = std::process::Command::new(&executable)
+            .arg(test_name)
+            .arg("--exact")
+            .arg("--nocapture")
+            .arg("--test-threads=1")
+            .env(STAGE_ENV, stage)
+            .env(CACHE_ENV, &cache_dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh-process {stage} stage failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}

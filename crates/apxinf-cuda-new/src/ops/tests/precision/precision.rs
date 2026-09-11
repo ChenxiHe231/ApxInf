@@ -13,6 +13,43 @@ use apxinf_core::{DType, Tensor};
 #[path = "torch_l3_fixtures.rs"]
 mod torch_fixture;
 
+unsafe extern "C" {
+    fn apxinf_gemm_test_compare_reference(
+        expected: *const f32,
+        expected_count: usize,
+        actual: *const f32,
+        actual_count: usize,
+    ) -> i32;
+}
+
+fn reference_is_accepted(expected: &[f32], actual: &[f32]) -> bool {
+    unsafe {
+        apxinf_gemm_test_compare_reference(
+            expected.as_ptr(),
+            expected.len(),
+            actual.as_ptr(),
+            actual.len(),
+        ) == 1
+    }
+}
+
+#[test]
+fn precision_comparator_rejects_bad_outputs() {
+    let reference = [1.0, 2.0, 3.0];
+    assert!(reference_is_accepted(&reference, &reference));
+    assert!(
+        !reference_is_accepted(&reference, &[2.0, 4.0, 6.0]),
+        "cosine=1 must not hide a globally scaled wrong output"
+    );
+    assert!(!reference_is_accepted(&reference, &[1.0, f32::NAN, 3.0]));
+    assert!(!reference_is_accepted(
+        &reference,
+        &[1.0, f32::INFINITY, 3.0]
+    ));
+    assert!(!reference_is_accepted(&reference, &[1.0, 2.0]));
+    assert!(!reference_is_accepted(&[0.0, 0.0], &[0.0, 0.01]));
+}
+
 fn assert_all_applicable_candidates_checked(summary: &str, expected_backends: &[&str]) {
     assert!(summary.contains("reference=torch"), "{summary}");
     assert!(summary.contains("max_element="), "{summary}");

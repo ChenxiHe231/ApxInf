@@ -7,86 +7,86 @@
 
 use super::framework::{tensor, values};
 use super::*;
-use crate::CudaContext;
+use crate::{CudaBuffer, CudaContext};
 use half::bf16;
+
+fn assert_close(actual: &[f32], expected: &[f32], tolerance: f32) {
+    assert_eq!(actual.len(), expected.len(), "output length mismatch");
+    for (index, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+        assert!(
+            actual.is_finite(),
+            "element {index} is not finite: {actual}"
+        );
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "element {index}: got {actual}, expected {expected}"
+        );
+    }
+}
+
+fn matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    let mut output = vec![0.0; m * n];
+    for row in 0..m {
+        for column in 0..n {
+            output[row * n + column] = (0..k)
+                .map(|inner| a[row * k + inner] * b[inner * n + column])
+                .sum();
+        }
+    }
+    output
+}
+
+fn gelu_tanh(value: f32) -> f32 {
+    0.5 * value * (1.0 + (0.79788456 * (value + 0.044715 * value.powi(3))).tanh())
+}
+
+fn write_bf16(tensor: &apxinf_core::Tensor, input: &[f32]) {
+    assert_eq!(tensor.shape().numel(), input.len());
+    let bytes: Vec<u8> = input
+        .iter()
+        .flat_map(|&value| bf16::from_f32(value).to_bits().to_ne_bytes())
+        .collect();
+    CudaBuffer::from_tensor(tensor)
+        .unwrap()
+        .copy_from_host(&bytes)
+        .unwrap();
+}
+
+const A: [f32; 6] = [1.0, 2.0, -1.0, 0.0, 3.0, 1.0];
+const B: [f32; 6] = [1.0, 2.0, 0.0, -1.0, 2.0, 1.0];
+const BIAS: [f32; 2] = [0.5, -1.0];
+const ALPHA: f32 = 0.75;
+const OUTPUT_SCALE: f32 = 1.25;
 
 #[test]
 fn gemm_has_its_own_semantic_api() {
     let ctx = CudaContext::new(0).unwrap();
-    let a = tensor(0, vec![2, 3], &[1.0; 6]);
-    let b = tensor(0, vec![3, 4], &[1.0; 12]);
-    let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
+    let a = tensor(0, vec![2, 3], &A);
+    let b = tensor(0, vec![3, 2], &B);
+    let mut out = tensor(0, vec![2, 2], &[0.0; 4]);
     let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.alpha = ALPHA;
+    args.output_scale = OUTPUT_SCALE;
     args.policy.online_tune = false;
     gemm(&ctx, args).unwrap();
-    assert!(values(&out).iter().all(|&value| value == 3.0));
-}
 
-#[test]
-fn gemm_geglu_is_a_separate_semantic_domain() {
-    let ctx = CudaContext::new(0).unwrap();
-    let (m, k, n) = (3, 5, 1024);
-    let a_values = vec![0.25; m * k];
-    let b_values: Vec<_> = (0..k * n).map(|i| ((i % 11) as f32 - 5.0) / 16.0).collect();
-    let a = tensor(0, vec![m, k], &a_values);
-    let b = tensor(0, vec![k, n], &b_values);
-    let mut out = tensor(0, vec![m, n / 2], &vec![0.0; m * n / 2]);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.policy.online_tune = false;
-    gemm_geglu(&ctx, GemmGegluArgs { gemm: args }).unwrap();
-    let actual = values(&out);
-    assert_eq!(actual.len(), m * n / 2);
-    for row in 0..m {
-        for column in 0..n / 2 {
-            let dot = |target| {
-                bf16::from_f32(
-                    (0..k)
-                        .map(|inner| a_values[row * k + inner] * b_values[inner * n + target])
-                        .sum(),
-                )
-                .to_f32()
-            };
-            let gate = dot(column);
-            let expected = 0.5
-                * gate
-                * (1.0 + (0.79788456 * (gate + 0.044715 * gate.powi(3))).tanh())
-                * dot(column + n / 2);
-            assert!((actual[row * n / 2 + column] - expected).abs() < 0.01);
-        }
-    }
-}
-
-#[test]
-fn gemm_bias_gelu_has_its_own_semantic_api() {
-    let ctx = CudaContext::new(0).unwrap();
-    let a = tensor(0, vec![2, 3], &[1.0; 6]);
-    let b = tensor(0, vec![3, 4], &[1.0; 12]);
-    let bias = tensor(0, vec![4], &[0.5; 4]);
-    let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.policy.online_tune = false;
-    gemm_bias_gelu(
-        &ctx,
-        GemmBiasGeluArgs {
-            gemm: args,
-            bias: &bias,
-        },
-    )
-    .unwrap();
-    let output = values(&out);
-    let x: f32 = 3.5;
-    let expected = 0.5 * x * (1.0 + (0.79788456 * (x + 0.044715 * x.powi(3))).tanh());
-    assert!(output.iter().all(|value| (*value - expected).abs() < 0.02));
+    let expected: Vec<_> = matmul(&A, &B, 2, 3, 2)
+        .into_iter()
+        .map(|value| ALPHA * value / OUTPUT_SCALE)
+        .collect();
+    assert_close(&values(&out), &expected, 0.02);
 }
 
 #[test]
 fn gemm_bias_has_its_own_semantic_api() {
     let ctx = CudaContext::new(0).unwrap();
-    let a = tensor(0, vec![2, 3], &[1.0; 6]);
-    let b = tensor(0, vec![3, 4], &[1.0; 12]);
-    let bias = tensor(0, vec![4], &[0.5, -0.5, 1.0, -1.0]);
-    let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
+    let a = tensor(0, vec![2, 3], &A);
+    let b = tensor(0, vec![3, 2], &B);
+    let bias = tensor(0, vec![2], &BIAS);
+    let mut out = tensor(0, vec![2, 2], &[0.0; 4]);
     let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.alpha = ALPHA;
+    args.output_scale = OUTPUT_SCALE;
     args.policy.online_tune = false;
     gemm_bias(
         &ctx,
@@ -96,8 +96,114 @@ fn gemm_bias_has_its_own_semantic_api() {
         },
     )
     .unwrap();
-    let expected = [3.5, 2.5, 4.0, 2.0, 3.5, 2.5, 4.0, 2.0];
-    for (actual, expected) in values(&out).iter().zip(expected) {
-        assert!((*actual - expected).abs() < 0.01);
+
+    let expected: Vec<_> = matmul(&A, &B, 2, 3, 2)
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| (ALPHA * value + BIAS[index % 2]) / OUTPUT_SCALE)
+        .collect();
+    assert_close(&values(&out), &expected, 0.02);
+}
+
+#[test]
+fn gemm_bias_gelu_has_its_own_semantic_api() {
+    let ctx = CudaContext::new(0).unwrap();
+    let a = tensor(0, vec![2, 3], &A);
+    let b = tensor(0, vec![3, 2], &B);
+    let bias = tensor(0, vec![2], &BIAS);
+    let mut out = tensor(0, vec![2, 2], &[0.0; 4]);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.alpha = ALPHA;
+    args.output_scale = OUTPUT_SCALE;
+    args.policy.online_tune = false;
+    gemm_bias_gelu(
+        &ctx,
+        GemmBiasGeluArgs {
+            gemm: args,
+            bias: &bias,
+        },
+    )
+    .unwrap();
+
+    let expected: Vec<_> = matmul(&A, &B, 2, 3, 2)
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| gelu_tanh(ALPHA * value + BIAS[index % 2]) / OUTPUT_SCALE)
+        .collect();
+    assert_close(&values(&out), &expected, 0.02);
+}
+
+#[test]
+fn gemm_geglu_is_a_separate_semantic_domain() {
+    let ctx = CudaContext::new(0).unwrap();
+    let b_geglu = [
+        1.0, 2.0, -1.0, 0.5, 0.0, -1.0, 2.0, 1.0, 2.0, 1.0, 0.5, -2.0,
+    ];
+    let a = tensor(0, vec![2, 3], &A);
+    let b = tensor(0, vec![3, 4], &b_geglu);
+    let mut out = tensor(0, vec![2, 2], &[0.0; 4]);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.alpha = ALPHA;
+    args.output_scale = OUTPUT_SCALE;
+    args.policy.online_tune = false;
+    gemm_geglu(&ctx, GemmGegluArgs { gemm: args }).unwrap();
+
+    let mut expected = vec![0.0; 4];
+    for row in 0..2 {
+        for column in 0..2 {
+            let gate: f32 = (0..3)
+                .map(|inner| A[row * 3 + inner] * b_geglu[inner * 4 + column])
+                .sum();
+            let up: f32 = (0..3)
+                .map(|inner| A[row * 3 + inner] * b_geglu[inner * 4 + column + 2])
+                .sum();
+            expected[row * 2 + column] = gelu_tanh(ALPHA * gate) * (ALPHA * up) / OUTPUT_SCALE;
+        }
     }
+    assert_close(&values(&out), &expected, 0.03);
+}
+
+#[test]
+fn gemm_uses_current_values_after_resource_reuse() {
+    let ctx = CudaContext::new(0).unwrap();
+    let a = tensor(0, vec![2, 3], &A);
+    let b = tensor(0, vec![3, 2], &B);
+    let mut out = tensor(0, vec![2, 2], &[0.0; 4]);
+    let workspace = GraphWorkspace::new(4096, 0).unwrap();
+
+    prepare_with_workspace(&workspace, || {
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.alpha = ALPHA;
+        args.output_scale = OUTPUT_SCALE;
+        args.policy.online_tune = false;
+        gemm(&ctx, args)
+    })
+    .unwrap();
+
+    let changed_a = [2.0, -1.0, 0.5, -2.0, 1.0, 3.0];
+    write_bf16(&a, &changed_a);
+    with_workspace(&workspace, || {
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.alpha = ALPHA;
+        args.output_scale = OUTPUT_SCALE;
+        args.policy.online_tune = false;
+        gemm(&ctx, args)
+    })
+    .unwrap();
+    let expected: Vec<_> = matmul(&changed_a, &B, 2, 3, 2)
+        .into_iter()
+        .map(|value| ALPHA * value / OUTPUT_SCALE)
+        .collect();
+    assert_close(&values(&out), &expected, 0.02);
+
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.alpha = 0.5;
+    args.output_scale = 2.0;
+    args.policy.online_tune = false;
+    gemm(&ctx, args).unwrap();
+    let expected: Vec<_> = matmul(&changed_a, &B, 2, 3, 2)
+        .into_iter()
+        .map(|value| 0.5 * value / 2.0)
+        .collect();
+    assert_close(&values(&out), &expected, 0.02);
 }
