@@ -247,23 +247,3 @@ std::string format_accuracy(const AccuracyMetrics& metrics) {
 }
 
 }  // namespace apxinf::gemm
-
-extern "C" int apxinf_gemm_test_compare_reference(
-    const float* expected, size_t expected_count, const float* actual,
-    size_t actual_count) {
-  if ((expected_count != 0 && expected == nullptr) ||
-      (actual_count != 0 && actual == nullptr)) {
-    return 0;
-  }
-  std::vector<float> expected_values;
-  std::vector<float> actual_values;
-  if (expected_count != 0) {
-    expected_values.assign(expected, expected + expected_count);
-  }
-  if (actual_count != 0) {
-    actual_values.assign(actual, actual + actual_count);
-  }
-  return apxinf::gemm::compare_reference(expected_values, actual_values).valid
-             ? 1
-             : 0;
-}
