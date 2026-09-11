@@ -1,3 +1,9 @@
+//! Public-API integration tests from an external executor's point of view.
+//!
+//! Adding an L3 operator normally does not require editing this file. Extend it
+//! only when the operator changes the public preparation, capture, replay,
+//! stream, or lifetime contract exposed to downstream crates.
+
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda::{
     capture,
