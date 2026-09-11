@@ -3,10 +3,16 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use apxinf_core::storage::{GpuStorageHandle, Storage};
 use apxinf_core::{DType, Device, Shape, Tensor};
 
 use crate::ffi;
+
+#[cfg(test)]
+static DEVICE_ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaDeviceAddress {
@@ -71,6 +77,8 @@ impl CudaBuffer {
         unsafe {
             ffi::check_cuda(ffi::cudaMalloc(&mut ptr, num_bytes))?;
         }
+        #[cfg(test)]
+        DEVICE_ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
         let owner: Arc<dyn std::any::Any + Send + Sync> = Arc::new(CudaAllocation { ptr });
         Ok(Self {
             ptr,
@@ -227,6 +235,16 @@ impl CudaBuffer {
         }
         Ok(self.clone().into_tensor(shape, dtype))
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_device_allocation_count() {
+    DEVICE_ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn device_allocation_count() -> usize {
+    DEVICE_ALLOCATION_COUNT.load(Ordering::Relaxed)
 }
 
 /// Page-locked host memory mapped into the CUDA device address space.

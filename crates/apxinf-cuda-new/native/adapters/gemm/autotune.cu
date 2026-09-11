@@ -5,10 +5,15 @@
 #include <cuda_fp8.h>
 
 #include <cmath>
+#include <atomic>
+#include <cstdint>
 #include <limits>
 
 namespace apxinf::gemm {
 namespace {
+
+std::atomic<uint64_t> test_tuning_count{0};
+std::atomic<uint64_t> test_configuration_evaluation_count{0};
 
 struct Events {
   cudaEvent_t start = nullptr;
@@ -108,6 +113,7 @@ std::shared_ptr<State> tune(
     const Spec& spec, const apxinf_gemm_policy_t& policy,
     const apxinf_gemm_tuning_bindings_t& tuning_bindings, int device,
     std::string& report, const Recipe* preferred) {
+  test_tuning_count.fetch_add(1, std::memory_order_relaxed);
   const size_t count = static_cast<size_t>(
       spec.m * (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU
                     ? spec.n / 2
@@ -179,6 +185,8 @@ std::shared_ptr<State> tune(
     }
   }
   for (const auto& selected : candidates) {
+    test_configuration_evaluation_count.fetch_add(1,
+                                                  std::memory_order_relaxed);
     const auto& implementation = *selected.implementation;
     const int configuration = selected.configuration;
     try {
@@ -263,6 +271,19 @@ std::shared_ptr<State> tune(
   }
   report += "]";
   return winner;
+}
+
+extern "C" void apxinf_gemm_test_reset_tuning_observers() {
+  test_tuning_count.store(0, std::memory_order_relaxed);
+  test_configuration_evaluation_count.store(0, std::memory_order_relaxed);
+}
+
+extern "C" uint64_t apxinf_gemm_test_tuning_count() {
+  return test_tuning_count.load(std::memory_order_relaxed);
+}
+
+extern "C" uint64_t apxinf_gemm_test_configuration_evaluation_count() {
+  return test_configuration_evaluation_count.load(std::memory_order_relaxed);
 }
 
 }  // namespace apxinf::gemm

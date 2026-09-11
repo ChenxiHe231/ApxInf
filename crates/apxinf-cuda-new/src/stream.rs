@@ -2,7 +2,13 @@
 
 use std::ffi::c_void;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::ffi;
+
+#[cfg(test)]
+static SYNCHRONIZE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Owns a CUDA stream for async kernel execution.
 pub struct CudaStream {
@@ -38,6 +44,8 @@ impl CudaStream {
 
     /// Block until all operations on this stream are complete.
     pub fn synchronize(&self) -> Result<(), String> {
+        #[cfg(test)]
+        SYNCHRONIZE_COUNT.fetch_add(1, Ordering::Relaxed);
         self.with_current_device(|| unsafe {
             ffi::check_cuda(ffi::cudaStreamSynchronize(self.handle))
         })
@@ -88,6 +96,16 @@ impl CudaStream {
             device: device.max(0) as usize,
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_synchronize_count() {
+    SYNCHRONIZE_COUNT.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+pub(crate) fn synchronize_count() -> usize {
+    SYNCHRONIZE_COUNT.load(Ordering::Relaxed)
 }
 
 impl Drop for CudaStream {

@@ -13,6 +13,101 @@ use apxinf_core::{DType, Tensor};
 #[path = "torch_l3_fixtures.rs"]
 mod torch_fixture;
 
+const MAX_SCALED_ERROR: f64 = 0.08;
+const MAX_RELATIVE_L2: f64 = 0.05;
+const MIN_COSINE: f64 = 0.9999;
+
+fn check_precision(reference: &[f32], actual: &[f32]) -> Result<(), String> {
+    if reference.len() != actual.len() {
+        return Err(format!(
+            "output length mismatch: expected {}, got {}",
+            reference.len(),
+            actual.len()
+        ));
+    }
+    if reference.is_empty() {
+        return Err("precision comparison requires a non-empty output".into());
+    }
+    if reference
+        .iter()
+        .chain(actual)
+        .any(|value| !value.is_finite())
+    {
+        return Err("precision comparison encountered NaN or Inf".into());
+    }
+
+    let mut max_scaled_error = 0.0f64;
+    let mut squared_error = 0.0f64;
+    let mut reference_norm = 0.0f64;
+    let mut actual_norm = 0.0f64;
+    let mut dot = 0.0f64;
+    for (&expected, &observed) in reference.iter().zip(actual) {
+        let expected = expected as f64;
+        let observed = observed as f64;
+        let error = observed - expected;
+        max_scaled_error = max_scaled_error.max(error.abs() / expected.abs().max(1.0));
+        squared_error += error * error;
+        reference_norm += expected * expected;
+        actual_norm += observed * observed;
+        dot += expected * observed;
+    }
+    let relative_l2 = (squared_error / reference_norm.max(1e-20)).sqrt();
+    let cosine = if reference_norm == 0.0 && actual_norm == 0.0 {
+        1.0
+    } else if reference_norm == 0.0 || actual_norm == 0.0 {
+        0.0
+    } else {
+        dot / (reference_norm * actual_norm).sqrt()
+    };
+
+    if max_scaled_error > MAX_SCALED_ERROR || relative_l2 > MAX_RELATIVE_L2 || cosine < MIN_COSINE {
+        return Err(format!(
+            "precision failed: max_scaled_error={max_scaled_error}, relative_l2={relative_l2}, cosine={cosine}"
+        ));
+    }
+    Ok(())
+}
+
+fn check_candidate_coverage(expected: &[&str], visited: &[&str]) -> Result<(), String> {
+    if expected.is_empty() {
+        return Err("acceptance case declared no expected candidate capability".into());
+    }
+    if visited.is_empty() {
+        return Err("no candidate was exercised".into());
+    }
+    let missing: Vec<_> = expected
+        .iter()
+        .copied()
+        .filter(|candidate| !visited.contains(candidate))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "expected candidates were not exercised: {missing:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// P05 validates the acceptance harness itself. In particular, cosine alone
+/// must not accept a uniformly scaled wrong result, and an empty/partial
+/// candidate traversal must never become a vacuous pass.
+#[test]
+fn precision_checks_reject_bad_outputs_and_missing_candidates() {
+    assert!(check_precision(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]).is_ok());
+    assert!(check_precision(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]).is_err());
+    assert!(check_precision(&[1.0, 2.0, 3.0], &[1.0, f32::NAN, 3.0]).is_err());
+    assert!(check_precision(&[1.0, 2.0, 3.0], &[1.0, f32::INFINITY, 3.0]).is_err());
+    assert!(check_precision(&[1.0, 2.0, 3.0], &[1.0, 2.0]).is_err());
+    assert!(check_precision(&[0.0, 0.0], &[0.0, 1.0]).is_err());
+
+    assert!(check_candidate_coverage(&["baseline", "specialized"], &[]).is_err());
+    assert!(check_candidate_coverage(&["baseline", "specialized"], &["baseline"]).is_err());
+    assert!(
+        check_candidate_coverage(&["baseline", "specialized"], &["baseline", "specialized"])
+            .is_ok()
+    );
+}
+
 fn assert_all_applicable_candidates_checked(summary: &str, expected_backends: &[&str]) {
     assert!(summary.contains("reference=torch"), "{summary}");
     assert!(summary.contains("max_element="), "{summary}");
