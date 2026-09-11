@@ -29,3 +29,5 @@ pub fn with_workspace<T>(
 }
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod torch_l3_fixtures;

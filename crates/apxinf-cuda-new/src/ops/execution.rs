@@ -177,25 +177,15 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<P
     let tuning_bindings = if let Some(reference) = validation_reference {
         abi::TuningBindings {
             execution: bindings,
-            original_a: reference.a.as_ptr(),
-            original_a_len: reference.a.len() as u64,
-            original_b: reference.b.as_ptr(),
-            original_b_len: reference.b.len() as u64,
-            original_bias: reference
-                .bias
-                .map_or(std::ptr::null(), |bias| bias.as_ptr()),
-            original_bias_len: reference.bias.map_or(0, |bias| bias.len()) as u64,
+            expected_output: reference.expected.as_ptr(),
+            expected_output_len: reference.expected.len() as u64,
             reference_kind: 1,
         }
     } else {
         abi::TuningBindings {
             execution: bindings,
-            original_a: std::ptr::null(),
-            original_a_len: 0,
-            original_b: std::ptr::null(),
-            original_b_len: 0,
-            original_bias: std::ptr::null(),
-            original_bias_len: 0,
+            expected_output: std::ptr::null(),
+            expected_output_len: 0,
             reference_kind: 0,
         }
     };

@@ -5,6 +5,8 @@ use half::bf16;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 
+use super::torch_l3_fixtures as torch_fixture;
+
 unsafe extern "C" {
     fn apxinf_gemm_test_hardware_fingerprint(
         uuid: *const u8,
@@ -87,6 +89,14 @@ fn tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
     buffer.as_tensor(Shape::new(shape), DType::BF16).unwrap()
 }
 
+fn bf16_bits_tensor(device: usize, shape: Vec<usize>, values: &[u16]) -> Tensor {
+    let bytes: Vec<_> = values
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    bytes_tensor(device, shape, DType::BF16, &bytes)
+}
+
 fn f32_tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
     let bytes: Vec<_> = values
         .iter()
@@ -124,252 +134,37 @@ fn scales(device: usize, values: &[f32]) -> Tensor {
         .unwrap()
 }
 
-fn decode_e4m3(bits: u8) -> Option<f32> {
-    let sign = if bits & 0x80 == 0 { 1.0 } else { -1.0 };
-    let exponent = (bits >> 3) & 0x0f;
-    let mantissa = bits & 0x07;
-    if exponent == 0x0f && mantissa == 0x07 {
-        return None;
-    }
-    let magnitude = if exponent == 0 {
-        (mantissa as f32) * 2.0_f32.powi(-9)
-    } else {
-        (1.0 + mantissa as f32 / 8.0) * 2.0_f32.powi(exponent as i32 - 7)
-    };
-    Some(sign * magnitude)
-}
-
-fn quantize_e4m3(values: &[f32]) -> Vec<u8> {
-    values
-        .iter()
-        .map(|&value| {
-            let mut best = 0_u8;
-            let mut best_error = f32::INFINITY;
-            for candidate in 0_u16..=u8::MAX as u16 {
-                let bits = candidate as u8;
-                let Some(decoded) = decode_e4m3(bits) else {
-                    continue;
-                };
-                let error = (decoded - value).abs();
-                if error < best_error {
-                    best = bits;
-                    best_error = error;
-                }
-            }
-            best
-        })
-        .collect()
-}
-
-fn next_random(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
-}
-
-/// A deterministic mixture of zero, ordinary random, dynamic-range,
-/// cancellation, and FP8-boundary values. Boundary positions are staggered
-/// between A and B so their dot products remain finite in an F16 output.
-fn validation_matrix(
-    rows: usize,
-    columns: usize,
-    seed: u64,
-    boundary_on_rows: bool,
-    boundary_phase: usize,
-) -> Vec<f32> {
-    const RANDOM_VALUES: [f32; 9] = [-1.0, -0.75, -0.5, -0.25, 0.0, 0.25, 0.5, 0.75, 1.0];
-    const DYNAMIC_VALUES: [f32; 9] = [-16.0, -4.0, -1.0, -0.25, 0.0, 0.25, 1.0, 4.0, 16.0];
-    let mut state = seed;
-    let mut values = Vec::with_capacity(rows * columns);
-    for row in 0..rows {
-        for column in 0..columns {
-            let random = next_random(&mut state) as usize;
-            let selector = (row * columns + column) % 5;
-            let boundary_index = if boundary_on_rows { row } else { column };
-            let value = if boundary_index % 16 == boundary_phase {
-                if column % 2 == 0 {
-                    448.0
-                } else {
-                    -448.0
-                }
-            } else {
-                match selector {
-                    0 => 0.0,
-                    1 => RANDOM_VALUES[random % RANDOM_VALUES.len()],
-                    2 => DYNAMIC_VALUES[random % DYNAMIC_VALUES.len()],
-                    3 => {
-                        let magnitude = RANDOM_VALUES[(random / 7) % RANDOM_VALUES.len()].abs();
-                        if column % 2 == 0 {
-                            magnitude
-                        } else {
-                            -magnitude
-                        }
-                    }
-                    _ => {
-                        if random & 1 == 0 {
-                            2.0
-                        } else {
-                            -2.0
-                        }
-                    }
-                }
-            };
-            values.push(value);
-        }
-    }
-    values
-}
-
-fn validation_bias(columns: usize, seed: u64) -> Vec<f32> {
-    let mut state = seed;
-    (0..columns)
-        .map(|column| {
-            let value = (next_random(&mut state) % 9) as f32 / 4.0;
-            if column % 3 == 0 {
-                0.0
-            } else if column % 2 == 0 {
-                value
-            } else {
-                -value
-            }
-        })
-        .collect()
-}
-
 fn assert_all_applicable_candidates_checked(summary: &str, expected_backends: &[&str]) {
-    assert!(summary.contains("reference=original-fp32"), "{summary}");
+    assert!(summary.contains("reference=torch"), "{summary}");
     assert!(summary.contains("max_element="), "{summary}");
     assert!(summary.contains("rel_l2="), "{summary}");
     assert!(summary.contains("cosine="), "{summary}");
     assert!(
         !summary.contains("reject(numeric:"),
-        "an applicable candidate failed the shared FP32 reference: {summary}"
+        "an applicable candidate failed the Torch reference: {summary}"
     );
     for backend in expected_backends {
+        let attempted = format!("{backend}#");
         assert!(
-            summary.contains(backend),
+            summary.contains(&attempted),
             "candidate was not visited: {backend}; {summary}"
         );
     }
 }
 
-fn run_deterministic_reference_corpus(fp8: bool) {
-    let ctx = CudaContext::new(0).unwrap();
-    let (m, k, n) = (8, 16, 16);
-    let raw_a = validation_matrix(m, k, 0x5eed_a11c_e001, false, 0);
-    let raw_b = validation_matrix(k, n, 0x5eed_b22d_e002, true, 1);
-    let raw_geglu_b = validation_matrix(k, 2 * n, 0x5eed_b33e_e003, true, 1);
-    let raw_bias = validation_bias(n, 0x5eed_b1a5_e004);
-
-    let a = if fp8 {
-        bytes_tensor(0, vec![m, k], DType::F8E4M3, &quantize_e4m3(&raw_a))
-    } else {
-        tensor(0, vec![m, k], &raw_a)
-    };
-    let b = if fp8 {
-        bytes_tensor(0, vec![k, n], DType::F8E4M3, &quantize_e4m3(&raw_b))
-    } else {
-        tensor(0, vec![k, n], &raw_b)
-    };
-    let geglu_b = if fp8 {
-        bytes_tensor(
-            0,
-            vec![k, 2 * n],
-            DType::F8E4M3,
-            &quantize_e4m3(&raw_geglu_b),
-        )
-    } else {
-        tensor(0, vec![k, 2 * n], &raw_geglu_b)
-    };
-    let bias = if fp8 {
-        f32_tensor(0, vec![n], &raw_bias)
-    } else {
-        tensor(0, vec![n], &raw_bias)
-    };
-
-    let configure = |args: &mut GemmArgs<'_>| {
-        if fp8 {
-            args.quantization = GemmQuantization::Fp8UnitScale;
-        }
-        args.policy.allow_fallback = false;
-        args.policy.graph_safe = false;
-    };
-    let vendor_backends = ["cublas+custom-epilogue", "cublasLt+custom-epilogue"];
-
-    let mut gemm_out = zeros_tensor(0, vec![m, n], if fp8 { DType::F16 } else { DType::BF16 });
-    let mut args = GemmArgs::new(&a, &b, &mut gemm_out);
-    configure(&mut args);
-    let prepared = prepare_with_original_fp32(
-        &ctx,
-        args,
-        super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
-        None,
-        super::contracts::ValidationReference::new(&raw_a, &raw_b),
-    )
-    .unwrap();
-    let expected = if fp8 {
-        vec![
-            "cublas+custom-epilogue",
-            "cublasLt+custom-epilogue",
-            "cublasLt-native-fp8+custom-epilogue",
-            "cutlass-fp8",
-        ]
-    } else {
-        vendor_backends.to_vec()
-    };
-    assert_all_applicable_candidates_checked(prepared.summary(), &expected);
-
-    for semantic in [
-        super::contracts::Semantic::GemmBias,
-        super::contracts::Semantic::GemmBiasGelu,
-    ] {
-        let mut out = zeros_tensor(0, vec![m, n], if fp8 { DType::F32 } else { DType::BF16 });
-        let mut args = GemmArgs::new(&a, &b, &mut out);
-        configure(&mut args);
-        let api = if semantic == super::contracts::Semantic::GemmBias {
-            super::execution::PlanApi::gemm_bias()
-        } else {
-            super::execution::PlanApi::gemm_bias_gelu()
-        };
-        let prepared = prepare_with_original_fp32(
-            &ctx,
-            args,
-            semantic,
-            api,
-            Some(&bias),
-            super::contracts::ValidationReference::with_bias(&raw_a, &raw_b, &raw_bias),
-        )
-        .unwrap();
-        assert_all_applicable_candidates_checked(prepared.summary(), &vendor_backends);
-    }
-
-    let mut geglu_out = zeros_tensor(0, vec![m, n], if fp8 { DType::F32 } else { DType::BF16 });
-    let mut args = GemmArgs::new(&a, &geglu_b, &mut geglu_out);
-    configure(&mut args);
-    let prepared = prepare_with_original_fp32(
-        &ctx,
-        args,
-        super::contracts::Semantic::GemmGeglu,
-        super::execution::PlanApi::gemm_geglu(),
-        None,
-        super::contracts::ValidationReference::new(&raw_a, &raw_geglu_b),
-    )
-    .unwrap();
-    assert_all_applicable_candidates_checked(prepared.summary(), &vendor_backends);
-}
-
-fn prepare_with_original_fp32<'a>(
+fn prepare_with_torch_reference<'a>(
     ctx: &CudaContext,
     args: GemmArgs<'a>,
     semantic: super::contracts::Semantic,
     api: super::execution::PlanApi,
     bias: Option<&'a Tensor>,
-    reference: super::contracts::ValidationReference<'a>,
+    expected: &'a [f32],
 ) -> apxinf_core::Result<super::execution::PreparedExecution> {
     let normalized = super::contracts::normalize(ctx, args, semantic, api, bias)?;
-    let normalized = super::contracts::with_validation_reference(normalized, reference)?;
+    let normalized = super::contracts::with_validation_reference(
+        normalized,
+        super::contracts::ValidationReference::torch(expected),
+    )?;
     super::execution::prepare(ctx, normalized)
 }
 
@@ -1140,11 +935,10 @@ fn quantization_contract_becomes_part_of_the_gemm_key() {
 }
 
 #[test]
-fn original_fp32_validation_requires_the_l3_semantic_operands() {
+fn torch_validation_requires_the_l3_output_shape() {
     let ctx = CudaContext::new(0).unwrap();
     let a = tensor(0, vec![2, 3], &[1.0; 6]);
     let b = tensor(0, vec![3, 4], &[1.0; 12]);
-    let bias = tensor(0, vec![4], &[0.0; 4]);
     let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
     let args = GemmArgs::new(&a, &b, &mut out);
     let normalized = super::contracts::normalize(
@@ -1157,210 +951,225 @@ fn original_fp32_validation_requires_the_l3_semantic_operands() {
     .unwrap();
     let error = match super::contracts::with_validation_reference(
         normalized,
-        super::contracts::ValidationReference::new(&[1.0; 5], &[1.0; 12]),
+        super::contracts::ValidationReference::torch(&[1.0; 7]),
     ) {
-        Ok(_) => panic!("invalid validation operands were accepted"),
+        Ok(_) => panic!("invalid Torch output was accepted"),
         Err(error) => error,
     };
     assert!(error
         .to_string()
-        .contains("validation operands do not match"));
+        .contains("Torch validation output does not match"));
+}
 
-    let args = GemmArgs::new(&a, &b, &mut out);
-    let normalized = super::contracts::normalize(
-        &ctx,
-        args,
-        super::contracts::Semantic::GemmBias,
-        super::execution::PlanApi::gemm_bias(),
-        Some(&bias),
-    )
-    .unwrap();
-    let error = match super::contracts::with_validation_reference(
-        normalized,
-        super::contracts::ValidationReference::new(&[1.0; 6], &[1.0; 12]),
-    ) {
-        Ok(_) => panic!("missing validation bias was accepted"),
-        Err(error) => error,
-    };
-    assert!(error
-        .to_string()
-        .contains("validation operands do not match"));
+fn configure_torch_case(args: &mut GemmArgs<'_>, alpha: f32, output_scale: f32) {
+    args.alpha = alpha;
+    args.output_scale = output_scale;
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = false;
 }
 
 #[test]
-fn cpu_fp32_reference_covers_every_l3_semantic() {
-    let ctx = CudaContext::new(0).unwrap();
-    let raw_a = vec![1.0; 6];
-    let raw_b = vec![1.0; 12];
-    let raw_bias = vec![0.25, -0.25, 0.5, -0.5];
-    let a = tensor(0, vec![2, 3], &raw_a);
-    let b = tensor(0, vec![3, 4], &raw_b);
-    let bias = tensor(0, vec![4], &raw_bias);
+fn gemm_all_candidates_match_torch() {
+    use torch_fixture as f;
+    let vendor = ["cublas+custom-epilogue", "cublasLt+custom-epilogue"];
 
-    let mut gemm_out = tensor(0, vec![2, 4], &[0.0; 8]);
-    let mut args = GemmArgs::new(&a, &b, &mut gemm_out);
-    args.policy.allow_fallback = false;
-    args.policy.graph_safe = false;
-    let prepared = prepare_with_original_fp32(
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bf16_bits_tensor(0, vec![f::M, f::K], f::BF16_A);
+    let b = bf16_bits_tensor(0, vec![f::K, f::N], f::BF16_B);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    configure_torch_case(&mut args, f::BF16_ALPHA, f::BF16_OUTPUT_SCALE);
+    let prepared = prepare_with_torch_reference(
         &ctx,
         args,
         super::contracts::Semantic::Gemm,
         super::execution::PlanApi::gemm(),
         None,
-        super::contracts::ValidationReference::new(&raw_a, &raw_b),
+        f::BF16_GEMM,
     )
     .unwrap();
-    assert!(prepared.summary().contains("reference=original-fp32"));
-    assert!(prepared.summary().contains("max_element="));
-    assert!(prepared.summary().contains("rel_l2="));
-    assert!(prepared.summary().contains("cosine="));
+    assert_all_applicable_candidates_checked(prepared.summary(), &vendor);
 
-    let mut bias_out = tensor(0, vec![2, 4], &[0.0; 8]);
-    let mut args = GemmArgs::new(&a, &b, &mut bias_out);
-    args.policy.allow_fallback = false;
-    args.policy.graph_safe = false;
-    let prepared = prepare_with_original_fp32(
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![f::M, f::K], DType::F8E4M3, f::FP8_A);
+    let b = bytes_tensor(0, vec![f::K, f::N], DType::F8E4M3, f::FP8_B);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    configure_torch_case(&mut args, f::FP8_UNIT_ALPHA, f::FP8_UNIT_OUTPUT_SCALE);
+    let prepared = prepare_with_torch_reference(
+        &ctx,
+        args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+        f::FP8_UNIT_GEMM,
+    )
+    .unwrap();
+    assert_all_applicable_candidates_checked(
+        prepared.summary(),
+        &[
+            "cublas+custom-epilogue",
+            "cublasLt+custom-epilogue",
+            "cublasLt-native-fp8+custom-epilogue",
+            "cutlass-fp8",
+        ],
+    );
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![f::M, f::K], DType::F8E4M3, f::FP8_A);
+    let b = bytes_tensor(0, vec![f::K, f::N], DType::F8E4M3, f::FP8_B);
+    let row_scales = scales(0, f::ROW_SCALES);
+    let channel_scales = scales(0, f::CHANNEL_SCALES);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
+    let mut args = GemmArgs::fp8(&a, &row_scales, &b, &channel_scales, &mut out);
+    configure_torch_case(&mut args, f::FP8_SCALED_ALPHA, f::FP8_SCALED_OUTPUT_SCALE);
+    let prepared = prepare_with_torch_reference(
+        &ctx,
+        args,
+        super::contracts::Semantic::Gemm,
+        super::execution::PlanApi::gemm(),
+        None,
+        f::FP8_SCALED_GEMM,
+    )
+    .unwrap();
+    assert_all_applicable_candidates_checked(
+        prepared.summary(),
+        &[
+            "cublas+custom-epilogue",
+            "cublasLt+custom-epilogue",
+            "cublasLt-native-fp8+custom-epilogue",
+        ],
+    );
+}
+
+#[test]
+fn gemm_bias_all_candidates_match_torch() {
+    use torch_fixture as f;
+    let vendor = ["cublas+custom-epilogue", "cublasLt+custom-epilogue"];
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bf16_bits_tensor(0, vec![f::M, f::K], f::BF16_A);
+    let b = bf16_bits_tensor(0, vec![f::K, f::N], f::BF16_B);
+    let bias = bf16_bits_tensor(0, vec![f::N], f::BF16_BIAS);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    configure_torch_case(&mut args, f::BF16_ALPHA, f::BF16_OUTPUT_SCALE);
+    let prepared = prepare_with_torch_reference(
         &ctx,
         args,
         super::contracts::Semantic::GemmBias,
         super::execution::PlanApi::gemm_bias(),
         Some(&bias),
-        super::contracts::ValidationReference::with_bias(&raw_a, &raw_b, &raw_bias),
+        f::BF16_GEMM_BIAS,
     )
     .unwrap();
-    assert!(prepared.summary().contains("reference=original-fp32"));
+    assert_all_applicable_candidates_checked(prepared.summary(), &vendor);
 
-    let mut gelu_out = tensor(0, vec![2, 4], &[0.0; 8]);
-    let mut args = GemmArgs::new(&a, &b, &mut gelu_out);
-    args.policy.allow_fallback = false;
-    args.policy.graph_safe = false;
-    let prepared = prepare_with_original_fp32(
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![f::M, f::K], DType::F8E4M3, f::FP8_A);
+    let b = bytes_tensor(0, vec![f::K, f::N], DType::F8E4M3, f::FP8_B);
+    let bias = f32_tensor(0, vec![f::N], f::FP8_BIAS);
+    let row_scales = scales(0, f::ROW_SCALES);
+    let channel_scales = scales(0, f::CHANNEL_SCALES);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
+    let mut args = GemmArgs::fp8(&a, &row_scales, &b, &channel_scales, &mut out);
+    configure_torch_case(&mut args, f::FP8_SCALED_ALPHA, f::FP8_SCALED_OUTPUT_SCALE);
+    let prepared = prepare_with_torch_reference(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmBias,
+        super::execution::PlanApi::gemm_bias(),
+        Some(&bias),
+        f::FP8_SCALED_GEMM_BIAS,
+    )
+    .unwrap();
+    assert_all_applicable_candidates_checked(prepared.summary(), &vendor);
+}
+
+#[test]
+fn gemm_bias_gelu_all_candidates_match_torch() {
+    use torch_fixture as f;
+    let vendor = ["cublas+custom-epilogue", "cublasLt+custom-epilogue"];
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bf16_bits_tensor(0, vec![f::M, f::K], f::BF16_A);
+    let b = bf16_bits_tensor(0, vec![f::K, f::N], f::BF16_B);
+    let bias = bf16_bits_tensor(0, vec![f::N], f::BF16_BIAS);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    configure_torch_case(&mut args, f::BF16_ALPHA, f::BF16_OUTPUT_SCALE);
+    let prepared = prepare_with_torch_reference(
         &ctx,
         args,
         super::contracts::Semantic::GemmBiasGelu,
         super::execution::PlanApi::gemm_bias_gelu(),
         Some(&bias),
-        super::contracts::ValidationReference::with_bias(&raw_a, &raw_b, &raw_bias),
+        f::BF16_GEMM_BIAS_GELU,
     )
     .unwrap();
-    assert!(prepared.summary().contains("reference=original-fp32"));
+    assert_all_applicable_candidates_checked(prepared.summary(), &vendor);
 
-    let mut geglu_out = tensor(0, vec![2, 2], &[0.0; 4]);
-    let mut args = GemmArgs::new(&a, &b, &mut geglu_out);
-    args.policy.allow_fallback = false;
-    args.policy.graph_safe = false;
-    let prepared = prepare_with_original_fp32(
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![f::M, f::K], DType::F8E4M3, f::FP8_A);
+    let b = bytes_tensor(0, vec![f::K, f::N], DType::F8E4M3, f::FP8_B);
+    let bias = f32_tensor(0, vec![f::N], f::FP8_BIAS);
+    let row_scales = scales(0, f::ROW_SCALES);
+    let channel_scales = scales(0, f::CHANNEL_SCALES);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
+    let mut args = GemmArgs::fp8(&a, &row_scales, &b, &channel_scales, &mut out);
+    configure_torch_case(&mut args, f::FP8_SCALED_ALPHA, f::FP8_SCALED_OUTPUT_SCALE);
+    let prepared = prepare_with_torch_reference(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmBiasGelu,
+        super::execution::PlanApi::gemm_bias_gelu(),
+        Some(&bias),
+        f::FP8_SCALED_GEMM_BIAS_GELU,
+    )
+    .unwrap();
+    assert_all_applicable_candidates_checked(prepared.summary(), &vendor);
+}
+
+#[test]
+fn gemm_geglu_all_candidates_match_torch() {
+    use torch_fixture as f;
+    let vendor = ["cublas+custom-epilogue", "cublasLt+custom-epilogue"];
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bf16_bits_tensor(0, vec![f::M, f::K], f::BF16_A);
+    let b = bf16_bits_tensor(0, vec![f::K, 2 * f::N], f::BF16_GEGLU_B);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    configure_torch_case(&mut args, f::BF16_ALPHA, f::BF16_OUTPUT_SCALE);
+    let prepared = prepare_with_torch_reference(
         &ctx,
         args,
         super::contracts::Semantic::GemmGeglu,
         super::execution::PlanApi::gemm_geglu(),
         None,
-        super::contracts::ValidationReference::new(&raw_a, &raw_b),
+        f::BF16_GEMM_GEGLU,
     )
     .unwrap();
-    assert!(prepared.summary().contains("reference=original-fp32"));
-}
-
-#[test]
-fn deterministic_bf16_reference_corpus_validates_all_l3_candidate_domains() {
-    run_deterministic_reference_corpus(false);
-}
-
-#[test]
-fn deterministic_fp8_reference_corpus_quantizes_and_validates_all_l3_candidate_domains() {
-    run_deterministic_reference_corpus(true);
-}
-
-#[test]
-fn fp8_reference_distinguishes_full_quantization_error() {
-    let (m, k, n) = (2, 16, 8);
-    let fp8_bytes_a = vec![0x38; m * k]; // E4M3 1.0
-    let fp8_bytes_b = vec![0x38; k * n];
+    assert_all_applicable_candidates_checked(prepared.summary(), &vendor);
 
     let ctx = CudaContext::new(0).unwrap();
-    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &fp8_bytes_a);
-    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &fp8_bytes_b);
-    let mut out = zeros_tensor(0, vec![m, n], DType::BF16);
+    let a = bytes_tensor(0, vec![f::M, f::K], DType::F8E4M3, f::FP8_A);
+    let b = bytes_tensor(0, vec![f::K, 2 * f::N], DType::F8E4M3, f::FP8_GEGLU_B);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
     let mut args = GemmArgs::new(&a, &b, &mut out);
     args.quantization = GemmQuantization::Fp8UnitScale;
-    let original_a = vec![1.2; m * k];
-    let original_b = vec![1.0; k * n];
-    args.policy.allow_fallback = false;
-    args.policy.graph_safe = false;
-    let error = match prepare_with_original_fp32(
+    configure_torch_case(&mut args, f::FP8_UNIT_ALPHA, f::FP8_UNIT_OUTPUT_SCALE);
+    let prepared = prepare_with_torch_reference(
         &ctx,
         args,
-        super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
+        super::contracts::Semantic::GemmGeglu,
+        super::execution::PlanApi::gemm_geglu(),
         None,
-        super::contracts::ValidationReference::new(&original_a, &original_b),
-    ) {
-        Ok(_) => panic!("quantization loss unexpectedly passed the fixed thresholds"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("fixed FP32 reference contract"));
-
-    let ctx = CudaContext::new(0).unwrap();
-    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &fp8_bytes_a);
-    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &fp8_bytes_b);
-    let mut out = zeros_tensor(0, vec![m, n], DType::BF16);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.quantization = GemmQuantization::Fp8UnitScale;
-    args.policy.allow_fallback = false;
-    args.policy.graph_safe = false;
-    let prepared = prepare_test_gemm(&ctx, args).unwrap();
-    assert!(prepared.summary().contains("reference=dequantized-input"));
-}
-
-#[test]
-fn bf16_and_fp8_share_the_original_fp32_reference_contract() {
-    let (m, k, n) = (2, 16, 8);
-    let raw_a = vec![1.0; m * k];
-    let raw_b = vec![1.0; k * n];
-
-    let bf16_ctx = CudaContext::new(0).unwrap();
-    let bf16_a = tensor(0, vec![m, k], &raw_a);
-    let bf16_b = tensor(0, vec![k, n], &raw_b);
-    let mut bf16_out = zeros_tensor(0, vec![m, n], DType::BF16);
-    let mut bf16_args = GemmArgs::new(&bf16_a, &bf16_b, &mut bf16_out);
-    bf16_args.policy.allow_fallback = false;
-    bf16_args.policy.graph_safe = false;
-    let mut bf16 = prepare_with_original_fp32(
-        &bf16_ctx,
-        bf16_args,
-        super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
-        None,
-        super::contracts::ValidationReference::new(&raw_a, &raw_b),
+        f::FP8_UNIT_GEMM_GEGLU,
     )
     .unwrap();
-    assert!(bf16.summary().contains("reference=original-fp32"));
-    bf16.enqueue().unwrap();
-    bf16_ctx.synchronize().unwrap();
-
-    let fp8_ctx = CudaContext::new(0).unwrap();
-    let fp8_a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
-    let fp8_b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
-    let mut fp8_out = zeros_tensor(0, vec![m, n], DType::BF16);
-    let mut fp8_args = GemmArgs::new(&fp8_a, &fp8_b, &mut fp8_out);
-    fp8_args.quantization = GemmQuantization::Fp8UnitScale;
-    fp8_args.policy.allow_fallback = false;
-    fp8_args.policy.graph_safe = false;
-    let mut fp8 = prepare_with_original_fp32(
-        &fp8_ctx,
-        fp8_args,
-        super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
-        None,
-        super::contracts::ValidationReference::new(&raw_a, &raw_b),
-    )
-    .unwrap();
-    assert!(fp8.summary().contains("reference=original-fp32"));
-    fp8.enqueue().unwrap();
-    fp8_ctx.synchronize().unwrap();
-
-    assert_eq!(values(&bf16_out), values(&fp8_out));
-    assert!(values(&bf16_out).iter().all(|&value| value == k as f32));
+    assert_all_applicable_candidates_checked(prepared.summary(), &vendor);
 }
 
 #[test]
@@ -1493,7 +1302,7 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     };
     // Provider 3, implementation 2, version 2 is the FP8 CUTLASS GeGLU
     // candidate. Seeding avoids an enormous CPU-reference autotune while
-    // keeping instance construction and enqueue/capture paths real.
+    // keeping instance construction and public enqueue/capture paths real.
     super::execution::seed_recipe(&ctx, &normalized, 3, 2, 2, 0).unwrap();
     drop(normalized);
 

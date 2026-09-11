@@ -124,57 +124,52 @@ std::vector<float> reference_gemm_geglu(
 
 ReferenceOutput cpu_reference(
     const Spec& spec, const apxinf_gemm_tuning_bindings_t& bindings) {
+  if (bindings.reference_kind == APXINF_GEMM_REFERENCE_TORCH_OUTPUT) {
+    ReferenceOutput result;
+    result.kind = "torch";
+    result.values.assign(bindings.expected_output,
+                         bindings.expected_output +
+                             bindings.expected_output_len);
+    return result;
+  }
   const auto stream = static_cast<cudaStream_t>(bindings.execution.stream);
-  const bool original =
-      bindings.reference_kind == APXINF_GEMM_REFERENCE_ORIGINAL_FP32;
   std::vector<float> a;
   std::vector<float> b;
   std::vector<float> bias;
-  if (original) {
-    a.assign(bindings.original_a,
-             bindings.original_a + bindings.original_a_len);
-    b.assign(bindings.original_b,
-             bindings.original_b + bindings.original_b_len);
-    if (bindings.original_bias != nullptr) {
-      bias.assign(bindings.original_bias,
-                  bindings.original_bias + bindings.original_bias_len);
-    }
-  } else {
-    a = read_device_values(bindings.execution.a,
-                           static_cast<size_t>(spec.m * spec.k), spec.a_dtype,
-                           stream);
-    b = read_device_values(bindings.execution.b,
-                           static_cast<size_t>(spec.k * spec.n), spec.b_dtype,
-                           stream);
-    if (has_row_channel_scales(spec)) {
-      const auto a_scales = read_device_values(
-          bindings.execution.a_scales, static_cast<size_t>(spec.m),
-          APXINF_DTYPE_F32, stream);
-      const auto b_scales = read_device_values(
-          bindings.execution.b_scales, static_cast<size_t>(spec.n),
-          APXINF_DTYPE_F32, stream);
-      for (int64_t row = 0; row < spec.m; ++row) {
-        for (int64_t inner = 0; inner < spec.k; ++inner) {
-          a[static_cast<size_t>(row * spec.k + inner)] *= a_scales[row];
-        }
-      }
+  a = read_device_values(bindings.execution.a,
+                         static_cast<size_t>(spec.m * spec.k), spec.a_dtype,
+                         stream);
+  b = read_device_values(bindings.execution.b,
+                         static_cast<size_t>(spec.k * spec.n), spec.b_dtype,
+                         stream);
+  if (has_row_channel_scales(spec)) {
+    const auto a_scales = read_device_values(
+        bindings.execution.a_scales, static_cast<size_t>(spec.m),
+        APXINF_DTYPE_F32, stream);
+    const auto b_scales = read_device_values(
+        bindings.execution.b_scales, static_cast<size_t>(spec.n),
+        APXINF_DTYPE_F32, stream);
+    for (int64_t row = 0; row < spec.m; ++row) {
       for (int64_t inner = 0; inner < spec.k; ++inner) {
-        for (int64_t column = 0; column < spec.n; ++column) {
-          b[static_cast<size_t>(inner * spec.n + column)] *= b_scales[column];
-        }
+        a[static_cast<size_t>(row * spec.k + inner)] *= a_scales[row];
       }
     }
-    if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
-        spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU) {
-      bias = read_device_values(bindings.execution.bias,
-                                static_cast<size_t>(spec.n), bias_dtype(spec),
-                                stream);
+    for (int64_t inner = 0; inner < spec.k; ++inner) {
+      for (int64_t column = 0; column < spec.n; ++column) {
+        b[static_cast<size_t>(inner * spec.n + column)] *= b_scales[column];
+      }
     }
+  }
+  if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU) {
+    bias = read_device_values(bindings.execution.bias,
+                              static_cast<size_t>(spec.n), bias_dtype(spec),
+                              stream);
   }
 
   const auto projection = project(spec, a, b);
   ReferenceOutput result;
-  result.kind = original ? "original-fp32" : "dequantized-input";
+  result.kind = "dequantized-input";
   // The reference must reproduce the scales the candidate will actually be
   // launched with, which now live in the execution bindings.
   const float alpha = bindings.execution.alpha;
@@ -199,7 +194,7 @@ AccuracyMetrics compare_reference(const std::vector<float>& expected,
   // One immutable acceptance contract applies to every provider and candidate.
   constexpr double kMaximumScaledElementError = 0.08;
   constexpr double kMaximumRelativeL2 = 0.05;
-  constexpr double kMinimumCosine = 0.998;
+  constexpr double kMinimumCosine = 0.9999;
   AccuracyMetrics metrics;
   if (expected.size() != actual.size()) return metrics;
   double squared_error = 0.0;

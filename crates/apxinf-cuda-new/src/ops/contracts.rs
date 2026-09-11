@@ -71,29 +71,17 @@ pub struct GemmArgs<'a> {
     pub weight_version: Option<WeightVersion>,
 }
 
-/// Original FP32 operands used by the crate's deterministic candidate
-/// validation suite. This is deliberately not part of the public execution
-/// contract: executors submit already-typed tensors and must not retain the
-/// pre-quantization training values merely to execute GEMM.
+/// Expected FP32 output supplied only by the crate's candidate validation
+/// suite. It is deliberately absent from the public execution contract.
 #[derive(Clone, Copy)]
 pub(crate) struct ValidationReference<'a> {
-    pub a: &'a [f32],
-    pub b: &'a [f32],
-    pub bias: Option<&'a [f32]>,
+    pub expected: &'a [f32],
 }
 
 #[cfg(test)]
 impl<'a> ValidationReference<'a> {
-    pub(crate) fn new(a: &'a [f32], b: &'a [f32]) -> Self {
-        Self { a, b, bias: None }
-    }
-
-    pub(crate) fn with_bias(a: &'a [f32], b: &'a [f32], bias: &'a [f32]) -> Self {
-        Self {
-            a,
-            b,
-            bias: Some(bias),
-        }
+    pub(crate) fn torch(expected: &'a [f32]) -> Self {
+        Self { expected }
     }
 }
 
@@ -498,32 +486,21 @@ pub(crate) fn with_validation_reference<'a>(
     mut normalized: Normalized<'a>,
     reference: ValidationReference<'a>,
 ) -> Result<Normalized<'a>> {
-    let expected_a = (normalized.spec.m as usize)
-        .checked_mul(normalized.spec.k as usize)
-        .ok_or_else(|| invalid("GEMM validation A size overflow"))?;
-    let expected_b = (normalized.spec.k as usize)
-        .checked_mul(normalized.spec.n as usize)
-        .ok_or_else(|| invalid("GEMM validation B size overflow"))?;
-    let needs_bias = !normalized.bindings.bias.is_null();
-    if reference.a.len() != expected_a
-        || reference.b.len() != expected_b
-        || reference.bias.is_some() != needs_bias
-        || reference
-            .bias
-            .is_some_and(|values| values.len() != normalized.spec.n as usize)
-    {
+    let output_width = if normalized.api.name == "gemm_geglu" {
+        normalized.spec.n as usize / 2
+    } else {
+        normalized.spec.n as usize
+    };
+    let expected_output = (normalized.spec.m as usize)
+        .checked_mul(output_width)
+        .ok_or_else(|| invalid("GEMM validation output size overflow"))?;
+    if reference.expected.len() != expected_output {
         return Err(invalid(
-            "original FP32 validation operands do not match the L3 semantic",
+            "Torch validation output does not match the L3 semantic",
         ));
     }
-    if reference
-        .a
-        .iter()
-        .chain(reference.b)
-        .chain(reference.bias.into_iter().flatten())
-        .any(|value| !value.is_finite())
-    {
-        return Err(invalid("original FP32 validation operands must be finite"));
+    if reference.expected.iter().any(|value| !value.is_finite()) {
+        return Err(invalid("Torch validation output must be finite"));
     }
     normalized.validation_reference = Some(reference);
     Ok(normalized)
