@@ -15,14 +15,5 @@ pub struct GemmGegluArgs<'a> {
 }
 
 pub fn gemm_geglu(ctx: &CudaContext, args: GemmGegluArgs<'_>) -> Result<()> {
-    execution::execute(
-        ctx,
-        normalize(
-            ctx,
-            args.gemm,
-            Semantic::GemmGeglu,
-            execution::PlanApi::gemm_geglu(),
-            None,
-        )?,
-    )
+    execution::execute(ctx, normalize(ctx, args.gemm, Semantic::GemmGeglu, None)?)
 }

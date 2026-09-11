@@ -7,12 +7,7 @@ namespace {
 
 using apxinf::gemm::Failure;
 using apxinf::gemm::Recipe;
-using apxinf::gemm::State;
-using apxinf::gemm::APXINF_GEMM_SEMANTIC_GEMM;
-using apxinf::gemm::APXINF_GEMM_SEMANTIC_GEMM_BIAS;
-using apxinf::gemm::APXINF_GEMM_SEMANTIC_GEMM_GEGLU;
-using apxinf::gemm::APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU;
-
+using apxinf::gemm::Execution;
 bool valid_alignment_class(uint32_t alignment) {
   return alignment <= 256 &&
          (alignment == 0 || (alignment & (alignment - 1)) == 0);
@@ -24,19 +19,20 @@ void validate_recorded_alignment(const void* pointer, uint32_t alignment,
       (alignment == 0 ||
        reinterpret_cast<uintptr_t>(pointer) % alignment != 0)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  std::string(name) + " does not satisfy plan alignment");
+                  std::string(name) + " does not satisfy execution alignment");
   }
 }
 
 void validate_spec(const apxinf::gemm::Spec& spec) {
-  if (spec.version != 3 || spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
+  if (spec.version != 4 || spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
       spec.a_dtype > APXINF_DTYPE_I8 || spec.b_dtype > APXINF_DTYPE_I8 ||
       spec.accumulation_dtype > APXINF_DTYPE_I32 ||
       spec.output_dtype > APXINF_DTYPE_E4M3 ||
       spec.quantization > APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL || spec.m <= 0 ||
       spec.n <= 0 || spec.k <= 0 || spec.m > INT32_MAX ||
       spec.n > INT32_MAX || spec.k > INT32_MAX ||
-      spec.alpha_is_unit > 1 || spec.output_scale_is_unit > 1) {
+      spec.alpha_is_unit > 1 || spec.output_scale_is_unit > 1 ||
+      spec.b_is_immutable > 1) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid GEMM Spec");
   }
   for (uint32_t alignment : {
@@ -138,9 +134,10 @@ void validate_bindings(const apxinf::gemm::Spec& spec,
   if ((bindings.alpha == 1.0F) != (spec.alpha_is_unit != 0) ||
       (bindings.output_scale == 1.0F) != (spec.output_scale_is_unit != 0)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "GEMM scale binding contradicts the plan scale predicate");
+                  "GEMM scale binding contradicts the Spec scale predicate");
   }
   if (bindings.b_is_immutable > 1 ||
+      bindings.b_is_immutable != spec.b_is_immutable ||
       (bindings.b_is_immutable == 0 && bindings.b_version != 0)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "invalid GEMM immutable-weight identity");
@@ -179,9 +176,11 @@ const apxinf::gemm::Implementation* find_implementation(const Recipe& recipe,
   return nullptr;
 }
 
-std::shared_ptr<State> fallback(const apxinf::gemm::Spec& spec,
-                                const apxinf_gemm_policy_t& policy,
-                                int device) {
+void warmup(Execution& execution);
+
+std::unique_ptr<Execution> fallback(
+    const apxinf::gemm::Spec& spec, const apxinf_gemm_policy_t& policy,
+    const apxinf_gemm_bindings_t& bindings, int device) {
   for (const auto& implementation :
        apxinf::gemm::registry(spec.semantic)) {
     if (!apxinf::gemm::supports_device(implementation, device) ||
@@ -194,8 +193,10 @@ std::shared_ptr<State> fallback(const apxinf::gemm::Spec& spec,
     implementation.enumerate_configs(spec, configurations);
     for (int configuration : configurations) {
       try {
-        return apxinf::gemm::prepare(implementation, configuration, spec,
-                                    policy, device);
+        auto execution = apxinf::gemm::prepare(
+            implementation, configuration, spec, policy, bindings, device);
+        warmup(*execution);
+        return execution;
       } catch (const Failure&) {
         cudaGetLastError();
       }
@@ -205,73 +206,67 @@ std::shared_ptr<State> fallback(const apxinf::gemm::Spec& spec,
                 "no GEMM fallback satisfies the Spec and Policy");
 }
 
-void release_instance_resources(State& state) {
-  // The framework only requests compaction. Each provider knows which
-  // allocations are transient and which recipe data must survive so that a
-  // later execution instance can be reconstructed.
-  state.implementation->release_resources(state);
+void warmup(Execution& execution) {
+  // An Execution is immutable with respect to its bindings after prepare.
+  // Validate the exact serving addresses instead of substituting an aligned
+  // scratch output that a provider may not have prepared for.
+  apxinf::gemm::check_cuda(execution.implementation->enqueue(execution));
+  apxinf::gemm::check_cuda(cudaStreamSynchronize(
+      static_cast<cudaStream_t>(execution.bindings.stream)));
 }
 
 }  // namespace
 
-const char* plan_summary(apxinf_gemm_plan* plan) {
-  return plan != nullptr ? plan->summary.c_str() : "null GEMM plan";
-}
-
-apxinf_status_t plan_create(
+extern "C" apxinf_status_t apxinf_gemm_prepare(
     apxinf_runtime_t runtime,
     const apxinf_gemm_spec_t* spec,
     const apxinf_gemm_policy_t* policy,
     const apxinf_gemm_tuning_bindings_t* tuning_bindings,
-    apxinf::gemm::Semantic semantic,
-    apxinf_gemm_plan** output) {
+    apxinf_gemm_execution_t* output) {
   if (output != nullptr) {
     *output = nullptr;
   }
   return apxinf::gemm::abi_boundary([&] {
     if (runtime == nullptr || spec == nullptr || policy == nullptr ||
-        output == nullptr) {
+        tuning_bindings == nullptr || output == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "null GEMM plan argument");
+                    "null GEMM execution argument");
     }
     apxinf::gemm::Spec normalized_spec{};
     static_cast<apxinf_gemm_spec_t&>(normalized_spec) = *spec;
-    normalized_spec.semantic = semantic;
     validate_spec(normalized_spec);
     validate_policy(*policy);
-    if (tuning_bindings != nullptr) {
-      validate_bindings(normalized_spec, tuning_bindings->execution, false);
-      if (tuning_bindings->reference_kind >
-          APXINF_GEMM_REFERENCE_TORCH_OUTPUT) {
+    validate_bindings(normalized_spec, tuning_bindings->execution, true);
+    if (tuning_bindings->reference_kind >
+        APXINF_GEMM_REFERENCE_TORCH_OUTPUT) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid GEMM reference kind");
+    }
+    if (tuning_bindings->reference_kind ==
+        APXINF_GEMM_REFERENCE_TORCH_OUTPUT) {
+      const uint64_t output_width =
+          normalized_spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU
+              ? static_cast<uint64_t>(normalized_spec.n / 2)
+              : static_cast<uint64_t>(normalized_spec.n);
+      const uint64_t output_count =
+          static_cast<uint64_t>(normalized_spec.m) * output_width;
+      if (tuning_bindings->expected_output == nullptr ||
+          tuning_bindings->expected_output_len != output_count) {
         throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                      "invalid GEMM reference kind");
+                      "invalid Torch GEMM reference output");
       }
-      if (tuning_bindings->reference_kind ==
-          APXINF_GEMM_REFERENCE_TORCH_OUTPUT) {
-        const uint64_t output_width =
-            semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU
-                ? static_cast<uint64_t>(normalized_spec.n / 2)
-                : static_cast<uint64_t>(normalized_spec.n);
-        const uint64_t output_count =
-            static_cast<uint64_t>(normalized_spec.m) * output_width;
-        if (tuning_bindings->expected_output == nullptr ||
-            tuning_bindings->expected_output_len != output_count) {
-          throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                        "invalid Torch GEMM reference output");
-        }
-      } else if (tuning_bindings->expected_output != nullptr ||
-                 tuning_bindings->expected_output_len != 0) {
-        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                      "unexpected Torch GEMM reference output");
-      }
-      cudaStreamCaptureStatus capture_status;
-      apxinf::gemm::check_cuda(cudaStreamIsCapturing(
-          static_cast<cudaStream_t>(tuning_bindings->execution.stream),
-          &capture_status));
-      if (capture_status != cudaStreamCaptureStatusNone) {
-        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                      "create GEMM plans before graph capture");
-      }
+    } else if (tuning_bindings->expected_output != nullptr ||
+               tuning_bindings->expected_output_len != 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "unexpected Torch GEMM reference output");
+    }
+    cudaStreamCaptureStatus capture_status;
+    apxinf::gemm::check_cuda(cudaStreamIsCapturing(
+        static_cast<cudaStream_t>(tuning_bindings->execution.stream),
+        &capture_status));
+    if (capture_status != cudaStreamCaptureStatusNone) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "prepare GEMM executions before graph capture");
     }
 
     apxinf::gemm::check_cuda(cudaSetDevice(runtime->device));
@@ -279,17 +274,6 @@ apxinf_status_t plan_create(
         apxinf::gemm::tuning_keys(normalized_spec, *policy, runtime->device);
     const std::string& key = keys.performance;
     std::lock_guard<std::mutex> lock(runtime->gemm_mutex);
-    if (const auto cached = runtime->gemm_plans.find(key);
-        cached != runtime->gemm_plans.end()) {
-      auto plan = std::make_unique<apxinf_gemm_plan>();
-      plan->state = cached->second;
-      plan->policy = *policy;
-      plan->policy.cache_dir = nullptr;
-      plan->summary = std::string(plan->state->implementation->name) +
-                      " source=memory";
-      *output = plan.release();
-      return;
-    }
 
     Recipe recipe{};
     bool recipe_found = false;
@@ -311,7 +295,7 @@ apxinf_status_t plan_create(
     }
 
     // A compatibility hint may come from a device with a different
-    // performance profile. It is never restored as a fully tuned plan: it is
+    // performance profile. It is never restored as a fully tuned recipe: it is
     // only moved to the front of the next complete tuning pass.
     if (!recipe_found) {
       const std::string serialized = apxinf::gemm::read_recipe(
@@ -330,42 +314,74 @@ apxinf_status_t plan_create(
       }
     }
 
-    std::shared_ptr<State> state;
+    std::unique_ptr<Execution> execution;
     if (recipe_found) {
       if (const auto* implementation =
               find_implementation(recipe, normalized_spec, runtime->device)) {
         try {
-          state = apxinf::gemm::prepare(*implementation, recipe.configuration,
-                                       normalized_spec, *policy, runtime->device);
+          execution = apxinf::gemm::prepare(
+              *implementation, recipe.configuration, normalized_spec, *policy,
+              tuning_bindings->execution, runtime->device);
+          warmup(*execution);
         } catch (const Failure&) {
+          execution.reset();
           cudaGetLastError();
         }
-        if (state == nullptr) {
-          compatible_hint = recipe;
-          compatible_hint_found = true;
+        if (execution != nullptr) {
+          runtime->gemm_recipes[key] = recipe;
         }
+      }
+      if (execution == nullptr) {
+        compatible_hint = recipe;
+        compatible_hint_found = true;
       }
     }
 
-    if (state == nullptr) {
-      if (policy->online_tune && tuning_bindings != nullptr) {
-        state = apxinf::gemm::tune(normalized_spec, *policy, *tuning_bindings,
-                                   runtime->device, source,
-                                   compatible_hint_found ? &compatible_hint
-                                                         : nullptr);
+    bool persist_recipe = false;
+    if (execution == nullptr) {
+      if (policy->online_tune) {
+        const Recipe tuned_recipe = apxinf::gemm::tune(
+            normalized_spec, *policy, *tuning_bindings, runtime->device,
+            source, compatible_hint_found ? &compatible_hint : nullptr);
+        const auto* implementation =
+            find_implementation(tuned_recipe, normalized_spec, runtime->device);
+        if (implementation == nullptr) {
+          throw Failure(APXINF_STATUS_INTERNAL_ERROR,
+                        "tuned GEMM Recipe is not restorable");
+        }
+        try {
+          execution = apxinf::gemm::prepare(
+              *implementation, tuned_recipe.configuration, normalized_spec,
+              *policy, tuning_bindings->execution, runtime->device);
+          warmup(*execution);
+          recipe = tuned_recipe;
+          persist_recipe = true;
+        } catch (const Failure&) {
+          execution.reset();
+          cudaGetLastError();
+          if (!policy->allow_fallback) {
+            throw;
+          }
+          execution = fallback(normalized_spec, *policy,
+                               tuning_bindings->execution, runtime->device);
+          source = "fallback-after-tune";
+        }
       } else if (policy->allow_fallback) {
-        state = fallback(normalized_spec, *policy, runtime->device);
+        execution = fallback(normalized_spec, *policy,
+                             tuning_bindings->execution, runtime->device);
         source = "fallback";
       } else {
         throw Failure(APXINF_STATUS_CACHE_MISS,
                       "GEMM recipe miss and tuning/fallback are disabled");
       }
 
-      recipe = {state->implementation->provider_id,
-                state->implementation->implementation_id,
-                state->implementation->implementation_version,
-                state->configuration};
-      if (source != "fallback") {
+      if (!persist_recipe) {
+        recipe = {execution->implementation->provider_id,
+                  execution->implementation->implementation_id,
+                  execution->implementation->implementation_version,
+                  execution->configuration};
+      }
+      if (persist_recipe) {
         runtime->gemm_recipes[key] = recipe;
         std::ostringstream serialized;
         serialized << recipe.provider_id << ' ' << recipe.implementation_id
@@ -380,105 +396,46 @@ apxinf_status_t plan_create(
       }
     }
 
-    release_instance_resources(*state);
-    if (source != "fallback") {
-      if (runtime->gemm_plans.size() >= 64) {
-        runtime->gemm_plans.erase(runtime->gemm_plans.begin());
-      }
-      runtime->gemm_plans[key] = state;
-    }
-
-    auto plan = std::make_unique<apxinf_gemm_plan>();
-    plan->state = state;
-    plan->policy = *policy;
-    plan->policy.cache_dir = nullptr;
-    plan->summary =
-        std::string(state->implementation->name) +
-        " config=" + std::to_string(state->configuration) +
-        " workspace=" + std::to_string(state->resource_bytes) +
+    execution->summary =
+        std::string(execution->implementation->name) +
+        " config=" + std::to_string(execution->configuration) +
+        " workspace=" + std::to_string(execution->resource_bytes) +
         " source=" + source;
-    *output = plan.release();
+    *output = reinterpret_cast<apxinf_gemm_execution_t>(execution.release());
   });
 }
 
-apxinf_status_t instance_create(
-    apxinf_gemm_plan* plan,
-    const apxinf_gemm_bindings_t* bindings,
-    apxinf_gemm_instance** output) {
-  if (output != nullptr) {
-    *output = nullptr;
-  }
+extern "C" apxinf_status_t apxinf_gemm_enqueue(
+    apxinf_gemm_execution_t handle) {
   return apxinf::gemm::abi_boundary([&] {
-    if (plan == nullptr || bindings == nullptr || output == nullptr) {
+    auto* execution = reinterpret_cast<Execution*>(handle);
+    if (execution == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "null GEMM instance argument");
+                    "null GEMM execution");
     }
-    validate_bindings(plan->state->spec, *bindings, true);
-    cudaStreamCaptureStatus capture_status;
-    apxinf::gemm::check_cuda(cudaStreamIsCapturing(
-        static_cast<cudaStream_t>(bindings->stream), &capture_status));
-    if (capture_status != cudaStreamCaptureStatusNone) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "create GEMM instances before graph capture");
-    }
-
-    auto instance = std::make_unique<apxinf_gemm_instance>();
-    const State& blueprint = *plan->state;
-    instance->state = apxinf::gemm::prepare(
-        *blueprint.implementation, blueprint.configuration, blueprint.spec,
-        plan->policy, blueprint.device, &blueprint);
-    instance->bindings = *bindings;
-    if (instance->state->implementation->bind_state != nullptr) {
-      instance->state->implementation->bind_state(*instance->state,
-                                                  instance->bindings);
-    }
-
-    void* scratch = nullptr;
-    auto warmup_bindings = instance->bindings;
-    const int64_t output_width =
-        blueprint.spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU
-            ? blueprint.spec.n / 2
-            : blueprint.spec.n;
-    const size_t scratch_bytes = blueprint.spec.m * output_width *
-                                 apxinf::gemm::dtype_bytes(
-                                     blueprint.spec.output_dtype);
-    apxinf::gemm::check_cuda(cudaMalloc(&scratch, scratch_bytes));
-    warmup_bindings.output = scratch;
-    try {
-      apxinf::gemm::check_cuda(instance->state->implementation->launch(
-          *instance->state, warmup_bindings));
-      apxinf::gemm::check_cuda(cudaStreamSynchronize(
-          static_cast<cudaStream_t>(bindings->stream)));
-    } catch (...) {
-      cudaFree(scratch);
-      throw;
-    }
-    apxinf::gemm::check_cuda(cudaFree(scratch));
-    *output = instance.release();
+    apxinf::gemm::check_cuda(cudaSetDevice(execution->device));
+    apxinf::gemm::check_cuda(execution->implementation->enqueue(*execution));
   });
 }
 
-apxinf_status_t enqueue(apxinf_gemm_instance* instance) {
-  return apxinf::gemm::abi_boundary([&] {
-    if (instance == nullptr) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "null GEMM instance");
-    }
-    apxinf::gemm::check_cuda(cudaSetDevice(instance->state->device));
-    apxinf::gemm::check_cuda(instance->state->implementation->launch(
-        *instance->state, instance->bindings));
-  });
+extern "C" void apxinf_gemm_destroy(apxinf_gemm_execution_t handle) {
+  delete reinterpret_cast<Execution*>(handle);
 }
 
-void instance_destroy(apxinf_gemm_instance* instance) {
-  delete instance;
+extern "C" const char* apxinf_gemm_summary(
+    apxinf_gemm_execution_t handle) {
+  const auto* execution = reinterpret_cast<const Execution*>(handle);
+  return execution != nullptr ? execution->summary.c_str()
+                              : "null GEMM execution";
 }
 
-extern "C" uint64_t apxinf_gemm_instance_weight_prepack_count(
-    apxinf_gemm_instance* instance) {
-  if (instance == nullptr || instance->state->implementation->provider_id != 3) {
+extern "C" uint64_t apxinf_gemm_execution_weight_prepack_count(
+    apxinf_gemm_execution_t handle) {
+  const auto* execution = reinterpret_cast<const Execution*>(handle);
+  if (execution == nullptr || execution->implementation->provider_id != 3) {
     return 0;
   }
-  return apxinf::gemm::cutlass_weight_prepack_count(*instance->state);
+  return apxinf::gemm::cutlass_weight_prepack_count(*execution);
 }
 
 // Private test hook used to select a provider without running the very large
@@ -486,21 +443,18 @@ extern "C" uint64_t apxinf_gemm_instance_weight_prepack_count(
 extern "C" apxinf_status_t apxinf_gemm_test_seed_recipe(
     const apxinf_gemm_spec_t* spec,
     const apxinf_gemm_policy_t* policy,
-    uint32_t semantic,
     int device,
     uint32_t provider_id,
     uint32_t implementation_id,
     uint32_t implementation_version,
     int32_t configuration) {
   return apxinf::gemm::abi_boundary([&] {
-    if (spec == nullptr || policy == nullptr || policy->cache_dir == nullptr ||
-        semantic > static_cast<uint32_t>(APXINF_GEMM_SEMANTIC_GEMM_BIAS)) {
+    if (spec == nullptr || policy == nullptr || policy->cache_dir == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid test recipe seed arguments");
     }
     apxinf::gemm::Spec normalized{};
     static_cast<apxinf_gemm_spec_t&>(normalized) = *spec;
-    normalized.semantic = static_cast<apxinf::gemm::Semantic>(semantic);
     validate_spec(normalized);
     const Recipe recipe{provider_id, implementation_id,
                         implementation_version, configuration};
@@ -517,73 +471,3 @@ extern "C" apxinf_status_t apxinf_gemm_test_seed_recipe(
                                serialized.str());
   });
 }
-
-void plan_destroy(apxinf_gemm_plan* plan) {
-  delete plan;
-}
-
-#define APXINF_DEFINE_GEMM_PLAN_ABI(prefix, semantic_value, plan_type,          \
-                                    instance_type)                             \
-  extern "C" apxinf_status_t prefix##_plan_create(                            \
-      apxinf_runtime_t runtime, const apxinf_gemm_spec_t* spec,                \
-      const apxinf_gemm_policy_t* policy,                                      \
-      const apxinf_gemm_tuning_bindings_t* tuning_bindings,                    \
-      plan_type* output) {                                                     \
-    if (output == nullptr) {                                                   \
-      return plan_create(runtime, spec, policy, tuning_bindings, semantic_value,\
-                         nullptr);                                             \
-    }                                                                          \
-    *output = nullptr;                                                         \
-    apxinf_gemm_plan* plan = nullptr;                                          \
-    const apxinf_status_t status = plan_create(                                \
-        runtime, spec, policy, tuning_bindings, semantic_value, &plan);         \
-    if (status == APXINF_STATUS_OK) {                                          \
-      *output = reinterpret_cast<plan_type>(plan);                             \
-    }                                                                          \
-    return status;                                                             \
-  }                                                                            \
-  extern "C" apxinf_status_t prefix##_instance_create(                        \
-      plan_type plan, const apxinf_gemm_bindings_t* bindings,                  \
-      instance_type* output) {                                                 \
-    if (output == nullptr) {                                                   \
-      return instance_create(reinterpret_cast<apxinf_gemm_plan*>(plan),        \
-                             bindings, nullptr);                               \
-    }                                                                          \
-    *output = nullptr;                                                         \
-    apxinf_gemm_instance* instance = nullptr;                                  \
-    const apxinf_status_t status = instance_create(                            \
-        reinterpret_cast<apxinf_gemm_plan*>(plan), bindings, &instance);       \
-    if (status == APXINF_STATUS_OK) {                                          \
-      *output = reinterpret_cast<instance_type>(instance);                     \
-    }                                                                          \
-    return status;                                                             \
-  }                                                                            \
-  extern "C" apxinf_status_t prefix##_enqueue(instance_type instance) {       \
-    return enqueue(reinterpret_cast<apxinf_gemm_instance*>(instance));         \
-  }                                                                            \
-  extern "C" void prefix##_instance_destroy(instance_type instance) {         \
-    instance_destroy(reinterpret_cast<apxinf_gemm_instance*>(instance));       \
-  }                                                                            \
-  extern "C" void prefix##_plan_destroy(plan_type plan) {                     \
-    plan_destroy(reinterpret_cast<apxinf_gemm_plan*>(plan));                   \
-  }                                                                            \
-  extern "C" const char* prefix##_plan_summary(plan_type plan) {              \
-    return plan_summary(reinterpret_cast<apxinf_gemm_plan*>(plan));            \
-  }
-
-APXINF_DEFINE_GEMM_PLAN_ABI(apxinf_gemm, apxinf::gemm::Semantic::kGemm,
-                            apxinf_gemm_plan_t, apxinf_gemm_instance_t)
-APXINF_DEFINE_GEMM_PLAN_ABI(apxinf_gemm_bias,
-                            apxinf::gemm::Semantic::kGemmBias,
-                            apxinf_gemm_bias_plan_t,
-                            apxinf_gemm_bias_instance_t)
-APXINF_DEFINE_GEMM_PLAN_ABI(apxinf_gemm_bias_gelu,
-                            apxinf::gemm::Semantic::kGemmBiasGelu,
-                            apxinf_gemm_bias_gelu_plan_t,
-                            apxinf_gemm_bias_gelu_instance_t)
-APXINF_DEFINE_GEMM_PLAN_ABI(apxinf_gemm_geglu,
-                            apxinf::gemm::Semantic::kGemmGeglu,
-                            apxinf_gemm_geglu_plan_t,
-                            apxinf_gemm_geglu_instance_t)
-
-#undef APXINF_DEFINE_GEMM_PLAN_ABI

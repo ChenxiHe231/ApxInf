@@ -32,11 +32,11 @@ struct CublasLtState {
   }
 };
 
-CublasLtState& provider(State& state) {
+CublasLtState& provider(Execution& state) {
   return *static_cast<CublasLtState*>(state.provider_state);
 }
 
-const CublasLtState& provider(const State& state) {
+const CublasLtState& provider(const Execution& state) {
   return *static_cast<const CublasLtState*>(state.provider_state);
 }
 
@@ -51,9 +51,7 @@ size_t common_requirement(const Spec& spec, bool native_fp8) {
   return vendor::common_resource_requirements(spec, native_fp8);
 }
 
-void prepare_cublaslt_impl(State& state,
-                           const State* blueprint,
-                           bool native_fp8) {
+void prepare_cublaslt_impl(Execution& state, bool native_fp8) {
   auto resources = std::make_unique<CublasLtState>();
   const auto& spec = state.spec;
   resources->common.projection_dtype =
@@ -90,50 +88,32 @@ void prepare_cublaslt_impl(State& state,
                                           projection_type, spec.n, spec.m,
                                           spec.n));
 
-  if (blueprint != nullptr && blueprint->provider_state != nullptr) {
-    const auto& source = provider(*blueprint);
-    resources->algorithm = source.algorithm;
-    resources->has_algorithm = source.has_algorithm;
-    resources->workspace_bytes = source.workspace_bytes;
-  }
-
-  if (resources->has_algorithm) {
-    cublasLtMatmulHeuristicResult_t checked{};
-    check_cublas(cublasLtMatmulAlgoCheck(
-        resources->handle, resources->operation, resources->a_layout,
-        resources->b_layout, resources->output_layout,
-        resources->output_layout, &resources->algorithm, &checked));
-    check_cublas(checked.state);
-    resources->workspace_bytes = checked.workspaceSize;
-  } else {
-    cublasLtMatmulPreference_t preference = nullptr;
-    check_cublas(cublasLtMatmulPreferenceCreate(&preference));
-    const size_t workspace_limit = available_workspace;
-    cublasStatus_t status = cublasLtMatmulPreferenceSetAttribute(
-        preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-        &workspace_limit, sizeof(workspace_limit));
-    if (status != CUBLAS_STATUS_SUCCESS) {
-      cublasLtMatmulPreferenceDestroy(preference);
-      check_cublas(status);
-    }
-    cublasLtMatmulHeuristicResult_t candidates[8]{};
-    int candidate_count = 0;
-    status = cublasLtMatmulAlgoGetHeuristic(
-        resources->handle, resources->operation, resources->a_layout,
-        resources->b_layout, resources->output_layout,
-        resources->output_layout, preference, 8, candidates, &candidate_count);
+  cublasLtMatmulPreference_t preference = nullptr;
+  check_cublas(cublasLtMatmulPreferenceCreate(&preference));
+  const size_t workspace_limit = available_workspace;
+  cublasStatus_t status = cublasLtMatmulPreferenceSetAttribute(
+      preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+      &workspace_limit, sizeof(workspace_limit));
+  if (status != CUBLAS_STATUS_SUCCESS) {
     cublasLtMatmulPreferenceDestroy(preference);
     check_cublas(status);
-    if (state.configuration >= candidate_count ||
-        candidates[state.configuration].state != CUBLAS_STATUS_SUCCESS) {
-      throw Failure(APXINF_STATUS_UNSUPPORTED,
-                    "cuBLASLt heuristic is unavailable");
-    }
-    resources->algorithm = candidates[state.configuration].algo;
-    resources->has_algorithm = true;
-    resources->workspace_bytes =
-        candidates[state.configuration].workspaceSize;
   }
+  cublasLtMatmulHeuristicResult_t candidates[8]{};
+  int candidate_count = 0;
+  status = cublasLtMatmulAlgoGetHeuristic(
+      resources->handle, resources->operation, resources->a_layout,
+      resources->b_layout, resources->output_layout,
+      resources->output_layout, preference, 8, candidates, &candidate_count);
+  cublasLtMatmulPreferenceDestroy(preference);
+  check_cublas(status);
+  if (state.configuration >= candidate_count ||
+      candidates[state.configuration].state != CUBLAS_STATUS_SUCCESS) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "cuBLASLt heuristic is unavailable");
+  }
+  resources->algorithm = candidates[state.configuration].algo;
+  resources->has_algorithm = true;
+  resources->workspace_bytes = candidates[state.configuration].workspaceSize;
 
   if (resources->workspace_bytes > available_workspace) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
@@ -162,25 +142,21 @@ size_t cublaslt_native_fp8_resource_requirements(const Spec& spec) {
   return common_requirement(spec, true);
 }
 
-void prepare_cublaslt(State& state, const State* blueprint) {
-  prepare_cublaslt_impl(state, blueprint, false);
+void prepare_cublaslt(Execution& state) {
+  prepare_cublaslt_impl(state, false);
 }
 
-void prepare_cublaslt_native_fp8(State& state, const State* blueprint) {
-  prepare_cublaslt_impl(state, blueprint, true);
+void prepare_cublaslt_native_fp8(Execution& state) {
+  prepare_cublaslt_impl(state, true);
 }
 
-void release_cublaslt_resources(State& state) noexcept {
-  if (state.provider_state != nullptr) provider(state).release_resources();
-}
-
-void destroy_cublaslt(State& state) noexcept {
+void destroy_cublaslt(Execution& state) noexcept {
   delete static_cast<CublasLtState*>(state.provider_state);
   state.provider_state = nullptr;
 }
 
-cudaError_t launch_cublaslt(State& state,
-                            const apxinf_gemm_bindings_t& bindings) {
+cudaError_t launch_cublaslt(Execution& state) {
+  const auto& bindings = state.bindings;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
   const auto& spec = state.spec;
   auto& resources = provider(state);

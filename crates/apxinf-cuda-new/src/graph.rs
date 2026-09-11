@@ -3,6 +3,7 @@
 use crate::context::CudaContext;
 use crate::ffi;
 use apxinf_core::{Error, Result};
+use std::any::Any;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -16,7 +17,7 @@ pub struct CapturedGraph {
     exec: ffi::cudaGraphExec_t,
     graph: ffi::cudaGraph_t,
     stream: Arc<crate::CudaStream>,
-    _gemm_instances: Vec<Rc<crate::ops::execution::SharedExecution>>,
+    _resources: Vec<Rc<dyn Any>>,
 }
 
 impl CapturedGraph {
@@ -80,7 +81,7 @@ fn end(ctx: &CudaContext) -> std::result::Result<CapturedGraph, String> {
         exec,
         graph,
         stream: ctx.shared_stream(),
-        _gemm_instances: retained,
+        _resources: retained,
     })
 }
 

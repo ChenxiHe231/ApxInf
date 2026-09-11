@@ -217,7 +217,7 @@ fn main() {
         "gemm/tuning_db.cu",
         "gemm/autotune.cu",
         "gemm/reference.cu",
-        "gemm/plan.cu",
+        "gemm/execution.cu",
         "gemm/providers/cublas.cu",
         "gemm/providers/cublaslt.cu",
         "gemm/providers/cutlass.cu",

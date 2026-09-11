@@ -12,12 +12,6 @@ pub struct GemmBiasGeluArgs<'a> {
 pub fn gemm_bias_gelu(ctx: &CudaContext, args: GemmBiasGeluArgs<'_>) -> Result<()> {
     execution::execute(
         ctx,
-        normalize(
-            ctx,
-            args.gemm,
-            Semantic::GemmBiasGelu,
-            execution::PlanApi::gemm_bias_gelu(),
-            Some(args.bias),
-        )?,
+        normalize(ctx, args.gemm, Semantic::GemmBiasGelu, Some(args.bias))?,
     )
 }

@@ -27,13 +27,23 @@ typedef enum {
   APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL = 3,
 } apxinf_gemm_quantization_t;
 
+typedef enum {
+  APXINF_GEMM_SEMANTIC_GEMM = 0,
+  APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU = 1,
+  APXINF_GEMM_SEMANTIC_GEMM_GEGLU = 2,
+  APXINF_GEMM_SEMANTIC_GEMM_BIAS = 3,
+} apxinf_gemm_semantic_t;
+
 typedef struct {
   uint32_t version;
+  uint32_t semantic;
   uint32_t a_dtype;
   uint32_t b_dtype;
   uint32_t accumulation_dtype;
   uint32_t output_dtype;
   uint32_t quantization;
+  /* Changes whether candidate preparation may hoist weight preprocessing. */
+  uint32_t b_is_immutable;
   /* Largest guaranteed power-of-two byte alignment, capped at 256. */
   uint32_t a_alignment;
   uint32_t b_alignment;
@@ -47,7 +57,7 @@ typedef struct {
   /* Structural scale predicates, not scale values.  Some candidates only
      implement the unit case, so "is this scale exactly one" belongs to the
      operation identity while the scale itself is a per-call binding.  Keeping
-     the value out of the Spec is what lets one tuned plan serve every layer
+     the value out of the Spec is what lets one tuned Recipe serve every layer
      that differs only by its calibration scale. */
   uint32_t alpha_is_unit;
   uint32_t output_scale_is_unit;

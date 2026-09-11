@@ -35,11 +35,10 @@ fn prepare_with_torch_reference<'a>(
     ctx: &CudaContext,
     args: GemmArgs<'a>,
     semantic: super::contracts::Semantic,
-    api: super::execution::PlanApi,
     bias: Option<&'a Tensor>,
     expected: &'a [f32],
-) -> apxinf_core::Result<super::execution::PreparedExecution> {
-    let normalized = super::contracts::normalize(ctx, args, semantic, api, bias)?;
+) -> apxinf_core::Result<std::rc::Rc<super::execution::Execution>> {
+    let normalized = super::contracts::normalize(ctx, args, semantic, bias)?;
     let normalized = super::contracts::with_validation_reference(
         normalized,
         super::contracts::ValidationReference::torch(expected),
@@ -61,14 +60,8 @@ fn torch_validation_requires_the_l3_output_shape() {
     let b = tensor(0, vec![3, 4], &[1.0; 12]);
     let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
     let args = GemmArgs::new(&a, &b, &mut out);
-    let normalized = super::contracts::normalize(
-        &ctx,
-        args,
-        super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
-        None,
-    )
-    .unwrap();
+    let normalized =
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
     let error = match super::contracts::with_validation_reference(
         normalized,
         super::contracts::ValidationReference::torch(&[1.0; 7]),
@@ -96,7 +89,6 @@ fn gemm_all_candidates_match_torch() {
         &ctx,
         args,
         super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
         None,
         f::BF16_GEMM,
     )
@@ -114,7 +106,6 @@ fn gemm_all_candidates_match_torch() {
         &ctx,
         args,
         super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
         None,
         f::FP8_UNIT_GEMM,
     )
@@ -141,7 +132,6 @@ fn gemm_all_candidates_match_torch() {
         &ctx,
         args,
         super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
         None,
         f::FP8_SCALED_GEMM,
     )
@@ -172,7 +162,6 @@ fn gemm_bias_all_candidates_match_torch() {
         &ctx,
         args,
         super::contracts::Semantic::GemmBias,
-        super::execution::PlanApi::gemm_bias(),
         Some(&bias),
         f::BF16_GEMM_BIAS,
     )
@@ -192,7 +181,6 @@ fn gemm_bias_all_candidates_match_torch() {
         &ctx,
         args,
         super::contracts::Semantic::GemmBias,
-        super::execution::PlanApi::gemm_bias(),
         Some(&bias),
         f::FP8_SCALED_GEMM_BIAS,
     )
@@ -216,7 +204,6 @@ fn gemm_bias_gelu_all_candidates_match_torch() {
         &ctx,
         args,
         super::contracts::Semantic::GemmBiasGelu,
-        super::execution::PlanApi::gemm_bias_gelu(),
         Some(&bias),
         f::BF16_GEMM_BIAS_GELU,
     )
@@ -236,7 +223,6 @@ fn gemm_bias_gelu_all_candidates_match_torch() {
         &ctx,
         args,
         super::contracts::Semantic::GemmBiasGelu,
-        super::execution::PlanApi::gemm_bias_gelu(),
         Some(&bias),
         f::FP8_SCALED_GEMM_BIAS_GELU,
     )
@@ -259,7 +245,6 @@ fn gemm_geglu_all_candidates_match_torch() {
         &ctx,
         args,
         super::contracts::Semantic::GemmGeglu,
-        super::execution::PlanApi::gemm_geglu(),
         None,
         f::BF16_GEMM_GEGLU,
     )
@@ -277,7 +262,6 @@ fn gemm_geglu_all_candidates_match_torch() {
         &ctx,
         args,
         super::contracts::Semantic::GemmGeglu,
-        super::execution::PlanApi::gemm_geglu(),
         None,
         f::FP8_UNIT_GEMM_GEGLU,
     )

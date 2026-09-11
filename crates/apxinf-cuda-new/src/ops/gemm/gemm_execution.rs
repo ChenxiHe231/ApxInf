@@ -1,4 +1,6 @@
-use std::ffi::{CStr, CString};
+#[cfg(test)]
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -6,158 +8,117 @@ use std::sync::Arc;
 use apxinf_core::{Error, Result};
 
 use super::contracts::{invalid, Normalized};
-use crate::ffi::abi::types::Runtime;
 use crate::ffi::abi::{gemm as abi, status};
 use crate::{CudaBuffer, CudaContext};
 
-#[derive(Clone, Copy)]
-pub(crate) struct PlanApi {
-    pub name: &'static str,
-    plan_create: unsafe extern "C" fn(
-        Runtime,
-        *const abi::Spec,
-        *const abi::Policy,
-        *const abi::TuningBindings,
-        *mut abi::Plan,
-    ) -> i32,
-    instance_create:
-        unsafe extern "C" fn(abi::Plan, *const abi::Bindings, *mut abi::Instance) -> i32,
-    enqueue: unsafe extern "C" fn(abi::Instance) -> i32,
-    instance_destroy: unsafe extern "C" fn(abi::Instance),
-    plan_destroy: unsafe extern "C" fn(abi::Plan),
-    plan_summary: unsafe extern "C" fn(abi::Plan) -> *const std::ffi::c_char,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ExecutionKey {
+    spec: abi::Spec,
+    device: usize,
+    a: usize,
+    b: usize,
+    b_version: u64,
+    b_is_immutable: u32,
+    bias: usize,
+    a_scales: usize,
+    b_scales: usize,
+    output: usize,
+    stream: usize,
+    alpha: u32,
+    output_scale: u32,
+    workspace_limit: u64,
+    graph_safe: bool,
+    deterministic: bool,
 }
 
-macro_rules! plan_api {
-    ($constructor:ident, $name:literal, $module:ident, $create:ident, $instance:ident, $enqueue:ident, $destroy_instance:ident, $destroy_plan:ident, $summary:ident) => {
-        pub(crate) fn $constructor() -> Self {
-            Self {
-                name: $name,
-                plan_create: crate::ffi::abi::$module::$create,
-                instance_create: crate::ffi::abi::$module::$instance,
-                enqueue: crate::ffi::abi::$module::$enqueue,
-                instance_destroy: crate::ffi::abi::$module::$destroy_instance,
-                plan_destroy: crate::ffi::abi::$module::$destroy_plan,
-                plan_summary: crate::ffi::abi::$module::$summary,
-            }
+impl ExecutionKey {
+    fn new(
+        ctx: &CudaContext,
+        spec: abi::Spec,
+        bindings: abi::Bindings,
+        policy: &super::contracts::GemmPolicy,
+    ) -> Self {
+        Self {
+            spec,
+            device: ctx.device_id(),
+            a: bindings.a as usize,
+            b: bindings.b as usize,
+            b_version: bindings.b_version,
+            b_is_immutable: bindings.b_is_immutable,
+            bias: bindings.bias as usize,
+            a_scales: bindings.a_scales as usize,
+            b_scales: bindings.b_scales as usize,
+            output: bindings.output as usize,
+            stream: bindings.stream as usize,
+            alpha: bindings.alpha.to_bits(),
+            output_scale: bindings.output_scale.to_bits(),
+            workspace_limit: policy.workspace_limit as u64,
+            graph_safe: policy.graph_safe,
+            deterministic: policy.deterministic,
         }
-    };
-}
-
-impl PlanApi {
-    plan_api!(
-        gemm,
-        "gemm",
-        gemm,
-        apxinf_gemm_plan_create,
-        apxinf_gemm_instance_create,
-        apxinf_gemm_enqueue,
-        apxinf_gemm_instance_destroy,
-        apxinf_gemm_plan_destroy,
-        apxinf_gemm_plan_summary
-    );
-    plan_api!(
-        gemm_bias_gelu,
-        "gemm_bias_gelu",
-        gemm_gelu,
-        apxinf_gemm_bias_gelu_plan_create,
-        apxinf_gemm_bias_gelu_instance_create,
-        apxinf_gemm_bias_gelu_enqueue,
-        apxinf_gemm_bias_gelu_instance_destroy,
-        apxinf_gemm_bias_gelu_plan_destroy,
-        apxinf_gemm_bias_gelu_plan_summary
-    );
-    plan_api!(
-        gemm_bias,
-        "gemm_bias",
-        gemm_bias,
-        apxinf_gemm_bias_plan_create,
-        apxinf_gemm_bias_instance_create,
-        apxinf_gemm_bias_enqueue,
-        apxinf_gemm_bias_instance_destroy,
-        apxinf_gemm_bias_plan_destroy,
-        apxinf_gemm_bias_plan_summary
-    );
-    plan_api!(
-        gemm_geglu,
-        "gemm_geglu",
-        gemm_geglu,
-        apxinf_gemm_geglu_plan_create,
-        apxinf_gemm_geglu_instance_create,
-        apxinf_gemm_geglu_enqueue,
-        apxinf_gemm_geglu_instance_destroy,
-        apxinf_gemm_geglu_plan_destroy,
-        apxinf_gemm_geglu_plan_summary
-    );
-}
-
-struct NativePlan {
-    raw: abi::Plan,
-    destroy: unsafe extern "C" fn(abi::Plan),
-}
-
-impl Drop for NativePlan {
-    fn drop(&mut self) {
-        unsafe { (self.destroy)(self.raw) }
     }
 }
 
-/// Owns the native instance and every device allocation referenced by it.
-/// The native object is deliberately thread-confined.
-pub(crate) struct SharedExecution {
-    raw: abi::Instance,
-    _plan: NativePlan,
+/// Rust ownership boundary for one native execution bound to fixed addresses.
+/// It is deliberately thread-confined and is not a second planning object.
+pub(crate) struct Execution {
+    raw: abi::Execution,
     stream: Arc<crate::CudaStream>,
     _storage: Vec<CudaBuffer>,
+    #[cfg(test)]
     summary: String,
-    enqueue: unsafe extern "C" fn(abi::Instance) -> i32,
-    destroy_instance: unsafe extern "C" fn(abi::Instance),
     _not_send: PhantomData<Rc<()>>,
 }
 
-impl Drop for SharedExecution {
-    fn drop(&mut self) {
-        let _ = self.stream.synchronize();
-        unsafe { (self.destroy_instance)(self.raw) }
-    }
-}
-
-/// Internal GEMM instance bound to fixed tensor addresses. Graph workspaces
-/// retain these between the eager preparation traversal and stream capture.
-pub(crate) struct PreparedExecution {
-    exec: Rc<SharedExecution>,
-}
-
-impl PreparedExecution {
+impl Execution {
+    #[cfg(test)]
     pub(crate) fn summary(&self) -> &str {
-        &self.exec.summary
+        &self.summary
     }
 
-    pub(crate) fn enqueue(&mut self) -> Result<()> {
+    #[cfg(test)]
+    pub(crate) fn enqueue(self: &Rc<Self>) -> Result<()> {
         crate::workspace::validate_capture_target(
-            self.exec.stream.device(),
-            self.exec.stream.handle() as usize,
+            self.stream.device(),
+            self.stream.handle() as usize,
         )?;
-        self.exec.stream.set_current_device().map_err(Error::Cuda)?;
-        crate::workspace::retain_gemm_instance(&self.exec);
-        unsafe { status::check((self.exec.enqueue)(self.exec.raw)) }
+        self.stream.set_current_device().map_err(Error::Cuda)?;
+        crate::workspace::retain_resource(self);
+        unsafe { status::check(abi::apxinf_gemm_enqueue(self.raw)) }
     }
 
     #[cfg(test)]
     pub(crate) fn weight_prepack_count(&self) -> u64 {
-        unsafe { abi::apxinf_gemm_instance_weight_prepack_count(self.exec.raw) }
+        unsafe { abi::apxinf_gemm_execution_weight_prepack_count(self.raw) }
     }
 }
 
-pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<PreparedExecution> {
+impl Drop for Execution {
+    fn drop(&mut self) {
+        let _ = self.stream.synchronize();
+        unsafe { abi::apxinf_gemm_destroy(self.raw) }
+    }
+}
+
+pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<Rc<Execution>> {
     let Normalized {
-        api,
         spec,
         policy: options,
         bindings,
         storage,
         validation_reference,
     } = normalized;
+    let key = ExecutionKey::new(ctx, spec, bindings, &options);
+    if let Some(execution) = crate::workspace::lookup_execution(&key) {
+        crate::workspace::use_execution(&execution)?;
+        return Ok(execution);
+    }
+    if !crate::workspace::may_prepare_native_resources() {
+        return Err(invalid(
+            "GEMM execution cache miss during capture; prepare the same bindings first",
+        ));
+    }
+
     let cache = options
         .cache_dir
         .as_ref()
@@ -189,79 +150,81 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<P
             reference_kind: 0,
         }
     };
-    let instance_key = format!(
-        "{}|{:?}|{:?}|{}|{}|{}",
-        api.name, spec, bindings, policy.workspace_limit, policy.graph_safe, policy.deterministic
-    );
-    if let Some(exec) = crate::workspace::lookup_gemm_instance(&instance_key) {
-        return Ok(PreparedExecution { exec });
-    }
-    if !crate::workspace::may_prepare_native_resources() {
-        return Err(invalid(
-            "GEMM instance cache miss during capture; prepare the same bindings first",
-        ));
-    }
-
-    let mut plan = std::ptr::null_mut();
+    let mut raw = std::ptr::null_mut();
     unsafe {
-        status::check((api.plan_create)(
+        status::check(abi::apxinf_gemm_prepare(
             ctx.runtime(),
             &spec,
             &policy,
             &tuning_bindings,
-            &mut plan,
+            &mut raw,
         ))?;
     }
-    let plan = NativePlan {
-        raw: plan,
-        destroy: api.plan_destroy,
-    };
-    let summary = unsafe { CStr::from_ptr((api.plan_summary)(plan.raw)) }
-        .to_string_lossy()
-        .into_owned();
-    let mut raw = std::ptr::null_mut();
-    unsafe {
-        status::check((api.instance_create)(plan.raw, &bindings, &mut raw))?;
+    if raw.is_null() {
+        return Err(invalid("native GEMM prepare returned a null execution"));
     }
     #[cfg(test)]
-    PREPARED_EXECUTION_CREATE_COUNT.with(|count| count.set(count.get() + 1));
-    let exec = Rc::new(SharedExecution {
+    let summary = unsafe { CStr::from_ptr(abi::apxinf_gemm_summary(raw)) }
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(test)]
+    EXECUTION_CREATE_COUNT.with(|count| count.set(count.get() + 1));
+    let execution = Rc::new(Execution {
         raw,
-        _plan: plan,
         stream: ctx.shared_stream(),
         _storage: storage,
+        #[cfg(test)]
         summary,
-        enqueue: api.enqueue,
-        destroy_instance: api.instance_destroy,
         _not_send: PhantomData,
     });
-    crate::workspace::store_gemm_instance(instance_key, Rc::clone(&exec));
-    Ok(PreparedExecution { exec })
+    crate::workspace::store_execution(key, Rc::clone(&execution));
+    crate::workspace::use_execution(&execution)?;
+    Ok(execution)
 }
 
 pub(crate) fn execute(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<()> {
-    let mut instance = prepare(ctx, normalized)?;
-    instance.enqueue()?;
-    if crate::workspace::is_capturing() {
+    let execution = prepare(ctx, normalized)?;
+    crate::workspace::validate_capture_target(
+        execution.stream.device(),
+        execution.stream.handle() as usize,
+    )?;
+    execution.stream.set_current_device().map_err(Error::Cuda)?;
+    unsafe { status::check(abi::apxinf_gemm_enqueue(execution.raw))? };
+    if crate::workspace::is_capturing()
+        || (crate::workspace::has_active_session() && !crate::workspace::is_preparing_session())
+    {
         Ok(())
     } else {
+        #[cfg(test)]
+        EXECUTION_SYNC_COUNT.with(|count| count.set(count.get() + 1));
         ctx.synchronize().map_err(Error::Cuda)
     }
 }
 
 #[cfg(test)]
 thread_local! {
-    static PREPARED_EXECUTION_CREATE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EXECUTION_CREATE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static EXECUTION_SYNC_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-pub(crate) fn reset_prepared_execution_create_count() {
-    PREPARED_EXECUTION_CREATE_COUNT.with(|count| count.set(0));
+pub(crate) fn reset_execution_create_count() {
+    EXECUTION_CREATE_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(test)]
-pub(crate) fn prepared_execution_create_count() -> usize {
-    PREPARED_EXECUTION_CREATE_COUNT.with(std::cell::Cell::get)
+pub(crate) fn execution_create_count() -> usize {
+    EXECUTION_CREATE_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_execution_sync_count() {
+    EXECUTION_SYNC_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn execution_sync_count() -> usize {
+    EXECUTION_SYNC_COUNT.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -291,7 +254,6 @@ pub(crate) fn seed_recipe(
         status::check(abi::apxinf_gemm_test_seed_recipe(
             &normalized.spec,
             &policy,
-            super::contracts::Semantic::GemmGeglu as u32,
             ctx.device_id() as i32,
             provider_id,
             implementation_id,

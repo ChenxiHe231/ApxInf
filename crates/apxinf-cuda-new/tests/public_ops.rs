@@ -7,7 +7,7 @@
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda::{
     capture,
-    ops::{gemm, prepare_with_workspace, with_workspace, GemmArgs, GraphWorkspace},
+    ops::{gemm, prepare_with_session, with_session, ExecutionSession, GemmArgs},
     CudaBuffer, CudaContext,
 };
 use half::bf16;
@@ -51,13 +51,17 @@ fn same_public_l3_forward_prepares_captures_and_replays() {
     let b = bf16_tensor(0, vec![3, 4], &[1.0; 12]);
     let mut out = bf16_tensor(0, vec![2, 4], &[0.0; 8]);
     let observed = CudaBuffer::from_tensor(&out).unwrap();
-    let workspace = GraphWorkspace::new(4096, 0).unwrap();
+    let session = ExecutionSession::with_capacity(4096, 0).unwrap();
 
-    prepare_with_workspace(&workspace, || run_gemm(&ctx, &a, &b, &mut out)).unwrap();
+    prepare_with_session(&session, || run_gemm(&ctx, &a, &b, &mut out)).unwrap();
     let graph = capture(&ctx, || {
-        with_workspace(&workspace, || run_gemm(&ctx, &a, &b, &mut out))
+        with_session(&session, || run_gemm(&ctx, &a, &b, &mut out))
     })
     .unwrap();
+
+    drop(session);
+    drop(a);
+    drop(b);
 
     let sentinel: Vec<u8> = (0..8)
         .flat_map(|_| bf16::from_f32(-123.0).to_bits().to_ne_bytes())
@@ -68,7 +72,6 @@ fn same_public_l3_forward_prepares_captures_and_replays() {
 
     assert!(values(&out).iter().all(|&value| value == 3.0));
     drop(graph);
-    drop(workspace);
 }
 
 #[test]
@@ -78,11 +81,11 @@ fn public_l3_capture_rejects_cached_instance_from_another_stream() {
     let a = bf16_tensor(0, vec![2, 3], &[1.0; 6]);
     let b = bf16_tensor(0, vec![3, 4], &[1.0; 12]);
     let mut out = bf16_tensor(0, vec![2, 4], &[0.0; 8]);
-    let workspace = GraphWorkspace::new(4096, 0).unwrap();
+    let session = ExecutionSession::with_capacity(4096, 0).unwrap();
 
-    prepare_with_workspace(&workspace, || run_gemm(&execution_ctx, &a, &b, &mut out)).unwrap();
+    prepare_with_session(&session, || run_gemm(&execution_ctx, &a, &b, &mut out)).unwrap();
     let error = match capture(&capture_ctx, || {
-        with_workspace(&workspace, || run_gemm(&execution_ctx, &a, &b, &mut out))
+        with_session(&session, || run_gemm(&execution_ctx, &a, &b, &mut out))
     }) {
         Ok(_) => panic!("capture accepted an execution bound to another stream"),
         Err(error) => error,
@@ -97,7 +100,7 @@ fn public_l3_capture_rejects_cached_instance_from_another_stream() {
     // A failed mismatched capture must not poison later capture on the bound
     // stream.
     let graph = capture(&execution_ctx, || {
-        with_workspace(&workspace, || run_gemm(&execution_ctx, &a, &b, &mut out))
+        with_session(&session, || run_gemm(&execution_ctx, &a, &b, &mut out))
     })
     .unwrap();
     graph.replay().unwrap();
@@ -111,16 +114,46 @@ fn public_l3_capture_rejects_an_unprepared_cache_miss() {
     let a = bf16_tensor(0, vec![2, 3], &[1.0; 6]);
     let b = bf16_tensor(0, vec![3, 4], &[1.0; 12]);
     let mut out = bf16_tensor(0, vec![2, 4], &[0.0; 8]);
-    let workspace = GraphWorkspace::new(4096, 0).unwrap();
+    let session = ExecutionSession::with_capacity(4096, 0).unwrap();
 
     let error = match capture(&ctx, || {
-        with_workspace(&workspace, || run_gemm(&ctx, &a, &b, &mut out))
+        with_session(&session, || run_gemm(&ctx, &a, &b, &mut out))
     }) {
         Ok(_) => panic!("capture unexpectedly prepared a GEMM instance"),
         Err(error) => error,
     };
     assert!(
         error.to_string().contains("cache miss during capture"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn public_l3_capture_rejects_a_different_operator_order() {
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bf16_tensor(0, vec![2, 3], &[1.0; 6]);
+    let b = bf16_tensor(0, vec![3, 4], &[1.0; 12]);
+    let mut first_out = bf16_tensor(0, vec![2, 4], &[0.0; 8]);
+    let mut second_out = bf16_tensor(0, vec![2, 4], &[0.0; 8]);
+    let session = ExecutionSession::with_capacity(4096, 0).unwrap();
+
+    prepare_with_session(&session, || {
+        run_gemm(&ctx, &a, &b, &mut first_out)?;
+        run_gemm(&ctx, &a, &b, &mut second_out)
+    })
+    .unwrap();
+
+    let error = match capture(&ctx, || {
+        with_session(&session, || {
+            run_gemm(&ctx, &a, &b, &mut second_out)?;
+            run_gemm(&ctx, &a, &b, &mut first_out)
+        })
+    }) {
+        Ok(_) => panic!("capture accepted a different operator order"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("operator sequence mismatch"),
         "unexpected error: {error}"
     );
 }

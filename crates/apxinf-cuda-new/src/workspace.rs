@@ -1,19 +1,20 @@
-//! Persistent CUDA graph workspace and deterministic sub-allocation.
+//! Persistent graph memory and session-owned native executions.
 
-use std::cell::Cell;
+use std::any::{Any, TypeId};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::hash::Hash;
+use std::rc::Rc;
 
 use apxinf_core::{Error, Result};
 
 use crate::buffer::CudaBuffer;
-use crate::context::CudaContext;
 
 const WORKSPACE_ALIGNMENT: usize = 256;
 
 /// Persistent device arena used by a fixed-shape CUDA graph.
+/// Native operator executions are deliberately not stored here.
 pub struct GraphWorkspace {
-    gemm_instances: std::cell::RefCell<
-        std::collections::HashMap<String, std::rc::Rc<crate::ops::execution::SharedExecution>>,
-    >,
     storage: CudaBuffer,
     offset: Cell<usize>,
 }
@@ -26,7 +27,6 @@ impl GraphWorkspace {
             ));
         }
         Ok(Self {
-            gemm_instances: Default::default(),
             storage: CudaBuffer::alloc(capacity_bytes, device).map_err(Error::Cuda)?,
             offset: Cell::new(0),
         })
@@ -44,7 +44,7 @@ impl GraphWorkspace {
         self.offset.set(0);
     }
 
-    fn allocate(&self, bytes: usize, device: usize) -> Result<CudaBuffer> {
+    pub fn allocate(&self, bytes: usize, device: usize) -> Result<CudaBuffer> {
         if device != self.storage.device() {
             return Err(Error::Other(format!(
                 "static inference workspace is on CUDA {}, but operation targets CUDA {device}",
@@ -71,12 +71,77 @@ impl GraphWorkspace {
     }
 }
 
+struct ExecutionSessionInner {
+    workspace: GraphWorkspace,
+    caches: RefCell<HashMap<TypeId, Box<dyn Any>>>,
+    prepared_sequence: RefCell<Vec<usize>>,
+    sequence_cursor: Cell<usize>,
+}
+
+impl ExecutionSessionInner {
+    fn lookup<K, V>(&self, key: &K) -> Option<Rc<V>>
+    where
+        K: Eq + Hash + 'static,
+        V: Any,
+    {
+        self.caches
+            .borrow()
+            .get(&TypeId::of::<(K, V)>())?
+            .downcast_ref::<HashMap<K, Rc<V>>>()?
+            .get(key)
+            .cloned()
+    }
+
+    fn store<K, V>(&self, key: K, value: Rc<V>)
+    where
+        K: Eq + Hash + 'static,
+        V: Any,
+    {
+        let mut caches = self.caches.borrow_mut();
+        let cache = caches
+            .entry(TypeId::of::<(K, V)>())
+            .or_insert_with(|| Box::new(HashMap::<K, Rc<V>>::new()));
+        cache
+            .downcast_mut::<HashMap<K, Rc<V>>>()
+            .expect("execution cache type identity collision")
+            .insert(key, value);
+    }
+}
+
+/// Owns reusable native executions for one eager/capture/replay session.
+/// Its typed cache is operator-independent.
+#[derive(Clone)]
+pub struct ExecutionSession {
+    inner: Rc<ExecutionSessionInner>,
+}
+
+impl ExecutionSession {
+    pub fn new(workspace: GraphWorkspace) -> Self {
+        Self {
+            inner: Rc::new(ExecutionSessionInner {
+                workspace,
+                caches: RefCell::new(HashMap::new()),
+                prepared_sequence: RefCell::new(Vec::new()),
+                sequence_cursor: Cell::new(0),
+            }),
+        }
+    }
+
+    pub fn with_capacity(capacity_bytes: usize, device: usize) -> Result<Self> {
+        GraphWorkspace::new(capacity_bytes, device).map(Self::new)
+    }
+
+    pub fn workspace(&self) -> &GraphWorkspace {
+        &self.inner.workspace
+    }
+}
+
 thread_local! {
-    static ACTIVE_WORKSPACE: Cell<*const GraphWorkspace> = const { Cell::new(std::ptr::null()) };
+    static ACTIVE_SESSION: Cell<*const ExecutionSessionInner> = const { Cell::new(std::ptr::null()) };
     static PREPARING: Cell<bool> = const { Cell::new(false) };
     static CAPTURE_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static CAPTURE_TARGET: Cell<Option<CaptureTarget>> = const { Cell::new(None) };
-    static CAPTURED_GEMM_INSTANCES: std::cell::RefCell<Vec<std::rc::Rc<crate::ops::execution::SharedExecution>>> = const { std::cell::RefCell::new(Vec::new()) };
+    static CAPTURED_RESOURCES: RefCell<Vec<Rc<dyn Any>>> = const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Clone, Copy)]
@@ -85,80 +150,93 @@ struct CaptureTarget {
     stream: usize,
 }
 
-struct ActiveWorkspaceGuard {
-    workspace: *const GraphWorkspace,
+struct ActiveSessionGuard {
+    session: *const ExecutionSessionInner,
     preparing: bool,
 }
 
-impl Drop for ActiveWorkspaceGuard {
+impl Drop for ActiveSessionGuard {
     fn drop(&mut self) {
-        ACTIVE_WORKSPACE.with(|active| active.set(self.workspace));
+        ACTIVE_SESSION.with(|active| active.set(self.session));
         PREPARING.with(|preparing| preparing.set(self.preparing));
     }
 }
 
-fn with_workspace_phase<T>(
-    workspace: &GraphWorkspace,
+fn with_session_phase<T>(
+    session: &ExecutionSession,
     prepare: bool,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    if prepare {
-        workspace.gemm_instances.borrow_mut().clear();
-    }
-    workspace.reset();
-    ACTIVE_WORKSPACE.with(|active| {
+    ACTIVE_SESSION.with(|active| {
         if !active.get().is_null() {
             return Err(Error::Other(
-                "nested static inference workspaces are not supported".into(),
+                "nested execution sessions are not supported".into(),
             ));
         }
-        let previous = active.replace(workspace as *const _);
+        session.inner.workspace.reset();
+        if prepare {
+            session.inner.prepared_sequence.borrow_mut().clear();
+        }
+        session.inner.sequence_cursor.set(0);
+        let previous = active.replace(Rc::as_ptr(&session.inner));
         let previous_preparing = PREPARING.with(|preparing| preparing.replace(prepare));
-        let _guard = ActiveWorkspaceGuard {
-            workspace: previous,
+        let _guard = ActiveSessionGuard {
+            session: previous,
             preparing: previous_preparing,
         };
-        operation()
+        retain_resource(&session.inner);
+        let result = operation();
+        if result.is_ok()
+            && !prepare
+            && session.inner.sequence_cursor.get() != session.inner.prepared_sequence.borrow().len()
+        {
+            return Err(Error::Other(
+                "execution session traversal ended before the prepared operator sequence".into(),
+            ));
+        }
+        result
     })
 }
 
-pub(crate) fn prepare_with_workspace<T>(
-    workspace: &GraphWorkspace,
+pub(crate) fn prepare_with_session<T>(
+    session: &ExecutionSession,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    with_workspace_phase(workspace, true, operation)
+    with_session_phase(session, true, operation)
 }
 
-pub(crate) fn with_workspace<T>(
-    workspace: &GraphWorkspace,
+pub(crate) fn with_session<T>(
+    session: &ExecutionSession,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    with_workspace_phase(workspace, false, operation)
+    with_session_phase(session, false, operation)
 }
 
-/// Native execution resources may be installed only before capture or when an
-/// operation is executed without a graph workspace.
+/// Native resources may be created only outside capture. A non-preparation
+/// traversal with an active session must hit the execution cache.
 pub(crate) fn may_prepare_native_resources() -> bool {
-    PREPARING.with(Cell::get) || ACTIVE_WORKSPACE.with(|active| active.get().is_null())
+    !is_capturing()
+        && (PREPARING.with(Cell::get) || ACTIVE_SESSION.with(|active| active.get().is_null()))
 }
 
-/// Whether execution is the synthetic eager traversal used only to prepare a
-/// graph workspace. Autotuning must wait for a real request instead of using
-/// these placeholder inputs.
-pub(crate) fn is_preparing_workspace() -> bool {
+pub(crate) fn has_active_session() -> bool {
+    ACTIVE_SESSION.with(|active| !active.get().is_null())
+}
+
+pub(crate) fn is_preparing_session() -> bool {
     PREPARING.with(Cell::get)
 }
 
 pub(crate) fn begin_capture_retention(device: usize, stream: usize) {
-    CAPTURED_GEMM_INSTANCES.with(|instances| instances.borrow_mut().clear());
+    CAPTURED_RESOURCES.with(|resources| resources.borrow_mut().clear());
     CAPTURE_TARGET.with(|target| target.set(Some(CaptureTarget { device, stream })));
     CAPTURE_ACTIVE.with(|active| active.set(true));
 }
 
-pub(crate) fn end_capture_retention() -> Vec<std::rc::Rc<crate::ops::execution::SharedExecution>> {
+pub(crate) fn end_capture_retention() -> Vec<Rc<dyn Any>> {
     CAPTURE_ACTIVE.with(|active| active.set(false));
     CAPTURE_TARGET.with(|target| target.set(None));
-    CAPTURED_GEMM_INSTANCES.with(|instances| std::mem::take(&mut *instances.borrow_mut()))
+    CAPTURED_RESOURCES.with(|resources| std::mem::take(&mut *resources.borrow_mut()))
 }
 
 pub(crate) fn is_capturing() -> bool {
@@ -177,67 +255,71 @@ pub(crate) fn validate_capture_target(device: usize, stream: usize) -> Result<()
     })
 }
 
-pub(crate) fn output_buffer(ctx: &CudaContext, bytes: usize) -> Result<CudaBuffer> {
-    ACTIVE_WORKSPACE.with(|active| {
-        let workspace = active.get();
-        if workspace.is_null() {
-            CudaBuffer::alloc_zeros(bytes, ctx.device_id()).map_err(Error::Cuda)
-        } else {
-            unsafe { &*workspace }.allocate(bytes, ctx.device_id())
-        }
-    })
-}
-
-pub(crate) fn has_active_workspace() -> bool {
-    ACTIVE_WORKSPACE.with(|slot| !slot.get().is_null())
-}
-
-pub(crate) fn lookup_gemm_instance(
-    key: &str,
-) -> Option<std::rc::Rc<crate::ops::execution::SharedExecution>> {
-    ACTIVE_WORKSPACE.with(|slot| {
-        let workspace = slot.get();
-        if workspace.is_null() {
+pub(crate) fn lookup_execution<K, V>(key: &K) -> Option<Rc<V>>
+where
+    K: Eq + Hash + 'static,
+    V: Any,
+{
+    ACTIVE_SESSION.with(|active| {
+        let inner = active.get();
+        if inner.is_null() {
             None
         } else {
-            let instance = unsafe { &*workspace }
-                .gemm_instances
-                .borrow()
-                .get(key)
-                .cloned();
-            if let Some(instance) = &instance {
-                retain_gemm_instance(instance);
-            }
-            instance
+            unsafe { &*inner }.lookup(key)
         }
     })
 }
 
-pub(crate) fn retain_gemm_instance(instance: &std::rc::Rc<crate::ops::execution::SharedExecution>) {
-    if CAPTURE_ACTIVE.with(Cell::get) {
-        CAPTURED_GEMM_INSTANCES.with(|instances| {
-            let mut instances = instances.borrow_mut();
-            if !instances
-                .iter()
-                .any(|stored| std::rc::Rc::ptr_eq(stored, instance))
-            {
-                instances.push(std::rc::Rc::clone(instance));
-            }
-        });
-    }
+pub(crate) fn store_execution<K, V>(key: K, value: Rc<V>)
+where
+    K: Eq + Hash + 'static,
+    V: Any,
+{
+    ACTIVE_SESSION.with(|active| {
+        let inner = active.get();
+        if !inner.is_null() {
+            unsafe { &*inner }.store(key, value);
+        }
+    });
 }
 
-pub(crate) fn store_gemm_instance(
-    key: String,
-    instance: std::rc::Rc<crate::ops::execution::SharedExecution>,
-) {
-    ACTIVE_WORKSPACE.with(|slot| {
-        let workspace = slot.get();
-        if !workspace.is_null() {
-            unsafe { &*workspace }
-                .gemm_instances
-                .borrow_mut()
-                .insert(key, instance);
+/// Record one operator occurrence and enforce that capture follows the exact
+/// execution order established by `prepare_with_session`.
+pub(crate) fn use_execution<T: Any>(resource: &Rc<T>) -> Result<()> {
+    let identity = Rc::as_ptr(resource).cast::<()>() as usize;
+    ACTIVE_SESSION.with(|active| {
+        let inner = active.get();
+        if inner.is_null() {
+            return Ok(());
+        }
+        let inner = unsafe { &*inner };
+        if PREPARING.with(Cell::get) {
+            inner.prepared_sequence.borrow_mut().push(identity);
+            return Ok(());
+        }
+        let cursor = inner.sequence_cursor.get();
+        let sequence = inner.prepared_sequence.borrow();
+        if sequence.get(cursor).copied() != Some(identity) {
+            return Err(Error::Other(format!(
+                "execution session operator sequence mismatch at index {cursor}; prepare and capture must use identical operators and bindings"
+            )));
+        }
+        inner.sequence_cursor.set(cursor + 1);
+        Ok(())
+    })?;
+    retain_resource(resource);
+    Ok(())
+}
+
+pub(crate) fn retain_resource<T: Any>(resource: &Rc<T>) {
+    if !is_capturing() {
+        return;
+    }
+    let resource: Rc<dyn Any> = resource.clone();
+    CAPTURED_RESOURCES.with(|resources| {
+        let mut resources = resources.borrow_mut();
+        if !resources.iter().any(|stored| Rc::ptr_eq(stored, &resource)) {
+            resources.push(resource);
         }
     });
 }

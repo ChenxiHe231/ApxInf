@@ -191,7 +191,6 @@ pub(crate) enum Semantic {
 }
 
 pub(crate) struct Normalized<'a> {
-    pub api: super::gemm_execution::PlanApi,
     pub spec: abi::Spec,
     pub policy: GemmPolicy,
     pub bindings: abi::Bindings,
@@ -296,7 +295,6 @@ pub(crate) fn normalize<'a>(
     ctx: &CudaContext,
     args: GemmArgs<'a>,
     semantic: Semantic,
-    api: super::gemm_execution::PlanApi,
     bias: Option<&Tensor>,
 ) -> Result<Normalized<'a>> {
     let a_shape = args.a.shape().dims();
@@ -305,7 +303,7 @@ pub(crate) fn normalize<'a>(
         return Err(invalid("GEMM requires rank-2 tensors"));
     }
     // Public storage is deliberately canonical and candidate-independent.
-    // Candidates may transpose or pack internally while preparing a plan.
+    // Candidates may transpose or pack internally while preparing an execution.
     let (m, k) = (a_shape[0], a_shape[1]);
     let (weight_k, n) = (b_shape[0], b_shape[1]);
     if k != weight_k
@@ -452,14 +450,15 @@ pub(crate) fn normalize<'a>(
     storage.push(output_buffer);
 
     Ok(Normalized {
-        api,
         spec: abi::Spec {
-            version: 3,
+            version: 4,
+            semantic: semantic as u32,
             a_dtype: dtype(args.a.dtype())?,
             b_dtype: dtype(args.b.dtype())?,
             accumulation_dtype: dtype(args.policy.accumulation_dtype)?,
             output_dtype: dtype(args.out.dtype())?,
             quantization,
+            b_is_immutable: bindings.b_is_immutable,
             a_alignment: alignment_class(bindings.a),
             b_alignment: alignment_class(bindings.b),
             bias_alignment: alignment_class(bindings.bias),
@@ -486,7 +485,7 @@ pub(crate) fn with_validation_reference<'a>(
     mut normalized: Normalized<'a>,
     reference: ValidationReference<'a>,
 ) -> Result<Normalized<'a>> {
-    let output_width = if normalized.api.name == "gemm_geglu" {
+    let output_width = if normalized.spec.semantic == Semantic::GemmGeglu as u32 {
         normalized.spec.n as usize / 2
     } else {
         normalized.spec.n as usize

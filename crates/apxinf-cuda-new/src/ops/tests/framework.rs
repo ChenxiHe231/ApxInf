@@ -141,32 +141,20 @@ pub(super) fn scales(device: usize, values: &[f32]) -> Tensor {
 fn prepare_test_gemm(
     ctx: &CudaContext,
     args: GemmArgs<'_>,
-) -> apxinf_core::Result<super::execution::PreparedExecution> {
+) -> apxinf_core::Result<std::rc::Rc<super::execution::Execution>> {
     super::execution::prepare(
         ctx,
-        super::contracts::normalize(
-            ctx,
-            args,
-            super::contracts::Semantic::Gemm,
-            super::execution::PlanApi::gemm(),
-            None,
-        )?,
+        super::contracts::normalize(ctx, args, super::contracts::Semantic::Gemm, None)?,
     )
 }
 
 fn prepare_test_geglu(
     ctx: &CudaContext,
     args: GemmGegluArgs<'_>,
-) -> apxinf_core::Result<super::execution::PreparedExecution> {
+) -> apxinf_core::Result<std::rc::Rc<super::execution::Execution>> {
     super::execution::prepare(
         ctx,
-        super::contracts::normalize(
-            ctx,
-            args.gemm,
-            super::contracts::Semantic::GemmGeglu,
-            super::execution::PlanApi::gemm_geglu(),
-            None,
-        )?,
+        super::contracts::normalize(ctx, args.gemm, super::contracts::Semantic::GemmGeglu, None)?,
     )
 }
 
@@ -213,25 +201,20 @@ fn gpu_e2e_candidate_alignment_is_selected_and_keyed_from_actual_bindings() {
     let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
     let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
 
-    // Seed the in-memory plan cache with the naturally aligned binding class.
+    // Seed the in-memory Recipe cache with the naturally aligned binding class.
     let mut aligned_out = zeros_tensor(0, vec![m, n], DType::F16);
     let mut aligned_args = GemmArgs::new(&a, &b, &mut aligned_out);
     aligned_args.quantization = GemmQuantization::Fp8UnitScale;
     aligned_args.policy.allow_fallback = false;
-    let aligned = super::contracts::normalize(
-        &ctx,
-        aligned_args,
-        super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
-        None,
-    )
-    .unwrap();
+    let aligned =
+        super::contracts::normalize(&ctx, aligned_args, super::contracts::Semantic::Gemm, None)
+            .unwrap();
     assert!(aligned.spec.output_alignment >= 16);
     let aligned_instance = super::execution::prepare(&ctx, aligned).unwrap();
     eprintln!("GPU_ALIGNMENT_ALIGNED {}", aligned_instance.summary());
 
     // Offset by two bytes: valid for F16, but below CUTLASS's 16-byte output
-    // requirement.  This must form a different plan key and skip CUTLASS.
+    // requirement.  This must form a different Recipe key and skip CUTLASS.
     let output_bytes = m * n * DType::F16.size_in_bytes();
     let backing = CudaBuffer::alloc(output_bytes + 2, 0).unwrap();
     let mut misaligned_out = backing
@@ -246,13 +229,12 @@ fn gpu_e2e_candidate_alignment_is_selected_and_keyed_from_actual_bindings() {
         &ctx,
         misaligned_args,
         super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
         None,
     )
     .unwrap();
     assert_eq!(misaligned.spec.output_alignment, 2);
-    let mut instance = super::execution::prepare(&ctx, misaligned).unwrap();
-    let summary = instance.summary().to_owned();
+    let execution = super::execution::prepare(&ctx, misaligned).unwrap();
+    let summary = execution.summary().to_owned();
     eprintln!("GPU_ALIGNMENT_MISALIGNED {summary}");
     assert!(summary.contains("cutlass-fp8=skip(alignment)"), "{summary}");
     assert!(
@@ -268,7 +250,7 @@ fn gpu_e2e_candidate_alignment_is_selected_and_keyed_from_actual_bindings() {
         "alignment key aliased: {summary}"
     );
 
-    instance.enqueue().unwrap();
+    execution.enqueue().unwrap();
     ctx.synchronize().unwrap();
     assert!(f16_values(&misaligned_out)
         .iter()
@@ -339,16 +321,10 @@ fn fp8_unit_scale_bf16_output_does_not_round_through_f16() {
     args.policy.online_tune = true;
     args.policy.allow_fallback = false;
 
-    let normalized = super::contracts::normalize(
-        &ctx,
-        args,
-        super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
-        None,
-    )
-    .unwrap();
-    let mut instance = super::execution::prepare(&ctx, normalized).unwrap();
-    let summary = instance.summary();
+    let normalized =
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+    let execution = super::execution::prepare(&ctx, normalized).unwrap();
+    let summary = execution.summary();
     assert!(
         summary.contains("cublas+custom-epilogue#0=pass"),
         "{summary}"
@@ -360,7 +336,7 @@ fn fp8_unit_scale_bf16_output_does_not_round_through_f16() {
         "{summary}"
     );
 
-    instance.enqueue().unwrap();
+    execution.enqueue().unwrap();
     ctx.synchronize().unwrap();
 
     let expected = 448.0 * 448.0 * k as f32;
@@ -383,16 +359,10 @@ fn gpu_e2e_registered_backends_execute_and_report_verdicts() {
     args.policy.allow_fallback = false;
     args.policy.graph_safe = true;
 
-    let normalized = super::contracts::normalize(
-        &ctx,
-        args,
-        super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
-        None,
-    )
-    .unwrap();
-    let mut instance = super::execution::prepare(&ctx, normalized).unwrap();
-    let summary = instance.summary().to_owned();
+    let normalized =
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+    let execution = super::execution::prepare(&ctx, normalized).unwrap();
+    let summary = execution.summary().to_owned();
     eprintln!("GPU_E2E_CANDIDATES {summary}");
     assert!(
         summary.contains("winner-graph=pass"),
@@ -425,7 +395,7 @@ fn gpu_e2e_registered_backends_execute_and_report_verdicts() {
         );
     }
 
-    instance.enqueue().unwrap();
+    execution.enqueue().unwrap();
     ctx.synchronize().unwrap();
     assert!(f16_values(&out).iter().all(|&value| value == k as f32));
 }
@@ -441,16 +411,10 @@ fn gpu_e2e_graph_replay_overwrites_sentinel_and_matches_numeric_result() {
     let mut args = GemmArgs::new(&a, &b, &mut out);
     args.policy.online_tune = false;
 
-    let normalized = super::contracts::normalize(
-        &ctx,
-        args,
-        super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
-        None,
-    )
-    .unwrap();
-    let mut instance = super::execution::prepare(&ctx, normalized).unwrap();
-    let graph = crate::capture(&ctx, || instance.enqueue()).unwrap();
+    let normalized =
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+    let execution = super::execution::prepare(&ctx, normalized).unwrap();
+    let graph = crate::capture(&ctx, || execution.enqueue()).unwrap();
 
     let sentinel: Vec<u8> = (0..m * n)
         .flat_map(|_| bf16::from_f32(-123.0).to_bits().to_ne_bytes())
@@ -483,20 +447,13 @@ fn bf16_gemm_numeric_recipe_and_graph() {
     let mut out = tensor(0, vec![m, n], &vec![0.0; m * n]);
     let mut args = GemmArgs::new(&a, &b, &mut out);
     args.policy.cache_dir = Some("/tmp/apxinf-gemm-design-tests".into());
-    let mut instance = super::execution::prepare(
+    let execution = super::execution::prepare(
         &ctx,
-        super::contracts::normalize(
-            &ctx,
-            args,
-            super::contracts::Semantic::Gemm,
-            super::execution::PlanApi::gemm(),
-            None,
-        )
-        .unwrap(),
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap(),
     )
     .unwrap();
-    eprintln!("GEMM {}", instance.summary());
-    instance.enqueue().unwrap();
+    eprintln!("GEMM {}", execution.summary());
+    execution.enqueue().unwrap();
     ctx.synchronize().unwrap();
     let actual = values(&out);
     for row in 0..m {
@@ -514,7 +471,7 @@ fn bf16_gemm_numeric_recipe_and_graph() {
     cached_args.policy.allow_fallback = false;
     gemm(&ctx, cached_args).unwrap();
 
-    let graph = crate::capture(&ctx, || instance.enqueue()).unwrap();
+    let graph = crate::capture(&ctx, || execution.enqueue()).unwrap();
     graph.replay().unwrap();
     ctx.synchronize().unwrap();
     assert_eq!(values(&out), actual);
@@ -548,13 +505,7 @@ fn compatible_recipe_is_only_a_retuning_hint() {
         args.policy.allow_fallback = false;
         super::execution::prepare(
             ctx,
-            super::contracts::normalize(
-                ctx,
-                args,
-                super::contracts::Semantic::Gemm,
-                super::execution::PlanApi::gemm(),
-                None,
-            )?,
+            super::contracts::normalize(ctx, args, super::contracts::Semantic::Gemm, None)?,
         )
     };
     let remove_performance_recipe = || {
@@ -625,12 +576,12 @@ fn scratch_cache_dir(label: &str) -> std::path::PathBuf {
     dir
 }
 
-/// A plan is shared by every caller whose Spec matches, and alpha is no longer
+/// A Recipe is shared by every caller whose Spec matches, and alpha is no longer
 /// part of that Spec. Executing the same shape twice with different alphas
 /// must therefore still scale each result independently: if alpha were cached
-/// inside the plan the second execution would silently reuse the first one.
+/// inside the Execution the second execution would silently reuse the first one.
 #[test]
-fn gpu_e2e_alpha_is_bound_per_execution_not_baked_into_the_plan() {
+fn gpu_e2e_alpha_is_bound_per_execution_not_baked_into_the_recipe() {
     let cache_dir = scratch_cache_dir("gemm-alpha-binding");
     let cache = cache_dir.to_string_lossy().into_owned();
     let ctx = CudaContext::new(0).unwrap();
@@ -649,20 +600,14 @@ fn gpu_e2e_alpha_is_bound_per_execution_not_baked_into_the_plan() {
         let mut args = GemmArgs::new(&a, &b, &mut out);
         args.alpha = alpha;
         args.policy.cache_dir = Some(cache.clone());
-        let mut instance = super::execution::prepare(
+        let execution = super::execution::prepare(
             &ctx,
-            super::contracts::normalize(
-                &ctx,
-                args,
-                super::contracts::Semantic::Gemm,
-                super::execution::PlanApi::gemm(),
-                None,
-            )
-            .unwrap(),
+            super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None)
+                .unwrap(),
         )
         .unwrap();
-        let summary = instance.summary().to_owned();
-        instance.enqueue().unwrap();
+        let summary = execution.summary().to_owned();
+        execution.enqueue().unwrap();
         ctx.synchronize().unwrap();
         (values(&out), summary)
     };
@@ -693,13 +638,13 @@ fn gpu_e2e_alpha_is_bound_per_execution_not_baked_into_the_plan() {
         assert!(
             (tripled[index] - want).abs() < 0.02,
             "alpha=3 element {index} is {} but should be {want} \
-             (a shared plan reused the previous alpha)",
+             (a shared Recipe reused the previous alpha)",
             tripled[index]
         );
     }
     assert_ne!(
         doubled, tripled,
-        "alpha must change the numeric result even when the plan is shared"
+        "alpha must change the numeric result even when the Recipe is shared"
     );
     std::fs::remove_dir_all(cache_dir).unwrap();
 }
@@ -721,19 +666,12 @@ fn gpu_e2e_scale_values_do_not_fragment_the_tuning_cache() {
         args.policy.cache_dir = Some(cache.clone());
         args.policy.online_tune = online_tune;
         args.policy.allow_fallback = false;
-        let instance = super::execution::prepare(
+        let execution = super::execution::prepare(
             ctx,
-            super::contracts::normalize(
-                ctx,
-                args,
-                super::contracts::Semantic::Gemm,
-                super::execution::PlanApi::gemm(),
-                None,
-            )
-            .unwrap(),
+            super::contracts::normalize(ctx, args, super::contracts::Semantic::Gemm, None).unwrap(),
         )
         .unwrap();
-        instance.summary().to_owned()
+        execution.summary().to_owned()
     };
 
     let ctx = CudaContext::new(0).unwrap();
@@ -745,9 +683,9 @@ fn gpu_e2e_scale_values_do_not_fragment_the_tuning_cache() {
     let reused = run(&ctx, 3.0, true);
     assert!(
         reused.contains("source=memory"),
-        "a different alpha must hit the same tuned plan: {reused}"
+        "a different alpha must hit the same tuned Recipe: {reused}"
     );
-    // A fresh runtime has no in-memory plan, so this proves the persisted
+    // A fresh runtime has no in-memory Recipe, so this proves the persisted
     // recipe is shared too and that tuning is not repeated.
     let restored = run(&CudaContext::new(0).unwrap(), 4.0, false);
     assert!(
@@ -758,22 +696,105 @@ fn gpu_e2e_scale_values_do_not_fragment_the_tuning_cache() {
 }
 
 #[test]
-fn captured_graph_retains_workspace_instance_and_tensor_storage() {
+fn gpu_e2e_persisted_recipe_restores_in_new_process() {
+    const CHILD_CACHE: &str = "APXINF_RECIPE_RESTORE_CHILD";
+    let run = |cache: String, online_tune: bool| {
+        let ctx = CudaContext::new(0).unwrap();
+        let a = tensor(0, vec![4, 8], &[0.5; 32]);
+        let b = tensor(0, vec![8, 6], &[0.25; 48]);
+        let mut out = tensor(0, vec![4, 6], &[0.0; 24]);
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.policy.cache_dir = Some(cache);
+        args.policy.online_tune = online_tune;
+        args.policy.allow_fallback = false;
+        prepare_test_gemm(&ctx, args).unwrap().summary().to_owned()
+    };
+
+    if let Ok(cache) = std::env::var(CHILD_CACHE) {
+        let restored = run(cache, false);
+        assert!(
+            restored.contains("source=recipe"),
+            "child process did not restore the persisted Recipe: {restored}"
+        );
+        return;
+    }
+
+    let cache_dir = scratch_cache_dir("gemm-process-recipe");
+    let cache = cache_dir.to_string_lossy().into_owned();
+    let tuned = run(cache.clone(), true);
+    assert!(tuned.contains("source=tuned"), "{tuned}");
+
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "ops::tests::framework::gpu_e2e_persisted_recipe_restores_in_new_process",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD_CACHE, &cache)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Recipe restore child failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}
+
+#[test]
+fn gpu_e2e_invalid_persisted_recipe_is_retuned() {
+    let cache_dir = scratch_cache_dir("gemm-invalid-recipe");
+    let cache = cache_dir.to_string_lossy().into_owned();
+    let run = |ctx: &CudaContext| {
+        let a = tensor(0, vec![4, 8], &[0.5; 32]);
+        let b = tensor(0, vec![8, 6], &[0.25; 48]);
+        let mut out = tensor(0, vec![4, 6], &[0.0; 24]);
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.policy.cache_dir = Some(cache.clone());
+        args.policy.online_tune = true;
+        args.policy.allow_fallback = false;
+        prepare_test_gemm(ctx, args).unwrap().summary().to_owned()
+    };
+
+    let first = run(&CudaContext::new(0).unwrap());
+    assert!(first.contains("source=tuned"), "{first}");
+    for entry in std::fs::read_dir(&cache_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|value| value.to_str()) != Some("recipe") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        let key = text.lines().next().unwrap();
+        std::fs::write(path, format!("{key}\n999 999 999 999\n")).unwrap();
+    }
+
+    let restored = run(&CudaContext::new(0).unwrap());
+    assert!(
+        restored.contains("source=tuned"),
+        "an invalid persisted Recipe was accepted instead of retuned: {restored}"
+    );
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}
+
+#[test]
+fn captured_graph_retains_session_execution_and_tensor_storage() {
     let ctx = CudaContext::new(0).unwrap();
     let a = tensor(0, vec![2, 3], &[1.0; 6]);
     let b = tensor(0, vec![3, 4], &[1.0; 12]);
     let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
     let observed = out.clone();
-    let workspace = GraphWorkspace::new(4096, 0).unwrap();
+    let session = ExecutionSession::with_capacity(4096, 0).unwrap();
 
-    prepare_with_workspace(&workspace, || gemm(&ctx, GemmArgs::new(&a, &b, &mut out))).unwrap();
+    prepare_with_session(&session, || gemm(&ctx, GemmArgs::new(&a, &b, &mut out))).unwrap();
 
     let graph = crate::capture(&ctx, || {
-        with_workspace(&workspace, || gemm(&ctx, GemmArgs::new(&a, &b, &mut out)))
+        with_session(&session, || gemm(&ctx, GemmArgs::new(&a, &b, &mut out)))
     })
     .unwrap();
 
-    drop(workspace);
+    drop(session);
     drop(a);
     drop(b);
     drop(out);
@@ -796,7 +817,6 @@ fn quantization_contract_becomes_part_of_the_gemm_key() {
         &ctx,
         GemmArgs::fp8(&fp8_a, &row_scales, &fp8_b, &channel_scales, &mut fp8_out),
         super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
         None,
     )
     .unwrap();
@@ -816,7 +836,6 @@ fn quantization_contract_becomes_part_of_the_gemm_key() {
             &mut int8_out,
         ),
         super::contracts::Semantic::Gemm,
-        super::execution::PlanApi::gemm(),
         None,
     )
     .unwrap();
@@ -860,24 +879,25 @@ fn scaled_fp8_and_w8a8_use_the_canonical_kn_weight_contract() {
 }
 
 #[test]
-fn graph_workspace_reuses_one_native_instance_across_forward_traversals() {
+fn execution_session_reuses_one_native_execution_across_forward_traversals() {
     let ctx = CudaContext::new(0).unwrap();
     let a = tensor(0, vec![2, 3], &[1.0; 6]);
     let b = tensor(0, vec![3, 4], &[1.0; 12]);
     let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
-    let workspace = GraphWorkspace::new(4096, 0).unwrap();
+    let session = ExecutionSession::with_capacity(4096, 0).unwrap();
 
-    super::execution::reset_prepared_execution_create_count();
-    prepare_with_workspace(&workspace, || {
+    super::execution::reset_execution_create_count();
+    prepare_with_session(&session, || {
         let mut args = GemmArgs::new(&a, &b, &mut out);
         args.policy.online_tune = false;
         gemm(&ctx, args)
     })
     .unwrap();
-    assert_eq!(super::execution::prepared_execution_create_count(), 1);
+    assert_eq!(super::execution::execution_create_count(), 1);
+    super::execution::reset_execution_sync_count();
 
     for _ in 0..2 {
-        with_workspace(&workspace, || {
+        with_session(&session, || {
             let mut args = GemmArgs::new(&a, &b, &mut out);
             args.policy.online_tune = false;
             gemm(&ctx, args)
@@ -885,29 +905,33 @@ fn graph_workspace_reuses_one_native_instance_across_forward_traversals() {
         .unwrap();
     }
 
-    // Native instance creation includes provider resource creation and warmup.
-    // Repeating the same public L3 traversal must hit the workspace instance.
-    assert_eq!(super::execution::prepared_execution_create_count(), 1);
+    // Native Execution creation includes provider resource creation and warmup.
+    // Repeating the same public L3 traversal must hit the session Execution.
+    assert_eq!(super::execution::execution_create_count(), 1);
+    assert_eq!(super::execution::execution_sync_count(), 0);
     assert!(values(&out).iter().all(|&value| value == 3.0));
 }
 
 #[test]
-fn gpu_e2e_cached_plan_rebuilds_and_drops_provider_private_instances() {
+fn gpu_e2e_cached_recipe_rebuilds_and_drops_provider_private_executions() {
     let ctx = CudaContext::new(0).unwrap();
-    let a = tensor(0, vec![8, 16], &[1.0; 8 * 16]);
-    let b = tensor(0, vec![16, 8], &[1.0; 16 * 8]);
 
     for iteration in 0..4 {
+        // Every iteration uses new A/B/output allocations. The computation
+        // key and Recipe stay the same, while the bound Execution must be
+        // rebuilt for the new addresses.
+        let a = tensor(0, vec![8, 16], &[1.0; 8 * 16]);
+        let b = tensor(0, vec![16, 8], &[1.0; 16 * 8]);
         let mut out = tensor(0, vec![8, 8], &[0.0; 8 * 8]);
         let mut args = GemmArgs::new(&a, &b, &mut out);
         args.policy.online_tune = true;
         args.policy.allow_fallback = false;
 
-        let mut prepared = prepare_test_gemm(&ctx, args).unwrap();
+        let prepared = prepare_test_gemm(&ctx, args).unwrap();
         if iteration != 0 {
             assert!(
-                prepared.summary().contains("source=memory"),
-                "provider recipe was not rebuilt from the compacted plan: {}",
+                prepared.summary().contains("source=memory-recipe"),
+                "provider Execution was not rebuilt from the cached Recipe: {}",
                 prepared.summary()
             );
         }
@@ -943,24 +967,18 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
         args.policy.online_tune = false;
         args.policy.allow_fallback = false;
         args.policy.cache_dir = Some(cache_dir_string.clone());
-        super::contracts::normalize(
-            &ctx,
-            args,
-            super::contracts::Semantic::GemmGeglu,
-            super::execution::PlanApi::gemm_geglu(),
-            None,
-        )
-        .unwrap()
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::GemmGeglu, None)
+            .unwrap()
     };
     // Provider 3, implementation 2, version 2 is the FP8 CUTLASS GeGLU
     // candidate. Seeding avoids an enormous CPU-reference autotune while
-    // keeping instance construction and public enqueue/capture paths real.
+    // keeping execution construction and public enqueue/capture paths real.
     super::execution::seed_recipe(&ctx, &normalized, 3, 2, 2, 0).unwrap();
     drop(normalized);
 
-    let workspace = GraphWorkspace::new(1, 0).unwrap();
-    super::execution::reset_prepared_execution_create_count();
-    let (mut first, same_version, changed_version) = prepare_with_workspace(&workspace, || {
+    let session = ExecutionSession::with_capacity(1, 0).unwrap();
+    super::execution::reset_execution_create_count();
+    let (first, same_version, changed_version) = prepare_with_session(&session, || {
         let first = {
             let mut args =
                 GemmArgs::new(&a, &b, &mut out).with_immutable_weight(WeightVersion::new(7));
@@ -993,7 +1011,7 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     })
     .unwrap();
 
-    assert_eq!(super::execution::prepared_execution_create_count(), 2);
+    assert_eq!(super::execution::execution_create_count(), 2);
     assert_eq!(first.weight_prepack_count(), 1);
     assert_eq!(same_version.weight_prepack_count(), 1);
     assert_eq!(changed_version.weight_prepack_count(), 1);
@@ -1010,17 +1028,46 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     assert_eq!(first.weight_prepack_count(), 1);
 
     drop((graph, first, same_version, changed_version));
-    drop(workspace);
+    drop(session);
 
     // Without the explicit immutability/version contract, each launch must
     // conservatively repack because the caller may have changed B in place.
+    // That different steady-state cost must use a separate Recipe key.
+    let mutable_miss = {
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.quantization = GemmQuantization::Fp8UnitScale;
+        args.policy.online_tune = false;
+        args.policy.allow_fallback = false;
+        args.policy.cache_dir = Some(cache_dir_string.clone());
+        let normalized =
+            super::contracts::normalize(&ctx, args, super::contracts::Semantic::GemmGeglu, None)
+                .unwrap();
+        match super::execution::prepare(&ctx, normalized) {
+            Ok(_) => panic!("mutable weights reused an immutable-weight Recipe"),
+            Err(error) => error,
+        }
+    };
+    assert!(mutable_miss.to_string().contains("recipe miss"));
+
+    let mutable_normalized = {
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.quantization = GemmQuantization::Fp8UnitScale;
+        args.policy.online_tune = false;
+        args.policy.allow_fallback = false;
+        args.policy.cache_dir = Some(cache_dir_string.clone());
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::GemmGeglu, None)
+            .unwrap()
+    };
+    super::execution::seed_recipe(&ctx, &mutable_normalized, 3, 2, 2, 0).unwrap();
+    drop(mutable_normalized);
+
     let mut mutable_args = GemmArgs::new(&a, &b, &mut out);
     mutable_args.quantization = GemmQuantization::Fp8UnitScale;
     mutable_args.policy.online_tune = false;
     mutable_args.policy.allow_fallback = false;
     mutable_args.policy.cache_dir = Some(cache_dir_string);
-    let mut mutable = prepare_test_geglu(&ctx, GemmGegluArgs { gemm: mutable_args }).unwrap();
-    assert_eq!(mutable.weight_prepack_count(), 1); // instance warmup
+    let mutable = prepare_test_geglu(&ctx, GemmGegluArgs { gemm: mutable_args }).unwrap();
+    assert_eq!(mutable.weight_prepack_count(), 1); // execution warmup
     mutable.enqueue().unwrap();
     ctx.synchronize().unwrap();
     assert_eq!(mutable.weight_prepack_count(), 2);

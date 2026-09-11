@@ -5,7 +5,7 @@
 namespace apxinf::gemm::vendor {
 
 // Shared only by the vendor providers. These buffers are intentionally not
-// part of the planner State: another provider can define a completely
+// part of the common Execution: another provider can define a completely
 // different private state without modifying the common framework.
 struct CommonResources {
   void* projection = nullptr;

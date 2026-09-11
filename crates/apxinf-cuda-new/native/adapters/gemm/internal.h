@@ -1,9 +1,6 @@
 #pragma once
 
 #include "../../include/apxinf_cuda/gemm.h"
-#include "../../include/apxinf_cuda/gemm_bias.h"
-#include "../../include/apxinf_cuda/gemm_gelu.h"
-#include "../../include/apxinf_cuda/gemm_geglu.h"
 
 #include <cublasLt.h>
 #include <cublas_v2.h>
@@ -22,22 +19,7 @@
 
 namespace apxinf::gemm {
 
-enum class Semantic : uint32_t {
-  kGemm = 0,
-  kGemmBiasGelu = 1,
-  kGemmGeglu = 2,
-  kGemmBias = 3,
-};
-
-constexpr Semantic APXINF_GEMM_SEMANTIC_GEMM = Semantic::kGemm;
-constexpr Semantic APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU =
-    Semantic::kGemmBiasGelu;
-constexpr Semantic APXINF_GEMM_SEMANTIC_GEMM_GEGLU = Semantic::kGemmGeglu;
-constexpr Semantic APXINF_GEMM_SEMANTIC_GEMM_BIAS = Semantic::kGemmBias;
-
-struct Spec : apxinf_gemm_spec_t {
-  Semantic semantic = Semantic::kGemm;
-};
+struct Spec : apxinf_gemm_spec_t {};
 
 struct Failure : std::runtime_error {
   apxinf_status_t status;
@@ -95,12 +77,10 @@ inline bool has_row_channel_scales(const Spec& spec) {
          spec.quantization == APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL;
 }
 
-struct State;
-using LaunchFn = cudaError_t (*)(State&, const apxinf_gemm_bindings_t&);
-using CreateStateFn = void (*)(State&, const State* blueprint);
-using BindStateFn = void (*)(State&, const apxinf_gemm_bindings_t&);
-using ReleaseResourcesFn = void (*)(State&) noexcept;
-using DestroyStateFn = void (*)(State&) noexcept;
+struct Execution;
+using PrepareExecutionFn = void (*)(Execution&);
+using EnqueueFn = cudaError_t (*)(Execution&);
+using DestroyExecutionFn = void (*)(Execution&) noexcept;
 
 struct AlignmentRequirements {
   uint32_t a = 1;
@@ -126,11 +106,9 @@ struct Implementation {
   AlignmentFn alignment_requirements;
   ResourceRequirementsFn resource_requirements;
   void (*enumerate_configs)(const Spec&, std::vector<int>&);
-  CreateStateFn create_state;
-  BindStateFn bind_state;
-  ReleaseResourcesFn release_resources;
-  DestroyStateFn destroy_state;
-  LaunchFn launch;
+  PrepareExecutionFn prepare;
+  EnqueueFn enqueue;
+  DestroyExecutionFn destroy;
 };
 
 bool supports_device(const Implementation& implementation,
@@ -142,8 +120,9 @@ inline bool supports_alignment(const Implementation& implementation,
   const auto required = implementation.alignment_requirements(spec);
   return spec.a_alignment >= required.a &&
          spec.b_alignment >= required.b &&
-         spec.bias_alignment >= (spec.semantic == Semantic::kGemmBias ||
-                                         spec.semantic == Semantic::kGemmBiasGelu
+         spec.bias_alignment >=
+             (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
+                      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU
                                      ? required.bias
                                      : 0) &&
          spec.a_scales_alignment >=
@@ -183,12 +162,13 @@ struct AccuracyMetrics {
   double cosine = 0.0;
 };
 
-struct State {
+struct Execution {
   Spec spec{};
+  apxinf_gemm_bindings_t bindings{};
   int configuration = 0;
   int device = 0;
   const Implementation* implementation = nullptr;
-  // Opaque provider-owned state. The common planner never knows which
+  // Opaque provider-owned state. The common execution framework never knows which
   // handles, descriptors, algorithms or temporary buffers a provider needs.
   void* provider_state = nullptr;
   size_t resource_bytes = 0;
@@ -196,38 +176,31 @@ struct State {
   // algorithms and construct descriptors first, but must not allocate device
   // memory beyond this limit.
   size_t resource_limit = 0;
+  std::string summary;
 
-  ~State();
+  ~Execution();
 };
 
-const std::vector<Implementation>& registry(Semantic semantic);
-void prepare_cublas(State& state, const State* blueprint);
+const std::vector<Implementation>& registry(uint32_t semantic);
+void prepare_cublas(Execution& execution);
 size_t cublas_resource_requirements(const Spec& spec);
-void release_cublas_resources(State& state) noexcept;
-void destroy_cublas(State& state) noexcept;
-cudaError_t launch_cublas(State& state, const apxinf_gemm_bindings_t& bindings);
-void prepare_cublaslt(State& state, const State* blueprint);
-void prepare_cublaslt_native_fp8(State& state, const State* blueprint);
+void destroy_cublas(Execution& execution) noexcept;
+cudaError_t launch_cublas(Execution& execution);
+void prepare_cublaslt(Execution& execution);
+void prepare_cublaslt_native_fp8(Execution& execution);
 size_t cublaslt_resource_requirements(const Spec& spec);
 size_t cublaslt_native_fp8_resource_requirements(const Spec& spec);
-void release_cublaslt_resources(State& state) noexcept;
-void destroy_cublaslt(State& state) noexcept;
-cudaError_t launch_cublaslt(State& state, const apxinf_gemm_bindings_t& bindings);
-void prepare_cutlass_fp8_gemm(State& state, const State* blueprint);
-void prepare_cutlass_geglu(State& state, const State* blueprint);
+void destroy_cublaslt(Execution& execution) noexcept;
+cudaError_t launch_cublaslt(Execution& execution);
+void prepare_cutlass_fp8_gemm(Execution& execution);
+void prepare_cutlass_geglu(Execution& execution);
 size_t cutlass_fp8_resource_requirements(const Spec& spec);
 size_t cutlass_geglu_resource_requirements(const Spec& spec);
-void bind_cutlass_geglu(State& state,
-                        const apxinf_gemm_bindings_t& bindings);
-void release_cutlass_resources(State& state) noexcept;
-void destroy_cutlass(State& state) noexcept;
-cudaError_t launch_cutlass_fp8_gemm(
-    State& state, const apxinf_gemm_bindings_t& bindings);
-cudaError_t launch_cutlass_fp8_geglu(
-    State& state, const apxinf_gemm_bindings_t& bindings);
-cudaError_t launch_cutlass_bf16_geglu(
-    State& state, const apxinf_gemm_bindings_t& bindings);
-uint64_t cutlass_weight_prepack_count(const State& state);
+void destroy_cutlass(Execution& execution) noexcept;
+cudaError_t launch_cutlass_fp8_gemm(Execution& execution);
+cudaError_t launch_cutlass_fp8_geglu(Execution& execution);
+cudaError_t launch_cutlass_bf16_geglu(Execution& execution);
+uint64_t cutlass_weight_prepack_count(const Execution& execution);
 
 TuningKeys tuning_keys(const Spec& spec,
                        const apxinf_gemm_policy_t& policy,
@@ -236,18 +209,15 @@ std::string read_recipe(const std::string& directory, const std::string& key);
 void write_recipe(const std::string& directory,
                   const std::string& key,
                   const std::string& recipe);
-std::shared_ptr<State> prepare(const Implementation& implementation,
-                               int configuration,
-                               const Spec& spec,
-                               const apxinf_gemm_policy_t& policy,
-                               int device,
-                               const State* blueprint = nullptr);
-std::shared_ptr<State> tune(const Spec& spec,
-                            const apxinf_gemm_policy_t& policy,
-                            const apxinf_gemm_tuning_bindings_t& bindings,
-                            int device,
-                            std::string& report,
-                            const Recipe* preferred = nullptr);
+std::unique_ptr<Execution> prepare(const Implementation& implementation,
+                                   int configuration, const Spec& spec,
+                                   const apxinf_gemm_policy_t& policy,
+                                   const apxinf_gemm_bindings_t& bindings,
+                                   int device);
+Recipe tune(
+    const Spec& spec, const apxinf_gemm_policy_t& policy,
+    const apxinf_gemm_tuning_bindings_t& bindings, int device,
+    std::string& report, const Recipe* preferred = nullptr);
 ReferenceOutput cpu_reference(
     const Spec& spec, const apxinf_gemm_tuning_bindings_t& bindings);
 AccuracyMetrics compare_reference(const std::vector<float>& expected,
@@ -260,16 +230,4 @@ struct apxinf_runtime {
   int device = 0;
   std::mutex gemm_mutex;
   std::map<std::string, apxinf::gemm::Recipe> gemm_recipes;
-  std::map<std::string, std::shared_ptr<apxinf::gemm::State>> gemm_plans;
-};
-
-struct apxinf_gemm_plan {
-  std::shared_ptr<apxinf::gemm::State> state;
-  apxinf_gemm_policy_t policy{};
-  std::string summary;
-};
-
-struct apxinf_gemm_instance {
-  std::shared_ptr<apxinf::gemm::State> state;
-  apxinf_gemm_bindings_t bindings{};
 };

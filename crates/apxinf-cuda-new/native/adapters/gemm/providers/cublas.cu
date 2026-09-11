@@ -22,7 +22,7 @@ struct CublasState {
   }
 };
 
-CublasState& provider(State& state) {
+CublasState& provider(Execution& state) {
   return *static_cast<CublasState*>(state.provider_state);
 }
 
@@ -33,7 +33,7 @@ size_t cublas_resource_requirements(const Spec& spec) {
          4 * 1024 * 1024;
 }
 
-void prepare_cublas(State& state, const State*) {
+void prepare_cublas(Execution& state) {
   auto resources = std::make_unique<CublasState>();
   vendor::allocate_common_resources(state.spec, resources->common, false);
   check_cublas(cublasCreate(&resources->handle));
@@ -45,17 +45,13 @@ void prepare_cublas(State& state, const State*) {
   state.provider_state = resources.release();
 }
 
-void release_cublas_resources(State& state) noexcept {
-  if (state.provider_state != nullptr) provider(state).release_resources();
-}
-
-void destroy_cublas(State& state) noexcept {
+void destroy_cublas(Execution& state) noexcept {
   delete static_cast<CublasState*>(state.provider_state);
   state.provider_state = nullptr;
 }
 
-cudaError_t launch_cublas(State& state,
-                          const apxinf_gemm_bindings_t& bindings) {
+cudaError_t launch_cublas(Execution& state) {
+  const auto& bindings = state.bindings;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
   const auto& spec = state.spec;
   auto& resources = provider(state);

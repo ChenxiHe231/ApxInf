@@ -28,11 +28,11 @@ struct CutlassGegluState {
   }
 };
 
-CutlassGegluState& provider(State& state) {
+CutlassGegluState& provider(Execution& state) {
   return *static_cast<CutlassGegluState*>(state.provider_state);
 }
 
-void pack_geglu_weight(State& state,
+void pack_geglu_weight(Execution& state,
                        const apxinf_gemm_bindings_t& bindings) {
   auto& resources = provider(state);
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
@@ -60,20 +60,17 @@ size_t cutlass_geglu_resource_requirements(const Spec& spec) {
   return static_cast<size_t>(spec.k * spec.n) * dtype_bytes(spec.b_dtype);
 }
 
-void prepare_cutlass_fp8_gemm(State&, const State*) {}
+void prepare_cutlass_fp8_gemm(Execution&) {}
 
-void prepare_cutlass_geglu(State& state, const State*) {
-  auto resources = std::make_unique<CutlassGegluState>();
-  resources->packed_weight_bytes =
+void prepare_cutlass_geglu(Execution& state) {
+  auto owned_resources = std::make_unique<CutlassGegluState>();
+  owned_resources->packed_weight_bytes =
       state.spec.k * state.spec.n * dtype_bytes(state.spec.b_dtype);
-  check_cuda(cudaMalloc(&resources->packed_weight,
-                        resources->packed_weight_bytes));
-  state.resource_bytes = resources->packed_weight_bytes;
-  state.provider_state = resources.release();
-}
-
-void bind_cutlass_geglu(State& state,
-                        const apxinf_gemm_bindings_t& bindings) {
+  check_cuda(cudaMalloc(&owned_resources->packed_weight,
+                        owned_resources->packed_weight_bytes));
+  state.resource_bytes = owned_resources->packed_weight_bytes;
+  state.provider_state = owned_resources.release();
+  const auto& bindings = state.bindings;
   if (bindings.b_is_immutable == 0) return;
   auto& resources = provider(state);
   if (resources.packed_weight_ready) {
@@ -90,17 +87,13 @@ void bind_cutlass_geglu(State& state,
   resources.packed_weight_ready = true;
 }
 
-void release_cutlass_resources(State& state) noexcept {
-  if (state.provider_state != nullptr) provider(state).release_resources();
-}
-
-void destroy_cutlass(State& state) noexcept {
+void destroy_cutlass(Execution& state) noexcept {
   delete static_cast<CutlassGegluState*>(state.provider_state);
   state.provider_state = nullptr;
 }
 
-cudaError_t launch_cutlass_fp8_gemm(
-    State& state, const apxinf_gemm_bindings_t& bindings) {
+cudaError_t launch_cutlass_fp8_gemm(Execution& state) {
+  const auto& bindings = state.bindings;
 #ifdef APXINF_GEMM_CUTLASS
   const auto& spec = state.spec;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
@@ -116,8 +109,8 @@ cudaError_t launch_cutlass_fp8_gemm(
 #endif
 }
 
-cudaError_t launch_cutlass_fp8_geglu(
-    State& state, const apxinf_gemm_bindings_t& bindings) {
+cudaError_t launch_cutlass_fp8_geglu(Execution& state) {
+  const auto& bindings = state.bindings;
 #ifdef APXINF_GEMM_CUTLASS
   const auto& spec = state.spec;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
@@ -145,8 +138,8 @@ cudaError_t launch_cutlass_fp8_geglu(
 #endif
 }
 
-cudaError_t launch_cutlass_bf16_geglu(
-    State& state, const apxinf_gemm_bindings_t& bindings) {
+cudaError_t launch_cutlass_bf16_geglu(Execution& state) {
+  const auto& bindings = state.bindings;
 #ifdef APXINF_GEMM_CUTLASS
   const auto& spec = state.spec;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
@@ -174,7 +167,7 @@ cudaError_t launch_cutlass_bf16_geglu(
 #endif
 }
 
-uint64_t cutlass_weight_prepack_count(const State& state) {
+uint64_t cutlass_weight_prepack_count(const Execution& state) {
   if (state.provider_state == nullptr) return 0;
   return static_cast<const CutlassGegluState*>(state.provider_state)
       ->prepack_count;

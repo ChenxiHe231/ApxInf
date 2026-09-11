@@ -71,13 +71,12 @@ struct CapturedExecution {
   cudaGraphExec_t executable = nullptr;
   cudaStream_t stream = nullptr;
 
-  CapturedExecution(State& candidate,
-                    const apxinf_gemm_bindings_t& bindings)
-      : stream(static_cast<cudaStream_t>(bindings.stream)) {
+  explicit CapturedExecution(Execution& candidate)
+      : stream(static_cast<cudaStream_t>(candidate.bindings.stream)) {
     check_cuda(cudaStreamBeginCapture(stream,
                                       cudaStreamCaptureModeThreadLocal));
     try {
-      check_cuda(candidate.implementation->launch(candidate, bindings));
+      check_cuda(candidate.implementation->enqueue(candidate));
     } catch (...) {
       cudaStreamEndCapture(stream, &graph);
       if (graph != nullptr) cudaGraphDestroy(graph);
@@ -104,7 +103,7 @@ struct CapturedExecution {
 
 }  // namespace
 
-std::shared_ptr<State> tune(
+Recipe tune(
     const Spec& spec, const apxinf_gemm_policy_t& policy,
     const apxinf_gemm_tuning_bindings_t& tuning_bindings, int device,
     std::string& report, const Recipe* preferred) {
@@ -118,7 +117,7 @@ std::shared_ptr<State> tune(
   const size_t output_bytes = count * dtype_bytes(spec.output_dtype);
   const ReferenceOutput reference = cpu_reference(spec, tuning_bindings);
 
-  std::shared_ptr<State> winner;
+  std::unique_ptr<Execution> winner;
   float best = std::numeric_limits<float>::infinity();
   Events events;
   int checked = 0;
@@ -182,13 +181,10 @@ std::shared_ptr<State> tune(
     const auto& implementation = *selected.implementation;
     const int configuration = selected.configuration;
     try {
-        auto candidate =
-            prepare(implementation, configuration, spec, policy, device);
-        if (implementation.bind_state != nullptr) {
-          implementation.bind_state(*candidate, bindings);
-        }
+        auto candidate = prepare(implementation, configuration, spec, policy,
+                                 bindings, device);
         poison(bindings, output_bytes);
-        check_cuda(implementation.launch(*candidate, bindings));
+        check_cuda(implementation.enqueue(*candidate));
         const auto actual = read_output(
             output.pointer, count, spec.output_dtype,
             static_cast<cudaStream_t>(bindings.stream));
@@ -204,12 +200,12 @@ std::shared_ptr<State> tune(
           continue;
         }
         for (int iteration = 0; iteration < 3; ++iteration) {
-          check_cuda(implementation.launch(*candidate, bindings));
+          check_cuda(implementation.enqueue(*candidate));
         }
         check_cuda(cudaEventRecord(events.start,
                                    static_cast<cudaStream_t>(bindings.stream)));
         for (int iteration = 0; iteration < 10; ++iteration) {
-          check_cuda(implementation.launch(*candidate, bindings));
+          check_cuda(implementation.enqueue(*candidate));
         }
         check_cuda(cudaEventRecord(events.stop,
                                    static_cast<cudaStream_t>(bindings.stream)));
@@ -222,7 +218,7 @@ std::shared_ptr<State> tune(
                               ")");
         if (milliseconds < best) {
           best = milliseconds;
-          winner = candidate;
+          winner = std::move(candidate);
         }
     } catch (const Failure& failure) {
       ++rejected;
@@ -240,7 +236,7 @@ std::shared_ptr<State> tune(
     // Graph support is a correctness requirement, not a separate tuning
     // objective. Select the fastest eager candidate first, then prove that
     // the winner can be captured and that replay writes the correct output.
-    CapturedExecution graph(*winner, bindings);
+    CapturedExecution graph(*winner);
     poison(bindings, output_bytes);
     graph.launch();
     const auto graph_actual = read_output(
@@ -262,7 +258,13 @@ std::shared_ptr<State> tune(
     report += diagnostics[index];
   }
   report += "]";
-  return winner;
+  // Tuning executions are bound to a private poisoned output and must never be
+  // rebound for serving. Only the address-independent Recipe crosses this
+  // boundary; the caller creates a fresh Execution with the real bindings.
+  return {winner->implementation->provider_id,
+          winner->implementation->implementation_id,
+          winner->implementation->implementation_version,
+          winner->configuration};
 }
 
 }  // namespace apxinf::gemm

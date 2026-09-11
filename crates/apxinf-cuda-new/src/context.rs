@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::ffi;
 use crate::stream::CudaStream;
 
-/// Owns the stream and opaque native runtime used by GEMM plans.
+/// Owns the stream and opaque native runtime used by GEMM executions.
 pub struct CudaContext {
     device_id: usize,
     stream: Arc<CudaStream>,

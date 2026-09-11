@@ -3,14 +3,16 @@ use std::ffi::{c_char, c_void};
 use super::types::{CudaStream, Runtime};
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Spec {
     pub version: u32,
+    pub semantic: u32,
     pub a_dtype: u32,
     pub b_dtype: u32,
     pub accumulation_dtype: u32,
     pub output_dtype: u32,
     pub quantization: u32,
+    pub b_is_immutable: u32,
     pub a_alignment: u32,
     pub b_alignment: u32,
     pub bias_alignment: u32,
@@ -62,33 +64,27 @@ pub(crate) struct TuningBindings {
     pub reference_kind: u32,
 }
 
-pub(crate) type Plan = *mut c_void;
-pub(crate) type Instance = *mut c_void;
+pub(crate) type Execution = *mut c_void;
 
 unsafe extern "C" {
-    pub(crate) fn apxinf_gemm_plan_create(
+    pub(crate) fn apxinf_gemm_prepare(
         runtime: Runtime,
         spec: *const Spec,
         policy: *const Policy,
         tuning_bindings: *const TuningBindings,
-        plan: *mut Plan,
+        execution: *mut Execution,
     ) -> i32;
-    pub(crate) fn apxinf_gemm_instance_create(
-        plan: Plan,
-        bindings: *const Bindings,
-        instance: *mut Instance,
-    ) -> i32;
-    pub(crate) fn apxinf_gemm_enqueue(instance: Instance) -> i32;
-    pub(crate) fn apxinf_gemm_instance_destroy(instance: Instance);
-    pub(crate) fn apxinf_gemm_plan_destroy(plan: Plan);
-    pub(crate) fn apxinf_gemm_plan_summary(plan: Plan) -> *const c_char;
-    pub(crate) fn apxinf_gemm_instance_weight_prepack_count(instance: Instance) -> u64;
+    pub(crate) fn apxinf_gemm_enqueue(execution: Execution) -> i32;
+    pub(crate) fn apxinf_gemm_destroy(execution: Execution);
+    #[cfg(test)]
+    pub(crate) fn apxinf_gemm_summary(execution: Execution) -> *const c_char;
+    #[cfg(test)]
+    pub(crate) fn apxinf_gemm_execution_weight_prepack_count(execution: Execution) -> u64;
 
     #[cfg(test)]
     pub(crate) fn apxinf_gemm_test_seed_recipe(
         spec: *const Spec,
         policy: *const Policy,
-        semantic: u32,
         device: i32,
         provider_id: u32,
         implementation_id: u32,
