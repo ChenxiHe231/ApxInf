@@ -367,10 +367,42 @@ fn prepare_with_original_fp32<'a>(
     api: super::execution::PlanApi,
     bias: Option<&'a Tensor>,
     reference: super::contracts::ValidationReference<'a>,
-) -> apxinf_core::Result<PreparedExecution> {
+) -> apxinf_core::Result<super::execution::PreparedExecution> {
     let normalized = super::contracts::normalize(ctx, args, semantic, api, bias)?;
     let normalized = super::contracts::with_validation_reference(normalized, reference)?;
     super::execution::prepare(ctx, normalized)
+}
+
+fn prepare_test_gemm(
+    ctx: &CudaContext,
+    args: GemmArgs<'_>,
+) -> apxinf_core::Result<super::execution::PreparedExecution> {
+    super::execution::prepare(
+        ctx,
+        super::contracts::normalize(
+            ctx,
+            args,
+            super::contracts::Semantic::Gemm,
+            super::execution::PlanApi::gemm(),
+            None,
+        )?,
+    )
+}
+
+fn prepare_test_geglu(
+    ctx: &CudaContext,
+    args: GemmGegluArgs<'_>,
+) -> apxinf_core::Result<super::execution::PreparedExecution> {
+    super::execution::prepare(
+        ctx,
+        super::contracts::normalize(
+            ctx,
+            args.gemm,
+            super::contracts::Semantic::GemmGeglu,
+            super::execution::PlanApi::gemm_geglu(),
+            None,
+        )?,
+    )
 }
 
 #[test]
@@ -1276,7 +1308,7 @@ fn fp8_reference_distinguishes_full_quantization_error() {
     args.quantization = GemmQuantization::Fp8UnitScale;
     args.policy.allow_fallback = false;
     args.policy.graph_safe = false;
-    let prepared = prepare_gemm(&ctx, args).unwrap();
+    let prepared = prepare_test_gemm(&ctx, args).unwrap();
     assert!(prepared.summary().contains("reference=dequantized-input"));
 }
 
@@ -1367,24 +1399,33 @@ fn scaled_fp8_and_w8a8_use_the_canonical_kn_weight_contract() {
 }
 
 #[test]
-fn prepared_execution_reuses_one_native_instance_across_enqueues() {
+fn graph_workspace_reuses_one_native_instance_across_forward_traversals() {
     let ctx = CudaContext::new(0).unwrap();
     let a = tensor(0, vec![2, 3], &[1.0; 6]);
     let b = tensor(0, vec![3, 4], &[1.0; 12]);
     let mut out = tensor(0, vec![2, 4], &[0.0; 8]);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.policy.online_tune = false;
+    let workspace = GraphWorkspace::new(4096, 0).unwrap();
 
     super::execution::reset_prepared_execution_create_count();
-    let mut prepared = prepare_gemm(&ctx, args).unwrap();
+    prepare_with_workspace(&workspace, || {
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.policy.online_tune = false;
+        gemm(&ctx, args)
+    })
+    .unwrap();
     assert_eq!(super::execution::prepared_execution_create_count(), 1);
 
-    prepared.enqueue().unwrap();
-    prepared.enqueue().unwrap();
-    ctx.synchronize().unwrap();
+    for _ in 0..2 {
+        with_workspace(&workspace, || {
+            let mut args = GemmArgs::new(&a, &b, &mut out);
+            args.policy.online_tune = false;
+            gemm(&ctx, args)
+        })
+        .unwrap();
+    }
 
     // Native instance creation includes provider resource creation and warmup.
-    // Repeated hot-path submissions must not run that preparation again.
+    // Repeating the same public L3 traversal must hit the workspace instance.
     assert_eq!(super::execution::prepared_execution_create_count(), 1);
     assert!(values(&out).iter().all(|&value| value == 3.0));
 }
@@ -1401,7 +1442,7 @@ fn gpu_e2e_cached_plan_rebuilds_and_drops_provider_private_instances() {
         args.policy.online_tune = true;
         args.policy.allow_fallback = false;
 
-        let mut prepared = prepare_gemm(&ctx, args).unwrap();
+        let mut prepared = prepare_test_gemm(&ctx, args).unwrap();
         if iteration != 0 {
             assert!(
                 prepared.summary().contains("source=memory"),
@@ -1452,7 +1493,7 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     };
     // Provider 3, implementation 2, version 2 is the FP8 CUTLASS GeGLU
     // candidate. Seeding avoids an enormous CPU-reference autotune while
-    // keeping instance construction and public enqueue/capture paths real.
+    // keeping instance construction and enqueue/capture paths real.
     super::execution::seed_recipe(&ctx, &normalized, 3, 2, 2, 0).unwrap();
     drop(normalized);
 
@@ -1466,7 +1507,7 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
             args.policy.online_tune = false;
             args.policy.allow_fallback = false;
             args.policy.cache_dir = Some(cache_dir_string.clone());
-            prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: args })?
+            prepare_test_geglu(&ctx, GemmGegluArgs { gemm: args })?
         };
 
         let same = {
@@ -1476,7 +1517,7 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
             args.policy.online_tune = false;
             args.policy.allow_fallback = false;
             args.policy.cache_dir = Some(cache_dir_string.clone());
-            prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: args })?
+            prepare_test_geglu(&ctx, GemmGegluArgs { gemm: args })?
         };
         let changed = {
             let mut args =
@@ -1485,7 +1526,7 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
             args.policy.online_tune = false;
             args.policy.allow_fallback = false;
             args.policy.cache_dir = Some(cache_dir_string.clone());
-            prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: args })?
+            prepare_test_geglu(&ctx, GemmGegluArgs { gemm: args })?
         };
         Ok((first, same, changed))
     })
@@ -1517,7 +1558,7 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     mutable_args.policy.online_tune = false;
     mutable_args.policy.allow_fallback = false;
     mutable_args.policy.cache_dir = Some(cache_dir_string);
-    let mut mutable = prepare_gemm_geglu(&ctx, GemmGegluArgs { gemm: mutable_args }).unwrap();
+    let mut mutable = prepare_test_geglu(&ctx, GemmGegluArgs { gemm: mutable_args }).unwrap();
     assert_eq!(mutable.weight_prepack_count(), 1); // instance warmup
     mutable.enqueue().unwrap();
     ctx.synchronize().unwrap();

@@ -21,19 +21,3 @@ pub fn gemm_bias_gelu(ctx: &CudaContext, args: GemmBiasGeluArgs<'_>) -> Result<(
         )?,
     )
 }
-
-pub fn prepare_gemm_bias_gelu(
-    ctx: &CudaContext,
-    args: GemmBiasGeluArgs<'_>,
-) -> Result<execution::PreparedExecution> {
-    execution::prepare(
-        ctx,
-        normalize(
-            ctx,
-            args.gemm,
-            Semantic::GemmBiasGelu,
-            execution::PlanApi::gemm_bias_gelu(),
-            Some(args.bias),
-        )?,
-    )
-}

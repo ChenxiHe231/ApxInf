@@ -1,7 +1,7 @@
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda::{
     capture,
-    ops::{prepare_gemm, GemmArgs},
+    ops::{gemm, prepare_with_workspace, with_workspace, GemmArgs, GraphWorkspace},
     CudaBuffer, CudaContext,
 };
 use half::bf16;
@@ -27,18 +27,31 @@ fn values(tensor: &Tensor) -> Vec<f32> {
         .collect()
 }
 
+fn run_gemm(
+    ctx: &CudaContext,
+    a: &Tensor,
+    b: &Tensor,
+    out: &mut Tensor,
+) -> apxinf_core::Result<()> {
+    let mut args = GemmArgs::new(a, b, out);
+    args.policy.online_tune = false;
+    gemm(ctx, args)
+}
+
 #[test]
-fn public_prepared_execution_can_be_captured_and_replayed() {
+fn same_public_l3_forward_prepares_captures_and_replays() {
     let ctx = CudaContext::new(0).unwrap();
     let a = bf16_tensor(0, vec![2, 3], &[1.0; 6]);
     let b = bf16_tensor(0, vec![3, 4], &[1.0; 12]);
     let mut out = bf16_tensor(0, vec![2, 4], &[0.0; 8]);
     let observed = CudaBuffer::from_tensor(&out).unwrap();
+    let workspace = GraphWorkspace::new(4096, 0).unwrap();
 
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.policy.online_tune = false;
-    let mut prepared = prepare_gemm(&ctx, args).unwrap();
-    let graph = capture(&ctx, || prepared.enqueue()).unwrap();
+    prepare_with_workspace(&workspace, || run_gemm(&ctx, &a, &b, &mut out)).unwrap();
+    let graph = capture(&ctx, || {
+        with_workspace(&workspace, || run_gemm(&ctx, &a, &b, &mut out))
+    })
+    .unwrap();
 
     let sentinel: Vec<u8> = (0..8)
         .flat_map(|_| bf16::from_f32(-123.0).to_bits().to_ne_bytes())
@@ -48,20 +61,23 @@ fn public_prepared_execution_can_be_captured_and_replayed() {
     ctx.synchronize().unwrap();
 
     assert!(values(&out).iter().all(|&value| value == 3.0));
+    drop(graph);
+    drop(workspace);
 }
 
 #[test]
-fn capture_rejects_prepared_execution_from_another_stream() {
+fn public_l3_capture_rejects_cached_instance_from_another_stream() {
     let capture_ctx = CudaContext::new(0).unwrap();
     let execution_ctx = CudaContext::new(0).unwrap();
     let a = bf16_tensor(0, vec![2, 3], &[1.0; 6]);
     let b = bf16_tensor(0, vec![3, 4], &[1.0; 12]);
     let mut out = bf16_tensor(0, vec![2, 4], &[0.0; 8]);
+    let workspace = GraphWorkspace::new(4096, 0).unwrap();
 
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.policy.online_tune = false;
-    let mut prepared = prepare_gemm(&execution_ctx, args).unwrap();
-    let error = match capture(&capture_ctx, || prepared.enqueue()) {
+    prepare_with_workspace(&workspace, || run_gemm(&execution_ctx, &a, &b, &mut out)).unwrap();
+    let error = match capture(&capture_ctx, || {
+        with_workspace(&workspace, || run_gemm(&execution_ctx, &a, &b, &mut out))
+    }) {
         Ok(_) => panic!("capture accepted an execution bound to another stream"),
         Err(error) => error,
     };
@@ -74,8 +90,31 @@ fn capture_rejects_prepared_execution_from_another_stream() {
 
     // A failed mismatched capture must not poison later capture on the bound
     // stream.
-    let graph = capture(&execution_ctx, || prepared.enqueue()).unwrap();
+    let graph = capture(&execution_ctx, || {
+        with_workspace(&workspace, || run_gemm(&execution_ctx, &a, &b, &mut out))
+    })
+    .unwrap();
     graph.replay().unwrap();
     execution_ctx.synchronize().unwrap();
     assert!(values(&out).iter().all(|&value| value == 3.0));
+}
+
+#[test]
+fn public_l3_capture_rejects_an_unprepared_cache_miss() {
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bf16_tensor(0, vec![2, 3], &[1.0; 6]);
+    let b = bf16_tensor(0, vec![3, 4], &[1.0; 12]);
+    let mut out = bf16_tensor(0, vec![2, 4], &[0.0; 8]);
+    let workspace = GraphWorkspace::new(4096, 0).unwrap();
+
+    let error = match capture(&ctx, || {
+        with_workspace(&workspace, || run_gemm(&ctx, &a, &b, &mut out))
+    }) {
+        Ok(_) => panic!("capture unexpectedly prepared a GEMM instance"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("cache miss during capture"),
+        "unexpected error: {error}"
+    );
 }

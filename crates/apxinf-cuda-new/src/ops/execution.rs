@@ -122,22 +122,18 @@ impl Drop for SharedExecution {
     }
 }
 
-/// A fully prepared GEMM execution bound to fixed tensor addresses.
-///
-/// Preparation selects the candidate, creates provider resources and performs
-/// any required warmup. Executors should retain this object and call
-/// [`enqueue`](Self::enqueue) on their hot path. Enqueue is asynchronous; the
-/// executor owns synchronization or CUDA Graph replay.
-pub struct PreparedExecution {
+/// Internal GEMM instance bound to fixed tensor addresses. Graph workspaces
+/// retain these between the eager preparation traversal and stream capture.
+pub(crate) struct PreparedExecution {
     exec: Rc<SharedExecution>,
 }
 
 impl PreparedExecution {
-    pub fn summary(&self) -> &str {
+    pub(crate) fn summary(&self) -> &str {
         &self.exec.summary
     }
 
-    pub fn enqueue(&mut self) -> Result<()> {
+    pub(crate) fn enqueue(&mut self) -> Result<()> {
         crate::workspace::validate_capture_target(
             self.exec.stream.device(),
             self.exec.stream.handle() as usize,
