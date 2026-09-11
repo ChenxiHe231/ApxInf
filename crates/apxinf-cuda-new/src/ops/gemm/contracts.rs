@@ -191,7 +191,7 @@ pub(crate) enum Semantic {
 }
 
 pub(crate) struct Normalized<'a> {
-    pub api: super::execution::PlanApi,
+    pub api: super::gemm_execution::PlanApi,
     pub spec: abi::Spec,
     pub policy: GemmPolicy,
     pub bindings: abi::Bindings,
@@ -296,7 +296,7 @@ pub(crate) fn normalize<'a>(
     ctx: &CudaContext,
     args: GemmArgs<'a>,
     semantic: Semantic,
-    api: super::execution::PlanApi,
+    api: super::gemm_execution::PlanApi,
     bias: Option<&Tensor>,
 ) -> Result<Normalized<'a>> {
     let a_shape = args.a.shape().dims();

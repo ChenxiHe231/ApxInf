@@ -1,18 +1,18 @@
 //! GEMM-only pilot: semantic APIs with selection and native state behind L1.
 
-mod contracts;
-pub(crate) mod execution;
 mod gemm;
-mod gemm_bias;
-mod gemm_geglu;
-mod gemm_gelu;
+
+// Keep these crate-private aliases while graph/workspace and unit tests still
+// refer to the GEMM implementation through `crate::ops`.
+#[cfg(test)]
+pub(crate) use gemm::contracts;
+pub(crate) use gemm::gemm_execution as execution;
 
 pub use crate::workspace::GraphWorkspace;
-pub use contracts::{GemmArgs, GemmPolicy, GemmQuantization, WeightVersion};
-pub use gemm::gemm;
-pub use gemm_bias::{gemm_bias, GemmBiasArgs};
-pub use gemm_geglu::{gemm_geglu, GemmGegluArgs};
-pub use gemm_gelu::{gemm_bias_gelu, GemmBiasGeluArgs};
+pub use gemm::{
+    gemm, gemm_bias, gemm_bias_gelu, gemm_geglu, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs,
+    GemmGegluArgs, GemmPolicy, GemmQuantization, WeightVersion,
+};
 
 pub fn prepare_with_workspace<T>(
     workspace: &GraphWorkspace,

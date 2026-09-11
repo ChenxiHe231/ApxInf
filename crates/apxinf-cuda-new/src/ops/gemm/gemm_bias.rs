@@ -1,7 +1,7 @@
 use apxinf_core::{Result, Tensor};
 
 use super::contracts::{normalize, GemmArgs, Semantic};
-use super::execution;
+use super::gemm_execution as execution;
 use crate::CudaContext;
 
 pub struct GemmBiasArgs<'a> {
