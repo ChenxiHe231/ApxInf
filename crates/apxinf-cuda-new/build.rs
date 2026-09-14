@@ -5,74 +5,13 @@ use std::process::Command;
 
 #[path = "build_support/cuda_arch.rs"]
 mod cuda_arch;
+#[path = "build_support/gemm_fingerprint.rs"]
+mod gemm_fingerprint;
 
 use cuda_arch::{
     gencode_args, is_cutlass_sm100_family, select_cuda_arch, target_features, ArchSelection,
     ArchSource,
 };
-
-const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
-
-fn hash_bytes(hash: &mut u128, bytes: &[u8]) {
-    for byte in bytes {
-        *hash ^= u128::from(*byte);
-        *hash = hash.wrapping_mul(FNV1A_128_PRIME);
-    }
-}
-
-fn collect_inputs(root: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_inputs(&path, files);
-        } else if path.extension().is_some_and(|extension| {
-            matches!(
-                extension.to_string_lossy().as_ref(),
-                "cu" | "cuh" | "h" | "hh" | "hpp"
-            )
-        }) {
-            files.push(path);
-        }
-    }
-}
-
-fn build_id(native: &Path, target: &str, selection: &ArchSelection) -> String {
-    let mut hash = FNV1A_128_OFFSET;
-    for value in ["apxinf-gemm-pilot-v1", env!("CARGO_PKG_VERSION"), target] {
-        hash_bytes(&mut hash, value.as_bytes());
-        hash_bytes(&mut hash, &[0]);
-    }
-    for arch in &selection.targets {
-        hash_bytes(&mut hash, arch.nvcc_arch.as_bytes());
-        hash_bytes(&mut hash, &[0]);
-        hash_bytes(&mut hash, arch.cutlass_arch.as_bytes());
-        hash_bytes(&mut hash, &[0]);
-    }
-    let mut files = Vec::new();
-    collect_inputs(native, &mut files);
-    files.sort_unstable();
-    for path in files {
-        hash_bytes(
-            &mut hash,
-            path.strip_prefix(native)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .as_bytes(),
-        );
-        hash_bytes(&mut hash, &[0]);
-        hash_bytes(
-            &mut hash,
-            &std::fs::read(&path)
-                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
-        );
-        hash_bytes(&mut hash, &[0xff]);
-    }
-    format!("gemm-kb1-{hash:032x}")
-}
 
 fn write_arch_header(out: &Path, selection: &ArchSelection) -> PathBuf {
     let path = out.join("apxinf_cuda_arches.h");
@@ -146,6 +85,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=APXINF_KERNEL_BUILD_ID");
     println!("cargo:rerun-if-env-changed=CUDA_VISIBLE_DEVICES");
     println!("cargo:rerun-if-changed=build_support/cuda_arch.rs");
+    println!("cargo:rerun-if-changed=build_support/gemm_fingerprint.rs");
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let native = manifest.join("native");
@@ -199,8 +139,16 @@ fn main() {
         .join(", ");
     println!("cargo:warning=GEMM targets: {target_summary}");
 
-    let id = env::var("APXINF_KERNEL_BUILD_ID")
-        .unwrap_or_else(|_| build_id(&native, &target, &selection));
+    let id = env::var("APXINF_KERNEL_BUILD_ID").unwrap_or_else(|_| {
+        gemm_fingerprint::build_id(
+            &native,
+            &target,
+            selection
+                .targets
+                .iter()
+                .map(|arch| (arch.nvcc_arch.as_str(), arch.cutlass_arch.as_str())),
+        )
+    });
     assert!(
         !id.chars()
             .any(|character| matches!(character, '\n' | '\r' | '"')),

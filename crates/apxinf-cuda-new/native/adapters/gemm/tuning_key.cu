@@ -22,14 +22,15 @@ std::string compatibility_fingerprint(const cudaDeviceProp& properties) {
   return value.str();
 }
 
-std::string performance_fingerprint(const cudaDeviceProp& properties) {
+std::string performance_fingerprint(const cudaDeviceProp& properties,
+                                    int memory_clock_rate) {
   std::ostringstream value;
   value << compatibility_fingerprint(properties) << "|name=";
   append_hex_string(value, properties.name);
   value << "|sms=" << properties.multiProcessorCount
         << "|threads-per-sm=" << properties.maxThreadsPerMultiProcessor
-        << "|global-memory=" << properties.totalGlobalMem
         << "|memory-bus=" << properties.memoryBusWidth
+        << "|memory-clock=" << memory_clock_rate
         << "|l2=" << properties.l2CacheSize;
   return value.str();
 }
@@ -72,13 +73,17 @@ TuningKeys tuning_keys(const Spec& spec,
   check_cuda(cudaGetDeviceProperties(&properties, device));
   int runtime_version = 0;
   int driver_version = 0;
+  int memory_clock_rate = 0;
   check_cuda(cudaRuntimeGetVersion(&runtime_version));
   check_cuda(cudaDriverGetVersion(&driver_version));
+  check_cuda(cudaDeviceGetAttribute(&memory_clock_rate,
+                                    cudaDevAttrMemoryClockRate, device));
 
   const std::string common =
       common_key(spec, policy, runtime_version, driver_version, properties);
   return {
-      common + "|performance|" + performance_fingerprint(properties),
+      common + "|performance|" +
+          performance_fingerprint(properties, memory_clock_rate),
       common + "|compatible-hint",
   };
 }
@@ -92,6 +97,7 @@ extern "C" size_t apxinf_gemm_test_hardware_fingerprint(
     size_t uuid_size,
     int32_t multiprocessor_count,
     uint64_t total_global_memory,
+    int32_t memory_clock_rate,
     int32_t performance,
     char* output,
     size_t capacity) {
@@ -108,7 +114,8 @@ extern "C" size_t apxinf_gemm_test_hardware_fingerprint(
   properties.memoryBusWidth = 256;
   properties.l2CacheSize = 16 * 1024 * 1024;
   const std::string value = performance != 0
-                                ? apxinf::gemm::performance_fingerprint(properties)
+                                ? apxinf::gemm::performance_fingerprint(
+                                      properties, memory_clock_rate)
                                 : apxinf::gemm::compatibility_fingerprint(properties);
   if (output != nullptr && capacity != 0) {
     const size_t copied = std::min(value.size(), capacity - 1);

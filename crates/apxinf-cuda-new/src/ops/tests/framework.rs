@@ -17,6 +17,7 @@ unsafe extern "C" {
         uuid_size: usize,
         multiprocessor_count: i32,
         total_global_memory: u64,
+        memory_clock_rate: i32,
         performance: c_int,
         output: *mut c_char,
         capacity: usize,
@@ -24,7 +25,13 @@ unsafe extern "C" {
     fn apxinf_gemm_test_resource_prefilter(device: c_int) -> c_int;
 }
 
-fn hardware_fingerprint(uuid: [u8; 16], sms: i32, memory: u64, performance: bool) -> String {
+fn hardware_fingerprint(
+    uuid: [u8; 16],
+    sms: i32,
+    memory: u64,
+    memory_clock_rate: i32,
+    performance: bool,
+) -> String {
     let mut output = vec![0 as c_char; 512];
     let length = unsafe {
         apxinf_gemm_test_hardware_fingerprint(
@@ -32,6 +39,7 @@ fn hardware_fingerprint(uuid: [u8; 16], sms: i32, memory: u64, performance: bool
             uuid.len(),
             sms,
             memory,
+            memory_clock_rate,
             if performance { 1 } else { 0 },
             output.as_mut_ptr(),
             output.len(),
@@ -49,29 +57,54 @@ fn uuid_does_not_partition_persistent_tuning_cache() {
     let first = [0x11; 16];
     let second = [0xee; 16];
     assert_eq!(
-        hardware_fingerprint(first, 14, 32 << 30, true),
-        hardware_fingerprint(second, 14, 32 << 30, true),
+        hardware_fingerprint(first, 14, 32 << 30, 1_500_000, true),
+        hardware_fingerprint(second, 14, 32 << 30, 1_500_000, true),
         "equivalent GPUs with different UUIDs must share tuned recipes"
     );
     assert_eq!(
-        hardware_fingerprint(first, 14, 32 << 30, false),
-        hardware_fingerprint(second, 14, 32 << 30, false)
+        hardware_fingerprint(first, 14, 32 << 30, 1_500_000, false),
+        hardware_fingerprint(second, 14, 32 << 30, 1_500_000, false)
     );
 }
 
 #[test]
 fn performance_mismatch_is_compatible_but_not_fully_tuned() {
     let uuid = [0x42; 16];
-    let full = hardware_fingerprint(uuid, 14, 32 << 30, true);
-    let reduced = hardware_fingerprint(uuid, 7, 16 << 30, true);
+    let full = hardware_fingerprint(uuid, 14, 32 << 30, 1_500_000, true);
+    let reduced = hardware_fingerprint(uuid, 7, 16 << 30, 1_500_000, true);
     assert_ne!(
         full, reduced,
         "different performance profiles need retuning"
     );
     assert_eq!(
-        hardware_fingerprint(uuid, 14, 32 << 30, false),
-        hardware_fingerprint(uuid, 7, 16 << 30, false),
+        hardware_fingerprint(uuid, 14, 32 << 30, 1_500_000, false),
+        hardware_fingerprint(uuid, 7, 16 << 30, 1_500_000, false),
         "the previous winner remains an execution-compatible tuning hint"
+    );
+}
+
+#[test]
+fn total_memory_does_not_partition_the_performance_fingerprint() {
+    let uuid = [0x42; 16];
+    assert_eq!(
+        hardware_fingerprint(uuid, 14, 32 << 30, 1_500_000, true),
+        hardware_fingerprint(uuid, 14, 80 << 30, 1_500_000, true),
+        "different capacity SKUs with the same performance profile share recipes"
+    );
+}
+
+#[test]
+fn memory_clock_partitions_the_performance_fingerprint() {
+    let uuid = [0x42; 16];
+    assert_ne!(
+        hardware_fingerprint(uuid, 14, 32 << 30, 1_500_000, true),
+        hardware_fingerprint(uuid, 14, 32 << 30, 2_000_000, true),
+        "different memory clocks require performance retuning"
+    );
+    assert_eq!(
+        hardware_fingerprint(uuid, 14, 32 << 30, 1_500_000, false),
+        hardware_fingerprint(uuid, 14, 32 << 30, 2_000_000, false),
+        "memory clock does not affect execution compatibility"
     );
 }
 
