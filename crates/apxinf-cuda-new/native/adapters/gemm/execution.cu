@@ -176,8 +176,6 @@ const apxinf::gemm::Implementation* find_implementation(const Recipe& recipe,
   return nullptr;
 }
 
-void warmup(Execution& execution);
-
 std::unique_ptr<Execution> fallback(
     const apxinf::gemm::Spec& spec, const apxinf_gemm_policy_t& policy,
     const apxinf_gemm_bindings_t& bindings, int device) {
@@ -193,10 +191,8 @@ std::unique_ptr<Execution> fallback(
     implementation.enumerate_configs(spec, configurations);
     for (int configuration : configurations) {
       try {
-        auto execution = apxinf::gemm::prepare(
+        return apxinf::gemm::prepare(
             implementation, configuration, spec, policy, bindings, device);
-        warmup(*execution);
-        return execution;
       } catch (const Failure&) {
         cudaGetLastError();
       }
@@ -204,15 +200,6 @@ std::unique_ptr<Execution> fallback(
   }
   throw Failure(APXINF_STATUS_UNSUPPORTED,
                 "no GEMM fallback satisfies the Spec and Policy");
-}
-
-void warmup(Execution& execution) {
-  // An Execution is immutable with respect to its bindings after prepare.
-  // Validate the exact serving addresses instead of substituting an aligned
-  // scratch output that a provider may not have prepared for.
-  apxinf::gemm::check_cuda(execution.implementation->enqueue(execution));
-  apxinf::gemm::check_cuda(cudaStreamSynchronize(
-      static_cast<cudaStream_t>(execution.bindings.stream)));
 }
 
 }  // namespace
@@ -322,7 +309,6 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
           execution = apxinf::gemm::prepare(
               *implementation, recipe.configuration, normalized_spec, *policy,
               tuning_bindings->execution, runtime->device);
-          warmup(*execution);
         } catch (const Failure&) {
           execution.reset();
           cudaGetLastError();
@@ -353,7 +339,6 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
           execution = apxinf::gemm::prepare(
               *implementation, tuned_recipe.configuration, normalized_spec,
               *policy, tuning_bindings->execution, runtime->device);
-          warmup(*execution);
           recipe = tuned_recipe;
           persist_recipe = true;
         } catch (const Failure&) {

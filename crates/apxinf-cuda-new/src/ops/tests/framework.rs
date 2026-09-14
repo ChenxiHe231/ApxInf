@@ -938,8 +938,8 @@ fn execution_session_reuses_one_native_execution_across_forward_traversals() {
         .unwrap();
     }
 
-    // Native Execution creation includes provider resource creation and warmup.
-    // Repeating the same public L3 traversal must hit the session Execution.
+    // The first public L3 traversal creates provider resources and performs the
+    // one explicit enqueue. Repeating it must hit the session Execution.
     assert_eq!(super::execution::execution_create_count(), 1);
     assert_eq!(super::execution::execution_sync_count(), 0);
     assert!(values(&out).iter().all(|&value| value == 3.0));
@@ -974,6 +974,71 @@ fn gpu_e2e_cached_recipe_rebuilds_and_drops_provider_private_executions() {
 
         assert!(values(&out).iter().all(|&value| value == 16.0));
     }
+}
+
+#[test]
+fn tuning_isolated_from_user_buffers_and_replay_results() {
+    let cache_dir = scratch_cache_dir("acceptance-f11-tuning-isolation");
+    let ctx = CudaContext::new(0).unwrap();
+    let a = tensor(0, vec![2, 3], &[1.0, 2.0, -1.0, 0.0, 3.0, 1.0]);
+    let b = tensor(0, vec![3, 2], &[1.0, 2.0, 0.0, -1.0, 2.0, 1.0]);
+
+    let a_buffer = CudaBuffer::from_tensor(&a).unwrap();
+    let b_buffer = CudaBuffer::from_tensor(&b).unwrap();
+    let mut a_before = vec![0; a_buffer.len()];
+    let mut b_before = vec![0; b_buffer.len()];
+    a_buffer.copy_to_host(&mut a_before).unwrap();
+    b_buffer.copy_to_host(&mut b_before).unwrap();
+
+    let output_bytes = 2 * 2 * DType::BF16.size_in_bytes();
+    let backing = CudaBuffer::alloc(output_bytes + 4, 0).unwrap();
+    let guard_word = bf16::from_f32(-77.0).to_bits().to_ne_bytes();
+    let sentinel_word = bf16::from_f32(-123.0).to_bits().to_ne_bytes();
+    let mut initial = Vec::with_capacity(output_bytes + 4);
+    initial.extend_from_slice(&guard_word);
+    for _ in 0..4 {
+        initial.extend_from_slice(&sentinel_word);
+    }
+    initial.extend_from_slice(&guard_word);
+    backing.copy_from_host(&initial).unwrap();
+
+    let mut out = backing
+        .view(2, output_bytes)
+        .unwrap()
+        .as_tensor(Shape::new(vec![2, 2]), DType::BF16)
+        .unwrap();
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.policy.cache_dir = Some(cache_dir.to_string_lossy().into_owned());
+    args.policy.online_tune = true;
+    args.policy.allow_fallback = false;
+
+    // Native prepare may tune and allocate provider resources, but it must not
+    // execute the serving binding or otherwise touch caller-owned buffers.
+    let execution = prepare_test_gemm(&ctx, args).unwrap();
+
+    let mut after_prepare = vec![0; initial.len()];
+    backing.copy_to_host(&mut after_prepare).unwrap();
+    assert_eq!(
+        after_prepare, initial,
+        "prepare/tuning modified user output"
+    );
+
+    let mut a_after = vec![0; a_buffer.len()];
+    let mut b_after = vec![0; b_buffer.len()];
+    a_buffer.copy_to_host(&mut a_after).unwrap();
+    b_buffer.copy_to_host(&mut b_after).unwrap();
+    assert_eq!(a_after, a_before, "tuning modified input A");
+    assert_eq!(b_after, b_before, "tuning modified input B");
+
+    execution.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(values(&out), vec![-1.0, -1.0, 2.0, -2.0]);
+
+    let mut final_bytes = vec![0; initial.len()];
+    backing.copy_to_host(&mut final_bytes).unwrap();
+    assert_eq!(&final_bytes[..2], &guard_word);
+    assert_eq!(&final_bytes[final_bytes.len() - 2..], &guard_word);
+    std::fs::remove_dir_all(cache_dir).unwrap();
 }
 
 #[test]
@@ -1100,10 +1165,10 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     mutable_args.policy.allow_fallback = false;
     mutable_args.policy.cache_dir = Some(cache_dir_string);
     let mutable = prepare_test_geglu(&ctx, GemmGegluArgs { gemm: mutable_args }).unwrap();
-    assert_eq!(mutable.weight_prepack_count(), 1); // execution warmup
+    assert_eq!(mutable.weight_prepack_count(), 0);
     mutable.enqueue().unwrap();
     ctx.synchronize().unwrap();
-    assert_eq!(mutable.weight_prepack_count(), 2);
+    assert_eq!(mutable.weight_prepack_count(), 1);
 
     drop(mutable);
     std::fs::remove_dir_all(cache_dir).unwrap();
