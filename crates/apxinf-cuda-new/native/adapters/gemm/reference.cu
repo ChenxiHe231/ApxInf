@@ -10,6 +10,15 @@
 namespace apxinf::gemm {
 namespace {
 
+std::vector<unsigned char> read_device_bytes(const void* pointer, size_t count,
+                                             cudaStream_t stream) {
+  std::vector<unsigned char> bytes(count);
+  check_cuda(cudaMemcpyAsync(bytes.data(), pointer, bytes.size(),
+                             cudaMemcpyDeviceToHost, stream));
+  check_cuda(cudaStreamSynchronize(stream));
+  return bytes;
+}
+
 std::vector<float> read_device_values(const void* pointer, size_t count,
                                       uint32_t dtype, cudaStream_t stream) {
   std::vector<unsigned char> bytes(count * dtype_bytes(dtype));
@@ -45,8 +54,72 @@ std::vector<float> read_device_values(const void* pointer, size_t count,
   return values;
 }
 
+float e2m1_to_float(unsigned char nibble) {
+  constexpr float magnitudes[] = {0.0F, 0.5F, 1.0F, 1.5F,
+                                  2.0F, 3.0F, 4.0F, 6.0F};
+  const float value = magnitudes[nibble & 7U];
+  return (nibble & 8U) != 0 ? -value : value;
+}
+
+float ue4m3_to_float(unsigned char value) {
+  const int exponent = (value >> 3) & 0xf;
+  const int mantissa = value & 7;
+  if (exponent == 0) {
+    return std::ldexp(static_cast<float>(mantissa) / 8.0F, -6);
+  }
+  return std::ldexp(1.0F + static_cast<float>(mantissa) / 8.0F,
+                    exponent - 7);
+}
+
+std::vector<float> dequantize_nvfp4_rows(const void* packed_pointer,
+                                         const void* scale_pointer,
+                                         int64_t rows, int64_t k,
+                                         cudaStream_t stream) {
+  const auto packed = read_device_bytes(
+      packed_pointer, static_cast<size_t>(rows * k) / 2, stream);
+  const auto scales = read_device_bytes(
+      scale_pointer, static_cast<size_t>(rows * (k / 16)), stream);
+  std::vector<float> values(static_cast<size_t>(rows * k));
+  for (int64_t row = 0; row < rows; ++row) {
+    for (int64_t inner = 0; inner < k; ++inner) {
+      const size_t logical = static_cast<size_t>(row * k + inner);
+      const unsigned char byte = packed[logical / 2];
+      const unsigned char nibble =
+          (logical & 1U) == 0 ? (byte & 0xfU) : (byte >> 4);
+      const auto scale = scales[static_cast<size_t>(row * (k / 16) + inner / 16)];
+      values[logical] = e2m1_to_float(nibble) * ue4m3_to_float(scale);
+    }
+  }
+  return values;
+}
+
+std::vector<float> dequantize_nvfp4_b(const void* packed_pointer,
+                                      const void* scale_pointer, int64_t k,
+                                      int64_t n, cudaStream_t stream) {
+  const auto packed = read_device_bytes(
+      packed_pointer, static_cast<size_t>(k * n) / 2, stream);
+  const auto scales = read_device_bytes(
+      scale_pointer, static_cast<size_t>(n * (k / 16)), stream);
+  std::vector<float> values(static_cast<size_t>(k * n));
+  for (int64_t inner = 0; inner < k; ++inner) {
+    for (int64_t column = 0; column < n; ++column) {
+      const size_t logical = static_cast<size_t>(inner * n + column);
+      const unsigned char byte = packed[logical / 2];
+      const unsigned char nibble =
+          (logical & 1U) == 0 ? (byte & 0xfU) : (byte >> 4);
+      const auto scale = scales[static_cast<size_t>(
+          column * (k / 16) + inner / 16)];
+      values[logical] = e2m1_to_float(nibble) * ue4m3_to_float(scale);
+    }
+  }
+  return values;
+}
+
 uint32_t bias_dtype(const Spec& spec) {
   if (has_row_channel_scales(spec)) return spec.output_dtype;
+  if (spec.quantization == APXINF_GEMM_QUANT_NVFP4_BLOCK16) {
+    return APXINF_DTYPE_F16;
+  }
   if (spec.a_dtype == APXINF_DTYPE_E4M3) {
     return spec.output_dtype == APXINF_DTYPE_F32 ? APXINF_DTYPE_F32
                                                  : APXINF_DTYPE_F16;
@@ -136,12 +209,21 @@ ReferenceOutput cpu_reference(
   std::vector<float> a;
   std::vector<float> b;
   std::vector<float> bias;
-  a = read_device_values(bindings.execution.a,
-                         static_cast<size_t>(spec.m * spec.k), spec.a_dtype,
-                         stream);
-  b = read_device_values(bindings.execution.b,
-                         static_cast<size_t>(spec.k * spec.n), spec.b_dtype,
-                         stream);
+  if (spec.quantization == APXINF_GEMM_QUANT_NVFP4_BLOCK16) {
+    a = dequantize_nvfp4_rows(bindings.execution.a,
+                              bindings.execution.a_scales, spec.m, spec.k,
+                              stream);
+    b = dequantize_nvfp4_b(bindings.execution.b,
+                           bindings.execution.b_scales, spec.k, spec.n,
+                           stream);
+  } else {
+    a = read_device_values(bindings.execution.a,
+                           static_cast<size_t>(spec.m * spec.k), spec.a_dtype,
+                           stream);
+    b = read_device_values(bindings.execution.b,
+                           static_cast<size_t>(spec.k * spec.n), spec.b_dtype,
+                           stream);
+  }
   if (has_row_channel_scales(spec)) {
     const auto a_scales = read_device_values(
         bindings.execution.a_scales, static_cast<size_t>(spec.m),
