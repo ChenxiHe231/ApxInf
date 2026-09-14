@@ -102,6 +102,23 @@ fn gemm_all_candidates_match_torch() {
         f::FP8_SCALED_GEMM,
     )
     .unwrap();
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![f::M, f::K], DType::I8, f::W8A8_A);
+    let b = bytes_tensor(0, vec![f::K, f::N], DType::I8, f::W8A8_B);
+    let row_scales = scales(0, f::ROW_SCALES);
+    let channel_scales = scales(0, f::CHANNEL_SCALES);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::BF16);
+    let mut args = GemmArgs::w8a8(&a, &row_scales, &b, &channel_scales, &mut out);
+    configure_torch_case(&mut args, f::W8A8_ALPHA, f::W8A8_OUTPUT_SCALE);
+    validate_all_candidates(
+        &ctx,
+        args,
+        super::contracts::Semantic::Gemm,
+        None,
+        f::W8A8_GEMM,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -139,6 +156,24 @@ fn gemm_bias_all_candidates_match_torch() {
         super::contracts::Semantic::GemmBias,
         Some(&bias),
         f::FP8_SCALED_GEMM_BIAS,
+    )
+    .unwrap();
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![f::M, f::K], DType::I8, f::W8A8_A);
+    let b = bytes_tensor(0, vec![f::K, f::N], DType::I8, f::W8A8_B);
+    let bias = bf16_bits_tensor(0, vec![f::N], f::BF16_BIAS);
+    let row_scales = scales(0, f::ROW_SCALES);
+    let channel_scales = scales(0, f::CHANNEL_SCALES);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::BF16);
+    let mut args = GemmArgs::w8a8(&a, &row_scales, &b, &channel_scales, &mut out);
+    configure_torch_case(&mut args, f::W8A8_ALPHA, f::W8A8_OUTPUT_SCALE);
+    validate_all_candidates(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmBias,
+        Some(&bias),
+        f::W8A8_GEMM_BIAS,
     )
     .unwrap();
 }
