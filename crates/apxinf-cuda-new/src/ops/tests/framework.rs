@@ -356,29 +356,19 @@ fn fp8_unit_scale_bf16_output_does_not_round_through_f16() {
 
     let normalized =
         super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+    let expected = 448.0 * 448.0 * k as f32;
+    assert_eq!(expected, 3_211_264.0);
+    super::execution::validate_candidates(&ctx, &normalized, &vec![expected; m * n]).unwrap();
     let execution = super::execution::prepare(&ctx, normalized).unwrap();
-    let summary = execution.summary();
-    assert!(
-        summary.contains("cublas+custom-epilogue#0=pass"),
-        "{summary}"
-    );
-    assert!(
-        summary
-            .split(',')
-            .any(|entry| entry.contains("cublasLt+custom-epilogue") && entry.contains("=pass")),
-        "{summary}"
-    );
 
     execution.enqueue().unwrap();
     ctx.synchronize().unwrap();
 
-    let expected = 448.0 * 448.0 * k as f32;
-    assert_eq!(expected, 3_211_264.0);
     assert!(values(&out).iter().all(|&value| value == expected));
 }
 
 #[test]
-fn gpu_e2e_registered_backends_execute_and_report_verdicts() {
+fn gpu_e2e_autotune_times_candidates_and_checks_winner_capture() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, n) = (64, 64, 64);
     // E4M3 1.0 is 0x38.  This contract is supported by cuBLAS, cuBLASLt,
@@ -398,35 +388,13 @@ fn gpu_e2e_registered_backends_execute_and_report_verdicts() {
     let summary = execution.summary().to_owned();
     eprintln!("GPU_E2E_CANDIDATES {summary}");
     assert!(
-        summary.contains("winner-graph=pass"),
-        "the eager winner was not validated through CUDA Graph replay: {summary}"
+        summary.contains("winner-graph=capture-pass"),
+        "the eager winner was not validated for CUDA Graph capture: {summary}"
     );
-    for backend in [
-        "cublas+custom-epilogue#0=pass",
-        "cublasLt+custom-epilogue#",
-        "cublasLt-native-fp8+custom-epilogue#",
-        "cutlass-fp8#",
-    ] {
-        assert!(
-            summary.contains(backend),
-            "registered GPU backend was not explicitly exercised: {backend}; {summary}"
-        );
-    }
-    // cuBLASLt/CUTLASS may reject individual tactics, but each registered
-    // backend must have at least one numerically validated execution.
-    for backend in [
-        "cublasLt+custom-epilogue",
-        "cublasLt-native-fp8+custom-epilogue",
-        "cutlass-fp8",
-    ] {
-        let passed = summary
-            .split(',')
-            .any(|entry| entry.contains(backend) && entry.contains("=pass"));
-        assert!(
-            passed,
-            "GPU backend has no passing tactic: {backend}; {summary}"
-        );
-    }
+    assert!(
+        summary.contains("=timed("),
+        "no candidate was timed: {summary}"
+    );
 
     execution.enqueue().unwrap();
     ctx.synchronize().unwrap();

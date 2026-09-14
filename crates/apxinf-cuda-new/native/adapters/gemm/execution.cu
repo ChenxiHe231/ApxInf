@@ -208,14 +208,14 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
     apxinf_runtime_t runtime,
     const apxinf_gemm_spec_t* spec,
     const apxinf_gemm_policy_t* policy,
-    const apxinf_gemm_tuning_bindings_t* tuning_bindings,
+    const apxinf_gemm_bindings_t* bindings,
     apxinf_gemm_execution_t* output) {
   if (output != nullptr) {
     *output = nullptr;
   }
   return apxinf::gemm::abi_boundary([&] {
     if (runtime == nullptr || spec == nullptr || policy == nullptr ||
-        tuning_bindings == nullptr || output == nullptr) {
+        bindings == nullptr || output == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "null GEMM execution argument");
     }
@@ -223,33 +223,10 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
     static_cast<apxinf_gemm_spec_t&>(normalized_spec) = *spec;
     validate_spec(normalized_spec);
     validate_policy(*policy);
-    validate_bindings(normalized_spec, tuning_bindings->execution, true);
-    if (tuning_bindings->reference_kind >
-        APXINF_GEMM_REFERENCE_TORCH_OUTPUT) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GEMM reference kind");
-    }
-    if (tuning_bindings->reference_kind ==
-        APXINF_GEMM_REFERENCE_TORCH_OUTPUT) {
-      const uint64_t output_width =
-          normalized_spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU
-              ? static_cast<uint64_t>(normalized_spec.n / 2)
-              : static_cast<uint64_t>(normalized_spec.n);
-      const uint64_t output_count =
-          static_cast<uint64_t>(normalized_spec.m) * output_width;
-      if (tuning_bindings->expected_output == nullptr ||
-          tuning_bindings->expected_output_len != output_count) {
-        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                      "invalid Torch GEMM reference output");
-      }
-    } else if (tuning_bindings->expected_output != nullptr ||
-               tuning_bindings->expected_output_len != 0) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "unexpected Torch GEMM reference output");
-    }
+    validate_bindings(normalized_spec, *bindings, true);
     cudaStreamCaptureStatus capture_status;
     apxinf::gemm::check_cuda(cudaStreamIsCapturing(
-        static_cast<cudaStream_t>(tuning_bindings->execution.stream),
+        static_cast<cudaStream_t>(bindings->stream),
         &capture_status));
     if (capture_status != cudaStreamCaptureStatusNone) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
@@ -308,7 +285,7 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
         try {
           execution = apxinf::gemm::prepare(
               *implementation, recipe.configuration, normalized_spec, *policy,
-              tuning_bindings->execution, runtime->device);
+              *bindings, runtime->device);
         } catch (const Failure&) {
           execution.reset();
           cudaGetLastError();
@@ -327,7 +304,7 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
     if (execution == nullptr) {
       if (policy->online_tune) {
         const Recipe tuned_recipe = apxinf::gemm::tune(
-            normalized_spec, *policy, *tuning_bindings, runtime->device,
+            normalized_spec, *policy, *bindings, runtime->device,
             source, compatible_hint_found ? &compatible_hint : nullptr);
         const auto* implementation =
             find_implementation(tuned_recipe, normalized_spec, runtime->device);
@@ -338,7 +315,7 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
         try {
           execution = apxinf::gemm::prepare(
               *implementation, tuned_recipe.configuration, normalized_spec,
-              *policy, tuning_bindings->execution, runtime->device);
+              *policy, *bindings, runtime->device);
           recipe = tuned_recipe;
           persist_recipe = true;
         } catch (const Failure&) {
@@ -347,13 +324,13 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
           if (!policy->allow_fallback) {
             throw;
           }
-          execution = fallback(normalized_spec, *policy,
-                               tuning_bindings->execution, runtime->device);
+          execution = fallback(normalized_spec, *policy, *bindings,
+                               runtime->device);
           source = "fallback-after-tune";
         }
       } else if (policy->allow_fallback) {
-        execution = fallback(normalized_spec, *policy,
-                             tuning_bindings->execution, runtime->device);
+        execution = fallback(normalized_spec, *policy, *bindings,
+                             runtime->device);
         source = "fallback";
       } else {
         throw Failure(APXINF_STATUS_CACHE_MISS,
@@ -423,8 +400,30 @@ extern "C" uint64_t apxinf_gemm_execution_weight_prepack_count(
   return apxinf::gemm::cutlass_weight_prepack_count(*execution);
 }
 
-// Private test hook used to select a provider without running the very large
-// provider-independent CPU reference required by production GeGLU shapes.
+extern "C" apxinf_status_t apxinf_gemm_test_validate_candidates(
+    apxinf_runtime_t runtime, const apxinf_gemm_spec_t* spec,
+    const apxinf_gemm_policy_t* policy,
+    const apxinf_gemm_bindings_t* bindings, const float* expected_output,
+    uint64_t expected_output_len) {
+  return apxinf::gemm::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || policy == nullptr ||
+        bindings == nullptr || expected_output == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid candidate validation arguments");
+    }
+    apxinf::gemm::Spec normalized{};
+    static_cast<apxinf_gemm_spec_t&>(normalized) = *spec;
+    validate_spec(normalized);
+    validate_policy(*policy);
+    validate_bindings(normalized, *bindings, true);
+    apxinf::gemm::check_cuda(cudaSetDevice(runtime->device));
+    apxinf::gemm::validate_candidates(normalized, *policy, *bindings,
+                                      runtime->device, expected_output,
+                                      expected_output_len);
+  });
+}
+
+// Private test hook used to select a provider for focused lifecycle tests.
 extern "C" apxinf_status_t apxinf_gemm_test_seed_recipe(
     const apxinf_gemm_spec_t* spec,
     const apxinf_gemm_policy_t* policy,

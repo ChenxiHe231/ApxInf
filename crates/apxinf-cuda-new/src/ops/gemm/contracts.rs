@@ -71,20 +71,6 @@ pub struct GemmArgs<'a> {
     pub weight_version: Option<WeightVersion>,
 }
 
-/// Expected FP32 output supplied only by the crate's candidate validation
-/// suite. It is deliberately absent from the public execution contract.
-#[derive(Clone, Copy)]
-pub(crate) struct ValidationReference<'a> {
-    pub expected: &'a [f32],
-}
-
-#[cfg(test)]
-impl<'a> ValidationReference<'a> {
-    pub(crate) fn torch(expected: &'a [f32]) -> Self {
-        Self { expected }
-    }
-}
-
 /// Quantization contract for the operands supplied to one GEMM call.
 ///
 /// Inputs in the FP8 and W8A8 variants are already quantized. Dynamic
@@ -190,12 +176,11 @@ pub(crate) enum Semantic {
     GemmBias = 3,
 }
 
-pub(crate) struct Normalized<'a> {
+pub(crate) struct Normalized {
     pub spec: abi::Spec,
     pub policy: GemmPolicy,
     pub bindings: abi::Bindings,
     pub storage: Vec<CudaBuffer>,
-    pub(crate) validation_reference: Option<ValidationReference<'a>>,
 }
 
 pub(crate) fn invalid(message: impl Into<String>) -> Error {
@@ -296,7 +281,7 @@ pub(crate) fn normalize<'a>(
     args: GemmArgs<'a>,
     semantic: Semantic,
     bias: Option<&Tensor>,
-) -> Result<Normalized<'a>> {
+) -> Result<Normalized> {
     let a_shape = args.a.shape().dims();
     let b_shape = args.b.shape().dims();
     if a_shape.len() != 2 || b_shape.len() != 2 {
@@ -476,33 +461,7 @@ pub(crate) fn normalize<'a>(
         policy: args.policy,
         bindings,
         storage,
-        validation_reference: None,
     })
-}
-
-#[cfg(test)]
-pub(crate) fn with_validation_reference<'a>(
-    mut normalized: Normalized<'a>,
-    reference: ValidationReference<'a>,
-) -> Result<Normalized<'a>> {
-    let output_width = if normalized.spec.semantic == Semantic::GemmGeglu as u32 {
-        normalized.spec.n as usize / 2
-    } else {
-        normalized.spec.n as usize
-    };
-    let expected_output = (normalized.spec.m as usize)
-        .checked_mul(output_width)
-        .ok_or_else(|| invalid("GEMM validation output size overflow"))?;
-    if reference.expected.len() != expected_output {
-        return Err(invalid(
-            "Torch validation output does not match the L3 semantic",
-        ));
-    }
-    if reference.expected.iter().any(|value| !value.is_finite()) {
-        return Err(invalid("Torch validation output must be finite"));
-    }
-    normalized.validation_reference = Some(reference);
-    Ok(normalized)
 }
 
 #[cfg(test)]

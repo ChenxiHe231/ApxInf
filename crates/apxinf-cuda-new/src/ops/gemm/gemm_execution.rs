@@ -100,13 +100,12 @@ impl Drop for Execution {
     }
 }
 
-pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<Rc<Execution>> {
+pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized) -> Result<Rc<Execution>> {
     let Normalized {
         spec,
         policy: options,
         bindings,
         storage,
-        validation_reference,
     } = normalized;
     let key = ExecutionKey::new(ctx, spec, bindings, &options);
     if let Some(execution) = crate::workspace::lookup_execution(&key) {
@@ -135,28 +134,13 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<R
             .as_ref()
             .map_or(std::ptr::null(), |path| path.as_ptr()),
     };
-    let tuning_bindings = if let Some(reference) = validation_reference {
-        abi::TuningBindings {
-            execution: bindings,
-            expected_output: reference.expected.as_ptr(),
-            expected_output_len: reference.expected.len() as u64,
-            reference_kind: 1,
-        }
-    } else {
-        abi::TuningBindings {
-            execution: bindings,
-            expected_output: std::ptr::null(),
-            expected_output_len: 0,
-            reference_kind: 0,
-        }
-    };
     let mut raw = std::ptr::null_mut();
     unsafe {
         status::check(abi::apxinf_gemm_prepare(
             ctx.runtime(),
             &spec,
             &policy,
-            &tuning_bindings,
+            &bindings,
             &mut raw,
         ))?;
     }
@@ -182,7 +166,7 @@ pub(crate) fn prepare(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<R
     Ok(execution)
 }
 
-pub(crate) fn execute(ctx: &CudaContext, normalized: Normalized<'_>) -> Result<()> {
+pub(crate) fn execute(ctx: &CudaContext, normalized: Normalized) -> Result<()> {
     let execution = prepare(ctx, normalized)?;
     crate::workspace::validate_capture_target(
         execution.stream.device(),
@@ -230,7 +214,7 @@ pub(crate) fn execution_sync_count() -> usize {
 #[cfg(test)]
 pub(crate) fn seed_recipe(
     ctx: &CudaContext,
-    normalized: &Normalized<'_>,
+    normalized: &Normalized,
     provider_id: u32,
     implementation_id: u32,
     implementation_version: u32,
@@ -259,6 +243,58 @@ pub(crate) fn seed_recipe(
             implementation_id,
             implementation_version,
             configuration,
+        ))
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn validate_candidates(
+    ctx: &CudaContext,
+    normalized: &Normalized,
+    expected: &[f32],
+) -> Result<()> {
+    let output_width = if normalized.spec.semantic == super::contracts::Semantic::GemmGeglu as u32 {
+        normalized.spec.n as usize / 2
+    } else {
+        normalized.spec.n as usize
+    };
+    let expected_output = (normalized.spec.m as usize)
+        .checked_mul(output_width)
+        .ok_or_else(|| invalid("GEMM validation output size overflow"))?;
+    if expected.len() != expected_output {
+        return Err(invalid(
+            "Torch validation output does not match the L3 semantic",
+        ));
+    }
+    if expected.iter().any(|value| !value.is_finite()) {
+        return Err(invalid("Torch validation output must be finite"));
+    }
+
+    let cache = normalized
+        .policy
+        .cache_dir
+        .as_ref()
+        .map(|path| CString::new(path.as_str()))
+        .transpose()
+        .map_err(|_| invalid("cache path contains NUL"))?;
+    let policy = abi::Policy {
+        workspace_limit: normalized.policy.workspace_limit as u64,
+        online_tune: normalized.policy.online_tune as u32,
+        allow_fallback: normalized.policy.allow_fallback as u32,
+        graph_safe: normalized.policy.graph_safe as u32,
+        deterministic: normalized.policy.deterministic as u32,
+        cache_dir: cache
+            .as_ref()
+            .map_or(std::ptr::null(), |path| path.as_ptr()),
+    };
+    unsafe {
+        status::check(abi::apxinf_gemm_test_validate_candidates(
+            ctx.runtime(),
+            &normalized.spec,
+            &policy,
+            &normalized.bindings,
+            expected.as_ptr(),
+            expected.len() as u64,
         ))
     }
 }

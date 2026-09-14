@@ -148,11 +148,6 @@ struct TuningKeys {
   std::string compatible_hint;
 };
 
-struct ReferenceOutput {
-  std::vector<float> values;
-  const char* kind = "dequantized-input";
-};
-
 struct AccuracyMetrics {
   bool finite = false;
   bool valid = false;
@@ -216,13 +211,15 @@ std::unique_ptr<Execution> prepare(const Implementation& implementation,
                                    int device);
 Recipe tune(
     const Spec& spec, const apxinf_gemm_policy_t& policy,
-    const apxinf_gemm_tuning_bindings_t& bindings, int device,
+    const apxinf_gemm_bindings_t& bindings, int device,
     std::string& report, const Recipe* preferred = nullptr);
-ReferenceOutput cpu_reference(
-    const Spec& spec, const apxinf_gemm_tuning_bindings_t& bindings);
 AccuracyMetrics compare_reference(const std::vector<float>& expected,
                                   const std::vector<float>& actual);
 std::string format_accuracy(const AccuracyMetrics& metrics);
+void validate_candidates(const Spec& spec,
+                         const apxinf_gemm_policy_t& policy,
+                         const apxinf_gemm_bindings_t& bindings, int device,
+                         const float* expected, size_t expected_len);
 
 }  // namespace apxinf::gemm
 

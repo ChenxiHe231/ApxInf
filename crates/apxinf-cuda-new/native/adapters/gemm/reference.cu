@@ -10,188 +10,87 @@
 namespace apxinf::gemm {
 namespace {
 
-std::vector<float> read_device_values(const void* pointer, size_t count,
-                                      uint32_t dtype, cudaStream_t stream) {
+struct Allocation {
+  void* pointer = nullptr;
+
+  explicit Allocation(size_t bytes) { check_cuda(cudaMalloc(&pointer, bytes)); }
+  ~Allocation() {
+    if (pointer != nullptr) cudaFree(pointer);
+  }
+};
+
+std::vector<float> read_output(void* pointer, size_t count, int dtype,
+                               cudaStream_t stream) {
   std::vector<unsigned char> bytes(count * dtype_bytes(dtype));
   check_cuda(cudaMemcpyAsync(bytes.data(), pointer, bytes.size(),
                              cudaMemcpyDeviceToHost, stream));
   check_cuda(cudaStreamSynchronize(stream));
-  std::vector<float> values(count);
+  std::vector<float> result(count);
   for (size_t index = 0; index < count; ++index) {
     if (dtype == APXINF_DTYPE_F32) {
-      std::memcpy(&values[index], bytes.data() + 4 * index, 4);
+      std::memcpy(&result[index], bytes.data() + 4 * index, 4);
     } else if (dtype == APXINF_DTYPE_F16) {
       half value;
       std::memcpy(&value, bytes.data() + 2 * index, 2);
-      values[index] = __half2float(value);
+      result[index] = __half2float(value);
     } else if (dtype == APXINF_DTYPE_BF16) {
       __nv_bfloat16 value;
       std::memcpy(&value, bytes.data() + 2 * index, 2);
-      values[index] = __bfloat162float(value);
-    } else if (dtype == APXINF_DTYPE_E4M3) {
+      result[index] = __bfloat162float(value);
+    } else {
       __nv_fp8_e4m3 value;
       std::memcpy(&value, bytes.data() + index, 1);
-      values[index] = static_cast<float>(value);
-    } else if (dtype == APXINF_DTYPE_I8) {
-      int8_t value;
-      std::memcpy(&value, bytes.data() + index, 1);
-      values[index] = static_cast<float>(value);
-    } else {
-      int32_t value;
-      std::memcpy(&value, bytes.data() + 4 * index, 4);
-      values[index] = static_cast<float>(value);
+      result[index] = static_cast<float>(value);
     }
-  }
-  return values;
-}
-
-uint32_t bias_dtype(const Spec& spec) {
-  if (has_row_channel_scales(spec)) return spec.output_dtype;
-  if (spec.a_dtype == APXINF_DTYPE_E4M3) {
-    return spec.output_dtype == APXINF_DTYPE_F32 ? APXINF_DTYPE_F32
-                                                 : APXINF_DTYPE_F16;
-  }
-  return spec.a_dtype;
-}
-
-float gelu(float value) {
-  return 0.5F * value *
-         (1.0F + std::tanh(0.7978845608028654F *
-                           (value + 0.044715F * value * value * value)));
-}
-
-std::vector<float> project(const Spec& spec, const std::vector<float>& a,
-                           const std::vector<float>& b) {
-  std::vector<float> projection(static_cast<size_t>(spec.m * spec.n));
-  for (int64_t row = 0; row < spec.m; ++row) {
-    for (int64_t column = 0; column < spec.n; ++column) {
-      float accumulator = 0.0F;
-      for (int64_t inner = 0; inner < spec.k; ++inner) {
-        accumulator += a[static_cast<size_t>(row * spec.k + inner)] *
-                       b[static_cast<size_t>(inner * spec.n + column)];
-      }
-      projection[static_cast<size_t>(row * spec.n + column)] = accumulator;
-    }
-  }
-  return projection;
-}
-
-std::vector<float> reference_gemm(const std::vector<float>& projection,
-                                  float alpha, float output_scale) {
-  std::vector<float> output(projection.size());
-  for (size_t index = 0; index < output.size(); ++index) {
-    output[index] = alpha * projection[index] / output_scale;
-  }
-  return output;
-}
-
-std::vector<float> reference_gemm_bias(
-    const Spec& spec, const std::vector<float>& projection,
-    const std::vector<float>& bias, bool apply_gelu, float alpha,
-    float output_scale) {
-  std::vector<float> output(projection.size());
-  for (int64_t row = 0; row < spec.m; ++row) {
-    for (int64_t column = 0; column < spec.n; ++column) {
-      const size_t index = static_cast<size_t>(row * spec.n + column);
-      float value = alpha * projection[index] + bias[column];
-      if (apply_gelu) value = gelu(value);
-      output[index] = value / output_scale;
-    }
-  }
-  return output;
-}
-
-std::vector<float> reference_gemm_geglu(
-    const Spec& spec, const std::vector<float>& projection, float alpha,
-    float output_scale) {
-  const int64_t width = spec.n / 2;
-  std::vector<float> output(static_cast<size_t>(spec.m * width));
-  for (int64_t row = 0; row < spec.m; ++row) {
-    for (int64_t column = 0; column < width; ++column) {
-      const float gate =
-          alpha * projection[static_cast<size_t>(row * spec.n + column)];
-      const float up =
-          alpha * projection[static_cast<size_t>(row * spec.n +
-                                                 column + width)];
-      output[static_cast<size_t>(row * width + column)] =
-          gelu(gate) * up / output_scale;
-    }
-  }
-  return output;
-}
-
-}  // namespace
-
-ReferenceOutput cpu_reference(
-    const Spec& spec, const apxinf_gemm_tuning_bindings_t& bindings) {
-  if (bindings.reference_kind == APXINF_GEMM_REFERENCE_TORCH_OUTPUT) {
-    ReferenceOutput result;
-    result.kind = "torch";
-    result.values.assign(bindings.expected_output,
-                         bindings.expected_output +
-                             bindings.expected_output_len);
-    return result;
-  }
-  const auto stream = static_cast<cudaStream_t>(bindings.execution.stream);
-  std::vector<float> a;
-  std::vector<float> b;
-  std::vector<float> bias;
-  a = read_device_values(bindings.execution.a,
-                         static_cast<size_t>(spec.m * spec.k), spec.a_dtype,
-                         stream);
-  b = read_device_values(bindings.execution.b,
-                         static_cast<size_t>(spec.k * spec.n), spec.b_dtype,
-                         stream);
-  if (has_row_channel_scales(spec)) {
-    const auto a_scales = read_device_values(
-        bindings.execution.a_scales, static_cast<size_t>(spec.m),
-        APXINF_DTYPE_F32, stream);
-    const auto b_scales = read_device_values(
-        bindings.execution.b_scales, static_cast<size_t>(spec.n),
-        APXINF_DTYPE_F32, stream);
-    for (int64_t row = 0; row < spec.m; ++row) {
-      for (int64_t inner = 0; inner < spec.k; ++inner) {
-        a[static_cast<size_t>(row * spec.k + inner)] *= a_scales[row];
-      }
-    }
-    for (int64_t inner = 0; inner < spec.k; ++inner) {
-      for (int64_t column = 0; column < spec.n; ++column) {
-        b[static_cast<size_t>(inner * spec.n + column)] *= b_scales[column];
-      }
-    }
-  }
-  if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
-      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU) {
-    bias = read_device_values(bindings.execution.bias,
-                              static_cast<size_t>(spec.n), bias_dtype(spec),
-                              stream);
-  }
-
-  const auto projection = project(spec, a, b);
-  ReferenceOutput result;
-  result.kind = "dequantized-input";
-  // The reference must reproduce the scales the candidate will actually be
-  // launched with, which now live in the execution bindings.
-  const float alpha = bindings.execution.alpha;
-  const float output_scale = bindings.execution.output_scale;
-  if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM) {
-    result.values = reference_gemm(projection, alpha, output_scale);
-  } else if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS) {
-    result.values =
-        reference_gemm_bias(spec, projection, bias, false, alpha, output_scale);
-  } else if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU) {
-    result.values =
-        reference_gemm_bias(spec, projection, bias, true, alpha, output_scale);
-  } else {
-    result.values =
-        reference_gemm_geglu(spec, projection, alpha, output_scale);
   }
   return result;
 }
 
+void poison(const apxinf_gemm_bindings_t& bindings, size_t bytes) {
+  const auto stream = static_cast<cudaStream_t>(bindings.stream);
+  check_cuda(cudaMemsetAsync(bindings.output, 0xff, bytes, stream));
+  check_cuda(cudaStreamSynchronize(stream));
+}
+
+struct CapturedExecution {
+  cudaGraph_t graph = nullptr;
+  cudaGraphExec_t executable = nullptr;
+  cudaStream_t stream = nullptr;
+
+  explicit CapturedExecution(Execution& candidate)
+      : stream(static_cast<cudaStream_t>(candidate.bindings.stream)) {
+    check_cuda(cudaStreamBeginCapture(stream,
+                                      cudaStreamCaptureModeThreadLocal));
+    try {
+      check_cuda(candidate.implementation->enqueue(candidate));
+    } catch (...) {
+      cudaStreamEndCapture(stream, &graph);
+      if (graph != nullptr) cudaGraphDestroy(graph);
+      graph = nullptr;
+      throw;
+    }
+    check_cuda(cudaStreamEndCapture(stream, &graph));
+    const auto status =
+        cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0);
+    if (status != cudaSuccess) {
+      cudaGraphDestroy(graph);
+      graph = nullptr;
+      check_cuda(status);
+    }
+  }
+
+  ~CapturedExecution() {
+    if (executable != nullptr) cudaGraphExecDestroy(executable);
+    if (graph != nullptr) cudaGraphDestroy(graph);
+  }
+
+  void launch() { check_cuda(cudaGraphLaunch(executable, stream)); }
+};
+
+}  // namespace
+
 AccuracyMetrics compare_reference(const std::vector<float>& expected,
                                   const std::vector<float>& actual) {
-  // One immutable acceptance contract applies to every provider and candidate.
   constexpr double kMaximumScaledElementError = 0.08;
   constexpr double kMaximumRelativeL2 = 0.05;
   constexpr double kMinimumCosine = 0.9999;
@@ -238,12 +137,97 @@ AccuracyMetrics compare_reference(const std::vector<float>& expected,
 
 std::string format_accuracy(const AccuracyMetrics& metrics) {
   std::ostringstream output;
-  output << std::setprecision(6) << "finite=" << (metrics.finite ? 1 : 0)
-         << ",max_abs=" << metrics.max_absolute_error
-         << ",max_element=" << metrics.max_scaled_element_error
-         << ",rel_l2=" << metrics.relative_l2
-         << ",cosine=" << metrics.cosine;
+  output << std::setprecision(8) << "finite=" << metrics.finite
+         << " max_absolute=" << metrics.max_absolute_error
+         << " max_element=" << metrics.max_scaled_element_error
+         << " rel_l2=" << metrics.relative_l2
+         << " cosine=" << metrics.cosine;
   return output.str();
+}
+
+void validate_candidates(const Spec& spec,
+                         const apxinf_gemm_policy_t& policy,
+                         const apxinf_gemm_bindings_t& execution_bindings,
+                         int device, const float* expected,
+                         size_t expected_len) {
+  const size_t count = static_cast<size_t>(
+      spec.m * (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU
+                    ? spec.n / 2
+                    : spec.n));
+  if (expected == nullptr || expected_len != count) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid candidate validation output");
+  }
+  const std::vector<float> reference(expected, expected + expected_len);
+  Allocation output(count * dtype_bytes(spec.output_dtype));
+  auto bindings = execution_bindings;
+  bindings.output = output.pointer;
+  const size_t output_bytes = count * dtype_bytes(spec.output_dtype);
+  size_t implementations_checked = 0;
+
+  for (const auto& implementation : registry(spec.semantic)) {
+    if (!supports_device(implementation, device) ||
+        !implementation.supports(spec) ||
+        !supports_alignment(implementation, spec) ||
+        (policy.graph_safe && !implementation.graph_safe) ||
+        (policy.deterministic && !implementation.deterministic)) {
+      continue;
+    }
+    bool implementation_checked = false;
+    std::vector<int> configurations;
+    implementation.enumerate_configs(spec, configurations);
+    for (int configuration : configurations) {
+      std::unique_ptr<Execution> candidate;
+      std::vector<float> actual;
+      try {
+        candidate = prepare(implementation, configuration, spec, policy,
+                            bindings, device);
+        poison(bindings, output_bytes);
+        check_cuda(implementation.enqueue(*candidate));
+        actual = read_output(output.pointer, count, spec.output_dtype,
+                             static_cast<cudaStream_t>(bindings.stream));
+      } catch (const Failure&) {
+        cudaGetLastError();
+        continue;
+      }
+
+      const std::string label = std::string(implementation.name) + "#" +
+                                std::to_string(configuration);
+      const auto eager_accuracy = compare_reference(reference, actual);
+      if (!eager_accuracy.valid) {
+        throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                      label + " failed eager precision: " +
+                          format_accuracy(eager_accuracy));
+      }
+
+      if (policy.graph_safe) {
+        CapturedExecution graph(*candidate);
+        poison(bindings, output_bytes);
+        graph.launch();
+        const auto graph_actual = read_output(
+            output.pointer, count, spec.output_dtype,
+            static_cast<cudaStream_t>(bindings.stream));
+        const auto graph_accuracy = compare_reference(reference, graph_actual);
+        if (!graph_accuracy.valid) {
+          throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                        label + " failed graph replay precision: " +
+                            format_accuracy(graph_accuracy));
+        }
+      }
+      implementation_checked = true;
+    }
+    if (!implementation_checked) {
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                    std::string(implementation.name) +
+                        " has no executable configuration for candidate validation");
+    }
+    ++implementations_checked;
+  }
+
+  if (implementations_checked == 0) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "no registered candidate applies to the validation Spec");
+  }
 }
 
 }  // namespace apxinf::gemm
