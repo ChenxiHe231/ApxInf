@@ -1,0 +1,164 @@
+#include "internal.h"
+
+namespace apxinf::attention {
+namespace {
+
+constexpr uint32_t kProviderCustom = 1;
+#if defined(APXINF_ATTENTION_FA2)
+constexpr uint32_t kProviderFa2 = 2;
+#endif
+#if defined(APXINF_ATTENTION_CUTLASS)
+constexpr uint32_t kProviderCutlass = 3;
+#endif
+
+bool supports_custom(const Spec& spec) {
+  return (spec.dtype == APXINF_DTYPE_F16 ||
+          spec.dtype == APXINF_DTYPE_BF16) &&
+         spec.output_dtype == spec.dtype;
+}
+
+AlignmentRequirements natural_alignment(const Spec&) { return {}; }
+
+void one_configuration(const Spec&, std::vector<int>& configurations) {
+  configurations.push_back(0);
+}
+
+#if defined(APXINF_ATTENTION_FA2)
+bool supports_fa2(const Spec& spec) {
+  return spec.head_dim <= 256 && spec.dtype == APXINF_DTYPE_BF16 &&
+         spec.output_dtype == spec.dtype;
+}
+
+AlignmentRequirements fa2_alignment(const Spec&) {
+  return {16, 16, 16, 16};
+}
+#endif
+
+#if defined(APXINF_ATTENTION_CUTLASS)
+bool supports_cutlass(const Spec& spec) {
+  return spec.mask == APXINF_ATTENTION_MASK_NONE &&
+         spec.query_tokens == 256 && spec.key_tokens == 256 &&
+         spec.query_heads == 16 && spec.kv_heads == 16 &&
+         spec.head_dim == 72 &&
+         (spec.dtype == APXINF_DTYPE_F16 ||
+          spec.dtype == APXINF_DTYPE_BF16) &&
+         spec.output_dtype == spec.dtype;
+}
+
+AlignmentRequirements cutlass_alignment(const Spec&) {
+  return {16, 16, 16, 16};
+}
+#endif
+
+}  // namespace
+
+const ImplementationRegistry& registry() {
+  static const ImplementationRegistry entries = {
+#if defined(APXINF_ATTENTION_CUTLASS)
+      {kProviderCutlass, 1, 1, "cutlass-fmha-sm100",
+       apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, false,
+       supports_cutlass, cutlass_alignment, cutlass_resource_requirements,
+       one_configuration, prepare_cutlass, launch_cutlass, destroy_cutlass},
+#endif
+#if defined(APXINF_ATTENTION_FA2)
+      {kProviderFa2, 1, 1, "flash-attention-2",
+       apxinf::gemm::kDeviceFeatureFa2, true, true, false, supports_fa2,
+       fa2_alignment, fa2_resource_requirements, one_configuration,
+       prepare_fa2, launch_fa2, destroy_fa2},
+#endif
+      {kProviderCustom, 1, 1, "custom-attention-fallback", 0, true, true,
+       true, supports_custom, natural_alignment,
+       custom_resource_requirements, one_configuration, prepare_custom,
+       launch_custom, destroy_custom},
+  };
+  return entries;
+}
+
+bool supports_device(const Implementation& implementation, int device,
+                     std::string* reason) {
+  cudaDeviceProp properties{};
+  const auto status = cudaGetDeviceProperties(&properties, device);
+  if (status != cudaSuccess) {
+    if (reason != nullptr) {
+      *reason = std::string("cannot query CUDA device: ") +
+                cudaGetErrorString(status);
+    }
+    return false;
+  }
+  const int sm = properties.major * 10 + properties.minor;
+  const auto* target = apxinf::gemm::compiled_target(sm);
+  if (target == nullptr) {
+    if (reason != nullptr) {
+      *reason = "SM " + std::to_string(sm) +
+                " is not present in this CUDA build";
+    }
+    return false;
+  }
+  if ((target->features & implementation.required_device_features) !=
+      implementation.required_device_features) {
+    if (reason != nullptr) {
+      *reason = "device lacks a capability required by this candidate";
+    }
+    return false;
+  }
+  return true;
+}
+
+bool supports_alignment(const Implementation& implementation,
+                        const Spec& spec) {
+  const auto required = implementation.alignment_requirements(spec);
+  return spec.q_alignment >= required.query &&
+         spec.k_alignment >= required.key &&
+         spec.v_alignment >= required.value &&
+         spec.output_alignment >= required.output;
+}
+
+Execution::~Execution() {
+  cudaSetDevice(device);
+  if (implementation != nullptr && implementation->destroy != nullptr) {
+    implementation->destroy(*this);
+  }
+}
+
+std::unique_ptr<Execution> prepare(
+    const Implementation& implementation, int configuration, const Spec& spec,
+    const apxinf_attention_policy_t& policy,
+    const apxinf_attention_bindings_t& bindings, int device) {
+  std::string reason;
+  if (!supports_device(implementation, device, &reason)) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED, reason);
+  }
+  if (!implementation.supports(spec)) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "Attention candidate contract mismatch");
+  }
+  if (!supports_alignment(implementation, spec)) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "Attention candidate binding alignment mismatch");
+  }
+  if (policy.graph_safe && !implementation.graph_safe) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "Attention candidate is not CUDA Graph safe");
+  }
+  if (policy.deterministic && !implementation.deterministic) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "Attention candidate is not deterministic");
+  }
+  const size_t required = implementation.resource_requirements(spec);
+  if (required > policy.workspace_limit) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "Attention workspace policy exceeded before allocation");
+  }
+  auto execution = std::make_unique<Execution>();
+  execution->spec = spec;
+  execution->bindings = bindings;
+  execution->configuration = configuration;
+  execution->device = device;
+  execution->implementation = &implementation;
+  execution->resource_limit = policy.workspace_limit;
+  check_cuda(cudaSetDevice(device));
+  implementation.prepare(*execution);
+  return execution;
+}
+
+}  // namespace apxinf::attention

@@ -6,6 +6,7 @@
 //! depend on or prescribe a candidate's internal implementation.
 
 use super::framework::{bf16_bits_tensor, bytes_tensor, f32_tensor, scales, tensor, zeros_tensor};
+use super::l3_behavior::attention_reference;
 use super::*;
 use crate::CudaContext;
 use apxinf_core::{DType, Tensor};
@@ -29,6 +30,85 @@ fn configure_torch_case(args: &mut GemmArgs<'_>, alpha: f32, output_scale: f32) 
     args.output_scale = output_scale;
     args.policy.allow_fallback = false;
     args.policy.graph_safe = true;
+}
+
+#[test]
+fn attention_all_candidates_match_reference() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (batch, query_tokens, key_tokens, query_heads, kv_heads, head_dim) = (1, 3, 4, 4, 2, 8);
+    let query_values: Vec<_> = (0..batch * query_tokens * query_heads * head_dim)
+        .map(|index| ((index * 3 % 17) as f32 - 8.0) / 16.0)
+        .collect();
+    let key_values: Vec<_> = (0..batch * key_tokens * kv_heads * head_dim)
+        .map(|index| ((index * 5 % 19) as f32 - 9.0) / 16.0)
+        .collect();
+    let value_values: Vec<_> = (0..batch * key_tokens * kv_heads * head_dim)
+        .map(|index| ((index * 7 % 23) as f32 - 11.0) / 16.0)
+        .collect();
+    let scale = 1.0 / (head_dim as f32).sqrt();
+    let query = tensor(
+        0,
+        vec![batch, query_tokens, query_heads, head_dim],
+        &query_values,
+    );
+    let key = tensor(0, vec![batch, key_tokens, kv_heads, head_dim], &key_values);
+    let value = tensor(
+        0,
+        vec![batch, key_tokens, kv_heads, head_dim],
+        &value_values,
+    );
+    let mut out = zeros_tensor(
+        0,
+        vec![batch, query_tokens, query_heads, head_dim],
+        DType::BF16,
+    );
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut out).causal();
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
+    let expected = attention_reference(
+        &query_values,
+        &key_values,
+        &value_values,
+        batch,
+        query_tokens,
+        key_tokens,
+        query_heads,
+        kv_heads,
+        head_dim,
+        scale,
+        true,
+    );
+    super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
+}
+
+#[test]
+fn attention_sm100_fmha_candidate_matches_reference() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (batch, tokens, heads, head_dim) = (1, 256, 16, 72);
+    let elements = batch * tokens * heads * head_dim;
+    let query = tensor(
+        0,
+        vec![batch, tokens, heads, head_dim],
+        &vec![0.0; elements],
+    );
+    let key = tensor(
+        0,
+        vec![batch, tokens, heads, head_dim],
+        &vec![0.0; elements],
+    );
+    let value = tensor(
+        0,
+        vec![batch, tokens, heads, head_dim],
+        &vec![1.0; elements],
+    );
+    let mut out = zeros_tensor(0, vec![batch, tokens, heads, head_dim], DType::BF16);
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut out);
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
+    super::attention_execution::validate_candidates(&ctx, &normalized, &vec![1.0; elements])
+        .unwrap();
 }
 
 #[test]

@@ -3,6 +3,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "build_support/attention_fingerprint.rs"]
+mod attention_fingerprint;
 #[path = "build_support/cuda_arch.rs"]
 mod cuda_arch;
 #[path = "build_support/gemm_fingerprint.rs"]
@@ -19,6 +21,7 @@ fn write_arch_header(out: &Path, selection: &ArchSelection) -> PathBuf {
         "#pragma once\n#include <cstddef>\n#include <cstdint>\nnamespace apxinf::gemm {\n\
          constexpr uint64_t kDeviceFeatureNativeFp8 = UINT64_C(1) << 0;\n\
          constexpr uint64_t kDeviceFeatureCutlassSm100 = UINT64_C(1) << 1;\n\
+         constexpr uint64_t kDeviceFeatureFa2 = UINT64_C(1) << 2;\n\
          struct CompiledTarget { int sm; uint64_t features; };\n\
          constexpr CompiledTarget kCompiledTargets[] = {\n",
     );
@@ -85,6 +88,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=APXINF_KERNEL_BUILD_ID");
     println!("cargo:rerun-if-env-changed=CUDA_VISIBLE_DEVICES");
     println!("cargo:rerun-if-changed=build_support/cuda_arch.rs");
+    println!("cargo:rerun-if-changed=build_support/attention_fingerprint.rs");
     println!("cargo:rerun-if-changed=build_support/gemm_fingerprint.rs");
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -149,6 +153,14 @@ fn main() {
                 .map(|arch| (arch.nvcc_arch.as_str(), arch.cutlass_arch.as_str())),
         )
     });
+    let attention_id = attention_fingerprint::build_id(
+        &native,
+        &target,
+        selection
+            .targets
+            .iter()
+            .map(|arch| (arch.nvcc_arch.as_str(), arch.cutlass_arch.as_str())),
+    );
     assert!(
         !id.chars()
             .any(|character| matches!(character, '\n' | '\r' | '"')),
@@ -162,7 +174,7 @@ fn main() {
         "runtime.cu",
         "gemm/registry.cu",
         "gemm/tuning_key.cu",
-        "gemm/tuning_db.cu",
+        "../framework/tuning_db.cu",
         "gemm/autotune.cu",
         "gemm/reference.cu",
         "gemm/execution.cu",
@@ -170,10 +182,16 @@ fn main() {
         "gemm/providers/cublaslt.cu",
         "gemm/providers/cutlass.cu",
         "gemm/providers/custom.cu",
+        "attention/registry.cu",
+        "attention/tuning_key.cu",
+        "attention/autotune.cu",
+        "attention/execution.cu",
+        "attention/providers/custom.cu",
     ]
     .map(|source| adapters.join(source))
     .to_vec();
     let cutlass_root = native.join("kernels/cutlass");
+    let fa2_root = native.join("kernels/fa2");
     let mut cutlass_sources = Vec::new();
     if selection
         .targets
@@ -190,13 +208,28 @@ fn main() {
             ]
             .map(|source| operators.join(source)),
         );
+        cutlass_sources.push(adapters.join("attention/providers/cutlass.cu"));
+    }
+    let has_fa2 = selection.targets.iter().any(|target| target.sm() >= 80);
+    let mut fa2_sources = Vec::new();
+    if has_fa2 {
+        generic_sources.push(adapters.join("attention/providers/fa2.cu"));
+        fa2_sources.extend(
+            [
+                "fa2.cu",
+                "flash_attn/flash_fwd_hdim128_bf16_sm80.cu",
+                "flash_attn/flash_fwd_hdim256_bf16_sm80.cu",
+            ]
+            .map(|source| fa2_root.join(source)),
+        );
     }
     assert!(
         generic_sources
             .iter()
             .chain(&cutlass_sources)
+            .chain(&fa2_sources)
             .all(|path| path.is_file()),
-        "GEMM build source is missing"
+        "native build source is missing"
     );
 
     let cuda_includes = [
@@ -207,6 +240,7 @@ fn main() {
     ];
     let cutlass_includes = [
         cutlass_root.clone(),
+        cutlass_root.join("fmha"),
         cutlass_root.join("include"),
         cutlass_root.join("tools/util/include"),
     ];
@@ -224,14 +258,26 @@ fn main() {
             .filter(|target| is_cutlass_sm100_family(&target.cutlass_arch))
             .map(|target| target.cutlass_arch.clone()),
     );
+    let fa2_codegen = gencode_args(
+        selection
+            .targets
+            .iter()
+            .filter(|target| target.sm() >= 80)
+            .map(|target| target.nvcc_arch.clone()),
+    );
     let mut objects = Vec::new();
     for (index, source) in generic_sources
         .drain(..)
-        .map(|source| (source, false))
-        .chain(cutlass_sources.into_iter().map(|source| (source, true)))
+        .map(|source| (source, false, false))
+        .chain(
+            cutlass_sources
+                .into_iter()
+                .map(|source| (source, true, false)),
+        )
+        .chain(fa2_sources.into_iter().map(|source| (source, false, true)))
         .enumerate()
     {
-        let (source, is_cutlass) = source;
+        let (source, is_cutlass, is_fa2) = source;
         let object = out.join(format!(
             "gemm-{index}-{}.o",
             source.file_stem().unwrap().to_string_lossy()
@@ -245,9 +291,12 @@ fn main() {
             .args(["--compiler-options", "-fPIC", "-O3", "-std=c++17"])
             .arg(format!("-I{}", native.join("include").display()))
             .arg(format!("-I{}", out.display()))
-            .arg(format!("-DAPXINF_GEMM_BUILD_ID=\"{id}\""));
+            .arg(format!("-DAPXINF_GEMM_BUILD_ID=\"{id}\""))
+            .arg(format!("-DAPXINF_ATTENTION_BUILD_ID=\"{attention_id}\""));
         command.args(if is_cutlass {
             &cutlass_codegen
+        } else if is_fa2 {
+            &fa2_codegen
         } else {
             &generic_codegen
         });
@@ -256,6 +305,10 @@ fn main() {
         }
         if has_cutlass {
             command.arg("-DAPXINF_GEMM_CUTLASS=1");
+            command.arg("-DAPXINF_ATTENTION_CUTLASS=1");
+        }
+        if has_fa2 {
+            command.arg("-DAPXINF_ATTENTION_FA2=1");
         }
         if is_cutlass {
             command.args(["--expt-relaxed-constexpr", "--expt-extended-lambda"]);
@@ -274,6 +327,20 @@ fn main() {
             {
                 command.arg("-DAPXINF_BF16_DUAL_GEGLU_PRODUCTION=1");
             }
+        }
+        if is_fa2 {
+            command.args([
+                "--expt-relaxed-constexpr",
+                "--expt-extended-lambda",
+                "--use_fast_math",
+                "-U__CUDA_NO_HALF_OPERATORS__",
+                "-U__CUDA_NO_HALF_CONVERSIONS__",
+                "-U__CUDA_NO_HALF2_OPERATORS__",
+                "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                "-DFLASH_NAMESPACE=apxinf_fa2",
+            ]);
+            command.arg(format!("-I{}", fa2_root.display()));
+            command.arg(format!("-I{}", cutlass_root.join("include").display()));
         }
         run(&mut command, &format!("compile {}", source.display()));
         objects.push(object);
