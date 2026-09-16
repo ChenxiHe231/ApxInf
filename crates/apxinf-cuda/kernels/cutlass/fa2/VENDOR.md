@@ -34,23 +34,23 @@ We keep a dedicated CUTLASS 3.x tree here separate from
 because CUTLASS 4.x has breaking CuTe layout-algebra changes that FA2
 2.7.x does not support.
 
-## Local patches
+## PyTorch-free build boundary
 
-Three inherited PyTorch-decoupling patches in `flash_attn/` allow FA2 to build
-without a Torch installation:
+`flash.h`, `philox_unpack.cuh`, and `flash_fwd_launch_template.h` are kept at
+their upstream `v2.7.4.post1` contents. ApxInf does not depend on libtorch, so
+the narrow ATen/C10 surface referenced by those files is implemented under
+the sibling `../fa2_compat/` include root. Keeping the compatibility code out
+of this directory makes the upstream provenance auditable with a byte-for-byte
+comparison.
 
-1. `flash_fwd_launch_template.h`: replaced `#include <c10/cuda/CUDAException.h>`
-   with inline CUDA-runtime stubs for `C10_CUDA_CHECK` and
-   `C10_CUDA_KERNEL_LAUNCH_CHECK`.
+The compatibility layer is inference-only: FA2 is compiled with dropout,
+ALiBi, soft-cap, and local attention disabled. It supplies a Philox state
+carrier for template completeness and native CUDA error handling for launch
+code. It is not intended to emulate PyTorch outside this build boundary.
 
-2. `flash.h`: replaced `#include <ATen/cuda/CUDAGeneratorImpl.h>` with a
-   minimal POD `at::PhiloxCudaState` struct (dropout RNG state is
-   carried through but never read in inference because `p_dropout=0`).
-
-3. `philox_unpack.cuh`: replaced `#include <ATen/cuda/detail/UnpackRaw.cuh>`
-   with a ~10-line inline stub for `at::cuda::philox::unpack()`.
-
-Total inherited patch footprint: approximately 30 lines.
+The direct-E4M3 output path remains an ApxInf extension in
+`flash_fwd_kernel.h`; it is unrelated to the PyTorch-free compatibility layer
+and is selected only by `APXINF_FA2_DIRECT_E4M3`.
 
 ## Backporting upstream bugfixes
 

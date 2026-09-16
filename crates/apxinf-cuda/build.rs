@@ -379,6 +379,7 @@ fn main() {
             }
 
             let fa2_root = cutlass_root.join("fa2");
+            let fa2_compat = cutlass_root.join("fa2_compat");
             let fa2_operator = cutlass_root.join("fa2_bf16_sm80.cu");
             let fa2_wrapper = std::path::Path::new(&adapters_dir).join("fa2_adapter.cu");
             let mut fa2_sources = Vec::new();
@@ -437,12 +438,13 @@ fn main() {
                     kernel_files.extend(fa2_direct_e4m3_sources.iter().cloned());
                     println!("cargo:rustc-cfg=apxinf_fa2_direct_e4m3_sm100");
                 }
-                fa2_includes.extend([fa2_root.clone(), fa2_cutlass]);
+                fa2_includes.extend([fa2_compat.clone(), fa2_root.clone(), fa2_cutlass]);
                 kernel_files.extend(fa2_sources.iter().cloned());
                 if fa2_sm80 {
                     println!("cargo:rustc-cfg=apxinf_fa2_sm80");
                 }
                 emit_rerun_if_changed_tree(&fa2_root);
+                emit_rerun_if_changed_tree(&fa2_compat);
             }
 
             if !kernel_files.is_empty() {
