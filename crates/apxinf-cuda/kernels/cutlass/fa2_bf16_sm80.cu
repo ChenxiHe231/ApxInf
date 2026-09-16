@@ -309,4 +309,13 @@ int fa2_f16(
       query_heads, kv_heads, head_dim, softmax_scale, stream);
 }
 
+int fa2_f16_strided_qkv(
+    const void* qkv, void* output, void* softmax_lse, int batch,
+    int tokens, int heads, int head_dim, float softmax_scale,
+    cudaStream_t stream) {
+  return fa2_strided_qkv<cutlass::half_t>(
+      qkv, output, softmax_lse, batch, tokens, heads, head_dim,
+      softmax_scale, stream);
+}
+
 }  // namespace apxinf::cuda::cutlass_ops

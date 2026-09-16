@@ -65,3 +65,12 @@ extern "C" int apxinf_static_fa2_f16(
       q, k, v, output, softmax_lse, batch, query_tokens, key_tokens,
       query_heads, kv_heads, head_dim, softmax_scale, stream);
 }
+
+extern "C" int apxinf_static_fa2_f16_strided_qkv(
+    const void* qkv, void* output, void* softmax_lse, int batch,
+    int tokens, int heads, int head_dim, float softmax_scale,
+    cudaStream_t stream) {
+  return apxinf::cuda::cutlass_ops::fa2_f16_strided_qkv(
+      qkv, output, softmax_lse, batch, tokens, heads, head_dim,
+      softmax_scale, stream);
+}

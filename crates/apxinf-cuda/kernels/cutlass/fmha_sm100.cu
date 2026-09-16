@@ -166,48 +166,6 @@ static int cutlass_mha(
   return operation.run(stream) == cutlass::Status::kSuccess ? 0 : -3;
 }
 
-int prepare_mha_f16(
-    const void* q, const void* k, const void* v, void* output,
-    int batches, int query_tokens, int key_tokens, int query_heads,
-    int kv_heads, int head_dim, cudaStream_t stream) {
-  return cutlass_mha<cutlass::half_t, cutlass::half_t>(
-      q, k, v, output, batches, query_tokens, key_tokens, query_heads,
-      kv_heads, head_dim, 0, 0, stream, true);
-}
-
-int mha_f16(
-    const void* q, const void* k, const void* v, void* output,
-    int batches, int query_tokens, int key_tokens, int query_heads,
-    int kv_heads, int head_dim, cudaStream_t stream) {
-  return cutlass_mha<cutlass::half_t, cutlass::half_t>(
-      q, k, v, output, batches, query_tokens, key_tokens, query_heads,
-      kv_heads, head_dim, 0, 0, stream, false);
-}
-
-int prepare_mha_packed_qkv_f16(
-    const void* qkv, void* output, int batches, int tokens, int heads,
-    int head_dim, cudaStream_t stream) {
-  if (qkv == nullptr) return -1;
-  int projection_width = heads * head_dim;
-  auto base = static_cast<cutlass::half_t const*>(qkv);
-  return cutlass_mha<cutlass::half_t, cutlass::half_t>(
-      base, base + projection_width, base + 2 * projection_width, output,
-      batches, tokens, tokens, heads, heads, head_dim, 3 * projection_width,
-      3 * projection_width, stream, true);
-}
-
-int mha_packed_qkv_f16(
-    const void* qkv, void* output, int batches, int tokens, int heads,
-    int head_dim, cudaStream_t stream) {
-  if (qkv == nullptr) return -1;
-  int projection_width = heads * head_dim;
-  auto base = static_cast<cutlass::half_t const*>(qkv);
-  return cutlass_mha<cutlass::half_t, cutlass::half_t>(
-      base, base + projection_width, base + 2 * projection_width, output,
-      batches, tokens, tokens, heads, heads, head_dim, 3 * projection_width,
-      3 * projection_width, stream, false);
-}
-
 int prepare_mha_bf16(
     const void* q, const void* k, const void* v, void* output,
     int batches, int query_tokens, int key_tokens, int query_heads,

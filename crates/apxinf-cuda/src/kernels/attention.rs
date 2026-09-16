@@ -11,7 +11,9 @@ use crate::buffer::{CudaBuffer, CudaDeviceAddress};
 use crate::context::CudaContext;
 use crate::cublas::CublasTranspose;
 use crate::ffi;
-use crate::workspace::{may_prepare_native_resources, output_buffer};
+#[cfg(all(apxinf_cutlass_fmha, not(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))))]
+use crate::workspace::may_prepare_native_resources;
+use crate::workspace::output_buffer;
 use crate::CudaKVCache;
 
 pub struct QkvTensors {
@@ -1772,17 +1774,23 @@ pub(crate) fn cublas_mqa_f16(
 }
 
 #[cfg(apxinf_fa2_f16_sm100)]
-pub(crate) fn fa2_mqa_f16(
+#[allow(clippy::too_many_arguments)]
+fn fa2_attention_f16(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
+    batches: usize,
+    query_tokens: usize,
     key_tokens: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
 ) -> Result<Tensor> {
-    let q_shape = q.shape().dims();
     let output = output_buffer(ctx, q.size_in_bytes())?;
-    let lse_elements = q_shape[0]
-        .checked_mul(q_shape[1])
+    let lse_elements = batches
+        .checked_mul(query_heads)
+        .and_then(|value| value.checked_mul(query_tokens))
         .ok_or_else(|| Error::Other("FA2 FP16 LSE size overflow".into()))?;
     let softmax_lse = output_buffer(
         ctx,
@@ -1797,13 +1805,13 @@ pub(crate) fn fa2_mqa_f16(
             gpu_ptr(v)?,
             output.ptr(),
             softmax_lse.ptr(),
-            1,
-            q_shape[0] as i32,
+            batches as i32,
+            query_tokens as i32,
             key_tokens as i32,
-            q_shape[1] as i32,
-            1,
-            q_shape[2] as i32,
-            (q_shape[2] as f32).sqrt().recip(),
+            query_heads as i32,
+            kv_heads as i32,
+            head_dim as i32,
+            (head_dim as f32).sqrt().recip(),
             ctx.stream().handle(),
         ))
         .map_err(Error::Cuda)?;
@@ -1814,6 +1822,20 @@ pub(crate) fn fa2_mqa_f16(
         ctx.device_id(),
         output,
     ))
+}
+
+#[cfg(apxinf_fa2_f16_sm100)]
+pub(crate) fn fa2_mqa_f16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
+) -> Result<Tensor> {
+    let q_shape = q.shape().dims();
+    fa2_attention_f16(
+        ctx, q, k, v, 1, q_shape[0], key_tokens, q_shape[1], 1, q_shape[2],
+    )
 }
 
 /// Exact MQA for the static inference action expert. Prefix and suffix
@@ -1941,9 +1963,9 @@ pub fn split_qkv_bias_f16(
     })
 }
 
-/// Apply QKV bias without splitting the projection, then let SM100-family
-/// FMHA consume Q/K/V through row-strided views of `[tokens, 3 * heads * dim]`.
-/// This avoids materializing three layout copies for SigLIP attention.
+/// Apply QKV bias without splitting the projection, then let FA2 consume Q/K/V
+/// through row-strided views of `[tokens, 3 * heads * dim]`. This avoids
+/// materializing three layout copies for SigLIP attention.
 pub fn mha_packed_qkv_bias_f16(
     ctx: &CudaContext,
     qkv: &Tensor,
@@ -1972,49 +1994,42 @@ pub fn mha_packed_qkv_bias_f16(
         )));
     }
 
-    #[cfg(apxinf_cutlass_fmha)]
+    #[cfg(apxinf_fa2_f16_sm100)]
     if tokens_per_batch == 256 && heads == 16 && head_dim == 72 {
         let biased = bias
             .map(|value| bias_f16(ctx, qkv, Some(value)))
             .transpose()?;
         let packed = biased.as_ref().unwrap_or(qkv);
         let output = f16_output(ctx, tokens, projection_width)?;
+        let lse_elements = tokens
+            .checked_mul(heads)
+            .ok_or_else(|| Error::Other("packed FA2 FP16 LSE size overflow".into()))?;
+        let softmax_lse = output_buffer(
+            ctx,
+            lse_elements
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| Error::Other("packed FA2 FP16 LSE byte size overflow".into()))?,
+        )?;
         unsafe {
-            let batches = tokens / tokens_per_batch;
-            if may_prepare_native_resources() {
-                let status = ffi::apxinf_static_prepare_cutlass_mha_packed_qkv_f16(
-                    gpu_ptr(packed)?,
-                    output.ptr(),
-                    batches as i32,
-                    tokens_per_batch as i32,
-                    heads as i32,
-                    head_dim as i32,
-                    ctx.stream().handle(),
-                );
-                if status != 0 {
-                    return Err(Error::Cuda(format!(
-                        "packed CUTLASS FMHA resource preparation failed with status {status}"
-                    )));
-                }
-            }
-            let status = ffi::apxinf_static_cutlass_mha_packed_qkv_f16(
+            ffi::check_cuda(ffi::apxinf_static_fa2_f16_strided_qkv(
                 gpu_ptr(packed)?,
                 output.ptr(),
-                batches as i32,
+                softmax_lse.ptr(),
+                (tokens / tokens_per_batch) as i32,
                 tokens_per_batch as i32,
                 heads as i32,
                 head_dim as i32,
+                (head_dim as f32).sqrt().recip(),
                 ctx.stream().handle(),
-            );
-            if status == 0 {
-                return Ok(make_gpu_tensor(
-                    Shape::new(vec![tokens, heads, head_dim]),
-                    DType::F16,
-                    ctx.device_id(),
-                    output,
-                ));
-            }
+            ))
+            .map_err(Error::Cuda)?;
         }
+        return Ok(make_gpu_tensor(
+            Shape::new(vec![tokens, heads, head_dim]),
+            DType::F16,
+            ctx.device_id(),
+            output,
+        ));
     }
 
     let split = split_qkv_bias_f16(ctx, qkv, bias, heads, head_dim)?;
@@ -2043,54 +2058,22 @@ pub fn mha_f16(
             "static inference MHA expects matching FP16 [tokens,heads,head_dim] tensors".into(),
         ));
     }
-    let output = output_buffer(ctx, q.size_in_bytes())?;
-    #[cfg(apxinf_cutlass_fmha)]
+    #[cfg(apxinf_fa2_f16_sm100)]
     if tokens_per_batch == 256 && shape[1] == 16 && shape[2] == 72 {
-        unsafe {
-            let batches = shape[0] / tokens_per_batch;
-            if may_prepare_native_resources() {
-                let status = ffi::apxinf_static_prepare_cutlass_mha_f16(
-                    gpu_ptr(q)?,
-                    gpu_ptr(k)?,
-                    gpu_ptr(v)?,
-                    output.ptr(),
-                    batches as i32,
-                    tokens_per_batch as i32,
-                    tokens_per_batch as i32,
-                    shape[1] as i32,
-                    shape[1] as i32,
-                    shape[2] as i32,
-                    ctx.stream().handle(),
-                );
-                if status != 0 {
-                    return Err(Error::Cuda(format!(
-                        "CUTLASS FMHA resource preparation failed with status {status}"
-                    )));
-                }
-            }
-            let status = ffi::apxinf_static_cutlass_mha_f16(
-                gpu_ptr(q)?,
-                gpu_ptr(k)?,
-                gpu_ptr(v)?,
-                output.ptr(),
-                batches as i32,
-                tokens_per_batch as i32,
-                tokens_per_batch as i32,
-                shape[1] as i32,
-                shape[1] as i32,
-                shape[2] as i32,
-                ctx.stream().handle(),
-            );
-            if status == 0 {
-                return Ok(make_gpu_tensor(
-                    q.shape().clone(),
-                    DType::F16,
-                    ctx.device_id(),
-                    output,
-                ));
-            }
-        }
+        return fa2_attention_f16(
+            ctx,
+            q,
+            k,
+            v,
+            shape[0] / tokens_per_batch,
+            tokens_per_batch,
+            tokens_per_batch,
+            shape[1],
+            shape[1],
+            shape[2],
+        );
     }
+    let output = output_buffer(ctx, q.size_in_bytes())?;
     unsafe {
         ffi::check_cuda(ffi::apxinf_static_mha_flash_f16(
             gpu_ptr(q)?,
