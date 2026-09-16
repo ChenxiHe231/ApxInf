@@ -1038,6 +1038,143 @@ fn fa2_splitkv_enabled(
         && matches!(head_dim, 128 | 256)
 }
 
+/// Choose split-KV parallelism from the logical work shape.
+///
+/// The occupancy policy follows the documented heuristic in official
+/// FlashAttention 2.7.4.post1 (BSD-3-Clause), expressed here independently in
+/// Rust so the raw-pointer CUDA wrapper only marshals an already-made choice.
+#[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
+fn plan_fa2_split_count(
+    batches: usize,
+    query_tokens: usize,
+    key_tokens: usize,
+    query_heads: usize,
+    head_dim: usize,
+    multiprocessors: usize,
+) -> usize {
+    if batches == 0
+        || query_tokens == 0
+        || key_tokens == 0
+        || query_heads == 0
+        || head_dim == 0
+        || multiprocessors == 0
+    {
+        return 1;
+    }
+    let key_tile = if head_dim <= 64 {
+        256
+    } else if head_dim <= 128 {
+        128
+    } else {
+        64
+    };
+    let key_tiles = key_tokens.div_ceil(key_tile);
+    let row_tiles = query_tokens.div_ceil(64);
+    let base_jobs = batches
+        .saturating_mul(query_heads)
+        .saturating_mul(row_tiles);
+    let execution_slots = multiprocessors.saturating_mul(2);
+    if execution_slots == 0
+        || key_tiles == 0
+        || base_jobs.saturating_mul(5) >= execution_slots.saturating_mul(4)
+    {
+        return 1;
+    }
+
+    let limit = 128.min(execution_slots).min(key_tiles);
+    let eligible =
+        |splits: usize| splits == 1 || key_tiles.div_ceil(splits) != key_tiles.div_ceil(splits - 1);
+    let utilization = |splits: usize| {
+        let jobs = base_jobs.saturating_mul(splits);
+        let waves = jobs as f32 / execution_slots as f32;
+        waves / waves.ceil()
+    };
+    let peak = (1..=limit)
+        .filter(|&splits| eligible(splits))
+        .map(utilization)
+        .fold(0.0f32, f32::max);
+    (1..=limit)
+        .find(|&splits| eligible(splits) && utilization(splits) >= 0.85 * peak)
+        .unwrap_or(1)
+}
+
+#[cfg(all(test, any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100)))]
+mod splitkv_planner_tests {
+    use super::plan_fa2_split_count;
+
+    fn official_fa2_choice(base_jobs: usize, execution_slots: usize, key_tiles: usize) -> usize {
+        if base_jobs as f32 >= 0.8 * execution_slots as f32 {
+            return 1;
+        }
+        let limit = 128.min(execution_slots).min(key_tiles);
+        let eligible = |splits: usize| {
+            splits == 1 || key_tiles.div_ceil(splits) != key_tiles.div_ceil(splits - 1)
+        };
+        let scores = (1..=limit)
+            .map(|splits| {
+                if !eligible(splits) {
+                    return 0.0;
+                }
+                let waves = (base_jobs * splits) as f32 / execution_slots as f32;
+                waves / waves.ceil()
+            })
+            .collect::<Vec<_>>();
+        let peak = scores.iter().copied().fold(0.0f32, f32::max);
+        (1..=limit)
+            .find(|&splits| eligible(splits) && scores[splits - 1] >= 0.85 * peak)
+            .unwrap_or(1)
+    }
+
+    #[test]
+    fn pi05_orin_shape_uses_three_splits() {
+        assert_eq!(plan_fa2_split_count(1, 10, 532, 8, 256, 16), 3);
+    }
+
+    #[test]
+    fn saturated_or_single_tile_work_stays_unsplit() {
+        assert_eq!(plan_fa2_split_count(1, 64, 512, 32, 256, 16), 1);
+        assert_eq!(plan_fa2_split_count(1, 10, 32, 8, 256, 16), 1);
+    }
+
+    #[test]
+    fn invalid_or_overflowing_work_stays_unsplit() {
+        assert_eq!(plan_fa2_split_count(0, 1, 64, 1, 256, 16), 1);
+        assert_eq!(plan_fa2_split_count(1, 0, 64, 1, 256, 16), 1);
+        assert_eq!(plan_fa2_split_count(1, 1, 0, 1, 256, 16), 1);
+        assert_eq!(plan_fa2_split_count(1, 1, 64, 0, 256, 16), 1);
+        assert_eq!(plan_fa2_split_count(1, 1, 64, 1, 0, 16), 1);
+        assert_eq!(plan_fa2_split_count(1, 1, 64, 1, 256, 0), 1);
+        assert_eq!(
+            plan_fa2_split_count(usize::MAX, 64, usize::MAX, usize::MAX, 256, usize::MAX),
+            1
+        );
+    }
+
+    #[test]
+    fn agrees_with_official_fa2_policy_over_supported_domain() {
+        for multiprocessors in 1..=128 {
+            let execution_slots = multiprocessors * 2;
+            for query_heads in 1..=256 {
+                for key_tiles in 1..=128 {
+                    let expected = official_fa2_choice(query_heads, execution_slots, key_tiles);
+                    let actual = plan_fa2_split_count(
+                        1,
+                        1,
+                        key_tiles * 64,
+                        query_heads,
+                        256,
+                        multiprocessors,
+                    );
+                    assert_eq!(
+                        actual, expected,
+                        "SMs={multiprocessors}, heads={query_heads}, key_tiles={key_tiles}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fa2_attention_splitkv(
@@ -1053,6 +1190,14 @@ pub(crate) fn fa2_attention_splitkv(
     head_dim: usize,
     causal: bool,
 ) -> Result<Tensor> {
+    let num_splits = plan_fa2_split_count(
+        batches,
+        query_tokens,
+        key_tokens,
+        query_heads,
+        head_dim,
+        ctx.caps().multiprocessor_count as usize,
+    );
     let output = output_buffer(ctx, q.size_in_bytes())?;
     let lse_elements = batches
         .checked_mul(query_heads)
@@ -1112,7 +1257,7 @@ pub(crate) fn fa2_attention_splitkv(
                 kv_heads as i32,
                 head_dim as i32,
                 (head_dim as f32).sqrt().recip(),
-                ctx.caps().multiprocessor_count as i32,
+                num_splits as i32,
                 ctx.stream().handle(),
             )
         } else {
@@ -1131,7 +1276,7 @@ pub(crate) fn fa2_attention_splitkv(
                 kv_heads as i32,
                 head_dim as i32,
                 (head_dim as f32).sqrt().recip(),
-                ctx.caps().multiprocessor_count as i32,
+                num_splits as i32,
                 ctx.stream().handle(),
             )
         };

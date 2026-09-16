@@ -102,7 +102,7 @@ extern "C" {
         kv_heads: i32,
         head_dim: i32,
         softmax_scale: f32,
-        num_sms: i32,
+        num_splits: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[cfg(any(apxinf_fa2_sm80, apxinf_fa2_f16_sm100))]
@@ -121,7 +121,7 @@ extern "C" {
         kv_heads: i32,
         head_dim: i32,
         softmax_scale: f32,
-        num_sms: i32,
+        num_splits: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
 }

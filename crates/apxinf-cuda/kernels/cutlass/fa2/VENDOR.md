@@ -10,6 +10,12 @@ These paths use the repository-local raw-pointer wrapper in
 `../fa2_bf16_sm80.cu`. Only the listed forward instantiations and the required
 head-dimension 256 split-KV instantiation are compiled.
 
+The split-KV count is selected outside the vendored tree by ApxInf's Rust
+attention layer. Its occupancy policy is an independent Rust implementation of
+the BSD-3-Clause `num_splits_heuristic` in upstream FA2's `flash_api.cpp`; the
+raw-pointer CUDA wrapper receives the resulting count and only marshals kernel
+parameters.
+
 ## Sources
 
 ### flash_attn/
