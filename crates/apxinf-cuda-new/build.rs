@@ -172,7 +172,7 @@ fn main() {
     let adapters = native.join("adapters");
     let mut generic_sources = [
         "runtime.cu",
-        "gemm/registry.cu",
+        "gemm/candidates.cu",
         "gemm/tuning_key.cu",
         "../framework/tuning_db.cu",
         "gemm/autotune.cu",
@@ -182,7 +182,7 @@ fn main() {
         "gemm/providers/cublaslt.cu",
         "gemm/providers/cutlass.cu",
         "gemm/providers/custom.cu",
-        "attention/registry.cu",
+        "attention/candidates.cu",
         "attention/tuning_key.cu",
         "attention/autotune.cu",
         "attention/execution.cu",

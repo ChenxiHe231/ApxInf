@@ -1,6 +1,6 @@
 use std::ffi::{c_char, c_void};
 
-pub(crate) use super::tuning::Policy;
+pub(crate) use super::types::Policy;
 use super::types::{CudaStream, Runtime};
 
 #[repr(C)]
