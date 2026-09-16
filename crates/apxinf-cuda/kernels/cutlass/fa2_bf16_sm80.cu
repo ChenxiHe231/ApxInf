@@ -25,6 +25,15 @@ void run_mha_fwd_splitkv_dispatch(Flash_fwd_params& params,
 
 }  // namespace FLASH_NAMESPACE
 
+namespace apxinf::cuda::cutlass_ops {
+
+void run_mha_fwd_hdim64_bf16_apx(
+    FLASH_NAMESPACE::Flash_fwd_params& params, cudaStream_t stream);
+bool use_mha_fwd_hdim64_bf16_apx(
+    const FLASH_NAMESPACE::Flash_fwd_params& params);
+
+}  // namespace apxinf::cuda::cutlass_ops
+
 namespace {
 
 constexpr float kLog2E = 1.4426950408889634074f;
@@ -161,6 +170,13 @@ int fa2(
               q, k, v, output, softmax_lse, batch, query_tokens,
               key_tokens, query_heads, kv_heads, head_dim, softmax_scale);
   params.is_causal = false;
+  if constexpr (std::is_same<Element, cutlass::bfloat16_t>::value) {
+    if (head_dim == 64 &&
+        apxinf::cuda::cutlass_ops::use_mha_fwd_hdim64_bf16_apx(params)) {
+      apxinf::cuda::cutlass_ops::run_mha_fwd_hdim64_bf16_apx(params, stream);
+      return static_cast<int>(cudaSuccess);
+    }
+  }
   if (head_dim <= 96) {
     FLASH_NAMESPACE::run_mha_fwd_<Element, 96, false>(params, stream);
   } else if (head_dim <= 128) {
@@ -222,6 +238,13 @@ int fa2_strided_qkv(
   params.q_row_stride = row_stride;
   params.k_row_stride = row_stride;
   params.v_row_stride = row_stride;
+  if constexpr (std::is_same<Element, cutlass::bfloat16_t>::value) {
+    if (head_dim == 64 &&
+        apxinf::cuda::cutlass_ops::use_mha_fwd_hdim64_bf16_apx(params)) {
+      apxinf::cuda::cutlass_ops::run_mha_fwd_hdim64_bf16_apx(params, stream);
+      return static_cast<int>(cudaSuccess);
+    }
+  }
   if (head_dim <= 96) {
     FLASH_NAMESPACE::run_mha_fwd_<Element, 96, false>(params, stream);
   } else {

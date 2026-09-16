@@ -1,11 +1,14 @@
 # Vendored: Flash-Attention 2 forward kernels
 
 ApxInf compiles the BF16 head-dimension 96 and 256 non-causal forward
-instantiations for SM80/SM86/SM87/SM89. On SM100-family builds it also compiles
-the FP16 head-dimension 96 and 256 instantiations; the Thor PI0.5 FP8 path uses
-FP16 Gemma MQA (`head_dim=256`). Both paths use the repository-local raw-pointer
-wrapper in `../fa2_bf16_sm80.cu`. Split-KV and other head-dimension
-instantiations are intentionally omitted.
+instantiations for SM80/SM86/SM87/SM89. The ApxInf-owned sibling translation
+unit `../fa2_hdim64_bf16.cu` additionally instantiates exact head-dimension 64
+tiles for an SM87-only dispatch; it does not modify this vendored tree. On
+SM100-family builds ApxInf also compiles the FP16 head-dimension 96 and 256
+instantiations; the Thor PI0.5 FP8 path uses FP16 Gemma MQA (`head_dim=256`).
+These paths use the repository-local raw-pointer wrapper in
+`../fa2_bf16_sm80.cu`. Only the listed forward instantiations and the required
+head-dimension 256 split-KV instantiation are compiled.
 
 ## Sources
 
