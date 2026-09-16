@@ -6,7 +6,10 @@ mod gemm;
 // Keep these crate-private aliases while graph/workspace and unit tests still
 // refer to the GEMM implementation through `crate::ops`.
 #[cfg(test)]
-pub(crate) use attention::{contracts as attention_contracts, execution as attention_execution};
+pub(crate) use attention::{
+    contracts as attention_contracts, execution as attention_execution,
+    normalize_kv_cache_attention, normalize_segmented_attention,
+};
 #[cfg(test)]
 pub(crate) use gemm::contracts;
 #[cfg(test)]

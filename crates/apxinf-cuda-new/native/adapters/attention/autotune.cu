@@ -31,7 +31,7 @@ class AttentionTuningProblem {
   }
 
   const ImplementationRegistry& registry() const {
-    return apxinf::attention::registry();
+    return apxinf::attention::registry(spec_.semantic);
   }
 
   bool supports(const Implementation& implementation,

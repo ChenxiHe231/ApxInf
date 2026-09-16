@@ -17,6 +17,21 @@ bool supports_custom(const Spec& spec) {
          spec.output_dtype == spec.dtype;
 }
 
+bool supports_dense_custom(const Spec& spec) {
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+         supports_custom(spec);
+}
+
+bool supports_kv_cache_custom(const Spec& spec) {
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+         supports_custom(spec);
+}
+
+bool supports_segmented_custom(const Spec& spec) {
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED &&
+         supports_custom(spec);
+}
+
 AlignmentRequirements natural_alignment(const Spec&) { return {}; }
 
 void one_configuration(const Spec&, std::vector<int>& configurations) {
@@ -25,7 +40,14 @@ void one_configuration(const Spec&, std::vector<int>& configurations) {
 
 #if defined(APXINF_ATTENTION_FA2)
 bool supports_fa2(const Spec& spec) {
-  return spec.head_dim <= 256 && spec.dtype == APXINF_DTYPE_BF16 &&
+  const bool layout_supported =
+      spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE ||
+      (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+       spec.key_capacity == spec.key_tokens &&
+       (spec.mask == APXINF_ATTENTION_MASK_NONE ||
+        spec.query_start == spec.key_tokens - spec.query_tokens));
+  return layout_supported && spec.head_dim <= 256 &&
+         spec.dtype == APXINF_DTYPE_BF16 &&
          spec.output_dtype == spec.dtype;
 }
 
@@ -36,7 +58,8 @@ AlignmentRequirements fa2_alignment(const Spec&) {
 
 #if defined(APXINF_ATTENTION_CUTLASS)
 bool supports_cutlass(const Spec& spec) {
-  return spec.mask == APXINF_ATTENTION_MASK_NONE &&
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+         spec.mask == APXINF_ATTENTION_MASK_NONE &&
          spec.query_tokens == 256 && spec.key_tokens == 256 &&
          spec.query_heads == 16 && spec.kv_heads == 16 &&
          spec.head_dim == 72 &&
@@ -52,8 +75,8 @@ AlignmentRequirements cutlass_alignment(const Spec&) {
 
 }  // namespace
 
-const ImplementationRegistry& registry() {
-  static const ImplementationRegistry entries = {
+const ImplementationRegistry& registry(uint32_t semantic) {
+  static const ImplementationRegistry dense_entries = {
 #if defined(APXINF_ATTENTION_CUTLASS)
       {kProviderCutlass, 1, 1, "cutlass-fmha-sm100",
        apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, false,
@@ -67,11 +90,38 @@ const ImplementationRegistry& registry() {
        prepare_fa2, launch_fa2, destroy_fa2},
 #endif
       {kProviderCustom, 1, 1, "custom-attention-fallback", 0, true, true,
-       true, supports_custom, natural_alignment,
+       true, supports_dense_custom, natural_alignment,
        custom_resource_requirements, one_configuration, prepare_custom,
        launch_custom, destroy_custom},
   };
-  return entries;
+  static const ImplementationRegistry kv_cache_entries = {
+#if defined(APXINF_ATTENTION_FA2)
+      {kProviderFa2, 1, 1, "flash-attention-2-kv-cache",
+       apxinf::gemm::kDeviceFeatureFa2, true, true, false, supports_fa2,
+       fa2_alignment, fa2_resource_requirements, one_configuration,
+       prepare_fa2, launch_fa2, destroy_fa2},
+#endif
+      {kProviderCustom, 2, 1, "custom-kv-cache-attention", 0, true, true,
+       true, supports_kv_cache_custom, natural_alignment,
+       custom_resource_requirements, one_configuration, prepare_custom,
+       launch_custom, destroy_custom},
+  };
+  static const ImplementationRegistry segmented_entries = {
+      {kProviderCustom, 3, 1, "custom-segmented-attention", 0, true, true,
+       true, supports_segmented_custom, natural_alignment,
+       custom_resource_requirements, one_configuration, prepare_custom,
+       launch_custom, destroy_custom},
+  };
+  switch (semantic) {
+    case APXINF_ATTENTION_SEMANTIC_DENSE:
+      return dense_entries;
+    case APXINF_ATTENTION_SEMANTIC_KV_CACHE:
+      return kv_cache_entries;
+    case APXINF_ATTENTION_SEMANTIC_SEGMENTED:
+      return segmented_entries;
+  }
+  throw Failure(APXINF_STATUS_INTERNAL_ERROR,
+                "unknown Attention semantic registry");
 }
 
 bool supports_device(const Implementation& implementation, int device,

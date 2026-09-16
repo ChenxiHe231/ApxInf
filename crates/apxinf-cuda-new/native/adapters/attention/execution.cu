@@ -18,23 +18,56 @@ bool valid_alignment(uint32_t alignment) {
 }
 
 void validate_spec(const Spec& spec) {
-  if (spec.version != 1 ||
+  if (spec.version != 2 ||
+      spec.semantic > APXINF_ATTENTION_SEMANTIC_SEGMENTED ||
       (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
       spec.output_dtype != spec.dtype ||
       spec.mask > APXINF_ATTENTION_MASK_CAUSAL || spec.batch <= 0 ||
       spec.query_tokens <= 0 || spec.key_tokens <= 0 ||
+      spec.key_capacity < spec.key_tokens ||
       spec.query_heads <= 0 || spec.kv_heads <= 0 || spec.head_dim <= 0 ||
       spec.query_heads % spec.kv_heads != 0 ||
       spec.batch > INT32_MAX || spec.query_tokens > INT32_MAX ||
-      spec.key_tokens > INT32_MAX || spec.query_heads > INT32_MAX ||
-      spec.kv_heads > INT32_MAX || spec.head_dim > INT32_MAX ||
+      spec.key_tokens > INT32_MAX || spec.key_capacity > INT32_MAX ||
+      spec.query_heads > INT32_MAX || spec.kv_heads > INT32_MAX ||
+      spec.head_dim > INT32_MAX || spec.query_start > INT32_MAX ||
+      spec.segments > INT32_MAX || spec.max_segment_tokens > INT32_MAX ||
       spec.scale_is_default > 1) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Attention Spec");
   }
-  if (spec.mask == APXINF_ATTENTION_MASK_CAUSAL &&
-      spec.key_tokens < spec.query_tokens) {
+  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+      (spec.key_capacity != spec.key_tokens ||
+       spec.query_start !=
+           (spec.mask == APXINF_ATTENTION_MASK_CAUSAL
+                ? spec.key_tokens - spec.query_tokens
+                : 0) ||
+       spec.segments != 0 || spec.max_segment_tokens != 0 ||
+       spec.offsets_hash != 0 || spec.offsets_alignment != 0)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "causal Attention requires key_tokens >= query_tokens");
+                  "invalid dense Attention semantic fields");
+  }
+  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+      (spec.query_start < 0 || spec.query_start > spec.key_tokens ||
+       (spec.mask == APXINF_ATTENTION_MASK_NONE && spec.query_start != 0) ||
+       spec.segments != 0 || spec.max_segment_tokens != 0 ||
+       spec.offsets_hash != 0 || spec.offsets_alignment != 0)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid KV-cache Attention semantic fields");
+  }
+  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED &&
+      (spec.batch != 1 || spec.query_tokens != spec.key_tokens ||
+       spec.key_capacity != spec.key_tokens || spec.query_heads != spec.kv_heads ||
+       spec.mask != APXINF_ATTENTION_MASK_NONE || spec.query_start != 0 ||
+       spec.segments <= 0 || spec.max_segment_tokens <= 0 ||
+       spec.max_segment_tokens > spec.query_tokens)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid segmented Attention semantic fields");
+  }
+  if (spec.mask == APXINF_ATTENTION_MASK_CAUSAL &&
+      (spec.query_start < 0 ||
+       spec.query_start + spec.query_tokens > spec.key_tokens)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "causal Attention query positions exceed valid keys");
   }
   for (uint32_t alignment : {spec.q_alignment, spec.k_alignment,
                              spec.v_alignment, spec.output_alignment}) {
@@ -43,6 +76,11 @@ void validate_spec(const Spec& spec) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid Attention binding alignment");
     }
+  }
+  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED &&
+      (!valid_alignment(spec.offsets_alignment) || spec.offsets_alignment < 4)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid segmented Attention offsets alignment");
   }
 }
 
@@ -59,9 +97,16 @@ void validate_bindings(const Spec& spec,
       bindings.value == nullptr || bindings.output == nullptr ||
       !std::isfinite(bindings.scale) || bindings.scale <= 0.0F ||
       ((bindings.scale == 1.0F / std::sqrt(static_cast<float>(spec.head_dim))) !=
-       (spec.scale_is_default != 0))) {
+       (spec.scale_is_default != 0)) ||
+      ((spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED) !=
+       (bindings.offsets != nullptr))) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "invalid Attention bindings");
+  }
+  if (bindings.offsets != nullptr &&
+      reinterpret_cast<uintptr_t>(bindings.offsets) % spec.offsets_alignment != 0) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "Attention offsets pointer contradicts recorded alignment");
   }
   for (const auto [pointer, alignment] : {
            std::pair{bindings.query, spec.q_alignment},
@@ -78,7 +123,7 @@ void validate_bindings(const Spec& spec,
 
 const apxinf::attention::Implementation* find_implementation(
     const Recipe& recipe, const Spec& spec, int device) {
-  const auto* implementation = apxinf::attention::registry().find(
+  const auto* implementation = apxinf::attention::registry(spec.semantic).find(
       recipe.provider_id, recipe.implementation_id,
       recipe.implementation_version);
   if (implementation == nullptr ||
@@ -97,7 +142,8 @@ const apxinf::attention::Implementation* find_implementation(
 std::unique_ptr<Execution> fallback(
     const Spec& spec, const apxinf_attention_policy_t& policy,
     const apxinf_attention_bindings_t& bindings, int device) {
-  for (const auto& implementation : apxinf::attention::registry()) {
+  for (const auto& implementation :
+       apxinf::attention::registry(spec.semantic)) {
     if (!implementation.fallback ||
         !apxinf::attention::supports_device(implementation, device) ||
         !implementation.supports(spec) ||
@@ -371,7 +417,8 @@ extern "C" apxinf_status_t apxinf_attention_test_validate_candidates(
     }
     apxinf::attention::check_cuda(cudaSetDevice(runtime->device));
     size_t implementations_checked = 0;
-    for (const auto& implementation : apxinf::attention::registry()) {
+    for (const auto& implementation :
+         apxinf::attention::registry(normalized.semantic)) {
       if (!apxinf::attention::supports_device(implementation, runtime->device) ||
           !implementation.supports(normalized) ||
           !apxinf::attention::supports_alignment(implementation, normalized) ||

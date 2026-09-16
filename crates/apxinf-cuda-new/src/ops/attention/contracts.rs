@@ -74,11 +74,11 @@ pub(crate) struct Normalized {
     pub storage: Vec<CudaBuffer>,
 }
 
-fn invalid(message: impl Into<String>) -> Error {
+pub(crate) fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
 }
 
-fn dtype_code(dtype: DType) -> Result<u32> {
+pub(crate) fn dtype_code(dtype: DType) -> Result<u32> {
     match dtype {
         DType::F16 => Ok(1),
         DType::BF16 => Ok(2),
@@ -86,7 +86,7 @@ fn dtype_code(dtype: DType) -> Result<u32> {
     }
 }
 
-fn required_bytes(dtype: DType, shape: &[usize]) -> Result<usize> {
+pub(crate) fn required_bytes(dtype: DType, shape: &[usize]) -> Result<usize> {
     shape
         .iter()
         .try_fold(dtype.size_in_bytes(), |bytes, dimension| {
@@ -95,7 +95,7 @@ fn required_bytes(dtype: DType, shape: &[usize]) -> Result<usize> {
         .ok_or_else(|| invalid("Attention size overflow"))
 }
 
-fn tensor_storage(
+pub(crate) fn tensor_storage(
     ctx: &CudaContext,
     tensor: &Tensor,
     dtype: DType,
@@ -115,7 +115,7 @@ fn tensor_storage(
     Ok(buffer)
 }
 
-fn range(buffer: &CudaBuffer, bytes: usize) -> Result<Range<usize>> {
+pub(crate) fn range(buffer: &CudaBuffer, bytes: usize) -> Result<Range<usize>> {
     let start = buffer.ptr() as usize;
     let end = start
         .checked_add(bytes)
@@ -123,7 +123,7 @@ fn range(buffer: &CudaBuffer, bytes: usize) -> Result<Range<usize>> {
     Ok(start..end)
 }
 
-fn alignment(pointer: *const std::ffi::c_void) -> u32 {
+pub(crate) fn alignment(pointer: *const std::ffi::c_void) -> u32 {
     let address = pointer as usize;
     (1usize << address.trailing_zeros().min(8)) as u32
 }
@@ -200,13 +200,15 @@ pub(crate) fn normalize(ctx: &CudaContext, args: AttentionArgs<'_>) -> Result<No
         query: q.ptr(),
         key: k.ptr(),
         value: v.ptr(),
+        offsets: std::ptr::null(),
         output: out.ptr(),
         stream: ctx.stream().handle(),
         scale: args.scale,
     };
     Ok(Normalized {
         spec: abi::Spec {
-            version: 1,
+            version: abi::SPEC_VERSION,
+            semantic: abi::SEMANTIC_DENSE,
             dtype: dtype_code(dtype)?,
             output_dtype: dtype_code(dtype)?,
             mask: args.mask as u32,
@@ -214,12 +216,22 @@ pub(crate) fn normalize(ctx: &CudaContext, args: AttentionArgs<'_>) -> Result<No
             k_alignment: alignment(bindings.key),
             v_alignment: alignment(bindings.value),
             output_alignment: alignment(bindings.output.cast_const()),
+            offsets_alignment: 0,
             batch: batch as i64,
             query_tokens: query_tokens as i64,
             key_tokens: key_tokens as i64,
+            key_capacity: key_tokens as i64,
             query_heads: query_heads as i64,
             kv_heads: kv_heads as i64,
             head_dim: head_dim as i64,
+            query_start: if args.mask == AttentionMask::Causal {
+                (key_tokens - query_tokens) as i64
+            } else {
+                0
+            },
+            segments: 0,
+            max_segment_tokens: 0,
+            offsets_hash: 0,
             scale_is_default: u32::from(args.scale == default_scale),
         },
         policy: args.policy,

@@ -6,13 +6,23 @@
 //! depend on or prescribe a candidate's internal implementation.
 
 use super::framework::{bf16_bits_tensor, bytes_tensor, f32_tensor, scales, tensor, zeros_tensor};
-use super::l3_behavior::attention_reference;
+use super::l3_behavior::{attention_reference, kv_cache_attention_reference};
 use super::*;
 use crate::CudaContext;
 use apxinf_core::{DType, Tensor};
 
 #[path = "torch_l3_fixtures.rs"]
 mod torch_fixture;
+
+fn u32_buffer(device: usize, values: &[u32]) -> crate::CudaBuffer {
+    let bytes: Vec<_> = values
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    let buffer = crate::CudaBuffer::alloc(bytes.len(), device).unwrap();
+    buffer.copy_from_host(&bytes).unwrap();
+    buffer
+}
 
 fn validate_all_candidates<'a>(
     ctx: &CudaContext,
@@ -79,6 +89,101 @@ fn attention_all_candidates_match_reference() {
         scale,
         true,
     );
+    super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
+}
+
+#[test]
+fn kv_cache_attention_all_candidates_match_reference() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (batch, query_tokens, valid_key_tokens, key_capacity, heads, head_dim) = (2, 2, 4, 6, 2, 8);
+    let query_values: Vec<_> = (0..batch * query_tokens * heads * head_dim)
+        .map(|index| ((index * 3 % 17) as f32 - 8.0) / 16.0)
+        .collect();
+    let key_values: Vec<_> = (0..batch * key_capacity * heads * head_dim)
+        .map(|index| ((index * 5 % 19) as f32 - 9.0) / 16.0)
+        .collect();
+    let value_values: Vec<_> = (0..batch * key_capacity * heads * head_dim)
+        .map(|index| ((index * 7 % 23) as f32 - 11.0) / 16.0)
+        .collect();
+    let query = tensor(0, vec![batch, query_tokens, heads, head_dim], &query_values);
+    let key = tensor(0, vec![batch, key_capacity, heads, head_dim], &key_values);
+    let value = tensor(0, vec![batch, key_capacity, heads, head_dim], &value_values);
+    let mut out = zeros_tensor(0, vec![batch, query_tokens, heads, head_dim], DType::BF16);
+    let mut args = KvCacheAttentionArgs::new(&query, &key, &value, &mut out);
+    args.valid_key_tokens = valid_key_tokens;
+    args.query_start = 1;
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    let normalized = super::normalize_kv_cache_attention(&ctx, args).unwrap();
+    let expected = kv_cache_attention_reference(
+        &query_values,
+        &key_values,
+        &value_values,
+        batch,
+        query_tokens,
+        valid_key_tokens,
+        key_capacity,
+        heads,
+        heads,
+        head_dim,
+        1,
+        1.0 / (head_dim as f32).sqrt(),
+        true,
+    );
+    super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
+}
+
+#[test]
+fn segmented_attention_all_candidates_match_reference() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (tokens, heads, head_dim) = (4, 2, 8);
+    let query_values: Vec<_> = (0..tokens * heads * head_dim)
+        .map(|index| ((index * 3 % 17) as f32 - 8.0) / 16.0)
+        .collect();
+    let key_values: Vec<_> = (0..tokens * heads * head_dim)
+        .map(|index| ((index * 5 % 19) as f32 - 9.0) / 16.0)
+        .collect();
+    let value_values: Vec<_> = (0..tokens * heads * head_dim)
+        .map(|index| ((index * 7 % 23) as f32 - 11.0) / 16.0)
+        .collect();
+    let query = tensor(0, vec![tokens, heads, head_dim], &query_values);
+    let key = tensor(0, vec![tokens, heads, head_dim], &key_values);
+    let value = tensor(0, vec![tokens, heads, head_dim], &value_values);
+    let mut out = zeros_tensor(0, vec![tokens, heads, head_dim], DType::BF16);
+    let host_offsets = [0, 2, 2, 4];
+    let offsets = u32_buffer(0, &host_offsets);
+    let mut args =
+        SegmentedAttentionArgs::new(&query, &key, &value, &mut out, &offsets, &host_offsets);
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    let normalized = super::normalize_segmented_attention(&ctx, args).unwrap();
+    let elements_per_segment = 2 * heads * head_dim;
+    let mut expected = attention_reference(
+        &query_values[..elements_per_segment],
+        &key_values[..elements_per_segment],
+        &value_values[..elements_per_segment],
+        1,
+        2,
+        2,
+        heads,
+        heads,
+        head_dim,
+        1.0 / (head_dim as f32).sqrt(),
+        false,
+    );
+    expected.extend(attention_reference(
+        &query_values[elements_per_segment..],
+        &key_values[elements_per_segment..],
+        &value_values[elements_per_segment..],
+        1,
+        2,
+        2,
+        heads,
+        heads,
+        head_dim,
+        1.0 / (head_dim as f32).sqrt(),
+        false,
+    ));
     super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
 }
 

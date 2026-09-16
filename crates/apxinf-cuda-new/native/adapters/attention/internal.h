@@ -75,7 +75,7 @@ struct Execution {
   ~Execution();
 };
 
-const ImplementationRegistry& registry();
+const ImplementationRegistry& registry(uint32_t semantic);
 bool supports_device(const Implementation& implementation, int device,
                      std::string* reason = nullptr);
 bool supports_alignment(const Implementation& implementation, const Spec& spec);

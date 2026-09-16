@@ -19,15 +19,19 @@ TuningKeys tuning_keys(const Spec& spec,
                                     cudaDevAttrMemoryClockRate, device));
 
   std::ostringstream common;
-  common << "attention-recipe-v1|" << APXINF_ATTENTION_BUILD_ID << '|'
+  common << "attention-recipe-v2|" << APXINF_ATTENTION_BUILD_ID << '|'
          << properties.major * 10 + properties.minor << '|'
          << runtime_version << '|' << driver_version << '|'
-         << spec.version << '|' << spec.dtype << '|' << spec.output_dtype << '|'
-         << spec.mask << '|' << spec.batch << '|' << spec.query_tokens << '|'
-         << spec.key_tokens << '|' << spec.query_heads << '|' << spec.kv_heads
-         << '|' << spec.head_dim << '|' << spec.scale_is_default << '|'
+         << spec.version << '|' << spec.semantic << '|' << spec.dtype << '|'
+         << spec.output_dtype << '|' << spec.mask << '|' << spec.batch << '|'
+         << spec.query_tokens << '|' << spec.key_tokens << '|'
+         << spec.key_capacity << '|' << spec.query_heads << '|'
+         << spec.kv_heads << '|' << spec.head_dim << '|' << spec.query_start
+         << '|' << spec.segments << '|' << spec.max_segment_tokens << '|'
+         << spec.offsets_hash << '|' << spec.scale_is_default << '|'
          << spec.q_alignment << '|' << spec.k_alignment << '|'
          << spec.v_alignment << '|' << spec.output_alignment << '|'
+         << spec.offsets_alignment << '|'
          << policy.workspace_limit << '|' << policy.graph_safe << '|'
          << policy.deterministic;
 
