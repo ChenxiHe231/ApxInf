@@ -7,7 +7,7 @@
 use super::*;
 use crate::{CudaBuffer, CudaContext};
 use apxinf_core::{DType, Shape, Tensor};
-use half::bf16;
+use half::{bf16, f16};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 
@@ -124,6 +124,19 @@ pub(super) fn tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor
     let buffer = CudaBuffer::alloc(bytes.len(), device).unwrap();
     buffer.copy_from_host(bytes).unwrap();
     buffer.as_tensor(Shape::new(shape), DType::BF16).unwrap()
+}
+
+pub(super) fn f16_tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
+    let host: Vec<_> = values.iter().map(|value| f16::from_f32(*value)).collect();
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            host.as_ptr().cast::<u8>(),
+            host.len() * std::mem::size_of::<f16>(),
+        )
+    };
+    let buffer = CudaBuffer::alloc(bytes.len(), device).unwrap();
+    buffer.copy_from_host(bytes).unwrap();
+    buffer.as_tensor(Shape::new(shape), DType::F16).unwrap()
 }
 
 pub(super) fn bf16_bits_tensor(device: usize, shape: Vec<usize>, values: &[u16]) -> Tensor {

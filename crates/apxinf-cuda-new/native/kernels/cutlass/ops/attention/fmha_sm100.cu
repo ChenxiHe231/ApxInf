@@ -12,20 +12,29 @@
 #include "cute/tensor.hpp"
 #include "cutlass/util/packed_stride.hpp"
 
-// The inherited kernel guard names SM100A/SM110A but omits SM101A even
-// though CUTLASS 4 enables the same TCGEN05/TMA path natively for SM101A.
-// Alias only while parsing that guard. Defining SM100A before CUTLASS config
-// is loaded makes the rest of CUTLASS see two architectures at once and can
-// select the wrong instruction specializations on Thor-U.
-#if defined(CUTLASS_ARCH_MMA_SM101A_ENABLED) && \
+// The upstream example guard recognizes SM100 and SM103. CUTLASS enables the
+// same kernel path for SM101 and SM110, so alias those architecture markers
+// only while parsing the kernel header.
+#if (defined(CUTLASS_ARCH_MMA_SM101A_ENABLED) || \
+     defined(CUTLASS_ARCH_MMA_SM110A_ENABLED)) && \
     !defined(CUTLASS_ARCH_MMA_SM100A_ENABLED)
-#define APXINF_FMHA_SM101_GUARD_ALIAS 1
+#define APXINF_FMHA_UNDEF_SM100A 1
 #define CUTLASS_ARCH_MMA_SM100A_ENABLED 1
 #endif
+#if (defined(CUTLASS_ARCH_MMA_SM101F_ENABLED) || \
+     defined(CUTLASS_ARCH_MMA_SM110F_ENABLED)) && \
+    !defined(CUTLASS_ARCH_MMA_SM100F_ENABLED)
+#define APXINF_FMHA_UNDEF_SM100F 1
+#define CUTLASS_ARCH_MMA_SM100F_ENABLED 1
+#endif
 #include "kernel/sm100_fmha_fwd_kernel_tma_warpspecialized.hpp"
-#if defined(APXINF_FMHA_SM101_GUARD_ALIAS)
+#if defined(APXINF_FMHA_UNDEF_SM100A)
 #undef CUTLASS_ARCH_MMA_SM100A_ENABLED
-#undef APXINF_FMHA_SM101_GUARD_ALIAS
+#undef APXINF_FMHA_UNDEF_SM100A
+#endif
+#if defined(APXINF_FMHA_UNDEF_SM100F)
+#undef CUTLASS_ARCH_MMA_SM100F_ENABLED
+#undef APXINF_FMHA_UNDEF_SM100F
 #endif
 #include "collective/sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp"
 #include "device/fmha.hpp"

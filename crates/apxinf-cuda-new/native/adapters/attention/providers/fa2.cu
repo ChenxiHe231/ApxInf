@@ -12,6 +12,10 @@ int fa2_bf16_causal(const void* q, const void* k, const void* v, void* output,
                     void* softmax_lse, int batch, int query_tokens,
                     int key_tokens, int query_heads, int kv_heads,
                     int head_dim, float softmax_scale, cudaStream_t stream);
+int fa2_f16(const void* q, const void* k, const void* v, void* output,
+            void* softmax_lse, int batch, int query_tokens, int key_tokens,
+            int query_heads, int kv_heads, int head_dim, float softmax_scale,
+            cudaStream_t stream);
 }  // namespace apxinf::cuda::cutlass_ops
 
 namespace apxinf::attention {
@@ -56,6 +60,14 @@ cudaError_t launch_fa2(Execution& execution) {
                             ? apxinf::cuda::cutlass_ops::fa2_bf16_causal
                             : apxinf::cuda::cutlass_ops::fa2_bf16;
     status = launch(
+        bindings.query, bindings.key, bindings.value, bindings.output,
+        state->softmax_lse, static_cast<int>(spec.batch),
+        static_cast<int>(spec.query_tokens), static_cast<int>(spec.key_tokens),
+        static_cast<int>(spec.query_heads), static_cast<int>(spec.kv_heads),
+        static_cast<int>(spec.head_dim), bindings.scale, stream);
+  } else if (spec.dtype == APXINF_DTYPE_F16 &&
+             spec.mask == APXINF_ATTENTION_MASK_NONE) {
+    status = apxinf::cuda::cutlass_ops::fa2_f16(
         bindings.query, bindings.key, bindings.value, bindings.output,
         state->softmax_lse, static_cast<int>(spec.batch),
         static_cast<int>(spec.query_tokens), static_cast<int>(spec.key_tokens),

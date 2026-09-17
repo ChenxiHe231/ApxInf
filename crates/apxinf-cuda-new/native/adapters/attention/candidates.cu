@@ -46,8 +46,15 @@ bool supports_fa2(const Spec& spec) {
        spec.key_capacity == spec.key_tokens &&
        (spec.mask == APXINF_ATTENTION_MASK_NONE ||
         spec.query_start == spec.key_tokens - spec.query_tokens));
-  return layout_supported && spec.head_dim <= 256 &&
-         spec.dtype == APXINF_DTYPE_BF16 &&
+  const bool bf16_supported =
+      spec.dtype == APXINF_DTYPE_BF16 && spec.head_dim <= 256;
+  const bool f16_vision_supported =
+      spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+      spec.mask == APXINF_ATTENTION_MASK_NONE &&
+      spec.query_tokens == 256 && spec.key_tokens == 256 &&
+      spec.query_heads == 16 && spec.kv_heads == 16 &&
+      spec.head_dim == 72 && spec.dtype == APXINF_DTYPE_F16;
+  return layout_supported && (bf16_supported || f16_vision_supported) &&
          spec.output_dtype == spec.dtype;
 }
 
@@ -63,8 +70,7 @@ bool supports_cutlass(const Spec& spec) {
          spec.query_tokens == 256 && spec.key_tokens == 256 &&
          spec.query_heads == 16 && spec.kv_heads == 16 &&
          spec.head_dim == 72 &&
-         (spec.dtype == APXINF_DTYPE_F16 ||
-          spec.dtype == APXINF_DTYPE_BF16) &&
+         spec.dtype == APXINF_DTYPE_BF16 &&
          spec.output_dtype == spec.dtype;
 }
 

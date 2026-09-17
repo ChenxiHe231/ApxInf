@@ -7,8 +7,10 @@ const INPUT_TREES: &[&str] = &[
     "adapters/attention",
     "framework",
     "kernels/fa2",
+    "kernels/fa2_compat",
     "kernels/cutlass/fmha",
     "kernels/cutlass/ops/attention",
+    "patches",
 ];
 const INPUT_FILES: &[&str] = &[
     "include/apxinf_cuda/attention.h",

@@ -1,10 +1,10 @@
 # Vendored: Flash-Attention 2 forward kernels
 
-ApxInf compiles the BF16 head-dimension 128 and 256 forward instantiations.
-The 128 specialization handles dimensions up to 128; the 256 specialization
-handles larger dimensions. Both causal and non-causal execution use the
-repository-local raw-pointer wrapper in `../fa2.cu`. FP16, split-KV, backward,
-and other instantiations are intentionally omitted from this operator package.
+ApxInf compiles the BF16 head-dimension 128 and 256 forward instantiations and
+the FP16 head-dimension 128 non-causal instantiation used by vision attention.
+The repository-local raw-pointer wrapper in `../fa2.cu` owns parameter
+marshalling. Split planning, provider selection, and other execution policy
+belong outside this vendored tree.
 
 ## Sources
 
@@ -21,23 +21,24 @@ and other instantiations are intentionally omitted from this operator package.
              CUTLASS headers already vendored by `apxinf-cuda-new`; no second
              CUTLASS copy is carried under this directory.
 
-## Local patches
+## PyTorch-free build boundary
 
-Three inherited PyTorch-decoupling patches in `flash_attn/` allow FA2 to build
-without a Torch installation:
+`flash.h`, `philox_unpack.cuh`, and `flash_fwd_launch_template.h` retain their
+upstream `v2.7.4.post1` contents. ApxInf does not depend on libtorch, so the
+narrow ATen/C10 surface referenced by those files is implemented under the
+sibling `../fa2_compat/` include root. Keeping compatibility code outside this
+directory makes upstream provenance auditable by byte-for-byte comparison.
 
-1. `flash_fwd_launch_template.h`: replaced `#include <c10/cuda/CUDAException.h>`
-   with inline CUDA-runtime stubs for `C10_CUDA_CHECK` and
-   `C10_CUDA_KERNEL_LAUNCH_CHECK`.
+The compatibility layer is inference-only: dropout is disabled, and it is not
+intended to emulate PyTorch beyond the types and checks required to instantiate
+the forward kernels.
 
-2. `flash.h`: replaced `#include <ATen/cuda/CUDAGeneratorImpl.h>` with a
-   minimal POD `at::PhiloxCudaState` struct (dropout RNG state is
-   carried through but never read in inference because `p_dropout=0`).
+## Direct E4M3 exception
 
-3. `philox_unpack.cuh`: replaced `#include <ATen/cuda/detail/UnpackRaw.cuh>`
-   with a ~10-line inline stub for `at::cuda::philox::unpack()`.
-
-Total inherited patch footprint: approximately 30 lines.
+The guarded `APXINF_FA2_DIRECT_E4M3` output conversion in
+`flash_fwd_kernel.h` is the sole ApxInf operator extension in the vendor
+headers. Its output scale is carried through the upstream `softcap` field by a
+dedicated ApxInf operator translation unit; the vendor ABI is not extended.
 
 ## Backporting upstream bugfixes
 
@@ -53,12 +54,11 @@ git clone https://github.com/Dao-AILab/flash-attention.git /tmp/fa-upstream
 cd /tmp/fa-upstream
 git log v2.7.4.post1..HEAD -- csrc/flash_attn/src/
 
-# For each relevant commit, generate a patch and apply here
+# For each relevant commit, generate a patch and store it under native/patches
 git format-patch -1 <SHA> --stdout > /tmp/fa-fix.patch
-cd <apxinf>/crates/apxinf-cuda-new/native/kernels/fa2/flash_attn
-patch -p4 < /tmp/fa-fix.patch   # strip leading csrc/flash_attn/src/
 # verify: rebuild + cos test
 ```
 
-Record each applied fix in the commit log on this path and re-run the
-all-candidate precision test on every compiled CUDA architecture.
+Do not edit the vendored file in place. Record the upstream revision and patch
+purpose in `native/patches/README.md`, then re-run the all-candidate precision
+test on every compiled CUDA architecture.

@@ -5,7 +5,9 @@
 //! `torch_l3_fixtures.rs`. Tests compare final L3 outputs only; they must not
 //! depend on or prescribe a candidate's internal implementation.
 
-use super::framework::{bf16_bits_tensor, bytes_tensor, f32_tensor, scales, tensor, zeros_tensor};
+use super::framework::{
+    bf16_bits_tensor, bytes_tensor, f16_tensor, f32_tensor, scales, tensor, zeros_tensor,
+};
 use super::l3_behavior::{attention_reference, kv_cache_attention_reference};
 use super::*;
 use crate::CudaContext;
@@ -214,6 +216,30 @@ fn attention_sm100_fmha_candidate_matches_reference() {
     let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
     super::attention_execution::validate_candidates(&ctx, &normalized, &vec![1.0; elements])
         .unwrap();
+}
+
+#[test]
+fn attention_f16_vision_uses_fa2_and_matches_reference() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (batch, tokens, heads, head_dim) = (1, 256, 16, 72);
+    let elements = batch * tokens * heads * head_dim;
+    let shape = vec![batch, tokens, heads, head_dim];
+    let query = f16_tensor(0, shape.clone(), &vec![0.0; elements]);
+    let key = f16_tensor(0, shape.clone(), &vec![0.0; elements]);
+    let value = f16_tensor(0, shape.clone(), &vec![1.0; elements]);
+    let mut out = zeros_tensor(0, shape, DType::F16);
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut out);
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
+    super::attention_execution::validate_candidates(&ctx, &normalized, &vec![1.0; elements])
+        .unwrap();
+    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
+    assert!(
+        execution.summary().starts_with("flash-attention-2 "),
+        "unexpected F16 vision provider: {}",
+        execution.summary()
+    );
 }
 
 #[test]

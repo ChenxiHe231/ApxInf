@@ -192,6 +192,7 @@ fn main() {
     .to_vec();
     let cutlass_root = native.join("kernels/cutlass");
     let fa2_root = native.join("kernels/fa2");
+    let fa2_compat_root = native.join("kernels/fa2_compat");
     let mut cutlass_sources = Vec::new();
     if selection
         .targets
@@ -339,6 +340,7 @@ fn main() {
                 "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                 "-DFLASH_NAMESPACE=apxinf_fa2",
             ]);
+            command.arg(format!("-I{}", fa2_compat_root.display()));
             command.arg(format!("-I{}", fa2_root.display()));
             command.arg(format!("-I{}", cutlass_root.join("include").display()));
         }
