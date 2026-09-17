@@ -6,6 +6,7 @@ const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
 const INPUT_TREES: &[&str] = &[
     "adapters/attention",
     "framework",
+    "kernels/attention",
     "kernels/fa2",
     "kernels/fa2_compat",
     "kernels/cutlass/fmha",

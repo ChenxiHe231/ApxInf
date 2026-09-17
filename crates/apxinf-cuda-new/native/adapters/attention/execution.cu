@@ -1,6 +1,7 @@
 #include "internal.h"
 
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 
 #include <cmath>
 #include <cstring>
@@ -18,10 +19,15 @@ bool valid_alignment(uint32_t alignment) {
 }
 
 void validate_spec(const Spec& spec) {
-  if (spec.version != 2 ||
+  const bool native_output = spec.output_dtype == spec.dtype;
+  const bool static_e4m3_output =
+      spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+      spec.dtype == APXINF_DTYPE_F16 &&
+      spec.output_dtype == APXINF_DTYPE_E4M3;
+  if (spec.version != 3 ||
       spec.semantic > APXINF_ATTENTION_SEMANTIC_SEGMENTED ||
       (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
-      spec.output_dtype != spec.dtype ||
+      (!native_output && !static_e4m3_output) ||
       spec.mask > APXINF_ATTENTION_MASK_CAUSAL || spec.batch <= 0 ||
       spec.query_tokens <= 0 || spec.key_tokens <= 0 ||
       spec.key_capacity < spec.key_tokens ||
@@ -70,12 +76,18 @@ void validate_spec(const Spec& spec) {
                   "causal Attention query positions exceed valid keys");
   }
   for (uint32_t alignment : {spec.q_alignment, spec.k_alignment,
-                             spec.v_alignment, spec.output_alignment}) {
+                             spec.v_alignment}) {
     if (!valid_alignment(alignment) ||
         alignment < apxinf::attention::dtype_bytes(spec.dtype)) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid Attention binding alignment");
     }
+  }
+  if (!valid_alignment(spec.output_alignment) ||
+      spec.output_alignment <
+          apxinf::attention::dtype_bytes(spec.output_dtype)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid Attention output binding alignment");
   }
   if (spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED &&
       (!valid_alignment(spec.offsets_alignment) || spec.offsets_alignment < 4)) {
@@ -96,6 +108,10 @@ void validate_bindings(const Spec& spec,
   if (bindings.query == nullptr || bindings.key == nullptr ||
       bindings.value == nullptr || bindings.output == nullptr ||
       !std::isfinite(bindings.scale) || bindings.scale <= 0.0F ||
+      !std::isfinite(bindings.output_scale) ||
+      bindings.output_scale <= 0.0F ||
+      (spec.output_dtype != APXINF_DTYPE_E4M3 &&
+       bindings.output_scale != 1.0F) ||
       ((bindings.scale == 1.0F / std::sqrt(static_cast<float>(spec.head_dim))) !=
        (spec.scale_is_default != 0)) ||
       ((spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED) !=
@@ -184,8 +200,23 @@ bool parse(const std::string& value, Recipe& recipe) {
 std::vector<float> read_output(const Spec& spec,
                                const apxinf_attention_bindings_t& bindings,
                                size_t count) {
-  std::vector<uint16_t> storage(count);
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
+  if (spec.output_dtype == APXINF_DTYPE_E4M3) {
+    std::vector<uint8_t> storage(count);
+    apxinf::attention::check_cuda(cudaMemcpyAsync(
+        storage.data(), bindings.output, count, cudaMemcpyDeviceToHost,
+        stream));
+    apxinf::attention::check_cuda(cudaStreamSynchronize(stream));
+    std::vector<float> values;
+    values.reserve(count);
+    for (uint8_t bits : storage) {
+      __nv_fp8_e4m3 value{};
+      std::memcpy(&value, &bits, sizeof(bits));
+      values.push_back(static_cast<float>(value) * bindings.output_scale);
+    }
+    return values;
+  }
+  std::vector<uint16_t> storage(count);
   apxinf::attention::check_cuda(cudaMemcpyAsync(
       storage.data(), bindings.output, count * sizeof(uint16_t),
       cudaMemcpyDeviceToHost, stream));
@@ -193,7 +224,7 @@ std::vector<float> read_output(const Spec& spec,
   std::vector<float> values;
   values.reserve(count);
   for (uint16_t bits : storage) {
-    if (spec.dtype == APXINF_DTYPE_BF16) {
+    if (spec.output_dtype == APXINF_DTYPE_BF16) {
       const uint32_t word = static_cast<uint32_t>(bits) << 16;
       float value = 0.0F;
       std::memcpy(&value, &word, sizeof(value));
@@ -411,7 +442,10 @@ extern "C" apxinf_status_t apxinf_attention_test_validate_candidates(
     const uint64_t count = static_cast<uint64_t>(normalized.batch) *
                            normalized.query_tokens * normalized.query_heads *
                            normalized.head_dim;
-    if (count != expected_output_len || count > SIZE_MAX / sizeof(uint16_t)) {
+    const size_t output_element_bytes =
+        apxinf::attention::dtype_bytes(normalized.output_dtype);
+    if (count != expected_output_len ||
+        count > SIZE_MAX / output_element_bytes) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid Attention candidate validation output");
     }
@@ -437,7 +471,8 @@ extern "C" apxinf_status_t apxinf_attention_test_validate_candidates(
         auto candidate = apxinf::attention::prepare(
             implementation, configuration, normalized, *policy, *bindings,
             runtime->device);
-        const size_t bytes = static_cast<size_t>(count) * sizeof(uint16_t);
+        const size_t bytes =
+            static_cast<size_t>(count) * output_element_bytes;
         const auto stream = static_cast<cudaStream_t>(bindings->stream);
         apxinf::attention::check_cuda(
             cudaMemsetAsync(bindings->output, 0xff, bytes, stream));

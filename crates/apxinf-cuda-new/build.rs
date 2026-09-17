@@ -193,6 +193,7 @@ fn main() {
     let cutlass_root = native.join("kernels/cutlass");
     let fa2_root = native.join("kernels/fa2");
     let fa2_compat_root = native.join("kernels/fa2_compat");
+    let attention_kernel_root = native.join("kernels/attention");
     let mut cutlass_sources = Vec::new();
     if selection
         .targets
@@ -224,11 +225,23 @@ fn main() {
             .map(|source| fa2_root.join(source)),
         );
     }
+    let mut fa2_e4m3_sources = Vec::new();
+    if selection
+        .targets
+        .iter()
+        .any(|target| is_cutlass_sm100_family(&target.cutlass_arch))
+    {
+        fa2_e4m3_sources.extend(
+            ["fa2_f16_e4m3_522.cu", "fa2_fwd_hdim256_e4m3.cu"]
+                .map(|source| attention_kernel_root.join(source)),
+        );
+    }
     assert!(
         generic_sources
             .iter()
             .chain(&cutlass_sources)
             .chain(&fa2_sources)
+            .chain(&fa2_e4m3_sources)
             .all(|path| path.is_file()),
         "native build source is missing"
     );
@@ -269,16 +282,25 @@ fn main() {
     let mut objects = Vec::new();
     for (index, source) in generic_sources
         .drain(..)
-        .map(|source| (source, false, false))
+        .map(|source| (source, false, false, false))
         .chain(
             cutlass_sources
                 .into_iter()
-                .map(|source| (source, true, false)),
+                .map(|source| (source, true, false, false)),
         )
-        .chain(fa2_sources.into_iter().map(|source| (source, false, true)))
+        .chain(
+            fa2_sources
+                .into_iter()
+                .map(|source| (source, false, true, false)),
+        )
+        .chain(
+            fa2_e4m3_sources
+                .into_iter()
+                .map(|source| (source, false, false, true)),
+        )
         .enumerate()
     {
-        let (source, is_cutlass, is_fa2) = source;
+        let (source, is_cutlass, is_fa2, is_fa2_e4m3) = source;
         let object = out.join(format!(
             "gemm-{index}-{}.o",
             source.file_stem().unwrap().to_string_lossy()
@@ -294,7 +316,7 @@ fn main() {
             .arg(format!("-I{}", out.display()))
             .arg(format!("-DAPXINF_GEMM_BUILD_ID=\"{id}\""))
             .arg(format!("-DAPXINF_ATTENTION_BUILD_ID=\"{attention_id}\""));
-        command.args(if is_cutlass {
+        command.args(if is_cutlass || is_fa2_e4m3 {
             &cutlass_codegen
         } else if is_fa2 {
             &fa2_codegen
@@ -310,6 +332,9 @@ fn main() {
         }
         if has_fa2 {
             command.arg("-DAPXINF_ATTENTION_FA2=1");
+        }
+        if !cutlass_codegen.is_empty() {
+            command.arg("-DAPXINF_ATTENTION_FA2_E4M3=1");
         }
         if is_cutlass {
             command.args(["--expt-relaxed-constexpr", "--expt-extended-lambda"]);
@@ -329,7 +354,7 @@ fn main() {
                 command.arg("-DAPXINF_BF16_DUAL_GEGLU_PRODUCTION=1");
             }
         }
-        if is_fa2 {
+        if is_fa2 || is_fa2_e4m3 {
             command.args([
                 "--expt-relaxed-constexpr",
                 "--expt-extended-lambda",
@@ -338,8 +363,21 @@ fn main() {
                 "-U__CUDA_NO_HALF_CONVERSIONS__",
                 "-U__CUDA_NO_HALF2_OPERATORS__",
                 "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                "-DFLASH_NAMESPACE=apxinf_fa2",
             ]);
+            command.arg(if is_fa2_e4m3 {
+                "-DFLASH_NAMESPACE=apxinf_fa2_direct_e4m3"
+            } else {
+                "-DFLASH_NAMESPACE=apxinf_fa2"
+            });
+            if is_fa2_e4m3 {
+                command.args([
+                    "-DAPXINF_FA2_DIRECT_E4M3=1",
+                    "-DFLASHATTENTION_DISABLE_DROPOUT",
+                    "-DFLASHATTENTION_DISABLE_ALIBI",
+                    "-DFLASHATTENTION_DISABLE_SOFTCAP",
+                    "-DFLASHATTENTION_DISABLE_LOCAL",
+                ]);
+            }
             command.arg(format!("-I{}", fa2_compat_root.display()));
             command.arg(format!("-I{}", fa2_root.display()));
             command.arg(format!("-I{}", cutlass_root.join("include").display()));

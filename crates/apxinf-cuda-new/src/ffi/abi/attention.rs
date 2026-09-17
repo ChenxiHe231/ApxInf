@@ -3,7 +3,7 @@ use std::ffi::{c_char, c_void};
 pub(crate) use super::types::Policy;
 use super::types::{CudaStream, Runtime};
 
-pub(crate) const SPEC_VERSION: u32 = 2;
+pub(crate) const SPEC_VERSION: u32 = 3;
 pub(crate) const SEMANTIC_DENSE: u32 = 0;
 pub(crate) const SEMANTIC_KV_CACHE: u32 = 1;
 pub(crate) const SEMANTIC_SEGMENTED: u32 = 2;
@@ -45,6 +45,7 @@ pub(crate) struct Bindings {
     pub output: *mut c_void,
     pub stream: CudaStream,
     pub scale: f32,
+    pub output_scale: f32,
 }
 
 pub(crate) type Execution = *mut c_void;

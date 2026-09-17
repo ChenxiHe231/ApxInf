@@ -50,4 +50,5 @@ typedef struct {
   void* output;
   apxinf_cuda_stream_t stream;
   float scale;
+  float output_scale;
 } apxinf_attention_bindings_t;

@@ -243,6 +243,57 @@ fn attention_f16_vision_uses_fa2_and_matches_reference() {
 }
 
 #[test]
+fn attention_f16_mqa_522_uses_direct_e4m3_fa2() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (batch, tokens, query_heads, kv_heads, head_dim) = (1, 522, 8, 1, 256);
+    let query_shape = vec![batch, tokens, query_heads, head_dim];
+    let kv_shape = vec![batch, tokens, kv_heads, head_dim];
+    let query = f16_tensor(
+        0,
+        query_shape.clone(),
+        &vec![0.0; batch * tokens * query_heads * head_dim],
+    );
+    let key = f16_tensor(
+        0,
+        kv_shape.clone(),
+        &vec![0.0; batch * tokens * kv_heads * head_dim],
+    );
+    let value = f16_tensor(
+        0,
+        kv_shape,
+        &vec![1.0; batch * tokens * kv_heads * head_dim],
+    );
+    let mut out = zeros_tensor(0, query_shape, DType::F8E4M3);
+    let output_scale = 1.0 / 16.0;
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut out);
+    args.output_scale = output_scale;
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
+    let expected = vec![1.0; batch * tokens * query_heads * head_dim];
+    super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
+    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
+    assert!(
+        execution
+            .summary()
+            .starts_with("flash-attention-2-f16-e4m3-522 "),
+        "unexpected direct-E4M3 provider: {}",
+        execution.summary()
+    );
+    drop(execution);
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut out);
+    args.output_scale = output_scale;
+    args.policy.allow_fallback = false;
+    super::attention(&ctx, args).unwrap();
+
+    let output = crate::CudaBuffer::from_tensor(&out).unwrap();
+    let mut bytes = vec![0; output.len()];
+    output.copy_to_host(&mut bytes).unwrap();
+    // E4M3 encodes 1.0 / output_scale = 16.0 as 0x58.
+    assert!(bytes.iter().all(|&value| value == 0x58));
+}
+
+#[test]
 fn torch_validation_requires_the_l3_output_shape() {
     let ctx = CudaContext::new(0).unwrap();
     let a = tensor(0, vec![2, 3], &[1.0; 6]);

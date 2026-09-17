@@ -145,6 +145,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: SegmentedAttentionArgs<'_>) -> 
         output: out.ptr(),
         stream: ctx.stream().handle(),
         scale: args.scale,
+        output_scale: 1.0,
     };
     Ok(Normalized {
         spec: abi::Spec {

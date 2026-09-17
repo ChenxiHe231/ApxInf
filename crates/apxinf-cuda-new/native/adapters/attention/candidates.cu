@@ -58,6 +58,18 @@ bool supports_fa2(const Spec& spec) {
          spec.output_dtype == spec.dtype;
 }
 
+#if defined(APXINF_ATTENTION_FA2_E4M3)
+bool supports_fa2_direct_e4m3_522(const Spec& spec) {
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+         spec.mask == APXINF_ATTENTION_MASK_NONE && spec.batch == 1 &&
+         spec.query_tokens == 522 && spec.key_tokens == 522 &&
+         spec.key_capacity == 522 && spec.query_heads == 8 &&
+         spec.kv_heads == 1 && spec.head_dim == 256 &&
+         spec.dtype == APXINF_DTYPE_F16 &&
+         spec.output_dtype == APXINF_DTYPE_E4M3;
+}
+#endif
+
 AlignmentRequirements fa2_alignment(const Spec&) {
   return {16, 16, 16, 16};
 }
@@ -90,6 +102,13 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        one_configuration, prepare_cutlass, launch_cutlass, destroy_cutlass},
 #endif
 #if defined(APXINF_ATTENTION_FA2)
+#if defined(APXINF_ATTENTION_FA2_E4M3)
+      {kProviderFa2, 2, 1, "flash-attention-2-f16-e4m3-522",
+       apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, false,
+       supports_fa2_direct_e4m3_522, fa2_alignment,
+       fa2_resource_requirements, one_configuration, prepare_fa2, launch_fa2,
+       destroy_fa2},
+#endif
       {kProviderFa2, 1, 1, "flash-attention-2",
        apxinf::gemm::kDeviceFeatureFa2, true, true, false, supports_fa2,
        fa2_alignment, fa2_resource_requirements, one_configuration,

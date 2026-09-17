@@ -19,7 +19,7 @@ TuningKeys tuning_keys(const Spec& spec,
                                     cudaDevAttrMemoryClockRate, device));
 
   std::ostringstream common;
-  common << "attention-recipe-v2|" << APXINF_ATTENTION_BUILD_ID << '|'
+  common << "attention-recipe-v3|" << APXINF_ATTENTION_BUILD_ID << '|'
          << properties.major * 10 + properties.minor << '|'
          << runtime_version << '|' << driver_version << '|'
          << spec.version << '|' << spec.semantic << '|' << spec.dtype << '|'

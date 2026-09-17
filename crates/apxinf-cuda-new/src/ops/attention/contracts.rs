@@ -44,6 +44,10 @@ pub struct AttentionArgs<'a> {
     pub out: &'a mut Tensor,
     pub mask: AttentionMask,
     pub scale: f32,
+    /// Static dequantization scale for an E4M3 output. The stored value is
+    /// `round_to_e4m3(attention / output_scale)`. Must remain `1.0` for
+    /// ordinary F16/BF16 output.
+    pub output_scale: f32,
     pub policy: AttentionPolicy,
 }
 
@@ -57,6 +61,7 @@ impl<'a> AttentionArgs<'a> {
             out,
             mask: AttentionMask::None,
             scale: 1.0 / (head_dim as f32).sqrt(),
+            output_scale: 1.0,
             policy: AttentionPolicy::default(),
         }
     }
@@ -83,6 +88,17 @@ pub(crate) fn dtype_code(dtype: DType) -> Result<u32> {
         DType::F16 => Ok(1),
         DType::BF16 => Ok(2),
         _ => Err(invalid("Attention currently supports F16 and BF16")),
+    }
+}
+
+fn output_dtype_code(dtype: DType) -> Result<u32> {
+    match dtype {
+        DType::F16 => Ok(1),
+        DType::BF16 => Ok(2),
+        DType::F8E4M3 => Ok(3),
+        _ => Err(invalid(
+            "Attention output currently supports F16, BF16, and E4M3",
+        )),
     }
 }
 
@@ -155,13 +171,22 @@ pub(crate) fn normalize(ctx: &CudaContext, args: AttentionArgs<'_>) -> Result<No
         || args.out.shape().dims() != q_shape
         || args.query.dtype() != args.key.dtype()
         || args.query.dtype() != args.value.dtype()
-        || args.query.dtype() != args.out.dtype()
+        || (args.out.dtype() != args.query.dtype()
+            && !(args.query.dtype() == DType::F16 && args.out.dtype() == DType::F8E4M3))
         || (args.mask == AttentionMask::Causal && key_tokens < query_tokens)
     {
         return Err(invalid("invalid Attention shape or dtype contract"));
     }
     if !args.scale.is_finite() || args.scale <= 0.0 {
         return Err(invalid("Attention scale must be finite and positive"));
+    }
+    if !args.output_scale.is_finite()
+        || args.output_scale <= 0.0
+        || (args.out.dtype() != DType::F8E4M3 && args.output_scale != 1.0)
+    {
+        return Err(invalid(
+            "Attention output_scale must be finite and positive, and is only meaningful for E4M3 output",
+        ));
     }
     if [
         batch,
@@ -181,8 +206,9 @@ pub(crate) fn normalize(ctx: &CudaContext, args: AttentionArgs<'_>) -> Result<No
     let q = tensor_storage(ctx, args.query, dtype, q_shape)?;
     let k = tensor_storage(ctx, args.key, dtype, k_shape)?;
     let v = tensor_storage(ctx, args.value, dtype, v_shape)?;
-    let out = tensor_storage(ctx, args.out, dtype, q_shape)?;
-    let out_range = range(&out, required_bytes(dtype, q_shape)?)?;
+    let output_dtype = args.out.dtype();
+    let out = tensor_storage(ctx, args.out, output_dtype, q_shape)?;
+    let out_range = range(&out, required_bytes(output_dtype, q_shape)?)?;
     for (name, input, shape) in [
         ("query", &q, q_shape),
         ("key", &k, k_shape),
@@ -204,13 +230,14 @@ pub(crate) fn normalize(ctx: &CudaContext, args: AttentionArgs<'_>) -> Result<No
         output: out.ptr(),
         stream: ctx.stream().handle(),
         scale: args.scale,
+        output_scale: args.output_scale,
     };
     Ok(Normalized {
         spec: abi::Spec {
             version: abi::SPEC_VERSION,
             semantic: abi::SEMANTIC_DENSE,
             dtype: dtype_code(dtype)?,
-            output_dtype: dtype_code(dtype)?,
+            output_dtype: output_dtype_code(output_dtype)?,
             mask: args.mask as u32,
             q_alignment: alignment(bindings.query),
             k_alignment: alignment(bindings.key),

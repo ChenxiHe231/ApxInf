@@ -21,7 +21,9 @@ using apxinf::framework::check_cuda;
 struct Spec : apxinf_attention_spec_t {};
 
 inline size_t dtype_bytes(uint32_t dtype) {
-  return dtype == APXINF_DTYPE_F32 ? 4 : 2;
+  if (dtype == APXINF_DTYPE_F32) return 4;
+  if (dtype == APXINF_DTYPE_E4M3 || dtype == APXINF_DTYPE_I8) return 1;
+  return 2;
 }
 
 struct Execution;
