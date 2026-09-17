@@ -10,5 +10,6 @@ use super::*;
 
 mod framework;
 mod l3_behavior;
+mod operator_doc;
 #[path = "precision/precision.rs"]
 mod precision;

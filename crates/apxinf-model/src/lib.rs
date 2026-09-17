@@ -9,6 +9,7 @@ pub mod gr00t;
 pub mod llama;
 pub mod llm_trait;
 pub mod pi05;
+pub mod pi0fast;
 pub mod profiling;
 pub mod qwen3vl;
 pub mod registry;

@@ -87,6 +87,7 @@ __all__ = [
     "ComposablePolicy",
     # L2 policies
     "Pi05Policy",
+    "Pi0FastPolicy",
     "Gr00tPolicy",
     "WallossPolicy",
     "AutoPolicy",

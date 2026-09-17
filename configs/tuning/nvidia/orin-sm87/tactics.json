@@ -31,6 +31,56 @@
     {
       "key": {
         "activation_dtype": "bf16",
+        "device": {
+          "multiprocessor_count": 16,
+          "sm": 87
+        },
+        "epilogue": "none",
+        "k": 16384,
+        "layout": "row_major",
+        "m": 1,
+        "n": 2048,
+        "op": "bf16",
+        "output_dtype": "bf16",
+        "scale_mode": "none",
+        "weight_dtype": "bf16",
+        "workspace_limit": 18446744073709551615
+      },
+      "milliseconds": 0.3916287982463837,
+      "tactic": {
+        "backend": "cublaslt",
+        "id": 6,
+        "implementation_version": 1
+      }
+    },
+    {
+      "key": {
+        "activation_dtype": "bf16",
+        "device": {
+          "multiprocessor_count": 16,
+          "sm": 87
+        },
+        "epilogue": "none",
+        "k": 2048,
+        "layout": "row_major",
+        "m": 1,
+        "n": 2560,
+        "op": "bf16",
+        "output_dtype": "bf16",
+        "scale_mode": "none",
+        "weight_dtype": "bf16",
+        "workspace_limit": 18446744073709551615
+      },
+      "milliseconds": 0.07386496067047119,
+      "tactic": {
+        "backend": "cublaslt",
+        "id": 4,
+        "implementation_version": 1
+      }
+    },
+    {
+      "key": {
+        "activation_dtype": "bf16",
         "epilogue": "none",
         "k": 1024,
         "layout": "row_major",
@@ -52,6 +102,31 @@
         "implementation_version": 1
       },
       "milliseconds": 0.049890123307704926
+    },
+    {
+      "key": {
+        "activation_dtype": "bf16",
+        "device": {
+          "multiprocessor_count": 16,
+          "sm": 87
+        },
+        "epilogue": "none",
+        "k": 2048,
+        "layout": "row_major",
+        "m": 1,
+        "n": 32768,
+        "op": "bf16",
+        "output_dtype": "bf16",
+        "scale_mode": "none",
+        "weight_dtype": "bf16",
+        "workspace_limit": 18446744073709551615
+      },
+      "milliseconds": 0.7667507219314575,
+      "tactic": {
+        "backend": "cublaslt",
+        "id": 4,
+        "implementation_version": 1
+      }
     },
     {
       "key": {

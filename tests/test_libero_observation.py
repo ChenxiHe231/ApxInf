@@ -13,7 +13,9 @@ import sys
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+from scripts.eval_libero import state_finger_joints
 from scripts.libero_observation import (
     libero_gr00t_action,
     libero_gr00t_state,
@@ -60,13 +62,31 @@ def test_libero_state_collapses_mirrored_gripper_joints():
     assert state.dtype == np.float32
 
 
+def test_libero_state_keeps_both_finger_joints_on_request():
+    """LeRobot's own LIBERO env feeds both mirrored joints (8-dim state)."""
+       observation = {
+        "robot0_eef_pos": np.array([0.1, 0.2, 0.3]),
+        "robot0_eef_quat": np.array([0.0, 0.0, 0.0, 1.0]),
+        "robot0_gripper_qpos": np.array([0.04, -0.04]),
+    }
+    
+    state = libero_state(observation, finger_joints=2)
+
+    np.testing.assert_array_equal(
+        state,
+        np.array([0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, -0.04], dtype=np.float32),
+    )
+    with pytest.raises(ValueError, match="finger_joints must be 1 or 2"):
+        libero_state(observation, finger_joints=3)
+    
+    
 def test_libero_gr00t_state_preserves_named_two_joint_contract():
     observation = {
         "robot0_eef_pos": np.array([0.1, 0.2, 0.3]),
         "robot0_eef_quat": np.array([0.0, 0.0, 0.0, 1.0]),
         "robot0_gripper_qpos": np.array([0.04, -0.04]),
     }
-
+    
     state = libero_gr00t_state(observation)
 
     assert list(state) == ["x", "y", "z", "roll", "pitch", "yaw", "gripper"]
@@ -77,6 +97,14 @@ def test_libero_gr00t_state_preserves_named_two_joint_contract():
     np.testing.assert_array_equal(state["pitch"], np.array([0.0], dtype=np.float32))
     np.testing.assert_array_equal(state["yaw"], np.array([0.0], dtype=np.float32))
     np.testing.assert_array_equal(state["gripper"], np.array([0.04, -0.04], dtype=np.float32))
+
+
+def test_state_finger_joints_follows_the_policys_declared_state_width():
+    assert state_finger_joints({"state_dim": 8}) == 2
+    assert state_finger_joints({"state_dim": 7}) == 1
+    assert state_finger_joints({}) == 1
+    with pytest.raises(ValueError, match="can only build"):
+        state_finger_joints({"state_dim": 32})
 
 
 def test_libero_gr00t_action_matches_nvidia_environment_convention():

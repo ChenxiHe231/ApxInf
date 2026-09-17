@@ -446,6 +446,17 @@ extern "C" {
         layout: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    /// Same addressing as the BF16 variant, but the normalized patch value stays
+    /// in FP32 for a patch projection that is kept at full precision.
+    pub fn apxinf_static_rgb_u8_to_patches_f32(
+        images: *const c_void,
+        patches: *mut c_void,
+        views: i32,
+        image_size: i32,
+        patch_size: i32,
+        layout: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_rgb_u8_to_normalized_temporal_merged_patches_bf16(
         images: *const c_void,
         patches: *mut c_void,
@@ -824,6 +835,17 @@ extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
 
+    pub fn apxinf_static_bias_position_f32_bf16(
+        projection: *const c_void,
+        bias: *const c_void,
+        position: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        tokens_per_view: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
     pub fn apxinf_rms_norm_f32(
         input: *const c_void,
         weight: *const c_void,
@@ -1150,6 +1172,16 @@ extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
 
+    pub fn apxinf_kv_cache_gather_bf16(
+        src: *const c_void,
+        dst: *mut c_void,
+        tokens: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        max_seq_len: u32,
+        kv_offset: u32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_flash_attn_decode_bf16(
         q: *const c_void,
         k_cache: *const c_void,
@@ -1298,6 +1330,31 @@ extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
 
+
+    pub fn apxinf_vision_sdpa_bf16_v3(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        out: *mut c_void,
+        seq_len: u32,
+        n_heads: u32,
+        head_dim: u32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+
+    pub fn apxinf_vision_sdpa_bf16_v3_hd72(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        out: *mut c_void,
+        seq_len: u32,
+        n_heads: u32,
+        head_dim: u32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_noncausal_sdpa_bf16(
         q: *const c_void,
         k: *const c_void,

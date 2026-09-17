@@ -176,6 +176,30 @@ pub(crate) enum Semantic {
     GemmBias = 3,
 }
 
+#[cfg(test)]
+impl Semantic {
+    /// Every public L3 operator semantic that must be documented in
+    /// `cuda-operator.md`.
+    pub(crate) const ALL: &'static [Self] = &[
+        Self::Gemm,
+        Self::GemmBias,
+        Self::GemmBiasGelu,
+        Self::GemmGeglu,
+    ];
+
+    /// Stable identifier used by the operator catalog's machine-readable
+    /// markers. Keep this exhaustive so adding a semantic requires choosing a
+    /// documentation identifier.
+    pub(crate) const fn doc_id(self) -> &'static str {
+        match self {
+            Self::Gemm => "gemm",
+            Self::GemmBias => "gemm_bias",
+            Self::GemmBiasGelu => "gemm_bias_gelu",
+            Self::GemmGeglu => "gemm_geglu",
+        }
+    }
+}
+
 pub(crate) struct Normalized {
     pub spec: abi::Spec,
     pub policy: GemmPolicy,

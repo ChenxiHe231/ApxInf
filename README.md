@@ -399,6 +399,59 @@ That is the published protocol: all 10 LIBERO-10 tasks x 50 episodes at seed 7
   and the summary reports success rate alongside per-segment latency.
 
 
+## π0-FAST
+
+π0-FAST is a **token** VLA: instead of a continuous flow-matching head it
+autoregresses FAST discrete action tokens, and the policy layer detokenizes them
+(BPE then an orthonormal DCT) before unnormalizing. L1 therefore has its own
+entry point — the raw tokens — and L2 turns them into actions:
+
+```python
+from apxinf import AutoPolicy
+
+policy = AutoPolicy.from_pretrained("<path-to-model>", precision="bf16")
+
+# L1: raw FAST action tokens, uint32 [max_action_tokens]
+tokens = policy.model.infer_action_tokens_rgb(rgb, "nhwc", token_ids)
+
+# L2: tokens -> detokenized, unnormalized actions
+result = policy.infer(observation)        # observation: 2 cameras + state + prompt
+result["action_tokens"]                   # the ids behind result["actions"]
+result["normalized_actions"]              # before unnormalization
+```
+
+At L1 the runtime embeds exactly the ids it is handed, so `token_ids` must end
+with the PaliGemma BOS that triggers decoding — LeRobot concatenates it after the
+prompt before prefill, and `Pi0FastPolicy` appends it for you. Without that
+trailing BOS the model continues the prompt text (a caption) instead of emitting
+the `Action: …|` stream.
+
+The prompt is assembled from the task and the *discretized* state, so the state
+is required and its width is a checkpoint property — `policy.metadata["state_dim"]`
+(8 for LIBERO's `eef_pos + eef_axis_angle + gripper_qpos`). The two tokenizers are
+read from the assets the checkpoint names (`text_tokenizer_name`,
+`action_tokenizer_name`) and resolved offline: pass a local path with
+`tokenizer_path`/`fast_tokenizer_path`, or set `APXINF_PALIGEMMA_TOKENIZER` /
+`APXINF_FAST_TOKENIZER`, or let the local Hugging Face cache answer.
+
+### Run
+
+```bash
+# the native binding then the frontend, as in "Build ApxInf" - no extra of its own
+pip install --force-reinstall target/wheel/wheels/apxinf_py-*.whl
+pip install -e python/apxinf
+huggingface-cli download lerobot/pi0fast-libero-v044 --local-dir <path-to-model>
+
+python scripts/eval_libero.py --backend in-process --model-dir <path-to-model> \
+  --precision bf16 \
+  --suite libero_10 --tasks all --trials-per-task 50 \
+  --results-jsonl <out-dir>/results.jsonl --summary-json <out-dir>/summary.json
+```
+
+Unlike PI0.5 this checkpoint carries its own normalization statistics, so
+`--norm-stats` is neither needed nor accepted (its use is an error, not a silent
+no-op).
+
 ## Benchmark
 
 `scripts/bench_pi05.py` times the concentric serving shells so a regression can
@@ -459,6 +512,20 @@ rustup default stable
 ```
 
 Built with Rust 1.95 and 1.96; no minimum supported version is declared.
+
+## Acknowledgement
+
+The development of APXInf has been inspired by, and benefits from, the ideas and tooling of the broader open-source community.
+In particular, we would like to thank the teams and contributors behind
+[FasterTransformer](https://github.com/NVIDIA/FasterTransformer),
+[TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM),
+[llama.cpp](https://github.com/ggml-org/llama.cpp),
+[FlashAttention](https://github.com/Dao-AILab/flash-attention),
+[FlashRT](https://github.com/flashrt-project/FlashRT/tree/main),
+[vLLM](https://github.com/vllm-project/vllm),
+[sgLang](https://github.com/sgl-project/sglang),
+and if we have inadvertently missed your project or contribution,
+please open an issue or a pull request so we can properly credit you.
 
 
 ## License

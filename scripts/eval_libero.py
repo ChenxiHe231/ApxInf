@@ -348,6 +348,30 @@ class Backend(Protocol):
         ...
 
 
+def state_finger_joints(metadata: Mapping) -> int:
+    """How many of LIBERO's mirrored finger joints the checkpoint's state carries.
+
+    LIBERO reports two mirrored finger joints and LeRobot's own env keeps both
+    (8-dim state), while this harness collapsed them into one gripper coordinate
+    (7-dim) for PI0.5. The width is a checkpoint property — it is the width of
+    its normalization statistics — so a policy publishes it as
+    ``metadata["state_dim"]`` and the harness builds exactly that vector instead
+    of guessing. ``None`` (a policy that publishes no width) keeps the
+    historical collapsed vector.
+    """
+    width = metadata.get("state_dim")
+    if width is None:
+        return 1
+    if int(width) == 7:
+        return 1
+    if int(width) == 8:
+        return 2
+    raise ValueError(
+        f"the loaded policy declares state_dim={width}, but this harness can only "
+        "build LIBERO's 7-dim (collapsed gripper) or 8-dim (both finger joints) state"
+    )
+
+
 def _observation(base, wrist, state: Any, prompt, keys: WireKeys) -> dict:
     """The OpenPI LIBERO observation both backends consume, identical on the wire
     and in-process. The keys are resolved once per run, so what the evaluator
@@ -551,6 +575,7 @@ def run_episode(
     warm_start_alpha: float,
     replan_steps: int = REPLAN_STEPS,
     settle_gripper: float = -1.0,
+    finger_joints: int = 1,
     max_steps: int = MAX_STEPS,
 ) -> dict:
     episode_started = time.perf_counter()
@@ -590,7 +615,7 @@ def run_episode(
                 observation["agentview_image"],
                 observation["robot0_eye_in_hand_image"],
             )
-            state = backend.state_from_observation(observation)
+            state = libero_state(observation, finger_joints=finger_joints)
             preprocess_seconds += time.perf_counter() - preprocess_started
 
             noise = None
@@ -943,6 +968,7 @@ def main() -> None:
 
     backend = build_backend(args)
     print(f"backend={args.backend} metadata={backend.metadata}", flush=True)
+    finger_joints = state_finger_joints(getattr(backend, "metadata", {}) or {})
     try:
         for name, suite in suites.items():
             for task_id in task_ids_by_suite[name]:
@@ -975,9 +1001,10 @@ def main() -> None:
                                     args.seed,
                                     args.warm_start,
                                     args.warm_start_alpha,
-                                    replan_steps=args.replan_steps,
-                                    settle_gripper=args.settle_gripper,
-                                    max_steps=args.max_steps,
+                                    args.replan_steps,
+                                    args.settle_gripper,
+                                    finger_joints,
+                                    args.max_steps,
                                 )
                                 record["attempt"] = attempt
                                 record["precision"] = args.precision
