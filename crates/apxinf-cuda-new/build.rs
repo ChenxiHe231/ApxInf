@@ -58,6 +58,48 @@ fn rerun_tree(root: &Path) {
     }
 }
 
+fn copy_tree(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination)
+        .unwrap_or_else(|error| panic!("create {}: {error}", destination.display()));
+    for entry in std::fs::read_dir(source)
+        .unwrap_or_else(|error| panic!("read {}: {error}", source.display()))
+    {
+        let entry = entry.unwrap_or_else(|error| panic!("read directory entry: {error}"));
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else {
+            std::fs::copy(&source_path, &destination_path).unwrap_or_else(|error| {
+                panic!(
+                    "copy {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            });
+        }
+    }
+}
+
+fn stage_patched_fa2(native: &Path, fa2_root: &Path, out: &Path) -> PathBuf {
+    let staged = out.join("fa2-direct-e4m3-patched");
+    if staged.exists() {
+        std::fs::remove_dir_all(&staged)
+            .unwrap_or_else(|error| panic!("remove {}: {error}", staged.display()));
+    }
+    copy_tree(&fa2_root.join("flash_attn"), &staged.join("flash_attn"));
+    let patch = native
+        .join("patches")
+        .join("fa2-direct-e4m3-output.patch");
+    let mut command = Command::new("patch");
+    command
+        .current_dir(&staged)
+        .args(["--batch", "--forward", "-p0", "-i"])
+        .arg(&patch);
+    run(&mut command, "apply FA2 direct-E4M3 patch");
+    staged
+}
+
 fn cuda_library_directories(cuda: &str, cpu_arch: &str) -> Vec<PathBuf> {
     [
         format!("{cuda}/lib64"),
@@ -224,6 +266,10 @@ fn main() {
             ]
             .map(|source| fa2_root.join(source)),
         );
+        fa2_sources.extend(
+            ["fa2_fwd_hdim128_extra.cu", "fa2_fwd_hdim256_extra.cu"]
+                .map(|source| attention_kernel_root.join(source)),
+        );
     }
     let mut fa2_e4m3_sources = Vec::new();
     if selection
@@ -236,6 +282,8 @@ fn main() {
                 .map(|source| attention_kernel_root.join(source)),
         );
     }
+    let patched_fa2_root = (!fa2_e4m3_sources.is_empty())
+        .then(|| stage_patched_fa2(&native, &fa2_root, &out));
     assert!(
         generic_sources
             .iter()
@@ -379,6 +427,15 @@ fn main() {
                 ]);
             }
             command.arg(format!("-I{}", fa2_compat_root.display()));
+            if is_fa2_e4m3 {
+                command.arg(format!(
+                    "-I{}",
+                    patched_fa2_root
+                        .as_ref()
+                        .expect("E4M3 FA2 staging must exist")
+                        .display()
+                ));
+            }
             command.arg(format!("-I{}", fa2_root.display()));
             command.arg(format!("-I{}", cutlass_root.join("include").display()));
         }

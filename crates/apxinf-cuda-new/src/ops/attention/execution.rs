@@ -147,6 +147,11 @@ impl Execution {
     pub(crate) fn summary(&self) -> &str {
         &self.summary
     }
+
+    pub(crate) fn enqueue_for_test(&self) -> Result<()> {
+        self.stream.set_current_device().map_err(Error::Cuda)?;
+        unsafe { status::check(abi::apxinf_attention_enqueue(self.raw)) }
+    }
 }
 
 #[cfg(test)]

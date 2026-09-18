@@ -97,8 +97,11 @@ int fa2(
               key_tokens, query_heads, kv_heads, head_dim, softmax_scale);
   params.is_causal = false;
   if constexpr (std::is_same<Element, cutlass::half_t>::value) {
-    if (head_dim > 128) return static_cast<int>(cudaErrorInvalidValue);
-    FLASH_NAMESPACE::run_mha_fwd_<Element, 128, false>(params, stream);
+    if (head_dim <= 128) {
+      FLASH_NAMESPACE::run_mha_fwd_<Element, 128, false>(params, stream);
+    } else {
+      FLASH_NAMESPACE::run_mha_fwd_<Element, 256, false>(params, stream);
+    }
   } else if (head_dim <= 128) {
     FLASH_NAMESPACE::run_mha_fwd_<Element, 128, false>(params, stream);
   } else {

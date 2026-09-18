@@ -12,6 +12,7 @@ use super::l3_behavior::{attention_reference, kv_cache_attention_reference};
 use super::*;
 use crate::CudaContext;
 use apxinf_core::{DType, Tensor};
+use std::time::Instant;
 
 #[path = "torch_l3_fixtures.rs"]
 mod torch_fixture;
@@ -239,6 +240,127 @@ fn attention_f16_vision_uses_fa2_and_matches_reference() {
         execution.summary().starts_with("flash-attention-2 "),
         "unexpected F16 vision provider: {}",
         execution.summary()
+    );
+}
+
+#[test]
+fn attention_f16_language_mqa_uses_fa2() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (batch, tokens, query_heads, kv_heads, head_dim) = (1, 522, 8, 1, 256);
+    let query_shape = vec![batch, tokens, query_heads, head_dim];
+    let kv_shape = vec![batch, tokens, kv_heads, head_dim];
+    let query = zeros_tensor(0, query_shape.clone(), DType::F16);
+    let key = zeros_tensor(0, kv_shape.clone(), DType::F16);
+    let value = zeros_tensor(0, kv_shape, DType::F16);
+    let mut out = zeros_tensor(0, query_shape, DType::F16);
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut out);
+    args.policy.allow_fallback = false;
+    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
+    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
+    assert!(
+        execution.summary().starts_with("flash-attention-2 "),
+        "unexpected F16 language MQA provider: {}",
+        execution.summary()
+    );
+}
+
+#[test]
+fn attention_f16_action_cache_uses_fa2() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (batch, query_tokens, key_tokens, query_heads, kv_heads, head_dim) =
+        (1, 10, 532, 8, 1, 256);
+    let query_shape = vec![batch, query_tokens, query_heads, head_dim];
+    let cache_shape = vec![batch, key_tokens, kv_heads, head_dim];
+    let query = zeros_tensor(0, query_shape.clone(), DType::F16);
+    let key = zeros_tensor(0, cache_shape.clone(), DType::F16);
+    let value = zeros_tensor(0, cache_shape, DType::F16);
+    let mut out = zeros_tensor(0, query_shape, DType::F16);
+    let mut args = KvCacheAttentionArgs::new(&query, &key, &value, &mut out).non_causal();
+    args.policy.allow_fallback = false;
+    let normalized = super::normalize_kv_cache_attention(&ctx, args).unwrap();
+    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
+    assert!(
+        execution.summary().starts_with("flash-attention-2-kv-cache "),
+        "unexpected F16 action KV-cache provider: {}",
+        execution.summary()
+    );
+}
+
+#[test]
+#[ignore = "Thor-only performance characterization"]
+fn profile_pi05_f16_attention_shapes() {
+    fn measure(
+        ctx: &CudaContext,
+        execution: &super::attention_execution::Execution,
+        iterations: usize,
+    ) -> f64 {
+        for _ in 0..20 {
+            execution.enqueue_for_test().unwrap();
+        }
+        ctx.synchronize().unwrap();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            execution.enqueue_for_test().unwrap();
+        }
+        ctx.synchronize().unwrap();
+        start.elapsed().as_secs_f64() * 1_000.0 / iterations as f64
+    }
+
+    let ctx = CudaContext::new(0).unwrap();
+
+    let vision_shape = vec![2, 256, 16, 72];
+    let vision_q = zeros_tensor(0, vision_shape.clone(), DType::F16);
+    let vision_k = zeros_tensor(0, vision_shape.clone(), DType::F16);
+    let vision_v = zeros_tensor(0, vision_shape.clone(), DType::F16);
+    let mut vision_out = zeros_tensor(0, vision_shape, DType::F16);
+    let vision = super::attention_execution::prepare(
+        &ctx,
+        super::attention_contracts::normalize(
+            &ctx,
+            AttentionArgs::new(&vision_q, &vision_k, &vision_v, &mut vision_out),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let language_q_shape = vec![1, 522, 8, 256];
+    let language_kv_shape = vec![1, 522, 1, 256];
+    let language_q = zeros_tensor(0, language_q_shape.clone(), DType::F16);
+    let language_k = zeros_tensor(0, language_kv_shape.clone(), DType::F16);
+    let language_v = zeros_tensor(0, language_kv_shape, DType::F16);
+    let mut language_out = zeros_tensor(0, language_q_shape, DType::F8E4M3);
+    let mut language_args =
+        AttentionArgs::new(&language_q, &language_k, &language_v, &mut language_out);
+    language_args.output_scale = 1.0 / 16.0;
+    let language = super::attention_execution::prepare(
+        &ctx,
+        super::attention_contracts::normalize(&ctx, language_args).unwrap(),
+    )
+    .unwrap();
+
+    let action_q_shape = vec![1, 10, 8, 256];
+    let action_kv_shape = vec![1, 532, 1, 256];
+    let action_q = zeros_tensor(0, action_q_shape.clone(), DType::F16);
+    let action_k = zeros_tensor(0, action_kv_shape.clone(), DType::F16);
+    let action_v = zeros_tensor(0, action_kv_shape, DType::F16);
+    let mut action_out = zeros_tensor(0, action_q_shape, DType::F16);
+    let action_args =
+        KvCacheAttentionArgs::new(&action_q, &action_k, &action_v, &mut action_out).non_causal();
+    let action = super::attention_execution::prepare(
+        &ctx,
+        super::normalize_kv_cache_attention(&ctx, action_args).unwrap(),
+    )
+    .unwrap();
+
+    let vision_ms = measure(&ctx, &vision, 200);
+    let language_ms = measure(&ctx, &language, 200);
+    let action_ms = measure(&ctx, &action, 500);
+    let weighted_ms = 27.0 * vision_ms + 17.0 * language_ms + 180.0 * action_ms;
+    eprintln!(
+        "PI0.5 Attention profile: vision={vision_ms:.6}ms ({}) language={language_ms:.6}ms ({}) action={action_ms:.6}ms ({}) weighted={weighted_ms:.3}ms",
+        vision.summary(),
+        language.summary(),
+        action.summary()
     );
 }
 

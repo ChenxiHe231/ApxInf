@@ -1,10 +1,11 @@
 # Vendored: Flash-Attention 2 forward kernels
 
-ApxInf compiles the BF16 head-dimension 128 and 256 forward instantiations and
-the FP16 head-dimension 128 non-causal instantiation used by vision attention.
-The repository-local raw-pointer wrapper in `../fa2.cu` owns parameter
-marshalling. Split planning, provider selection, and other execution policy
-belong outside this vendored tree.
+ApxInf compiles the upstream BF16 head-dimension 128 and 256 non-causal
+instantiations. Additional FP16 and causal BF16 instantiations live in the
+ApxInf-owned `native/kernels/attention` directory. The repository-local
+raw-pointer wrapper in `../fa2.cu` owns parameter marshalling. Split planning,
+provider selection, and other execution policy belong outside this vendored
+tree.
 
 ## Sources
 
@@ -33,12 +34,14 @@ The compatibility layer is inference-only: dropout is disabled, and it is not
 intended to emulate PyTorch beyond the types and checks required to instantiate
 the forward kernels.
 
-## Direct E4M3 exception
+## Direct E4M3 extension
 
-The guarded `APXINF_FA2_DIRECT_E4M3` output conversion in
-`flash_fwd_kernel.h` is the sole ApxInf operator extension in the vendor
-headers. Its output scale is carried through the upstream `softcap` field by a
-dedicated ApxInf operator translation unit; the vendor ABI is not extended.
+The checked-in vendor sources remain identical to v2.7.4.post1. The direct
+E4M3 output epilogue is stored as
+`native/patches/fa2-direct-e4m3-output.patch`; `build.rs` applies it only to an
+`OUT_DIR` copy used by the dedicated ApxInf E4M3 translation units. Its output
+scale is carried through the upstream `softcap` field, so the vendor ABI is not
+extended and ordinary FA2 compilation always consumes the pristine snapshot.
 
 ## Backporting upstream bugfixes
 

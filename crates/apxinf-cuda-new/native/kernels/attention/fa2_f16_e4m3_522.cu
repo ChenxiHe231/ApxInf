@@ -7,8 +7,8 @@
 #include <cmath>
 #include <cstdint>
 
-#include "../fa2/flash_attn/flash.h"
-#include "../fa2/flash_attn/namespace_config.h"
+#include "flash_attn/flash.h"
+#include "flash_attn/namespace_config.h"
 
 namespace FLASH_NAMESPACE {
 template <typename Element, int HeadDim, bool IsCausal>
