@@ -95,9 +95,9 @@ class GemmTuningProblem {
 
 Recipe tune(const Spec& spec, const apxinf_gemm_policy_t& policy,
             const apxinf_gemm_bindings_t& bindings, int device,
-            std::string& report, const Recipe* preferred) {
+            std::string& report) {
   GemmTuningProblem problem(spec, policy, bindings, device);
-  return apxinf::framework::autotune(problem, report, preferred);
+  return apxinf::framework::autotune(problem, report);
 }
 
 }  // namespace apxinf::gemm

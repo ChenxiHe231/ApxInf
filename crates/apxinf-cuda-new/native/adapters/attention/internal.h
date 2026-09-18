@@ -59,8 +59,7 @@ struct Implementation {
 using ImplementationRegistry = apxinf::framework::Registry<Implementation>;
 
 struct TuningKeys {
-  std::string performance;
-  std::string compatible_hint;
+  std::string key;
 };
 
 struct Execution {
@@ -88,7 +87,7 @@ std::unique_ptr<Execution> prepare(const Implementation& implementation,
                                    int device);
 Recipe tune(const Spec& spec, const apxinf_attention_policy_t& policy,
             const apxinf_attention_bindings_t& bindings, int device,
-            std::string& report, const Recipe* preferred = nullptr);
+            std::string& report);
 TuningKeys tuning_keys(const Spec& spec,
                        const apxinf_attention_policy_t& policy, int device);
 

@@ -65,8 +65,7 @@ class CapturedCandidate {
 // Operator-independent tactic loop. Problem supplies only operator-specific
 // candidate filtering, configuration enumeration, preparation and launch.
 template <class Problem>
-Recipe autotune(Problem& problem, std::string& report,
-                const Recipe* preferred = nullptr) {
+Recipe autotune(Problem& problem, std::string& report) {
   using Implementation = typename Problem::Implementation;
   using Execution = typename Problem::Execution;
   struct Choice {
@@ -87,23 +86,6 @@ Recipe autotune(Problem& problem, std::string& report,
     problem.configurations(implementation, configurations);
     for (int configuration : configurations) {
       choices.push_back({&implementation, configuration});
-    }
-  }
-
-  bool preferred_first = false;
-  if (preferred != nullptr) {
-    const auto found = std::find_if(
-        choices.begin(), choices.end(), [&](const Choice& choice) {
-          return choice.implementation->provider_id == preferred->provider_id &&
-                 choice.implementation->implementation_id ==
-                     preferred->implementation_id &&
-                 choice.implementation->implementation_version ==
-                     preferred->implementation_version &&
-                 choice.configuration == preferred->configuration;
-        });
-    if (found != choices.end()) {
-      std::rotate(choices.begin(), found, std::next(found));
-      preferred_first = true;
     }
   }
 
@@ -154,8 +136,7 @@ Recipe autotune(Problem& problem, std::string& report,
     diagnostics.push_back("winner-graph=capture-pass");
   }
 
-  report = "tuned preferred=" + std::to_string(preferred_first) +
-           " checked=" + std::to_string(checked) +
+  report = "tuned checked=" + std::to_string(checked) +
            " rejected=" + std::to_string(rejected) +
            " ms=" + std::to_string(best) + " candidates=[";
   for (size_t index = 0; index < diagnostics.size(); ++index) {

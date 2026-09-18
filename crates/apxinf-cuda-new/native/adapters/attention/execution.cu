@@ -191,10 +191,12 @@ std::string serialize(const Recipe& recipe) {
 
 bool parse(const std::string& value, Recipe& recipe) {
   std::istringstream input(value);
-  return static_cast<bool>(input >> recipe.provider_id >>
-                           recipe.implementation_id >>
-                           recipe.implementation_version >>
-                           recipe.configuration);
+  if (!(input >> recipe.provider_id >> recipe.implementation_id >>
+        recipe.implementation_version >> recipe.configuration)) {
+    return false;
+  }
+  input >> std::ws;
+  return input.eof();
 }
 
 std::vector<float> read_output(const Spec& spec,
@@ -282,14 +284,13 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
     apxinf::attention::check_cuda(cudaSetDevice(runtime->device));
     const auto keys =
         apxinf::attention::tuning_keys(normalized, *policy, runtime->device);
+    const std::string& key = keys.key;
     std::lock_guard<std::mutex> lock(runtime->attention_mutex);
 
     Recipe recipe{};
     bool recipe_found = false;
-    Recipe compatible_hint{};
-    bool compatible_hint_found = false;
     std::string source = "recipe";
-    if (const auto cached = runtime->attention_recipes.find(keys.performance);
+    if (const auto cached = runtime->attention_recipes.find(key);
         cached != runtime->attention_recipes.end()) {
       recipe = cached->second;
       recipe_found = true;
@@ -298,20 +299,8 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
       recipe_found = parse(
           apxinf::framework::read_recipe(
               policy->cache_dir != nullptr ? policy->cache_dir : "",
-              keys.performance),
+              key),
           recipe);
-    }
-    if (!recipe_found) {
-      compatible_hint_found = parse(
-          apxinf::framework::read_recipe(
-              policy->cache_dir != nullptr ? policy->cache_dir : "",
-              keys.compatible_hint),
-          compatible_hint);
-      if (compatible_hint_found &&
-          find_implementation(compatible_hint, normalized, runtime->device) ==
-              nullptr) {
-        compatible_hint_found = false;
-      }
     }
 
     std::unique_ptr<Execution> execution;
@@ -327,21 +316,15 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
           cudaGetLastError();
         }
         if (execution != nullptr) {
-          runtime->attention_recipes[keys.performance] = recipe;
+          runtime->attention_recipes[key] = recipe;
         }
-      }
-      if (execution == nullptr) {
-        compatible_hint = recipe;
-        compatible_hint_found = true;
       }
     }
 
     bool persist = false;
     if (execution == nullptr && policy->online_tune) {
       recipe = apxinf::attention::tune(normalized, *policy, *bindings,
-                                       runtime->device, source,
-                                       compatible_hint_found ? &compatible_hint
-                                                             : nullptr);
+                                       runtime->device, source);
       const auto* implementation =
           find_implementation(recipe, normalized, runtime->device);
       if (implementation == nullptr) {
@@ -379,13 +362,11 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
     }
 
     if (persist) {
-      runtime->attention_recipes[keys.performance] = recipe;
+      runtime->attention_recipes[key] = recipe;
       const std::string encoded = serialize(recipe);
       const std::string directory =
           policy->cache_dir != nullptr ? policy->cache_dir : "";
-      apxinf::framework::write_recipe(directory, keys.performance, encoded);
-      apxinf::framework::write_recipe(directory, keys.compatible_hint,
-                                      encoded);
+      apxinf::framework::write_recipe(directory, key, encoded);
     }
     execution->summary =
         std::string(execution->implementation->name) +

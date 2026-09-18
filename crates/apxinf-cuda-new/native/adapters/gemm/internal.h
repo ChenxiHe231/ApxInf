@@ -101,12 +101,8 @@ inline bool supports_alignment(const Implementation& implementation,
 using Recipe = apxinf::framework::Recipe;
 
 struct TuningKeys {
-  // A recipe under this key is fully tuned for an equivalent performance
-  // profile and may be restored directly.
-  std::string performance;
-  // A recipe under this key only proves execution compatibility. It may be
-  // tried first, but all candidates must still be tuned on this device.
-  std::string compatible_hint;
+  // A recipe under this key is fully tuned for one exact equivalence class.
+  std::string key;
 };
 
 struct AccuracyMetrics {
@@ -172,7 +168,7 @@ std::unique_ptr<Execution> prepare(const Implementation& implementation,
 Recipe tune(
     const Spec& spec, const apxinf_gemm_policy_t& policy,
     const apxinf_gemm_bindings_t& bindings, int device,
-    std::string& report, const Recipe* preferred = nullptr);
+    std::string& report);
 AccuracyMetrics compare_reference(const std::vector<float>& expected,
                                   const std::vector<float>& actual);
 std::string format_accuracy(const AccuracyMetrics& metrics);
