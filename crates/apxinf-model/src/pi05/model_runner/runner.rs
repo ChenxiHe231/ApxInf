@@ -82,6 +82,23 @@ enum ExecStrategy {
     Eager(EagerInputs),
 }
 
+/// Run the fixed eager traversal prefix shared by preparation, inference, and
+/// calibration. Keeping RGB preprocessing here is important: an
+/// `ExecutionSession` keys native executions by both operator and binding, so
+/// every traversal after preparation must execute this prefix in the same
+/// order.
+fn eager_traversal<T>(
+    model: &ModelVariant,
+    spec: &InferenceSpec,
+    inputs: &EagerInputs,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let (Some(raw), Some(layout)) = (&inputs.raw_images, spec.image_layout) {
+        model.preprocess_rgb(raw, &inputs.patches, kernel_image_layout(layout))?;
+    }
+    operation()
+}
+
 /// Owning prepared PI0.5 inference plan. Runs neither capture nor autotune.
 /// Graph actions alias reusable device output: copy to host/device storage before
 /// the next run if a stable result is needed. Runs are serialized on this runner.
@@ -150,20 +167,15 @@ impl Pi05PreparedInference {
         self.update_eager_inputs(inputs, request)?;
         let raw_rgb = matches!(&observation.vision, VisionObservation::RgbU8 { .. });
         Ok(Action::new(ops::with_session(&inputs.session, || {
-            if let (Some(raw), Some(layout)) = (&inputs.raw_images, self.spec.image_layout) {
-                self.model.preprocess_rgb(
-                    raw,
+            eager_traversal(&self.model, &self.spec, inputs, || {
+                self.model.infer(
                     &inputs.patches,
-                    kernel_image_layout(layout),
-                )?;
-            }
-            self.model.infer(
-                &inputs.patches,
-                &inputs.token_ids,
-                self.spec.token_count,
-                &inputs.noise,
-                raw_rgb,
-            )
+                    &inputs.token_ids,
+                    self.spec.token_count,
+                    &inputs.noise,
+                    raw_rgb,
+                )
+            })
         })?))
     }
 
@@ -174,12 +186,14 @@ impl Pi05PreparedInference {
     ) -> Result<BTreeMap<String, f32>> {
         self.update_eager_inputs(inputs, request)?;
         ops::with_session(&inputs.session, || {
-            self.model.calibrate(
-                &inputs.patches,
-                &inputs.token_ids,
-                self.spec.token_count,
-                &inputs.noise,
-            )
+            eager_traversal(&self.model, &self.spec, inputs, || {
+                self.model.calibrate(
+                    &inputs.patches,
+                    &inputs.token_ids,
+                    self.spec.token_count,
+                    &inputs.noise,
+                )
+            })
         })
     }
 }
@@ -356,24 +370,28 @@ impl Pi05ModelRunner {
             self.model.workspace_requirements(spec.token_count)?.bytes,
             self.backend.device_id(),
         )?;
-        let raw_rgb = raw_images.is_some();
-        let output = ops::prepare_with_session(&session, || {
-            if let (Some(raw), Some(layout)) = (&raw_images, spec.image_layout) {
-                self.model
-                    .preprocess_rgb(raw, &patches, kernel_image_layout(layout))?;
-            }
-            self.model
-                .infer(&patches, &token_ids, spec.token_count, &noise, raw_rgb)
-        })?;
-        self.backend.synchronize()?;
-        drop(output);
-        Ok(EagerInputs {
+        let inputs = EagerInputs {
             patches,
             raw_images,
             noise,
             token_ids,
             session,
-        })
+        };
+        let raw_rgb = inputs.raw_images.is_some();
+        let output = ops::prepare_with_session(&inputs.session, || {
+            eager_traversal(&self.model, spec, &inputs, || {
+                self.model.infer(
+                    &inputs.patches,
+                    &inputs.token_ids,
+                    spec.token_count,
+                    &inputs.noise,
+                    raw_rgb,
+                )
+            })
+        })?;
+        self.backend.synchronize()?;
+        drop(output);
+        Ok(inputs)
     }
 
     fn build_eager(&self, spec: &InferenceSpec) -> Result<Pi05PreparedInference> {
