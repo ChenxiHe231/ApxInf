@@ -84,7 +84,6 @@ pub(super) fn load_model_runner(
             let weights = Arc::new(Fp8StaticWeights::from_host(
                 &host_weights,
                 &*backend,
-                config.language_dual_geglu_shape_possible(),
             )?);
             let time_embeddings = Arc::new(upload_time_embeddings_fp8_static(&config, &*backend)?);
             ModelVariant::Fp8Static {
@@ -101,7 +100,6 @@ pub(super) fn load_model_runner(
             let weights = Arc::new(Bf16Weights::from_host(
                 &host_weights,
                 &*backend,
-                config.language_dual_geglu_shape_possible(),
             )?);
             let time_embeddings = Arc::new(upload_time_embeddings_bf16(&config, &*backend)?);
             ModelVariant::Bf16 {

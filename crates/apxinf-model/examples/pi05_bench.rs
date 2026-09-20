@@ -3,7 +3,7 @@
 //! This single example replaces the former `pi05_{bf16,thor,int8}_bench.rs`. It
 //! bypasses the unified `AutoModel`/`infer` frontend and drives the variant-specific
 //! `Pi05{Bf16,,Int8Dynamic}CudaRuntime` directly, because it needs `apxinf_cuda`
-//! profiler hooks, tuning-DB install and raw device inputs that the model
+//! profiler hooks and raw device inputs that the model
 //! abstraction does not (and should not) expose. For an abstraction-level entry
 //! point see `pi05_auto_smoke`.
 //!
@@ -14,9 +14,9 @@
 //!
 //! ```text
 //! pi05_bench <checkpoint-or-index|random> --model-variant {bf16,fp8_static,int8_dynamic}
-//!     [--calibration <json|uniform:SCALE>] [--tactics <json>] [--autotune]
+//!     [--calibration <json|uniform:SCALE>]
 //!     [--views N] [--image-size N] [--action-horizon N] [--action-dim N]
-//!     [--num-flow-steps N] [--max-token-len N]            (random-only overrides)
+//!     [--num-flow-steps N] [--max-token-len N]  (views/H also work with checkpoints)
 //!     [--token-count T] [--iterations N] [--seed N]
 //!     [--image-input patches|nhwc|nchw] [--reference <json>] [--min-cosine C]
 //!     [--images-u8 <raw>] [--token-ids-u32le <raw>] [--noise-bf16-u16le <raw>]
@@ -30,8 +30,10 @@
 
 use apxinf_model::pi05::{build_bf16_model, build_fp8_static_model, build_int8_dynamic_model};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use apxinf_core::{Backend, DType, Tensor};
 use apxinf_cuda::{CudaBackend, CudaBuffer};
@@ -121,6 +123,71 @@ struct Thresholds {
 }
 
 const EAGER_GRAPH_MIN_COSINE: f64 = 0.999_999;
+const DEVICE_MEMORY_SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
+
+#[derive(Clone, Copy, Debug)]
+struct DeviceMemoryObservation {
+    baseline_used_bytes: usize,
+    min_free_bytes: usize,
+    observed_peak_used_bytes: usize,
+    sample_count: usize,
+}
+
+struct DeviceMemoryMonitor {
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<Result<DeviceMemoryObservation, String>>>,
+}
+
+impl DeviceMemoryMonitor {
+    fn start(device_id: usize) -> Result<Self, String> {
+        let baseline = apxinf_cuda::device_memory_info(device_id)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let handle = thread::Builder::new()
+            .name("pi05-device-memory-monitor".into())
+            .spawn(move || {
+                let mut min_free_bytes = baseline.free_bytes;
+                let mut observed_peak_used_bytes = baseline.used_bytes();
+                let mut sample_count = 1usize;
+                while !thread_stop.load(Ordering::Acquire) {
+                    thread::sleep(DEVICE_MEMORY_SAMPLE_INTERVAL);
+                    let memory = apxinf_cuda::device_memory_info(device_id)?;
+                    min_free_bytes = min_free_bytes.min(memory.free_bytes);
+                    observed_peak_used_bytes = observed_peak_used_bytes.max(memory.used_bytes());
+                    sample_count += 1;
+                }
+                Ok(DeviceMemoryObservation {
+                    baseline_used_bytes: baseline.used_bytes(),
+                    min_free_bytes,
+                    observed_peak_used_bytes,
+                    sample_count,
+                })
+            })
+            .map_err(|error| format!("start CUDA memory monitor: {error}"))?;
+        Ok(Self {
+            stop,
+            handle: Some(handle),
+        })
+    }
+
+    fn finish(mut self) -> Result<DeviceMemoryObservation, String> {
+        self.stop.store(true, Ordering::Release);
+        self.handle
+            .take()
+            .expect("memory monitor thread must exist")
+            .join()
+            .map_err(|_| "CUDA memory monitor thread panicked".to_string())?
+    }
+}
+
+impl Drop for DeviceMemoryMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 /// Benchmark-only dispatch over statically typed Networks. Capture uses the
 /// same prepare implementation and graph owner for every compute variant.
@@ -506,11 +573,12 @@ fn noise_fixture(
     })
 }
 
-fn latency_json(mut milliseconds: Vec<f64>) -> serde_json::Value {
-    milliseconds.sort_by(f64::total_cmp);
-    let sample_count = milliseconds.len() as f64;
-    let mean = milliseconds.iter().sum::<f64>() / sample_count;
-    let variance = milliseconds
+fn latency_json(samples_ms: Vec<f64>) -> serde_json::Value {
+    let mut ordered = samples_ms.clone();
+    ordered.sort_by(f64::total_cmp);
+    let sample_count = ordered.len() as f64;
+    let mean = ordered.iter().sum::<f64>() / sample_count;
+    let variance = ordered
         .iter()
         .map(|sample| {
             let delta = sample - mean;
@@ -519,62 +587,28 @@ fn latency_json(mut milliseconds: Vec<f64>) -> serde_json::Value {
         .sum::<f64>()
         / sample_count;
     let percentile = |fraction: f64| {
-        let index = ((milliseconds.len() - 1) as f64 * fraction).round() as usize;
-        milliseconds[index]
+        let index = ((ordered.len() - 1) as f64 * fraction).round() as usize;
+        ordered[index]
     };
     serde_json::json!({
-        "min": milliseconds[0],
+        "samples_ms": samples_ms,
+        "min": ordered[0],
         "p50": percentile(0.50),
         "p95": percentile(0.95),
-        "max": milliseconds[milliseconds.len() - 1],
+        "max": ordered[ordered.len() - 1],
         "mean": mean,
         "standard_deviation": variance.sqrt()
     })
 }
 
-/// Reference actions parser. FP8 uses a strict schema-validated fixture (matching
-/// the former `pi05_thor_bench`); BF16/INT8 accept a bare `{ "raw_actions": [..] }`.
+/// Reference action parser. Artifact identity is verified by the regression
+/// manifest, so every precision consumes the same pinned `raw_actions` payload.
 fn reference_actions(
     path: &Path,
-    model_variant: BenchVariant,
     config: &Pi05Config,
-    token_count: usize,
 ) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let raw = std::fs::read_to_string(path)?;
     let document: serde_json::Value = serde_json::from_str(&raw)?;
-    if model_variant == BenchVariant::Fp8Static {
-        let expected_integer = |name: &str, expected: usize| -> Result<(), String> {
-            let actual = document
-                .get(name)
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| format!("reference `{name}` is missing or not an integer"))?;
-            if actual as usize != expected {
-                return Err(format!(
-                    "reference `{name}` mismatch: expected {expected}, got {actual}"
-                ));
-            }
-            Ok(())
-        };
-        if document.get("schema").and_then(serde_json::Value::as_str)
-            != Some("apxinf.pi05.integrity.v1")
-        {
-            return Err("unsupported π0.5 integrity reference schema".into());
-        }
-        expected_integer("num_views", config.num_views)?;
-        expected_integer("token_count", token_count)?;
-        expected_integer("action_horizon", config.action_horizon)?;
-        expected_integer("action_dim", config.action_dim)?;
-        expected_integer("flow_steps", config.num_flow_steps)?;
-        for name in ["normalized_images", "token_ids", "diffusion_noise"] {
-            let value = document
-                .get("fixture")
-                .and_then(|fixture| fixture.get(name))
-                .and_then(serde_json::Value::as_str);
-            if value != Some("zeros") {
-                return Err(format!("reference fixture `{name}` must be `zeros`").into());
-            }
-        }
-    }
     let actions = document
         .get("raw_actions")
         .and_then(serde_json::Value::as_array)
@@ -605,8 +639,6 @@ struct Args {
     source: String,
     model_variant: BenchVariant,
     calibration: Option<String>,
-    tactics: Option<String>,
-    autotune: bool,
     views: Option<usize>,
     image_size: Option<usize>,
     action_horizon: Option<usize>,
@@ -637,8 +669,6 @@ impl Args {
         let mut source: Option<String> = None;
         let mut model_variant: Option<BenchVariant> = None;
         let mut calibration = None;
-        let mut tactics = None;
-        let mut autotune = false;
         let mut views = None;
         let mut image_size = None;
         let mut action_horizon = None;
@@ -669,8 +699,6 @@ impl Args {
                 "--calibration" => {
                     calibration = Some(expect_value(raw, &mut index, "--calibration")?)
                 }
-                "--tactics" => tactics = Some(expect_value(raw, &mut index, "--tactics")?),
-                "--autotune" => autotune = true,
                 "--views" => views = Some(expect_value(raw, &mut index, "--views")?.parse()?),
                 "--image-size" => {
                     image_size = Some(expect_value(raw, &mut index, "--image-size")?.parse()?)
@@ -725,7 +753,6 @@ impl Args {
         let source = source.ok_or("missing <checkpoint-or-index|random> positional argument")?;
         let model_variant = model_variant
             .ok_or("missing required --model-variant {bf16,fp8_static,int8_dynamic}")?;
-        validate_explicit_tactics_path(tactics.as_deref(), autotune)?;
         if iterations == 0 {
             return Err("--iterations must be non-zero".into());
         }
@@ -738,8 +765,6 @@ impl Args {
             source,
             model_variant,
             calibration,
-            tactics,
-            autotune,
             views,
             image_size,
             action_horizon,
@@ -759,24 +784,12 @@ impl Args {
     }
 }
 
-fn validate_explicit_tactics_path(tactics: Option<&str>, autotune: bool) -> Result<(), String> {
-    let Some(path) = tactics else {
-        return Ok(());
-    };
-    if autotune || Path::new(path).is_file() {
-        return Ok(());
-    }
-    Err(format!(
-        "explicit --tactics path `{path}` does not exist or is not a file; pass --autotune to create a new database"
-    ))
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw = std::env::args().collect::<Vec<_>>();
     let args = Args::parse(&raw).map_err(|error| {
         format!(
             "{error}\nusage: {} <checkpoint-or-index|random> --model-variant {{bf16,fp8_static,int8_dynamic}} \
-             [--calibration <json|uniform:SCALE>] [--tactics <json>] [--autotune] [--views N] \
+             [--calibration <json|uniform:SCALE>] [--views N] \
              [--image-size N] [--action-horizon N] [--action-dim N] [--num-flow-steps N] \
              [--max-token-len N] [--token-count T] [--iterations N] [--seed N] \
              [--image-input patches|nhwc|nchw] [--reference <json>] [--min-cosine C] \
@@ -795,18 +808,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--images-u8 requires --image-input nhwc".into());
     }
 
-    // Architecture overrides only apply to synthetic weights; a real checkpoint's
-    // tensors are fixed to the config it was exported with.
-    let has_overrides = args.views.is_some()
-        || args.image_size.is_some()
-        || args.action_horizon.is_some()
+    // View count and action horizon do not change checkpoint tensor shapes, so
+    // the fixed H10 regression matrix may override them for real weights. The
+    // remaining architecture fields still describe learned tensor dimensions.
+    let has_checkpoint_shape_overrides = args.image_size.is_some()
         || args.action_dim.is_some()
         || args.num_flow_steps.is_some()
         || args.max_token_len.is_some();
-    if !random && has_overrides {
+    if !random && has_checkpoint_shape_overrides {
         return Err(
-            "architecture overrides (--views/--image-size/--action-horizon/--action-dim/\
-             --num-flow-steps/--max-token-len) are only valid with the `random` source"
+            "checkpoint mode permits --views and --action-horizon, but \
+             --image-size/--action-dim/--num-flow-steps/--max-token-len require `random`"
                 .into(),
         );
     }
@@ -815,11 +827,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--reference is not valid with the `random` source (no trained weights to match); \
              eager-vs-graph integrity still runs as a self-test"
                 .into(),
-        );
-    }
-    if matches!(image_input, ImageInput::Rgb(_)) && args.reference.is_some() {
-        return Err(
-            "a raw-image fixture cannot be validated against the zero-input reference".into(),
         );
     }
     // All GEMM precisions share the hardware tactic database; calibration is
@@ -856,45 +863,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source.parent().unwrap_or_else(|| Path::new("."))
         };
         let config_path = root.join("config.json");
-        if config_path.is_file() {
+        let mut config = if config_path.is_file() {
             Pi05Config::from_json_file(&config_path)?
         } else {
             Pi05Config::default()
+        };
+        if let Some(num_views) = args.views {
+            config.num_views = num_views;
         }
+        if let Some(action_horizon) = args.action_horizon {
+            config.action_horizon = action_horizon;
+        }
+        config
     };
     config.validate()?;
     let config = Arc::new(config);
 
     let backend = Arc::new(CudaBackend::new(0)?);
+    let memory_monitor = DeviceMemoryMonitor::start(backend.device_id())?;
 
-    // BF16/FP8 tactics are optional: kernels retain their fallback route when no
-    // tuning DB is installed. Supplying the production DB is required for a
-    // benchmark that claims production routing.
-    let tuning_paths = args
-        .tactics
-        .as_deref()
-        .map(apxinf_cuda::tuning::TuningPaths::from_tactics)
-        .unwrap_or_else(|| {
-            apxinf_cuda::tuning::TuningPaths::for_cuda("configs/tuning", backend.context().caps())
-        });
-    let tuning = if tuning_paths.tactics.is_file() {
-        Some(apxinf_cuda::tuning::TuningDb::from_json_file(
-            &tuning_paths.tactics,
-        )?)
-    } else {
-        None
-    };
-    let tuning_mode = if args.autotune {
-        apxinf_cuda::tuning::TuningMode::AutoTune
-    } else {
-        apxinf_cuda::tuning::TuningMode::Inference
-    };
-    apxinf_cuda::kernels::gemm::configure_tuning(
-        backend.context(),
-        tuning_mode,
-        tuning.as_ref().map(std::slice::from_ref).unwrap_or(&[]),
-        Some(tuning_paths),
-    )?;
+    // cuda-new selects and prepares exact L3 executions before graph capture.
+    // That one-time work is outside both timed steady-state boundaries below.
 
     if random {
         eprintln!(
@@ -916,7 +905,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let device_weights = Arc::new(Bf16Weights::from_host(
                 &host_weights,
                 &*backend,
-                config.language_dual_geglu_shape_possible(),
             )?);
             Bench::Bf16(build_bf16_model(
                 backend.clone(),
@@ -969,7 +957,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let device_weights = Arc::new(Fp8StaticWeights::from_host(
                 &host_weights,
                 &*backend,
-                config.language_dual_geglu_shape_possible(),
             )?);
             Bench::Fp8Static(build_fp8_static_model(
                 backend.clone(),
@@ -1032,7 +1019,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let checksum = eager.iter().map(|value| value.abs() as f64).sum::<f64>();
         println!(
             "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            serde_json::to_string(&serde_json::json!({
+                "passed": true,
                 "model_variant": model_variant.variant_label(),
                 "mode": "eager_only",
                 "token_count": token_count,
@@ -1068,7 +1056,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reference_metrics = args
         .reference
         .as_ref()
-        .map(|path| reference_actions(Path::new(path), model_variant, &config, token_count))
+        .map(|path| reference_actions(Path::new(path), &config))
         .transpose()?
         .map(|expected| ErrorMetrics::measure(&captured, &expected))
         .transpose()?;
@@ -1084,6 +1072,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         graph.replay()?;
     }
     backend.synchronize()?;
+    // Stop the polling thread before profiling or latency measurement so the
+    // monitor cannot perturb the formal timing loops.
+    let device_memory = memory_monitor.finish()?;
 
     // Nsight Systems can use the CUDA profiler API as a robust one-shot capture
     // boundary and retain the NVTX name as a human-readable label:
@@ -1107,14 +1098,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stop_result?;
     }
 
+    let timer = apxinf_cuda::CudaEventTimer::new(backend.context())?;
     let mut milliseconds = Vec::with_capacity(iterations);
     for _ in 0..iterations {
-        let start = Instant::now();
-        graph.replay_and_synchronize()?;
-        milliseconds.push(start.elapsed().as_secs_f64() * 1e3);
+        let (_, elapsed_ms) = timer.measure(|| graph.replay())?;
+        milliseconds.push(elapsed_ms);
     }
     let graph_latency = latency_json(milliseconds);
     let update_plus_graph_latency = if let Some(images) = raw_images.as_ref() {
+        let mut samples = Vec::with_capacity(iterations);
+        for _ in 0..iterations {
+            let (_, elapsed_ms) = timer.measure(|| {
+                graph.update_raw_image_inputs(images, &host_token_ids, &noise_host)?;
+                graph.replay()
+            })?;
+            samples.push(elapsed_ms);
+        }
+        Some(latency_json(samples))
+    } else {
+        None
+    };
+    // Preserve the pre-migration host wall-time boundary for paired A/B with
+    // the 296f861 runner. CUDA-event latency above remains the canonical device
+    // measurement; these samples are deliberately reported under separate keys.
+    let mut host_milliseconds = Vec::with_capacity(iterations);
+    for _ in 0..iterations {
+        let start = Instant::now();
+        graph.replay_and_synchronize()?;
+        host_milliseconds.push(start.elapsed().as_secs_f64() * 1e3);
+    }
+    let host_graph_latency = latency_json(host_milliseconds);
+    let host_update_plus_graph_latency = if let Some(images) = raw_images.as_ref() {
         let mut samples = Vec::with_capacity(iterations);
         for _ in 0..iterations {
             let start = Instant::now();
@@ -1134,7 +1148,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!(
         "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
+        serde_json::to_string(&serde_json::json!({
+            "passed": eager_graph_passed && reference_passed,
             "profile": profile,
             "model_variant": model_variant.variant_label(),
             "weights": if random { "synthetic" } else { "checkpoint" },
@@ -1143,6 +1158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "graph_includes_cuda_preprocess": matches!(image_input, ImageInput::Rgb(_)),
                 "graph_latency_includes_h2d": false,
                 "input_update_plus_graph_latency_ms": update_plus_graph_latency,
+                "host_input_update_plus_graph_latency_ms": host_update_plus_graph_latency,
             },
             "token_count": token_count,
             "fixture_inputs": {
@@ -1151,13 +1167,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "noise_bf16_u16le": args.noise_bf16_u16le,
             },
             "iterations": iterations,
+            "timing_source": "cuda_event",
             "profile_replay": profile_replay,
             "latency_ms": graph_latency,
+            "host_latency_ms": host_graph_latency,
+            "observed_peak_device_memory_bytes": device_memory.observed_peak_used_bytes,
+            "device_memory": {
+                "scope": "device_wide",
+                "measurement": "cuda_mem_get_info_polling",
+                "sampling_interval_us": DEVICE_MEMORY_SAMPLE_INTERVAL.as_micros(),
+                "sample_count": device_memory.sample_count,
+                "baseline_used_bytes": device_memory.baseline_used_bytes,
+                "min_free_bytes": device_memory.min_free_bytes,
+                "observed_peak_used_bytes": device_memory.observed_peak_used_bytes,
+                "observed_peak_delta_bytes": device_memory
+                    .observed_peak_used_bytes
+                    .saturating_sub(device_memory.baseline_used_bytes),
+            },
             "workspace": {
                 "capacity_bytes": graph.workspace_bytes(),
                 "used_bytes": graph.workspace_used_bytes()
             },
             "output_abs_checksum": checksum,
+            "output_f32": output,
             "integrity": {
                 "passed": eager_graph_passed && reference_passed,
                 "eager_vs_graph": eager_graph.as_json(),
@@ -1188,50 +1220,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn arguments(extra: &[&str]) -> Vec<String> {
-        ["pi05_bench", "random", "--model-variant", "fp8_static"]
-            .into_iter()
-            .chain(extra.iter().copied())
-            .map(str::to_owned)
-            .collect()
-    }
-
-    #[test]
-    fn missing_explicit_tactics_is_rejected_in_inference_mode() {
-        let path = std::env::temp_dir().join(format!(
-            "apxinf-missing-tactics-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let error = Args::parse(&arguments(&["--tactics", path.to_str().unwrap()])).unwrap_err();
-        assert!(error.to_string().contains("does not exist"));
-        assert!(error.to_string().contains("--autotune"));
-    }
-
-    #[test]
-    fn missing_explicit_tactics_is_allowed_for_autotune_creation() {
-        let path = std::env::temp_dir().join(format!(
-            "apxinf-new-tactics-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let parsed = Args::parse(&arguments(&[
-            "--tactics",
-            path.to_str().unwrap(),
-            "--autotune",
-        ]));
-        assert!(parsed.is_ok());
-    }
 }

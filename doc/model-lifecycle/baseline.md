@@ -110,10 +110,13 @@ Important reproduction gaps:
    a reproduction of that historical checkpoint/fixture baseline. Locate the
    exact compatible workload/runner before making a regression claim.
 2. The two first-replan NPZ fixtures named by the regression doc are not tracked
-   in this checkout. They have now been located on Thor and both hashes match
-   the maintained pins; checkpoint and tokenizer hashes match too. Independent
-   reconstruction verifies derived image/token/noise bytes. H10 uses original
-   NPZ noise; H50 uses separately seeded Gaussian noise, not an H10 golden.
+   in this checkout. They were located on Thor for the historical campaign and
+   both hashes matched the maintained pins, but the maintained documentation
+   does not publish a durable current host path or download URL. A new campaign
+   must restore or recapture them and verify the pinned hashes. Checkpoint and
+   tokenizer hashes matched too. Independent reconstruction verified derived
+   image/token/noise bytes. H10 uses original NPZ noise; H50 uses separately
+   seeded Gaussian noise, not an H10 golden.
 3. Python bench L0 uses zero patches, whereas L1 uses RGB preprocessing. L2 invokes
    the full policy and may have its own noise behavior. Their latency differences
    alone do not demonstrate numerical equivalence of the three paths.

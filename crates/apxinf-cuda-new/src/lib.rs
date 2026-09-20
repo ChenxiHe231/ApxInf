@@ -7,14 +7,16 @@ mod graph;
 pub mod kernels;
 pub mod kv_cache;
 pub mod nvtx;
+pub mod profiler;
 pub mod sampling;
 pub mod stream;
+pub mod timing;
 pub mod transfers;
 mod workspace;
 
 pub use backend::CudaBackend;
 pub use buffer::{CudaBuffer, CudaDeviceAddress, HostMappedBuffer};
-pub use context::CudaContext;
+pub use context::{device_memory_info, CudaContext, CudaMemoryInfo};
 pub use device_caps::{CudaArchFamily, CudaDeviceCaps};
 pub use graph::{capture, CapturedGraph};
 pub use kv_cache::CudaKVCache;
@@ -28,5 +30,6 @@ pub use ops::{
     QuantizationSemantic, RopeArgs, RopePolicy, RopeSemantic, SegmentedAttentionArgs,
 };
 pub use stream::CudaStream;
+pub use timing::CudaEventTimer;
 
 pub mod ops;

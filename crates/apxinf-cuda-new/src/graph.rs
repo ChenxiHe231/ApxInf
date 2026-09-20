@@ -25,6 +25,12 @@ impl CapturedGraph {
     }
 }
 
+impl apxinf_core::Graph for CapturedGraph {
+    fn replay(&self) -> Result<()> {
+        CapturedGraph::replay(self)
+    }
+}
+
 impl Drop for CapturedGraph {
     fn drop(&mut self) {
         let _ = self.stream.with_current_device(|| unsafe {

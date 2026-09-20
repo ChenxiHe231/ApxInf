@@ -1,9 +1,9 @@
 //! Low-level numerical integrity probe for PI0.5.
 //!
 //! This example intentionally bypasses the unified `AutoModel`/`infer` frontend
-//! to reach `Fp8StaticModel` internals and `apxinf_cuda` tuning/kernel
-//! signatures directly, which the model abstraction does not (and should not)
-//! expose. See `pi05_auto_smoke` for the abstraction-level entry point.
+//! to reach `Fp8StaticModel` internals and L3 operator boundaries directly,
+//! which the model abstraction does not (and should not) expose. See
+//! `pi05_auto_smoke` for the abstraction-level entry point.
 
 use apxinf_model::pi05::build_fp8_static_model;
 use std::path::Path;
@@ -13,8 +13,7 @@ use apxinf_core::{Backend, DType, Tensor};
 use apxinf_cuda::{CudaBackend, CudaBuffer};
 use apxinf_model::pi05::{
     upload_time_embeddings_fp8_static, vision_layer_fp8_static, vision_patch_embed_fp8_static,
-    vision_qkv_packed_from_env, Fp8StaticActivationScales, Fp8StaticCalibration, Fp8StaticWeights,
-    Pi05Config, Pi05Weights,
+    Fp8StaticActivationScales, Fp8StaticCalibration, Fp8StaticWeights, Pi05Config, Pi05Weights,
 };
 
 fn signature(values: &[f32]) -> serde_json::Value {
@@ -61,9 +60,9 @@ fn device_signature(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arguments = std::env::args().collect::<Vec<_>>();
-    if arguments.len() != 5 {
+    if arguments.len() != 4 {
         return Err(format!(
-            "usage: {} <checkpoint-or-index> <calibration.json> <tactics.json> <token-count>",
+            "usage: {} <checkpoint-or-index> <calibration.json> <token-count>",
             arguments
                 .first()
                 .map(String::as_str)
@@ -71,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    let token_count = arguments[4].parse::<usize>()?;
+    let token_count = arguments[3].parse::<usize>()?;
     let config = Arc::new(Pi05Config::thor_two_view());
     let checkpoint = apxinf_model::pi05::checkpoint_identity(Path::new(&arguments[1]))?;
     let calibration =
@@ -81,15 +80,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &calibration,
     )?);
     let backend = Arc::new(CudaBackend::new(0)?);
-    let tuning = apxinf_cuda::tuning::TuningDb::from_json_file(Path::new(&arguments[3]))?;
-    apxinf_cuda::kernels::gemm::install_tuning_db(backend.context(), &tuning)?;
     eprintln!("loading π0.5 checkpoint...");
     let host_weights = Pi05Weights::from_safetensors(&config, Path::new(&arguments[1]))?;
     eprintln!("quantizing and uploading static FP8 weights...");
     let device_weights = Arc::new(Fp8StaticWeights::from_host(
         &host_weights,
         &*backend,
-        config.language_dual_geglu_shape_possible(),
     )?);
     drop(host_weights);
 
@@ -124,7 +120,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "vision_patch_embed_fp8_static".into(),
         device_signature(&backend, &vision_hidden)?,
     );
-    let packed_vision_qkv = vision_qkv_packed_from_env()?;
     for (index, (weights, layer_scales)) in device_weights
         .vision_layers
         .iter()
@@ -139,7 +134,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.patches_per_view(),
             config.vision_heads,
             config.vision_head_dim,
-            packed_vision_qkv,
             config.layer_norm_eps,
         )?;
         signatures.insert(
