@@ -88,9 +88,7 @@ fn stage_patched_fa2(native: &Path, fa2_root: &Path, out: &Path) -> PathBuf {
             .unwrap_or_else(|error| panic!("remove {}: {error}", staged.display()));
     }
     copy_tree(&fa2_root.join("flash_attn"), &staged.join("flash_attn"));
-    let patch = native
-        .join("patches")
-        .join("fa2-direct-e4m3-output.patch");
+    let patch = native.join("patches").join("fa2-direct-e4m3-output.patch");
     let mut command = Command::new("patch");
     command
         .current_dir(&staged)
@@ -229,6 +227,26 @@ fn main() {
         "attention/autotune.cpp",
         "attention/execution.cpp",
         "attention/providers/custom.cu",
+        "sampling.cu",
+        "ported/core_kernels.cu",
+        "ported/static_bf16.cu",
+        "ported/custom_kernels.cu",
+        "ported/w8a8.cu",
+        "norm/candidates.cpp",
+        "norm/execution.cpp",
+        "norm/providers/custom.cu",
+        "pointwise/candidates.cpp",
+        "pointwise/execution.cpp",
+        "pointwise/providers/custom.cu",
+        "rope/candidates.cpp",
+        "rope/execution.cpp",
+        "rope/providers/custom.cu",
+        "gather/candidates.cpp",
+        "gather/execution.cpp",
+        "gather/providers/custom.cu",
+        "quantization/candidates.cpp",
+        "quantization/execution.cpp",
+        "quantization/providers/ported.cu",
     ]
     .map(|source| adapters.join(source))
     .to_vec();
@@ -283,8 +301,8 @@ fn main() {
                 .map(|source| attention_kernel_root.join(source)),
         );
     }
-    let patched_fa2_root = (!fa2_e4m3_sources.is_empty())
-        .then(|| stage_patched_fa2(&native, &fa2_root, &out));
+    let patched_fa2_root =
+        (!fa2_e4m3_sources.is_empty()).then(|| stage_patched_fa2(&native, &fa2_root, &out));
     assert!(
         generic_sources
             .iter()

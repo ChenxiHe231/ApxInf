@@ -22,7 +22,9 @@ use super::backbone::vision_weights::transfer_vision_weights;
 use super::backbone::{
     transfer_text_weights, Qwen3VLConfig, Qwen3VLTextWeights, Qwen3VLVisionWeights,
 };
-use super::backend::{kernels, transfers, DeviceBuffer, RuntimeBackend, TuningMode};
+use super::backend::{
+    kernels, transfers, DeviceBuffer, ExecutionSession, RuntimeBackend,
+};
 use super::device_weights::DeviceLinearWeights;
 use super::geometry::{
     build_backbone_token_groups, dit_attention_source, Gr00tBackboneTokenGroups,
@@ -259,7 +261,7 @@ struct Gr00tRowIndexCache {
 
 struct Gr00tCapturedGraph {
     graph: Box<dyn Graph>,
-    _workspace: kernels::GraphWorkspace,
+    _session: ExecutionSession,
     output: Tensor,
     inputs: Gr00tGraphInputs,
 }
@@ -512,17 +514,6 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             // and selected embodiment tensors. Destroy an obsolete graph
             // before replacing any of those resources.
             drop(self.captured_graph.take());
-            if self.backend.context().tuning().mode() == TuningMode::AutoTune {
-                // Online tuning requires the real request operands and is
-                // intentionally disabled while sizing or capturing a graph.
-                // Traverse once eagerly, just as the shared PI0.5 runtime
-                // does, so every exact GEMM shape is persisted before graph
-                // preparation freezes the selected plans.
-                self.prepare_fixed_inputs(observation, None)?;
-                let tuned_output = self.infer_device(observation)?;
-                self.backend.synchronize()?;
-                drop(tuned_output);
-            }
             match self.capture_graph(observation) {
                 Ok(graph) => {
                     let result = graph.run(observation, &*self.backend, &self.config);
@@ -791,21 +782,20 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
         inputs: Gr00tGraphInputs,
         device_observation: Gr00tObservation,
     ) -> Result<Gr00tCapturedGraph> {
-        let workspace =
-            kernels::GraphWorkspace::new(INITIAL_GRAPH_WORKSPACE_BYTES, self.backend.device_id())?;
+        let session =
+            ExecutionSession::with_capacity(INITIAL_GRAPH_WORKSPACE_BYTES, self.backend.device_id())?;
 
         let preflight_start = Instant::now();
-        let eager_output =
-            kernels::prepare_with_workspace(&workspace, || self.infer_device(&device_observation))
-                .map_err(|error| Error::Other(format!("whole-graph preflight failed: {error}")))?;
+        let eager_output = session
+            .prepare(|| self.infer_device(&device_observation))
+            .map_err(|error| Error::Other(format!("whole-graph preflight failed: {error}")))?;
         self.backend.synchronize()?;
         let preflight_seconds = preflight_start.elapsed().as_secs_f64();
         drop(eager_output);
 
         let capture_start = Instant::now();
         self.backend.begin_capture()?;
-        let output =
-            match kernels::with_workspace(&workspace, || self.infer_device(&device_observation)) {
+        let output = match session.run(|| self.infer_device(&device_observation)) {
                 Ok(output) => output,
                 Err(error) => {
                     let _ = self.backend.end_capture();
@@ -821,14 +811,14 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
         let capture_seconds = capture_start.elapsed().as_secs_f64();
         eprintln!(
             "[apxinf] GR00T CUDA Graph captured with {} / {} workspace bytes; preflight {:.3}s, capture+instantiate {:.3}s",
-            workspace.used(),
-            workspace.capacity(),
+            session.workspace().used(),
+            session.workspace().capacity(),
             preflight_seconds,
             capture_seconds,
         );
         Ok(Gr00tCapturedGraph {
             graph,
-            _workspace: workspace,
+            _session: session,
             output,
             inputs,
         })

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Strictly audit a 10x10 PI0.5 LIBERO campaign and its BF16 parity gate.
+"""Strictly audit a PI0.5 LIBERO campaign and its BF16 parity gate.
 
-Cross-checks two artifacts: the ``apxinf.pi05.libero-eval.v1`` ledger written by
+Cross-checks two artifacts: the ``apxinf.libero-eval.v2`` ledger written by
 ``scripts/eval_libero.py``, and the ``apxinf.pi05.libero-calibration-sweep.v1``
 parity report written by ``scripts/sweep_pi05_libero_calibration.py`` here. Pure
 JSON validation — it imports neither LIBERO nor the engine.
@@ -29,6 +29,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=pathlib.Path)
     parser.add_argument("--trials-per-task", type=int, default=10)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--precision", choices=("fp8", "bf16", "int8"), default="fp8")
+    parser.add_argument("--max-steps", type=int, default=520)
+    parser.add_argument("--replan-steps", type=int, default=5)
+    parser.add_argument("--image-input", default="openpi_uint8_hwc")
     parser.add_argument("--require-zero-technical-errors", action="store_true")
     return parser.parse_args()
 
@@ -116,19 +120,39 @@ def main() -> None:
             key = (int(row["task_id"]), int(row["trial_id"]))
             if row.get("suite") != "libero_10":
                 failures.append(f"{key}: suite is not libero_10")
+            if row.get("precision") != args.precision:
+                failures.append(
+                    f"{key}: precision is {row.get('precision')!r}, "
+                    f"expected {args.precision!r}"
+                )
             if row.get("seed") != args.seed:
                 failures.append(f"{key}: seed is {row.get('seed')}, expected {args.seed}")
+            if row.get("image_input") != args.image_input:
+                failures.append(
+                    f"{key}: image_input is {row.get('image_input')!r}, "
+                    f"expected {args.image_input!r}"
+                )
+            if row.get("max_steps") != args.max_steps:
+                failures.append(
+                    f"{key}: max_steps is {row.get('max_steps')}, expected {args.max_steps}"
+                )
+            if row.get("replan_steps") != args.replan_steps:
+                failures.append(
+                    f"{key}: replan_steps is {row.get('replan_steps')}, "
+                    f"expected {args.replan_steps}"
+                )
             if row.get("attempt") != 1 and args.require_zero_technical_errors:
                 failures.append(f"{key}: attempt is {row.get('attempt')}, expected 1")
-            token_count = row.get("token_count")
-            if not isinstance(token_count, int) or not 0 < token_count <= 200:
-                failures.append(f"{key}: invalid token_count {token_count}")
             action_steps = row.get("action_steps")
             replans = row.get("replans")
-            if not isinstance(action_steps, int) or not 0 < action_steps <= 520:
+            if not isinstance(action_steps, int) or not 0 < action_steps <= args.max_steps:
                 failures.append(f"{key}: invalid action_steps {action_steps}")
                 continue
-            if not isinstance(replans, int) or replans != (action_steps + 4) // 5:
+            if (
+                not isinstance(replans, int)
+                or replans
+                != (action_steps + args.replan_steps - 1) // args.replan_steps
+            ):
                 failures.append(
                     f"{key}: replans {replans} disagree with action_steps {action_steps}"
                 )
@@ -136,7 +160,7 @@ def main() -> None:
             for field in ("preprocess_seconds", "inference_seconds", "elapsed_seconds"):
                 if not finite_nonnegative(row.get(field)):
                     failures.append(f"{key}: invalid {field} {row.get(field)}")
-            checksum = row.get("first_normalized_action_abs_checksum")
+            checksum = row.get("first_action_abs_checksum")
             if not finite_nonnegative(checksum) or checksum == 0:
                 failures.append(f"{key}: invalid first action checksum {checksum}")
             total_action_steps += action_steps
@@ -148,14 +172,27 @@ def main() -> None:
     successes = sum(bool(row.get("success")) for row in completed.values())
     evaluator_summary = json.loads(args.summary_json.read_text())
     expected_summary = {
-        "schema": "apxinf.pi05.libero-eval.v1",
-        "suite": "libero_10",
+        "schema": "apxinf.libero-eval.v2",
+        "suites": ["libero_10"],
+        "precision": args.precision,
         "expected_runs": len(expected_keys),
         "completed_runs": len(completed),
         "missing_runs": [],
         "successes": successes,
         "success_rate": successes / len(completed) if completed else None,
-        "per_task": per_task,
+        "per_suite": {
+            "libero_10": {
+                "completed": len(completed),
+                "successes": successes,
+                "success_rate": successes / len(completed) if completed else None,
+                "per_task": per_task,
+            }
+        },
+        "rollout_protocol": {
+            "max_steps": args.max_steps,
+            "replan_steps": args.replan_steps,
+            "wait_steps": 10,
+        },
     }
     for field, expected in expected_summary.items():
         if evaluator_summary.get(field) != expected:
@@ -206,6 +243,10 @@ def main() -> None:
             "expected_completed_runs": len(expected_keys),
             "require_zero_technical_errors": args.require_zero_technical_errors,
             "seed": args.seed,
+            "precision": args.precision,
+            "image_input": args.image_input,
+            "max_steps": args.max_steps,
+            "replan_steps": args.replan_steps,
             "minimum_bf16_cosine": parity.get("min_cosine"),
             "maximum_bf16_relative_l2": parity.get("max_relative_l2"),
         },
