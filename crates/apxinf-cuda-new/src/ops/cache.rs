@@ -6,8 +6,10 @@ use crate::ffi;
 use crate::{CudaBuffer, CudaContext};
 
 /// Allocate a persistent row-major K/V cache and copy `prefix` into its first
-/// rows. Remaining rows are zero-initialized so callers never expose stale
-/// device memory when a later validity length is wrong.
+/// rows. During an execution session the cache is a deterministic arena slice,
+/// so prepare and capture reuse the same address without allocating inside CUDA
+/// stream capture. Remaining rows are zero-initialized so callers never expose
+/// stale device memory when a later validity length is wrong.
 pub fn reserve_prefix(ctx: &CudaContext, prefix: &Tensor, total_rows: usize) -> Result<Tensor> {
     let dims = prefix.shape().dims();
     if dims.len() != 2 {
@@ -26,10 +28,18 @@ pub fn reserve_prefix(ctx: &CudaContext, prefix: &Tensor, total_rows: usize) -> 
         .checked_mul(cols)
         .and_then(|elements| elements.checked_mul(prefix.dtype().size_in_bytes()))
         .ok_or_else(|| Error::Other("prefix KV cache size overflow".into()))?;
-    let output =
-        CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream()).map_err(Error::Cuda)?;
+    let shape = Shape::new(vec![total_rows, cols]);
+    let output_tensor = ctx.allocate_output(shape, prefix.dtype())?;
+    let output = CudaBuffer::from_tensor(&output_tensor).map_err(Error::Cuda)?;
     let source = CudaBuffer::from_tensor(prefix).map_err(Error::Cuda)?;
     unsafe {
+        ffi::check_cuda(ffi::cudaMemsetAsync(
+            output.ptr(),
+            0,
+            bytes,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
         ffi::check_cuda(ffi::cudaMemcpyAsync(
             output.ptr(),
             source.ptr(),
@@ -39,7 +49,7 @@ pub fn reserve_prefix(ctx: &CudaContext, prefix: &Tensor, total_rows: usize) -> 
         ))
         .map_err(Error::Cuda)?;
     }
-    Ok(output.into_tensor(Shape::new(vec![total_rows, cols]), prefix.dtype()))
+    Ok(output_tensor)
 }
 
 /// Concatenate two contiguous row-major matrices with the same column count.
