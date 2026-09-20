@@ -8,8 +8,8 @@
 
 use super::*;
 
+#[path = "backend_framework.rs"]
 mod framework;
-mod framework_backend;
 mod l3_behavior;
 #[path = "precision/precision.rs"]
 mod precision;
