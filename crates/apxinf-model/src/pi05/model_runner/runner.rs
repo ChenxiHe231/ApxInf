@@ -795,6 +795,41 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires CUDA and APXINF_PI05_TEST_CHECKPOINT"]
+    fn rgb_calibration_reuses_prepared_eager_traversal() {
+        let path =
+            std::env::var("APXINF_PI05_TEST_CHECKPOINT").expect("fixed real checkpoint required");
+        let backend = Arc::new(RuntimeBackend::new(0).unwrap());
+        let runner = load_model_runner(
+            Path::new(&path),
+            backend,
+            &LoadOptions {
+                model_variant: Some("bf16".into()),
+                ..LoadOptions::default()
+            },
+        )
+        .unwrap();
+        let observation = Observation {
+            vision: VisionObservation::RgbU8 {
+                bytes: vec![0; image_bytes(&runner.config)],
+                layout: ImageLayout::Nhwc,
+            },
+            token_ids: vec![0; 10],
+            state: None,
+            action_mask: None,
+        };
+        let noise = Tensor::zeros(noise_shape(&runner.config), DType::F32);
+        let records = runner
+            .calibration_amax(&VlaRequest::provided(&observation, &noise))
+            .unwrap();
+        let expected = crate::pi05::Pi05CalibrationPlan::for_config(&runner.config)
+            .sites()
+            .len();
+        assert_eq!(records.len(), expected);
+        assert!(records.values().all(|amax| amax.is_finite()));
+    }
+
+    #[test]
     fn execution_policy_does_not_hide_capture_failure() {
         let failure = || Err::<(), _>(Error::Other("capture fixture failure".into()));
         assert!(select_graph(ExecutionPolicy::RequireGraph, failure).is_err());
