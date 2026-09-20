@@ -38,8 +38,12 @@ __device__ __forceinline__ float warp_sum(float value) {
   return value;
 }
 
-// One block per row; `scratch` must hold blockDim.x / 32 floats.
-__device__ __forceinline__ float block_sum(float value, float* scratch) {
+// One block per row; `scratch` must hold blockDim.x / 32 floats. The final
+// barrier publishes scratch[0], but does not protect the reads that follow it.
+// Callers must consume the result and synchronize all block threads before
+// reusing the same scratch storage.
+__device__ __forceinline__ float block_sum_parallel_unsafe(float value,
+                                                            float* scratch) {
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
   const int warps = blockDim.x >> 5;
@@ -71,7 +75,8 @@ __global__ void rms_norm(const T* input, const T* weight, T* output, int rows,
     const float value = to_float(input[static_cast<int64_t>(row) * cols + col]);
     square_sum += value * value;
   }
-  const float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  const float inverse_rms =
+      rsqrtf(block_sum_parallel_unsafe(square_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     output[index] =
@@ -88,15 +93,17 @@ __global__ void layer_norm(const T* input, const T* weight, const T* bias,
   float sum = 0.0f;
   for (int col = threadIdx.x; col < cols; col += blockDim.x)
     sum += to_float(input[static_cast<int64_t>(row) * cols + col]);
-  const float mean = block_sum(sum, scratch) / cols;
+  const float mean = block_sum_parallel_unsafe(sum, scratch) / cols;
   float variance_sum = 0.0f;
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const float centered =
         to_float(input[static_cast<int64_t>(row) * cols + col]) - mean;
     variance_sum += centered * centered;
   }
-  const float inverse_std =
-      rsqrtf(block_sum(variance_sum, scratch) / cols + eps);
+  // Finish reading the mean before the variance reduction overwrites scratch.
+  __syncthreads();
+  const float inverse_std = rsqrtf(
+      block_sum_parallel_unsafe(variance_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     output[index] = from_float<T>(
@@ -117,7 +124,8 @@ __global__ void ada_rms_norm(const T* input, const T* norm_style, T* output,
     const float value = to_float(input[static_cast<int64_t>(row) * cols + col]);
     square_sum += value * value;
   }
-  const float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  const float inverse_rms =
+      rsqrtf(block_sum_parallel_unsafe(square_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     const float normalized = to_float(input[index]) * inverse_rms;
@@ -180,7 +188,8 @@ __global__ void bias_residual_rms_norm(const T* projection, const T* bias,
     const float stored = to_float(rounded);
     square_sum += stored * stored;
   }
-  const float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  const float inverse_rms =
+      rsqrtf(block_sum_parallel_unsafe(square_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     normalized[index] = from_float<T>(to_float(hidden[index]) * inverse_rms *
@@ -208,15 +217,17 @@ __global__ void bias_residual_layer_norm(const T* projection,
     hidden[index] = rounded;
     sum += to_float(rounded);
   }
-  const float mean = block_sum(sum, scratch) / cols;
+  const float mean = block_sum_parallel_unsafe(sum, scratch) / cols;
   float variance_sum = 0.0f;
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const float centered =
         to_float(hidden[static_cast<int64_t>(row) * cols + col]) - mean;
     variance_sum += centered * centered;
   }
-  const float inverse_std =
-      rsqrtf(block_sum(variance_sum, scratch) / cols + eps);
+  // Finish reading the mean before the variance reduction overwrites scratch.
+  __syncthreads();
+  const float inverse_std = rsqrtf(
+      block_sum_parallel_unsafe(variance_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     normalized[index] = from_float<T>(
@@ -263,7 +274,8 @@ __global__ void ada_gate_residual_rms_norm(const T* projection,
     const float value = to_float(rounded);
     square_sum += value * value;
   }
-  const float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  const float inverse_rms =
+      rsqrtf(block_sum_parallel_unsafe(square_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     const float value = to_float(hidden[index]) * inverse_rms;

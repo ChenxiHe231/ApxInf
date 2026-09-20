@@ -296,6 +296,8 @@ __global__ void vision_sdpa_bf16_kernel(
     if (tid == 0) scores[seq_len] = max_val;
     __syncthreads();
     max_val = scores[seq_len];
+    // Protect the maximum reads before reusing the max/sum scratch slot.
+    __syncwarp();
 
     float sum = 0.0f;
     for (uint32_t ki = tid; ki < seq_len; ki += 32u) {
@@ -392,6 +394,8 @@ __global__ void noncausal_sdpa_bf16_kernel(
     if (tid == 0) scores[key_value_len] = max_val;
     __syncthreads();
     max_val = scores[key_value_len];
+    // Protect the maximum reads before reusing the max/sum scratch slot.
+    __syncwarp();
 
     float sum = 0.0f;
     for (uint32_t ki = tid; ki < key_value_len; ki += 32u) {
@@ -1045,4 +1049,3 @@ __global__ void segmented_mha_bf16_kernel(
         __float2bfloat16(accumulator);
   }
 }
-
