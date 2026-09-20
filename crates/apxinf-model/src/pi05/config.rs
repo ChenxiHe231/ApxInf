@@ -644,6 +644,17 @@ impl ModelVariantChoice {
             explicit => explicit,
         }
     }
+
+    /// Reject an explicitly selected implementation before loading or
+    /// quantizing weights when the device cannot execute its full model path.
+    pub fn ensure_supported(self, sm: u32) -> Result<Self> {
+        if self == Self::Fp8Static && sm < 100 {
+            return Err(Error::Other(format!(
+                "PI0.5 model_variant=fp8_static is unsupported on sm_{sm}; it requires sm_100 or newer and will not fall back to bf16"
+            )));
+        }
+        Ok(self)
+    }
 }
 impl std::str::FromStr for ModelVariantChoice {
     type Err = apxinf_core::Error;
@@ -686,6 +697,16 @@ mod model_variant_tests {
         assert_eq!(
             ModelVariantChoice::Bf16.resolve(110, true),
             ModelVariantChoice::Bf16
+        );
+        let error = ModelVariantChoice::Fp8Static
+            .ensure_supported(89)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported on sm_89"));
+        assert!(error.contains("will not fall back to bf16"));
+        assert_eq!(
+            ModelVariantChoice::Fp8Static.ensure_supported(110).unwrap(),
+            ModelVariantChoice::Fp8Static
         );
     }
 }

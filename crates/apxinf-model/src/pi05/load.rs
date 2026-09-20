@@ -51,15 +51,17 @@ pub(super) fn load_model_runner(
             "PI0.5 uses model_variant instead of precision".into(),
         ));
     }
+    let sm = cuda.context().caps().sm;
     let model_variant = options
         .model_variant
         .as_deref()
         .unwrap_or("auto")
         .parse::<ModelVariantChoice>()?
         .resolve(
-            cuda.context().caps().sm,
+            sm,
             calibration_path.is_some() || options.uniform_fp8_scale.is_some(),
-        );
+        )
+        .ensure_supported(sm)?;
     eprintln!("[apxinf] PI0.5 model_variant={}", model_variant.as_str());
 
     let model = match model_variant {
