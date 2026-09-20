@@ -213,25 +213,26 @@ fn main() {
 
     let adapters = native.join("adapters");
     let mut generic_sources = [
-        "runtime.cu",
-        "gemm/candidates.cu",
-        "gemm/tuning_key.cu",
-        "../framework/tuning_db.cu",
-        "gemm/autotune.cu",
-        "gemm/reference.cu",
-        "gemm/execution.cu",
+        "runtime.cpp",
+        "gemm/candidates.cpp",
+        "gemm/tuning_key.cpp",
+        "../framework/tuning_db.cpp",
+        "gemm/autotune.cpp",
+        "gemm/reference.cpp",
+        "gemm/execution.cpp",
         "gemm/providers/cublas.cu",
         "gemm/providers/cublaslt.cu",
         "gemm/providers/cutlass.cu",
         "gemm/providers/custom.cu",
-        "attention/candidates.cu",
-        "attention/tuning_key.cu",
-        "attention/autotune.cu",
-        "attention/execution.cu",
+        "attention/candidates.cpp",
+        "attention/tuning_key.cpp",
+        "attention/autotune.cpp",
+        "attention/execution.cpp",
         "attention/providers/custom.cu",
     ]
     .map(|source| adapters.join(source))
     .to_vec();
+    generic_sources.push(native.join("tests/framework_backend.cu"));
     let cutlass_root = native.join("kernels/cutlass");
     let fa2_root = native.join("kernels/fa2");
     let fa2_compat_root = native.join("kernels/fa2_compat");
@@ -257,7 +258,7 @@ fn main() {
     let has_fa2 = selection.targets.iter().any(|target| target.sm() >= 80);
     let mut fa2_sources = Vec::new();
     if has_fa2 {
-        generic_sources.push(adapters.join("attention/providers/fa2.cu"));
+        generic_sources.push(adapters.join("attention/providers/fa2.cpp"));
         fa2_sources.extend(
             [
                 "fa2.cu",

@@ -41,7 +41,7 @@ fn collect_tree(root: &Path, files: &mut Vec<PathBuf>) {
         } else if path.extension().is_some_and(|extension| {
             matches!(
                 extension.to_string_lossy().as_ref(),
-                "cu" | "cuh" | "h" | "hh" | "hpp"
+                "cpp" | "cu" | "cuh" | "h" | "hh" | "hpp"
             )
         }) {
             files.push(path);
