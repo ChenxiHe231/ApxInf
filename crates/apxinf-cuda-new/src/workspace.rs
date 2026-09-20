@@ -349,7 +349,12 @@ pub(crate) fn output_buffer(ctx: &crate::CudaContext, bytes: usize) -> Result<Cu
     ACTIVE_SESSION.with(|active| {
         let inner = active.get();
         if inner.is_null() {
-            CudaBuffer::alloc_zeros(bytes, ctx.device_id()).map_err(Error::Cuda)
+            // The runtime stream is deliberately non-blocking, so a memset on
+            // the legacy default stream is not ordered before the operator
+            // that consumes this output. Keep initialization on the same
+            // stream to prevent a late memset from erasing kernel results.
+            CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
+                .map_err(Error::Cuda)
         } else {
             unsafe { &*inner }
                 .workspace
