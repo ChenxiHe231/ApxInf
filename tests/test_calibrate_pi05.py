@@ -1,6 +1,8 @@
 import json
 import pathlib
+import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -12,6 +14,37 @@ from scripts import calibrate_pi05, pi05_calibration_data
 
 
 class CalibratePi05Test(unittest.TestCase):
+    def test_libero_init_states_keep_weights_only_with_minimal_numpy_allowlist(self):
+        observed = {}
+
+        class SafeGlobals:
+            def __init__(self, allowed):
+                observed["allowed"] = allowed
+
+            def __enter__(self):
+                observed["entered"] = True
+
+            def __exit__(self, *_args):
+                observed["exited"] = True
+
+        fake_torch = types.SimpleNamespace(
+            serialization=types.SimpleNamespace(safe_globals=SafeGlobals)
+        )
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            with pi05_calibration_data._libero_numpy_safe_globals():
+                self.assertTrue(observed["entered"])
+
+        self.assertTrue(observed["exited"])
+        self.assertEqual(
+            observed["allowed"],
+            [
+                np.core.multiarray._reconstruct,
+                np.ndarray,
+                np.dtype,
+                type(np.dtype(np.float64)),
+            ],
+        )
+
     def test_checkpoint_identity_matches_shared_cross_language_fixture(self):
         fixture = pathlib.Path(__file__).parent / "fixtures" / "checkpoint_identity"
         expected = (fixture / "expected.sha256").read_text().strip()
