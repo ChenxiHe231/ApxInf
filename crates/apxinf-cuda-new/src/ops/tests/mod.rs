@@ -11,7 +11,11 @@ use super::*;
 #[path = "backend_framework.rs"]
 mod framework;
 mod framework_backend;
+mod bias_then_residual_reference;
+mod independent_operator_semantics;
 mod l3_behavior;
 mod operator_doc;
 #[path = "precision/precision.rs"]
 mod precision;
+mod public_safe_surfaces;
+mod quantization_reference;

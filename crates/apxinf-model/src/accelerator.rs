@@ -25,11 +25,9 @@ pub(crate) mod cuda {
     pub(crate) use apxinf_cuda::kernels;
     pub(crate) use apxinf_cuda::nvtx;
     pub(crate) use apxinf_cuda::transfers;
-    pub(crate) use apxinf_cuda::tuning;
     pub(crate) use apxinf_cuda::{
-        CublasTranspose, CudaBuffer as DeviceBuffer, CudaContext as Context,
-        CudaDeviceAddress as DeviceAddress, CudaKVCache as KvCache,
-        HostMappedBuffer as MappedBuffer,
+        CudaBuffer as DeviceBuffer, CudaContext as Context, CudaDeviceAddress as DeviceAddress,
+        CudaKVCache as KvCache, ExecutionSession, HostMappedBuffer as MappedBuffer,
     };
     pub(crate) type RuntimeBackend = apxinf_cuda::CudaBackend;
 
