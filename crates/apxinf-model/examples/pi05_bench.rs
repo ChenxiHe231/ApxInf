@@ -42,6 +42,7 @@ use apxinf_model::pi05::{
     upload_time_embeddings_int8_dynamic, Bf16Model, Bf16Weights, CapturedGraph,
     Fp8StaticActivationScales, Fp8StaticCalibration, Fp8StaticModel, Fp8StaticWeights,
     Int8DynamicModel, Int8DynamicWeights, Pi05Config, Pi05ImageLayout, Pi05Weights,
+    ModelVariantChoice,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -880,6 +881,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(config);
 
     let backend = Arc::new(CudaBackend::new(0)?);
+    if model_variant == BenchVariant::Fp8Static {
+        ModelVariantChoice::Fp8Static.ensure_supported(backend.context().caps().sm)?;
+    }
     let memory_monitor = DeviceMemoryMonitor::start(backend.device_id())?;
 
     // cuda-new selects and prepares exact L3 executions before graph capture.
