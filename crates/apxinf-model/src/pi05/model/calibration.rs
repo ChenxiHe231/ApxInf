@@ -188,7 +188,7 @@ impl Pi05Model<Bf16Blocks> {
             &self.blocks.config,
             &self.blocks.weights,
         )?);
-        let _guard = crate::pi05::backend::kernels::gemm::install_bf16_observer(observer.clone())?;
+        let _guard = crate::pi05::backend::ops::install_bf16_observer(observer.clone())?;
         self.infer(patches, ids, count, noise, embeddings)?;
         self.blocks.backend.synchronize()?;
         observer.records()
