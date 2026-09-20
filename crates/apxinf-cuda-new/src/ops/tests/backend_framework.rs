@@ -1012,6 +1012,85 @@ fn tuning_isolated_from_user_buffers_and_replay_results() {
 }
 
 #[test]
+fn nonblocking_output_initialization_is_ordered_before_operator_writes() {
+    const TOKENS: usize = 3 * 256;
+    const HEADS: usize = 16;
+    const HEAD_DIM: usize = 72;
+    const WIDTH: usize = HEADS * HEAD_DIM;
+
+    let ctx = CudaContext::new(0).unwrap();
+    let packed_values: Vec<_> = (0..TOKENS * 3 * WIDTH)
+        .map(|index| ((index % 127) as f32 - 63.0) / 64.0)
+        .collect();
+    let packed = tensor(0, vec![TOKENS, 3 * WIDTH], &packed_values);
+    let expected_q: Vec<_> = packed_values
+        .chunks_exact(3 * WIDTH)
+        .flat_map(|row| row[..WIDTH].iter().copied())
+        .collect();
+    let expected_k: Vec<_> = packed_values
+        .chunks_exact(3 * WIDTH)
+        .flat_map(|row| row[WIDTH..2 * WIDTH].iter().copied())
+        .collect();
+    let expected_v: Vec<_> = packed_values
+        .chunks_exact(3 * WIDTH)
+        .flat_map(|row| row[2 * WIDTH..].iter().copied())
+        .collect();
+    let output_shape = Shape::new(vec![TOKENS, HEADS, HEAD_DIM]);
+    let read_bf16 = |tensor: &Tensor| {
+        let buffer = CudaBuffer::from_tensor(tensor).unwrap();
+        let mut bytes = vec![0; buffer.len()];
+        buffer.copy_to_host(&mut bytes).unwrap();
+        bytes
+            .chunks_exact(2)
+            .map(|chunk| bf16::from_bits(u16::from_ne_bytes([chunk[0], chunk[1]])).to_f32())
+            .collect::<Vec<_>>()
+    };
+
+    for iteration in 0..20 {
+        let mut q = ctx
+            .allocate_output(output_shape.clone(), DType::BF16)
+            .unwrap();
+        let mut k = ctx
+            .allocate_output(output_shape.clone(), DType::BF16)
+            .unwrap();
+        let mut v = ctx
+            .allocate_output(output_shape.clone(), DType::BF16)
+            .unwrap();
+        rope(
+            &ctx,
+            RopeArgs {
+                semantic: RopeSemantic::SplitQkvBias,
+                qkv: &packed,
+                bias: None,
+                q: &mut q,
+                k: &mut k,
+                v: &mut v,
+                q_heads: HEADS,
+                kv_heads: HEADS,
+                head_dim: HEAD_DIM,
+                theta: 1.0,
+                position_offset: 0,
+                kv_output_offset: 0,
+                policy: RopePolicy::default(),
+            },
+        )
+        .unwrap();
+        assert!(
+            read_bf16(&q) == expected_q,
+            "Q drifted at iteration {iteration}"
+        );
+        assert!(
+            read_bf16(&k) == expected_k,
+            "K drifted at iteration {iteration}"
+        );
+        assert!(
+            read_bf16(&v) == expected_v,
+            "V drifted at iteration {iteration}"
+        );
+    }
+}
+
+#[test]
 fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, n) = (522, 2048, 32768);
