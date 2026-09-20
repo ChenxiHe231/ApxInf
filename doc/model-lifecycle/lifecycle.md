@@ -127,24 +127,25 @@ sequenceDiagram
 | prepare(spec) | 等价于 prepare_with_policy(spec, PreferGraph)；已知规格，使用默认策略 |
 | prepare_with_policy(spec, mode) | 不做样本调优；已有 tactics 或使用默认选择，需要明确控制执行方式 |
 | prepare_for(sample, mode) | 从样本提取 spec；仅后端加载时开启 autotune 才先进行允许调优的样本执行 |
-| ModelRunner.infer(request) | 维护最近一个隐式计划；缓存有效则跳过准备，否则按需样本调优再以 PreferGraph 建计划 |
+| ModelRunner.infer(request) | 维护最近一个隐式计划；shape 相同则复用，否则用 PreferGraph 建立新计划 |
 | ModelVariant.infer(inputs) | 只转发到对应 Model，不检查计划缓存，也不自动 prepare |
 
 三个显式 prepare 均返回 `Result<Box<dyn PreparedInference>>`，创建独立计划，
-不查询或填入 ModelRunner.infer 的隐式缓存。`autotune=true` 在加载时选择后端 AutoTune
-模式；调优选择算子 tactics，不训练、不改权重，已有条目可以复用。它与 Eager/Graph
-是独立选项。prepare_with_policy 的预热/录制以及计划 run 均禁止 autotune。
+不查询或填入 ModelRunner.infer 的隐式缓存。cuda-new 在 `ExecutionSession::prepare`
+遍历中完成 L3 provider/config 选择并创建固定地址的 native executions；这不训练、
+不改权重。后续 eager run 与 graph capture 都只使用该 session 已准备的执行对象，
+不会再选择 provider、调优或分配 operator workspace。
 
 | ExecutionPolicy | 准备结果 |
 | --- | --- |
-| Eager | 不尝试录图；分配输入/noise/RGB 等资源并创建 Eager 计划；run 仍可能分配临时内存 |
+| Eager | 不尝试录图；分配输入/noise/RGB/session workspace，并准备完整 operator sequence |
 | PreferGraph | 成功为 Graph；录制失败可返回 Eager 和 fallback_reason；输入/分配错误仍可能报错 |
 | RequireGraph | 必须返回 Graph 计划；录制失败返回 Err，不回退 |
 
 `strategy` 是 `Eager(EagerInputs)` 或 `Graph(CapturedGraph)`；Graph 分支就是 enum
-变体，不是额外阶段。`status()` 返回 Ready(Eager/Graph) 或 Invalidated，不是准备
-进度条。tactics store 身份或 generation 变化会使计划失效；显式 run 报错，由调用方
-重新准备，便利 ModelRunner.infer 则自动替换失效缓存。
+变体，不是额外阶段。PI0.5 的 `status()` 返回 Ready(Eager/Graph)，不是准备进度条。
+cuda-new 的 exact execution 由计划自己的 `ExecutionSession` 持有，不依赖可替换的
+进程级 tactics store，也没有旧的 tuning-generation 失效协议。
 
 所谓 RNG buffer 更准确地说是**初始噪声 buffer**：prepare 分配固定地址并绑定生成器，
 每次 run 根据 seed/sequence/draw 生成噪声，或复制用户提供的噪声。复用地址不代表
@@ -165,34 +166,32 @@ PreparedInference::status() -> PreparationStatus;
 PreparedInference::run(&VlaRequest) -> Result<Action>;
 LoadedModel::clear_prepared() -> Result<()>;
 
-// Example: strict captured inference, explicit re-preparation on invalidation.
+// Example: strict captured inference.
 let plan = model.prepare_for(&sample, ExecutionPolicy::RequireGraph)?;
 match plan.status() {
     PreparationStatus::Ready { mode: ExecutionMode::Graph, .. } => {
         let action = plan.run(&request)?;
         // Consume/copy action before another run writes this graph's output.
     }
-    PreparationStatus::Invalidated => { /* prepare a replacement */ }
     _ => { /* unsupported or unexpected state for this policy */ }
 }
 ```
 
 | Interface / event | Actual guarantee |
 | --- | --- |
-| Eager preparation | No graph attempt; native eager allocations may still occur during run |
+| Eager preparation | No graph attempt; prepares the fixed operator sequence and reusable workspace |
 | PreferGraph | Capture attempted during preparation; failure reason retained in Ready(Eager) |
 | RequireGraph | Capture error propagates; no eager plan returned |
-| Ready | Fixed spec and current tuning store identity/generation; not readiness for all shapes or models |
-| Tactic store replacement or generation changes | Graph and eager plans report Invalidated; run rejects them |
+| Ready | Fixed spec plus a session-owned exact operator sequence; not readiness for all shapes or models |
 | Invalid input | Run returns an error without automatic plan eviction or recapture |
 | execution_mode on ModelRunner | Reports the implicit cache only; use plan.status() for explicitly owned plans |
 | clear_prepared | Synchronizes and evicts the runner's implicit cache; caller-owned plans and output allocation views remain alive |
 | Request reset | PI0.5 binds every input and full RNG key per call; no implicit episode counter to reset |
 | Output | Device tensor; captured result aliases reusable output storage until next run; Tensor clone is not a value snapshot |
-| Concurrency | Fixed-buffer plans run serially; thread-local tuning suppression does not add thread safety |
+| Concurrency | Fixed-buffer plans run serially; thread-local session binding does not add thread safety |
 
-The pilot does not promise allocation-free eager execution or cancellation, and
-resource measurements apply only to the tested profiles. Processor
+The pilot does not promise cancellation, and resource measurements apply only
+to the tested profiles. Processor
 encode/decode context stays in the existing Python Policy helpers. Broader
 lifecycle guarantees above remain targets until separately implemented and tested.
 
@@ -219,11 +218,11 @@ value and release old output handles as well as plans when measuring memory
 reclamation. Cloning the Tensor preserves ownership and aliasing; it does not
 create a compact independent output allocation.
 
-A plan records both the tuning store `Arc` identity and its generation. Replacing
-the store with another generation-zero store invalidates old plans just as a
-record update does. Compatible prepared execution suppresses tuning; it never
-refreshes that identity or quietly captures a replacement. Callers prepare a new
-plan after invalidation.
+A plan owns its `ExecutionSession`, including deterministic workspace slices and
+native executions bound to the plan's tensor addresses and stream. Preparation
+may select/tune an exact L3 implementation; compatible run and graph capture
+must hit the same prepared sequence and fail on a missing or reordered operator
+instead of silently creating a replacement.
 
 The CUDA scope discards failed captures without instantiating them. Ending an
 invalidated capture releases the stream, but CUDA's last-error slot still needs
@@ -472,16 +471,11 @@ LLM TTFT/TPOT, and device memory separately. A documentation or CPU check does n
 qualify native GPU execution; unsupported or untested matrix cells remain explicit.
 
 
-### Deferred GEMM autotuning
+### Exact L3 preparation
 
-Preparation and prepared runs suppress autotuning, but may cache default or
-bucket GEMM choices. Those plans retain an `autotune_pending` flag. A later
-real-input `prepare_for` with an AutoTune backend resolves the deferred work
-before reusing the plan. Exact choices and already attempted tuning failures
-remain cached within the same tuning generation. Publishing new exact choices
-invalidates previously prepared inference plans through the existing generation
-check; callers must use the newly returned plan.
-
-The native regression `native_prepare_for_tunes_after_suppressed_preparation`
-checks both Eager and RequireGraph with a real checkpoint. It verifies deferred
-tuning, stale-plan rejection and reuse without repeated tuning.
+`prepare`, `prepare_with_policy`, and `prepare_for` all create a session and run
+one complete fixed-shape preparation traversal. `prepare_for` uses the request's
+spec; tensor values do not participate in provider selection. The native
+regression `native_prepare_for_reuses_prepared_execution` checks Eager and
+RequireGraph with a real checkpoint, runs each prepared plan twice, and requires
+bitwise-identical finite outputs without rebuilding the operator sequence.
