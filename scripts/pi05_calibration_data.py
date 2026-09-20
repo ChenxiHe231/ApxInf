@@ -19,6 +19,7 @@ in step.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 import json
 import pathlib
 from typing import Any
@@ -180,6 +181,36 @@ def _load_libero_suite(suite_name: str):
     return benchmark_dict[suite_name]()
 
 
+def _libero_numpy_safe_globals():
+    """Allow only the NumPy array types used by LIBERO init-state files.
+
+    PyTorch 2.6 changed ``torch.load`` to ``weights_only=True`` by default.
+    LIBERO stores its trusted numeric initial states as pickled NumPy arrays,
+    so an unqualified load now fails. Keep the safer loader enabled and scope
+    the minimum NumPy allowlist to the init-state reads instead of disabling
+    ``weights_only`` for the calibration process.
+    """
+    try:
+        import torch
+    except ImportError:
+        # LIBERO itself requires torch; this branch keeps unit-test fakes and
+        # older lightweight environments from gaining a new hard dependency.
+        return nullcontext()
+    safe_globals = getattr(torch.serialization, "safe_globals", None)
+    if safe_globals is None:
+        # Older PyTorch releases predate the weights_only default and need no
+        # compatibility context.
+        return nullcontext()
+    return safe_globals(
+        [
+            np.core.multiarray._reconstruct,
+            np.ndarray,
+            np.dtype,
+            type(np.dtype(np.float64)),
+        ]
+    )
+
+
 def load_libero_observations(
     suite_name: str,
     *,
@@ -202,9 +233,10 @@ def load_libero_observations(
         )
     progress = progress or (lambda _message: None)
     suite = _load_libero_suite(suite_name)
-    states_by_task = [
-        suite.get_task_init_states(task_id) for task_id in range(suite.n_tasks)
-    ]
+    with _libero_numpy_safe_globals():
+        states_by_task = [
+            suite.get_task_init_states(task_id) for task_id in range(suite.n_tasks)
+        ]
     task_indices = [
         task_id
         for task_id, initial_states in enumerate(states_by_task)
