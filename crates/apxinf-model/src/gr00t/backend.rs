@@ -2,10 +2,10 @@
 
 #[cfg(feature = "cuda")]
 pub(crate) use crate::accelerator::cuda::{
-    downcast_arc, kernels, transfers, DeviceBuffer, RuntimeBackend,
+    downcast_arc, kernels, transfers, DeviceBuffer, ExecutionSession, RuntimeBackend,
 };
 #[cfg(feature = "cuda")]
-pub(crate) use apxinf_cuda::{tuning::TuningMode, CudaBackend};
+pub(crate) use apxinf_cuda::CudaBackend;
 
 /// The model opts into packed8 only for its measured BF16 epilogues.
 const fn use_packed8_bias_activation(

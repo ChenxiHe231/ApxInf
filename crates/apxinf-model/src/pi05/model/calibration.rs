@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use apxinf_core::{Backend, Error, Result, Tensor};
-use apxinf_cuda::kernels::gemm::Bf16ActivationObserver;
+use apxinf_cuda::ops::Bf16ActivationObserver;
 
 use crate::pi05::{backend::RuntimeBackend, Bf16Weights, Pi05CalibrationPlan, Pi05Config};
 

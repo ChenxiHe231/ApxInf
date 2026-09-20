@@ -134,6 +134,24 @@ impl ExecutionSession {
     pub fn workspace(&self) -> &GraphWorkspace {
         &self.inner.workspace
     }
+
+    /// Traverse the real execution once before graph capture.
+    ///
+    /// This allocates deterministic workspace slices, prepares native operator
+    /// executions, and records their exact call order. The caller must invoke
+    /// the same operator sequence through [`Self::run`] when capturing or
+    /// replaying a fixed-shape workload.
+    pub fn prepare<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        prepare_with_session(self, operation)
+    }
+
+    /// Execute a traversal using resources installed by [`Self::prepare`].
+    ///
+    /// During CUDA graph capture this rejects missing or reordered operator
+    /// executions instead of creating plans or tuning candidates in capture.
+    pub fn run<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        with_session(self, operation)
+    }
 }
 
 thread_local! {
@@ -322,4 +340,20 @@ pub(crate) fn retain_resource<T: Any>(resource: &Rc<T>) {
             resources.push(resource);
         }
     });
+}
+
+/// Compatibility allocation for ported direct-launch operators. During an
+/// execution session it sub-allocates deterministically from the session
+/// arena; eager calls own a zeroed allocation directly.
+pub(crate) fn output_buffer(ctx: &crate::CudaContext, bytes: usize) -> Result<CudaBuffer> {
+    ACTIVE_SESSION.with(|active| {
+        let inner = active.get();
+        if inner.is_null() {
+            CudaBuffer::alloc_zeros(bytes, ctx.device_id()).map_err(Error::Cuda)
+        } else {
+            unsafe { &*inner }
+                .workspace
+                .allocate(bytes, ctx.device_id())
+        }
+    })
 }

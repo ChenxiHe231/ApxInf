@@ -1,95 +1,190 @@
-// RoPE and attention-helper kernels: partial RoPE, per-head RMSNorm, query/gate split, output gate.
-//
-// These ops have a single fixed implementation and no persisted selection,
-// so per doc/adding-new-kernels.md §6 they carry no candidate registry,
-// tuning key, or autotuner; they are direct C-ABI forwarders.
+#include "internal.h"
 
-#include "../../include/apxinf_cuda/attn.h"
-
-#include "../../framework/runtime_internal.h"
-#include "../../kernels/custom/attn_ops.h"
-
-#include <cstdint>
-#include <string>
+#include <cmath>
+#include <vector>
 
 namespace {
 
-using apxinf::framework::Failure;
-using apxinf::framework::abi_boundary;
+using apxinf::rope::Execution;
+using apxinf::rope::Failure;
+using apxinf::rope::Spec;
 
-void check(int status, const char* what) {
-  if (status != 0) {
-    throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                  std::string(what) + " failed with status " +
-                      std::to_string(status));
+bool valid_alignment(uint32_t alignment) {
+  return alignment <= 256 && alignment != 0 &&
+         (alignment & (alignment - 1)) == 0;
+}
+
+void validate_spec(const Spec& spec) {
+  if (spec.version != APXINF_ROPE_SPEC_VERSION ||
+      spec.semantic > APXINF_ROPE_SEMANTIC_SPLIT_QKV_BIAS ||
+      (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
+      spec.has_bias > 1 || spec.tokens <= 0 || spec.tokens > INT32_MAX ||
+      spec.q_heads == 0 || spec.kv_heads == 0 || spec.head_dim == 0 ||
+      spec.q_heads > INT32_MAX || spec.kv_heads > INT32_MAX ||
+      spec.head_dim > 2048 || spec.head_dim % 2 != 0 ||
+      spec.q_heads % spec.kv_heads != 0 ||
+      static_cast<uint64_t>(spec.q_heads) + 2ull * spec.kv_heads > 65535 ||
+      !valid_alignment(spec.qkv_alignment) ||
+      !valid_alignment(spec.bias_alignment) ||
+      !valid_alignment(spec.q_alignment) ||
+      !valid_alignment(spec.kv_alignment)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid RoPE Spec");
+  }
+  // The vision split has no grouped-query layout: Q, K and V share a width.
+  if (spec.semantic == APXINF_ROPE_SEMANTIC_SPLIT_QKV_BIAS &&
+      spec.q_heads != spec.kv_heads) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "unrotated QKV split requires q_heads == kv_heads");
   }
 }
 
-bool extent(int64_t value) { return value > 0 && value <= INT32_MAX; }
+void validate_bindings(const Spec& spec,
+                       const apxinf_rope_bindings_t& bindings) {
+  if (bindings.qkv == nullptr || bindings.q == nullptr ||
+      bindings.k == nullptr || bindings.v == nullptr) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "missing RoPE binding");
+  }
+  if ((spec.has_bias != 0) != (bindings.bias != nullptr)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "RoPE bias binding disagrees with Spec.has_bias");
+  }
+  if (bindings.kv_output_offset < 0 || bindings.position_offset < 0) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "negative RoPE offset");
+  }
+  if (apxinf::rope::applies_rope(spec.semantic) &&
+      (!std::isfinite(bindings.theta) || bindings.theta <= 0.0f)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid RoPE theta");
+  }
+  // The unrotated split has no notion of position, so a caller passing one is
+  // confused about which semantic it wants.
+  if (!apxinf::rope::applies_rope(spec.semantic) &&
+      (bindings.position_offset != 0 || bindings.kv_output_offset != 0)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "unrotated QKV split does not take offsets");
+  }
+}
 
 }  // namespace
 
-extern "C" apxinf_status_t apxinf_attn_partial_rope(
-    void* data, const void* positions, int64_t tokens, int64_t heads,
-    int64_t head_dim, int64_t rotary_dim, float theta,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (data == nullptr || positions == nullptr || !extent(tokens) ||
-        !extent(heads) || !extent(head_dim) || !extent(rotary_dim)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid RoPE arguments");
+namespace apxinf::rope {
+
+Execution::~Execution() {
+  if (implementation != nullptr && implementation->destroy != nullptr) {
+    implementation->destroy(*this);
+  }
+}
+
+bool supports_device(const Implementation& implementation, int,
+                     std::string* reason) {
+  if (implementation.required_device_features == 0) return true;
+  if (reason != nullptr) *reason = "missing required device feature";
+  return false;
+}
+
+bool supports_alignment(const Implementation& implementation,
+                        const Spec& spec) {
+  const auto required = implementation.alignment_requirements(spec);
+  return spec.qkv_alignment >= required.qkv &&
+         spec.q_alignment >= required.q && spec.kv_alignment >= required.kv &&
+         spec.bias_alignment >= (spec.has_bias != 0 ? required.bias : 0);
+}
+
+std::unique_ptr<Execution> prepare(const Implementation& implementation,
+                                   int configuration, const Spec& spec,
+                                   const apxinf_rope_policy_t& policy,
+                                   const apxinf_rope_bindings_t& bindings,
+                                   int device) {
+  auto execution = std::make_unique<Execution>();
+  execution->spec = spec;
+  execution->bindings = bindings;
+  execution->configuration = configuration;
+  execution->device = device;
+  execution->implementation = &implementation;
+  execution->resource_limit = policy.workspace_limit;
+  implementation.prepare(*execution);
+  if (execution->resource_bytes > execution->resource_limit &&
+      execution->resource_limit != 0) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "RoPE candidate exceeds the workspace limit");
+  }
+  return execution;
+}
+
+}  // namespace apxinf::rope
+
+extern "C" apxinf_status_t apxinf_rope_prepare(
+    apxinf_runtime_t runtime, const apxinf_rope_spec_t* spec,
+    const apxinf_rope_policy_t* policy,
+    const apxinf_rope_bindings_t* bindings,
+    apxinf_rope_execution_t* output) {
+  return apxinf::rope::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || policy == nullptr ||
+        bindings == nullptr || output == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "null RoPE argument");
     }
-    check(apxinf::cuda_new::attn_ops::partial_rope(
-              data, positions, static_cast<int>(tokens),
-              static_cast<int>(heads), static_cast<int>(head_dim),
-              static_cast<int>(rotary_dim), theta,
-              static_cast<cudaStream_t>(stream)),
-          "partial RoPE");
+    const apxinf::rope::Spec normalized{*spec};
+    validate_spec(normalized);
+    validate_bindings(normalized, *bindings);
+
+    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
+    if (cudaStreamIsCapturing(static_cast<cudaStream_t>(bindings->stream),
+                              &capture) == cudaSuccess &&
+        capture != cudaStreamCaptureStatusNone) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "RoPE preparation is not allowed during capture");
+    }
+
+    std::unique_ptr<apxinf::rope::Execution> execution;
+    for (const auto& implementation :
+         apxinf::rope::registry(normalized.semantic)) {
+      if (!implementation.supports(normalized) ||
+          !apxinf::rope::supports_device(implementation, runtime->device) ||
+          !apxinf::rope::supports_alignment(implementation, normalized)) {
+        continue;
+      }
+      if (policy->graph_safe && !implementation.graph_safe) continue;
+      if (policy->deterministic && !implementation.deterministic) continue;
+      if (!policy->allow_fallback && implementation.fallback) continue;
+      std::vector<int> configurations;
+      implementation.enumerate_configs(normalized, configurations);
+      if (configurations.empty()) continue;
+      execution = apxinf::rope::prepare(implementation, configurations.front(),
+                                        normalized, *policy, *bindings,
+                                        runtime->device);
+      break;
+    }
+    if (execution == nullptr) {
+      throw Failure(APXINF_STATUS_UNSUPPORTED,
+                    "no RoPE candidate supports this Spec");
+    }
+    execution->summary = std::string(execution->implementation->name) +
+                         " config=" +
+                         std::to_string(execution->configuration) +
+                         " source=direct";
+    auto wrapper = std::make_unique<apxinf_rope_execution>();
+    wrapper->state = std::move(execution);
+    *output = wrapper.release();
   });
 }
 
-extern "C" apxinf_status_t apxinf_attn_head_rms_norm(
-    void* data, const void* weight, int64_t rows, int64_t head_dim,
-    float epsilon, apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (data == nullptr || weight == nullptr || !extent(rows) ||
-        !extent(head_dim)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid head RMSNorm arguments");
+extern "C" apxinf_status_t apxinf_rope_enqueue(
+    apxinf_rope_execution_t execution) {
+  return apxinf::rope::abi_boundary([&] {
+    if (execution == nullptr || execution->state == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "null RoPE execution");
     }
-    check(apxinf::cuda_new::attn_ops::head_rms_norm(
-              data, weight, static_cast<int>(rows), static_cast<int>(head_dim),
-              epsilon, static_cast<cudaStream_t>(stream)),
-          "head RMSNorm");
+    apxinf::rope::check_cuda(cudaSetDevice(execution->state->device));
+    apxinf::rope::check_cuda(
+        execution->state->implementation->enqueue(*execution->state));
   });
 }
 
-extern "C" apxinf_status_t apxinf_attn_split_query_and_gate(
-    const void* fused, void* query, void* gate, int64_t tokens, int64_t heads,
-    int64_t head_dim, apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (fused == nullptr || query == nullptr || gate == nullptr ||
-        !extent(tokens) || !extent(heads) || !extent(head_dim)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid query/gate split arguments");
-    }
-    check(apxinf::cuda_new::attn_ops::split_query_and_gate(
-              fused, query, gate, static_cast<int>(tokens),
-              static_cast<int>(heads), static_cast<int>(head_dim),
-              static_cast<cudaStream_t>(stream)),
-          "query/gate split");
-  });
+extern "C" void apxinf_rope_destroy(apxinf_rope_execution_t execution) {
+  delete execution;
 }
 
-extern "C" apxinf_status_t apxinf_attn_apply_output_gate(
-    void* data, const void* gate, int64_t count,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (data == nullptr || gate == nullptr || count <= 0) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid output gate arguments");
-    }
-    check(apxinf::cuda_new::attn_ops::apply_output_gate(
-              data, gate, count, static_cast<cudaStream_t>(stream)),
-          "attention output gate");
-  });
+extern "C" const char* apxinf_rope_summary(apxinf_rope_execution_t execution) {
+  return execution == nullptr || execution->state == nullptr
+             ? ""
+             : execution->state->summary.c_str();
 }
