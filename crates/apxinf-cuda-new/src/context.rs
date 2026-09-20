@@ -8,6 +8,43 @@ use crate::ffi;
 use crate::stream::CudaStream;
 use crate::CudaDeviceCaps;
 
+/// One `cudaMemGetInfo` snapshot for the context's device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CudaMemoryInfo {
+    pub free_bytes: usize,
+    pub total_bytes: usize,
+}
+
+impl CudaMemoryInfo {
+    pub fn used_bytes(self) -> usize {
+        self.total_bytes.saturating_sub(self.free_bytes)
+    }
+}
+
+/// Query device-wide CUDA memory without requiring ownership of a context.
+///
+/// This is intended for monitoring threads. The CUDA current-device binding is
+/// thread-local, so the function establishes it before every query.
+pub fn device_memory_info(device_id: usize) -> Result<CudaMemoryInfo, String> {
+    let device = i32::try_from(device_id)
+        .map_err(|_| format!("CUDA device id {device_id} does not fit in i32"))?;
+    let mut free_bytes = 0usize;
+    let mut total_bytes = 0usize;
+    unsafe {
+        ffi::check_cuda(ffi::cudaSetDevice(device))?;
+        ffi::check_cuda(ffi::cudaMemGetInfo(&mut free_bytes, &mut total_bytes))?;
+    }
+    if free_bytes > total_bytes {
+        return Err(format!(
+            "CUDA returned invalid memory info: free={free_bytes}, total={total_bytes}"
+        ));
+    }
+    Ok(CudaMemoryInfo {
+        free_bytes,
+        total_bytes,
+    })
+}
+
 /// Owns the stream and opaque native runtime used by GEMM executions.
 pub struct CudaContext {
     device_id: usize,
@@ -68,6 +105,15 @@ impl CudaContext {
 
     pub fn synchronize(&self) -> Result<(), String> {
         self.stream.synchronize()
+    }
+
+    /// Return a point-in-time device-memory snapshot for this CUDA device.
+    ///
+    /// CUDA reports device-wide free and total memory. Callers that need an
+    /// attributable benchmark delta should retain a baseline snapshot and
+    /// report both the absolute high-water observation and its baseline delta.
+    pub fn memory_info(&self) -> Result<CudaMemoryInfo, String> {
+        device_memory_info(self.device_id)
     }
 
     /// Allocate caller-owned output storage for an L3 semantic operation.

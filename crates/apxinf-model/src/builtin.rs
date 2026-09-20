@@ -1,40 +1,49 @@
 //! Built-in model registrations used by [`crate::AutoModel`].
 
+#[cfg(not(feature = "pi05-only"))]
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use apxinf_core::{Backend, DType, Device, Error, Result, Tensor};
+use apxinf_core::{Backend, Device, Result};
+#[cfg(not(feature = "pi05-only"))]
+use apxinf_core::{DType, Error, Tensor};
 
 use crate::auto::{LoadOptions, LoadedModel};
+#[cfg(not(feature = "pi05-only"))]
 use crate::llama::{GeneralLlama, LlamaWeights};
+#[cfg(not(feature = "pi05-only"))]
 use crate::qwen3vl::{GeneralQwen3VL, Qwen3VLConfig};
 use crate::registry;
 
 /// Register every implementation shipped in this crate. Re-registering is
 /// harmless and keeps `AutoModel::load_model` self-contained for users.
 pub fn register_builtin_models() {
-    registry::register("llama", load_llama);
-    registry::register("qwen3_vl", load_qwen3vl);
-    registry::register("qwen3vl", load_qwen3vl);
-    registry::register("qwen_drive", load_qwen_drive);
-    registry::register("qwen38", load_qwen38);
-    registry::register("qwen3_8", load_qwen38);
-    // The NVFP4 checkpoint's config.json says model_type "qwen3_5" /
-    // "qwen3_5_text"; register both so AutoModel's detection works on the
-    // unmodified checkpoint directory.
-    registry::register("qwen3_5", load_qwen38);
-    registry::register("qwen3_5_text", load_qwen38);
+    #[cfg(not(feature = "pi05-only"))]
+    {
+        registry::register("llama", load_llama);
+        registry::register("qwen3_vl", load_qwen3vl);
+        registry::register("qwen3vl", load_qwen3vl);
+        registry::register("qwen_drive", load_qwen_drive);
+        registry::register("qwen38", load_qwen38);
+        registry::register("qwen3_8", load_qwen38);
+        // The NVFP4 checkpoint's config.json says model_type "qwen3_5" /
+        // "qwen3_5_text"; register both so AutoModel's detection works on the
+        // unmodified checkpoint directory.
+        registry::register("qwen3_5", load_qwen38);
+        registry::register("qwen3_5_text", load_qwen38);
+    }
 
     #[cfg(feature = "cuda")]
     crate::pi05::register_builtin();
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(feature = "pi05-only")))]
     crate::walloss::register_builtin();
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(feature = "pi05-only")))]
     crate::pi0fast::register_builtin();
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", not(feature = "pi05-only")))]
     crate::gr00t::register_builtin();
 }
+#[cfg(not(feature = "pi05-only"))]
 fn load_llama(
     path: &Path,
     device: Device,
@@ -60,6 +69,7 @@ fn load_llama(
     )?)))
 }
 
+#[cfg(not(feature = "pi05-only"))]
 fn load_qwen3vl(
     path: &Path,
     _device: Device,
@@ -78,6 +88,7 @@ fn load_qwen3vl(
     Ok(LoadedModel::text(Box::new(model)))
 }
 
+#[cfg(not(feature = "pi05-only"))]
 fn load_qwen_drive(
     path: &Path,
     device: Device,
@@ -97,6 +108,7 @@ fn load_qwen_drive(
     }
 }
 
+#[cfg(not(feature = "pi05-only"))]
 fn upcast_bf16_weights(tensors: &mut HashMap<String, Tensor>) -> Result<()> {
     for tensor in tensors.values_mut() {
         if tensor.dtype() != DType::BF16 {
@@ -112,6 +124,7 @@ fn upcast_bf16_weights(tensors: &mut HashMap<String, Tensor>) -> Result<()> {
 /// Qwen3.8-27B-NVFP4 on CUDA: safetensors shards in the checkpoint directory,
 /// validated default execution (FlashInfer-GDN prefill, CUDA-graph decode,
 /// split-KV attention).
+#[cfg(not(feature = "pi05-only"))]
 fn load_qwen38(
     path: &Path,
     device: Device,

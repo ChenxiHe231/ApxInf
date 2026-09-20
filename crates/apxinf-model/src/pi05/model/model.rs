@@ -125,6 +125,17 @@ impl ModelVariant {
         }
     }
 
+    pub(in crate::pi05) fn workspace_requirements(
+        &self,
+        token_count: usize,
+    ) -> Result<super::WorkspaceRequirements> {
+        match self {
+            Self::Bf16 { model, .. } => model.workspace_requirements(token_count),
+            Self::Fp8Static { model, .. } => model.workspace_requirements(token_count),
+            Self::Int8Dynamic { model, .. } => model.workspace_requirements(token_count),
+        }
+    }
+
     pub(in crate::pi05) fn infer(
         &self,
         patches: &Tensor,

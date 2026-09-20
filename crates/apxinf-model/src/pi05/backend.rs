@@ -5,8 +5,9 @@
 //! not the layer topology.
 
 pub(crate) use crate::accelerator::cuda::{
-    kernels, transfers, Context, DeviceBuffer, ExecutionSession, RuntimeBackend,
+    transfers, Context, DeviceBuffer, ExecutionSession, RuntimeBackend,
 };
+pub(crate) use apxinf_cuda::{capture, ops};
 
 /// Memory layout of a fixed-shape batch of RGB `uint8` images.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

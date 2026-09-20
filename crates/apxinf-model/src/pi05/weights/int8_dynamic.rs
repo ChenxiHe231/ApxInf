@@ -2,19 +2,17 @@
 mod linear {
     //! Output-channel-quantized W8A8 linear weights for π0.5.
 
-    use apxinf_core::{Backend, DType, Error, Result, Tensor};
+    use apxinf_core::{Backend, DType, Error, Result, Shape, Tensor};
 
-    use crate::pi05::backend::{kernels, Context, DeviceBuffer, RuntimeBackend};
+    use crate::pi05::backend::{ops, Context, RuntimeBackend};
     use crate::pi05::weights::packing::concat_host_2d;
     use crate::pi05::LinearWeights;
-    use kernels::gemm::{w8a8, W8A8Layout, W8A8ScaleMode, W8A8WeightView};
 
     pub struct Int8DynamicLinearWeights {
-        /// Physical output-major `[output,input]` INT8 bytes. This is also a
-        /// zero-copy `[input,output]` column-major view for cuBLAS/CUTLASS.
-        pub weight_output_major: DeviceBuffer,
+        /// Canonical contiguous row-major `[input,output]` signed INT8 weight.
+        pub weight: Tensor,
         /// Dequantization multiplier for each output channel.
-        pub weight_scales: Tensor,
+        pub channel_scales: Tensor,
         pub bias: Option<Tensor>,
         pub input_dim: usize,
         pub output_dim: usize,
@@ -43,16 +41,12 @@ mod linear {
                     .collect::<Vec<_>>(),
             )?;
             let (quantized, scales, input_dim, output_dim) = quantize_output_channels(&packed)?;
-            let bytes = quantized
-                .into_iter()
-                .map(|value| value as u8)
-                .collect::<Vec<_>>();
-            let weight_output_major =
-                DeviceBuffer::alloc(bytes.len(), backend.device_id()).map_err(Error::Cuda)?;
-            weight_output_major
-                .copy_from_host(&bytes)
-                .map_err(Error::Cuda)?;
-            let weight_scales = backend.to_device(&Tensor::from_f32(vec![output_dim], &scales)?)?;
+            let weight = backend.to_device(&Tensor::from_i8(
+                vec![input_dim, output_dim],
+                &quantized,
+            )?)?;
+            let channel_scales =
+                backend.to_device(&Tensor::from_f32(vec![output_dim], &scales)?)?;
             let bias = if linears.iter().all(|linear| linear.bias.is_none()) {
                 None
             } else if linears.iter().all(|linear| linear.bias.is_some()) {
@@ -69,32 +63,80 @@ mod linear {
                 ));
             };
             Ok(Self {
-                weight_output_major,
-                weight_scales,
+                weight,
+                channel_scales,
                 bias,
                 input_dim,
                 output_dim,
             })
         }
 
-        pub fn gemm(&self, ctx: &Context, activation: &Tensor) -> Result<Tensor> {
-            w8a8(ctx, activation, self.as_kernel_view())
+        pub fn gemm_with_policies(
+            &self,
+            ctx: &Context,
+            activation: &Tensor,
+            gemm_policy: &ops::GemmPolicy,
+            quantization_policy: &ops::QuantizationPolicy,
+        ) -> Result<Tensor> {
+            let shape = activation.shape().dims();
+            if activation.dtype() != DType::BF16
+                || shape.len() != 2
+                || shape[1] != self.input_dim
+                || self.weight.dtype() != DType::I8
+                || self.weight.shape().dims() != [self.input_dim, self.output_dim]
+                || self.channel_scales.dtype() != DType::F32
+                || self.channel_scales.shape().dims() != [self.output_dim]
+            {
+                return Err(Error::Other(format!(
+                    "PI0.5 W8A8 GEMM contract mismatch: activation {} {:?}, weight {} {:?}, scales {} {:?}",
+                    activation.dtype(),
+                    shape,
+                    self.weight.dtype(),
+                    self.weight.shape().dims(),
+                    self.channel_scales.dtype(),
+                    self.channel_scales.shape().dims(),
+                )));
+            }
+            let rows = shape[0];
+            let mut quantized =
+                ctx.allocate_output(Shape::new(vec![rows, self.input_dim]), DType::I8)?;
+            let mut row_scales = ctx.allocate_output(Shape::new(vec![rows]), DType::F32)?;
+            let mut quantization = ops::QuantizationArgs::new(
+                ops::QuantizationSemantic::RowwiseI8,
+                activation,
+                &mut quantized,
+            );
+            quantization.scales = Some(&mut row_scales);
+            quantization.policy = quantization_policy.clone();
+            ops::quantization(ctx, quantization)?;
+
+            let mut output =
+                ctx.allocate_output(Shape::new(vec![rows, self.output_dim]), DType::BF16)?;
+            let mut args = ops::GemmArgs::w8a8(
+                &quantized,
+                &row_scales,
+                &self.weight,
+                &self.channel_scales,
+                &mut output,
+            )
+            .with_immutable_weight(ops::WeightVersion::new(0));
+            args.policy = gemm_policy.clone();
+            ops::gemm(ctx, args)?;
+            Ok(output)
         }
 
-        pub fn as_kernel_view(&self) -> W8A8WeightView<'_> {
-            W8A8WeightView {
-                values_i8: &self.weight_output_major,
-                scales_f32: &self.weight_scales,
-                input_dim: self.input_dim,
-                output_dim: self.output_dim,
-                scale_mode: W8A8ScaleMode::DynamicRowPerOutputChannel,
-                layout: W8A8Layout::OutputMajor,
-            }
+        pub fn gemm(&self, ctx: &Context, activation: &Tensor) -> Result<Tensor> {
+            self.gemm_with_policies(
+                ctx,
+                activation,
+                &ops::GemmPolicy::default(),
+                &ops::QuantizationPolicy::default(),
+            )
         }
     }
 
-    /// Convert ApxInf's physical `[input,output]` matrix into the kernel's physical
-    /// `[output,input]` INT8 layout, with one `amax/127` scale per output.
+    /// Quantize canonical `[input,output]` weights with one `amax/127` scale
+    /// per output channel. Provider-specific packing belongs to cuda-new.
     fn quantize_output_channels(tensor: &Tensor) -> Result<(Vec<i8>, Vec<f32>, usize, usize)> {
         if tensor.dtype() == DType::F8E4M3 {
             return Err(Error::Other(
@@ -122,7 +164,7 @@ mod linear {
                 let value = (values[input * output_dim + output] / scale)
                     .round()
                     .clamp(-128.0, 127.0);
-                quantized[output * input_dim + input] = value as i8;
+                quantized[input * output_dim + output] = value as i8;
             }
         }
         Ok((quantized, scales, input_dim, output_dim))
@@ -146,11 +188,11 @@ mod linear {
         use super::*;
 
         #[test]
-        fn quantizes_each_output_channel_and_transposes_physically() {
+        fn quantizes_each_output_channel_in_canonical_layout() {
             let weight = Tensor::from_f32(vec![3, 2], &[1.0, -10.0, 2.0, 0.0, 3.0, 10.0]).unwrap();
             let (quantized, scales, input, output) = quantize_output_channels(&weight).unwrap();
             assert_eq!((input, output), (3, 2));
-            assert_eq!(quantized, vec![42, 85, 127, -127, 0, 127]);
+            assert_eq!(quantized, vec![42, -127, 85, 0, 127, 127]);
             assert!((scales[0] - 3.0 / 127.0).abs() < 1.0e-7);
             assert!((scales[1] - 10.0 / 127.0).abs() < 1.0e-7);
         }

@@ -30,7 +30,7 @@ pub use model::{
 pub use model::{
     action_layer_fp8_static, language_layer_fp8_static, vision_layer_fp8_static,
     vision_patch_embed_fp8_static, vision_patch_embed_fp8_static_native,
-    vision_qkv_packed_from_env, Fp8StaticActionLayerOutput, Fp8StaticLanguageLayerOutput,
+    Fp8StaticActionLayerOutput, Fp8StaticLanguageLayerOutput,
 };
 #[cfg(feature = "cuda")]
 pub use model::{
