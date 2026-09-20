@@ -93,6 +93,11 @@ class AttentionTuningProblem {
 Recipe tune(const Spec& spec, const apxinf_attention_policy_t& policy,
             const apxinf_attention_bindings_t& bindings, int device,
             std::string& report) {
+  if (semantic_registry(spec.semantic).selection_kind !=
+      SelectionKind::Autotune) {
+    throw Failure(APXINF_STATUS_INTERNAL_ERROR,
+                  "Attention semantic is not configured for autotuning");
+  }
   AttentionTuningProblem problem(spec, policy, bindings, device);
   return apxinf::framework::autotune(problem, report);
 }

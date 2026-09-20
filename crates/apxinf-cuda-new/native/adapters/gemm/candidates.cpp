@@ -145,10 +145,11 @@ bool supports_device(const Implementation& implementation,
   return true;
 }
 
-const ImplementationRegistry& registry(uint32_t semantic) {
+const SemanticRegistry& semantic_registry(uint32_t semantic) {
   // Every L3 semantic has exactly one baseline fallback. cuBLAS owns that role;
   // faster or more specialized providers remain autotuning candidates only.
-  static const ImplementationRegistry vendor_entries = {
+  static const SemanticRegistry vendor_entries = {
+      ImplementationRegistry{
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
@@ -156,10 +157,13 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
+      },
+      SelectionKind::Autotune,
   };
   // Keep GEMM+bias as a separate L3 tuning domain even though its current L1
   // candidates happen to be the same vendor implementations.
-  static const ImplementationRegistry gemm_bias_entries = {
+  static const SemanticRegistry gemm_bias_entries = {
+      ImplementationRegistry{
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
@@ -167,8 +171,11 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
+      },
+      SelectionKind::Autotune,
   };
-  static const ImplementationRegistry gemm_entries = {
+  static const SemanticRegistry gemm_entries = {
+      ImplementationRegistry{
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
@@ -188,8 +195,11 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        cutlass_fp8_resource_requirements, cutlass_configurations,
        prepare_cutlass_fp8_gemm, launch_cutlass_fp8_gemm, destroy_cutlass},
 #endif
+      },
+      SelectionKind::Autotune,
   };
-  static const ImplementationRegistry gemm_geglu_entries = {
+  static const SemanticRegistry gemm_geglu_entries = {
+      ImplementationRegistry{
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
@@ -209,8 +219,10 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        one_configuration, prepare_cutlass_geglu,
        launch_cutlass_bf16_geglu, destroy_cutlass},
 #endif
+      },
+      SelectionKind::Autotune,
   };
-  const ImplementationRegistry* selected = nullptr;
+  const SemanticRegistry* selected = nullptr;
   switch (semantic) {
     case APXINF_GEMM_SEMANTIC_GEMM:
       selected = &gemm_entries;
@@ -229,7 +241,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
                     "unknown GEMM semantic registry");
   }
   const auto fallback_count = std::count_if(
-      selected->begin(), selected->end(),
+      selected->implementations.begin(), selected->implementations.end(),
       [](const Implementation& implementation) {
         return implementation.fallback;
       });

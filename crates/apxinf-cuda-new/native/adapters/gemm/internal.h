@@ -24,6 +24,7 @@ namespace apxinf::gemm {
 struct Spec : apxinf_gemm_spec_t {};
 
 using apxinf::framework::Failure;
+using apxinf::framework::SelectionKind;
 using apxinf::framework::abi_boundary;
 using apxinf::framework::check_cublas;
 using apxinf::framework::check_cuda;
@@ -135,7 +136,15 @@ struct Execution {
 };
 
 using ImplementationRegistry = apxinf::framework::Registry<Implementation>;
-const ImplementationRegistry& registry(uint32_t semantic);
+struct SemanticRegistry {
+  ImplementationRegistry implementations;
+  SelectionKind selection_kind;
+};
+
+const SemanticRegistry& semantic_registry(uint32_t semantic);
+inline const ImplementationRegistry& registry(uint32_t semantic) {
+  return semantic_registry(semantic).implementations;
+}
 void prepare_cublas(Execution& execution);
 size_t cublas_resource_requirements(const Spec& spec);
 void destroy_cublas(Execution& execution) noexcept;

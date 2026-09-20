@@ -96,6 +96,11 @@ class GemmTuningProblem {
 Recipe tune(const Spec& spec, const apxinf_gemm_policy_t& policy,
             const apxinf_gemm_bindings_t& bindings, int device,
             std::string& report) {
+  if (semantic_registry(spec.semantic).selection_kind !=
+      SelectionKind::Autotune) {
+    throw Failure(APXINF_STATUS_INTERNAL_ERROR,
+                  "GEMM semantic is not configured for autotuning");
+  }
   GemmTuningProblem problem(spec, policy, bindings, device);
   return apxinf::framework::autotune(problem, report);
 }

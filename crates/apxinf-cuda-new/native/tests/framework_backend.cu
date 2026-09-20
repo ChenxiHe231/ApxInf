@@ -22,6 +22,7 @@ namespace {
 using apxinf::framework::Failure;
 using apxinf::framework::Recipe;
 using apxinf::framework::Registry;
+using apxinf::framework::SelectionKind;
 
 void set_error(char* output, size_t capacity, const std::string& message) {
   if (output == nullptr || capacity == 0) return;
@@ -54,6 +55,11 @@ struct RegistryCandidate {
 };
 
 void check_registry_contract() {
+  require(SelectionKind::Fixed != SelectionKind::Heuristic &&
+              SelectionKind::Heuristic != SelectionKind::Autotune &&
+              SelectionKind::Fixed != SelectionKind::Autotune,
+          "selection kinds must remain distinct registry policies");
+
   const RegistryCandidate expected{17, 23, 42, "exact"};
   const RegistryCandidate neighbor{17, 23, 43, "neighbor"};
   const Registry<RegistryCandidate> registry{expected, neighbor};

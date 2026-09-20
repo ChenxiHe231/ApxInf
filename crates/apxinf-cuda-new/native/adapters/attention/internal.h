@@ -15,6 +15,7 @@ namespace apxinf::attention {
 
 using apxinf::framework::Failure;
 using apxinf::framework::Recipe;
+using apxinf::framework::SelectionKind;
 using apxinf::framework::abi_boundary;
 using apxinf::framework::check_cuda;
 
@@ -58,6 +59,11 @@ struct Implementation {
 
 using ImplementationRegistry = apxinf::framework::Registry<Implementation>;
 
+struct SemanticRegistry {
+  ImplementationRegistry implementations;
+  SelectionKind selection_kind;
+};
+
 struct TuningKeys {
   std::string key;
 };
@@ -76,7 +82,10 @@ struct Execution {
   ~Execution();
 };
 
-const ImplementationRegistry& registry(uint32_t semantic);
+const SemanticRegistry& semantic_registry(uint32_t semantic);
+inline const ImplementationRegistry& registry(uint32_t semantic) {
+  return semantic_registry(semantic).implementations;
+}
 bool supports_device(const Implementation& implementation, int device,
                      std::string* reason = nullptr);
 bool supports_alignment(const Implementation& implementation, const Spec& spec);

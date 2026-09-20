@@ -90,8 +90,9 @@ AlignmentRequirements cutlass_alignment(const Spec&) {
 
 }  // namespace
 
-const ImplementationRegistry& registry(uint32_t semantic) {
-  static const ImplementationRegistry dense_entries = {
+const SemanticRegistry& semantic_registry(uint32_t semantic) {
+  static const SemanticRegistry dense_entries = {
+      ImplementationRegistry{
 #if defined(APXINF_ATTENTION_CUTLASS)
       {kProviderCutlass, 1, 1, "cutlass-fmha-sm100",
        apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, false,
@@ -115,8 +116,11 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        true, supports_dense_custom, natural_alignment,
        custom_resource_requirements, one_configuration, prepare_custom,
        launch_custom, destroy_custom},
+      },
+      SelectionKind::Autotune,
   };
-  static const ImplementationRegistry kv_cache_entries = {
+  static const SemanticRegistry kv_cache_entries = {
+      ImplementationRegistry{
 #if defined(APXINF_ATTENTION_FA2)
       {kProviderFa2, 1, 1, "flash-attention-2-kv-cache",
        apxinf::gemm::kDeviceFeatureFa2, true, true, false, supports_fa2,
@@ -127,12 +131,17 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        true, supports_kv_cache_custom, natural_alignment,
        custom_resource_requirements, one_configuration, prepare_custom,
        launch_custom, destroy_custom},
+      },
+      SelectionKind::Autotune,
   };
-  static const ImplementationRegistry segmented_entries = {
+  static const SemanticRegistry segmented_entries = {
+      ImplementationRegistry{
       {kProviderCustom, 3, 1, "custom-segmented-attention", 0, true, true,
        true, supports_segmented_custom, natural_alignment,
        custom_resource_requirements, one_configuration, prepare_custom,
        launch_custom, destroy_custom},
+      },
+      SelectionKind::Autotune,
   };
   switch (semantic) {
     case APXINF_ATTENTION_SEMANTIC_DENSE:

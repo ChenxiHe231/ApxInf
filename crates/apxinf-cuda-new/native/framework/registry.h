@@ -1,9 +1,18 @@
 #pragma once
 
+#include <cstdint>
 #include <initializer_list>
 #include <vector>
 
 namespace apxinf::framework {
+
+// Declared by each semantic registry. The execution adapter owns the concrete
+// selection algorithm; the common framework only provides the shared vocabulary.
+enum class SelectionKind : uint8_t {
+  Fixed,
+  Heuristic,
+  Autotune,
+};
 
 // The registry owns only immutable candidate descriptors. Spec filtering and
 // provider state remain operator-specific.
