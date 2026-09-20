@@ -141,7 +141,7 @@ __global__ void adaptive_layer_norm_bf16_kernel(
     float sum = 0.0f;
     for (uint32_t col = threadIdx.x; col < cols; col += blockDim.x)
         sum += __bfloat162float(input[(uint64_t)row * cols + col]);
-    const float mean = block_sum(sum, scratch) / cols;
+    const float mean = block_sum_parallel_unsafe(sum, scratch) / cols;
 
     float variance_sum = 0.0f;
     for (uint32_t col = threadIdx.x; col < cols; col += blockDim.x) {
@@ -149,7 +149,10 @@ __global__ void adaptive_layer_norm_bf16_kernel(
             __bfloat162float(input[(uint64_t)row * cols + col]) - mean;
         variance_sum += centered * centered;
     }
-    const float inverse_std = rsqrtf(block_sum(variance_sum, scratch) / cols + eps);
+    // Finish reading the previous reduction before reusing scratch.
+    __syncthreads();
+    const float inverse_std =
+        rsqrtf(block_sum_parallel_unsafe(variance_sum, scratch) / cols + eps);
 
     for (uint32_t col = threadIdx.x; col < cols; col += blockDim.x) {
         const uint64_t index = (uint64_t)row * cols + col;
@@ -174,7 +177,7 @@ __global__ void adaptive_layer_norm_quant_bf16_e4m3_kernel(
     float sum = 0.0f;
     for (uint32_t col = threadIdx.x; col < cols; col += blockDim.x)
         sum += __bfloat162float(input[(uint64_t)row * cols + col]);
-    const float mean = block_sum(sum, scratch) / cols;
+    const float mean = block_sum_parallel_unsafe(sum, scratch) / cols;
 
     float variance_sum = 0.0f;
     for (uint32_t col = threadIdx.x; col < cols; col += blockDim.x) {
@@ -182,8 +185,10 @@ __global__ void adaptive_layer_norm_quant_bf16_e4m3_kernel(
             __bfloat162float(input[(uint64_t)row * cols + col]) - mean;
         variance_sum += centered * centered;
     }
+    // Finish reading the previous reduction before reusing scratch.
+    __syncthreads();
     const float inverse_std =
-        rsqrtf(block_sum(variance_sum, scratch) / cols + eps);
+        rsqrtf(block_sum_parallel_unsafe(variance_sum, scratch) / cols + eps);
 
     for (uint32_t col = threadIdx.x; col < cols; col += blockDim.x) {
         const uint64_t index = (uint64_t)row * cols + col;
@@ -213,7 +218,7 @@ __global__ void rms_norm_quant_f16_e4m3_kernel(
     float value = __half2float(input[row * cols + col]);
     square_sum += value * value;
   }
-  square_sum = block_sum(square_sum, scratch);
+  square_sum = block_sum_parallel_unsafe(square_sum, scratch);
   float inverse_rms = rsqrtf(square_sum / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     float value = __half2float(input[row * cols + col]) * inverse_rms *
@@ -235,7 +240,8 @@ __global__ void rms_norm_quant_bf16_e4m3_kernel(
         input[static_cast<int64_t>(row) * cols + col]);
     square_sum += value * value;
   }
-  const float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  const float inverse_rms =
+      rsqrtf(block_sum_parallel_unsafe(square_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     float value = __bfloat162float(input[index]) * inverse_rms *
@@ -261,15 +267,17 @@ __global__ void layer_norm_quant_bf16_e4m3_kernel(
     x_buf[col] = value;
     sum += value;
   }
-  const float mean = block_sum(sum, scratch) / cols;
+  const float mean = block_sum_parallel_unsafe(sum, scratch) / cols;
 
   float variance_sum = 0.0f;
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const float centered = x_buf[col] - mean;
     variance_sum += centered * centered;
   }
+  // Finish reading the previous reduction before reusing scratch.
+  __syncthreads();
   const float inverse_std =
-      rsqrtf(block_sum(variance_sum, scratch) / cols + eps);
+      rsqrtf(block_sum_parallel_unsafe(variance_sum, scratch) / cols + eps);
 
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     float value = (x_buf[col] - mean) * inverse_std;
@@ -291,13 +299,16 @@ __global__ void layer_norm_quant_f16_e4m3_kernel(
   float sum = 0.0f;
   for (int col = threadIdx.x; col < cols; col += blockDim.x)
     sum += __half2float(input[row * cols + col]);
-  float mean = block_sum(sum, scratch) / cols;
+  float mean = block_sum_parallel_unsafe(sum, scratch) / cols;
   float variance_sum = 0.0f;
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     float centered = __half2float(input[row * cols + col]) - mean;
     variance_sum += centered * centered;
   }
-  float inverse_std = rsqrtf(block_sum(variance_sum, scratch) / cols + eps);
+  // Finish reading the previous reduction before reusing scratch.
+  __syncthreads();
+  float inverse_std =
+      rsqrtf(block_sum_parallel_unsafe(variance_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     float value = (__half2float(input[row * cols + col]) - mean) * inverse_std;
     value = value * __half2float(weight[col]) + __half2float(bias[col]);
@@ -316,7 +327,8 @@ __global__ void ada_rms_norm_quant_f16_e4m3_kernel(
     float value = __half2float(input[row * cols + col]);
     square_sum += value * value;
   }
-  float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  float inverse_rms =
+      rsqrtf(block_sum_parallel_unsafe(square_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     float normalized = __half2float(input[row * cols + col]) * inverse_rms;
     float scale = __half2float(style[col]);
@@ -338,7 +350,8 @@ __global__ void rms_norm_bf16_kernel(
     const float value = __bfloat162float(input[static_cast<int64_t>(row) * cols + col]);
     square_sum += value * value;
   }
-  const float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  const float inverse_rms =
+      rsqrtf(block_sum_parallel_unsafe(square_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     output[index] = __float2bfloat16(
@@ -355,14 +368,17 @@ __global__ void layer_norm_bf16_kernel(
   float sum = 0.0f;
   for (int col = threadIdx.x; col < cols; col += blockDim.x)
     sum += __bfloat162float(input[static_cast<int64_t>(row) * cols + col]);
-  const float mean = block_sum(sum, scratch) / cols;
+  const float mean = block_sum_parallel_unsafe(sum, scratch) / cols;
   float variance_sum = 0.0f;
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const float centered =
         __bfloat162float(input[static_cast<int64_t>(row) * cols + col]) - mean;
     variance_sum += centered * centered;
   }
-  const float inverse_std = rsqrtf(block_sum(variance_sum, scratch) / cols + eps);
+  // Finish reading the previous reduction before reusing scratch.
+  __syncthreads();
+  const float inverse_std =
+      rsqrtf(block_sum_parallel_unsafe(variance_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     const float value =
@@ -383,7 +399,8 @@ __global__ void ada_rms_norm_bf16_kernel(
     const float value = __bfloat162float(input[static_cast<int64_t>(row) * cols + col]);
     square_sum += value * value;
   }
-  const float inverse_rms = rsqrtf(block_sum(square_sum, scratch) / cols + eps);
+  const float inverse_rms =
+      rsqrtf(block_sum_parallel_unsafe(square_sum, scratch) / cols + eps);
   for (int col = threadIdx.x; col < cols; col += blockDim.x) {
     const int64_t index = static_cast<int64_t>(row) * cols + col;
     const float normalized = __bfloat162float(input[index]) * inverse_rms;
@@ -392,5 +409,4 @@ __global__ void ada_rms_norm_bf16_kernel(
         __bfloat162float(style[cols + col]));
   }
 }
-
 
