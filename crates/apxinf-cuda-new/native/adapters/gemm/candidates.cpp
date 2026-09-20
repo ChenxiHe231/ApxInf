@@ -146,11 +146,13 @@ bool supports_device(const Implementation& implementation,
 }
 
 const ImplementationRegistry& registry(uint32_t semantic) {
+  // Every L3 semantic has exactly one baseline fallback. cuBLAS owns that role;
+  // faster or more specialized providers remain autotuning candidates only.
   static const ImplementationRegistry vendor_entries = {
-      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
+      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
-      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
+      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
@@ -158,65 +160,84 @@ const ImplementationRegistry& registry(uint32_t semantic) {
   // Keep GEMM+bias as a separate L3 tuning domain even though its current L1
   // candidates happen to be the same vendor implementations.
   static const ImplementationRegistry gemm_bias_entries = {
-      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
+      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
-      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
+      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
   };
   static const ImplementationRegistry gemm_entries = {
-      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
+      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
-      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
+      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
       {kProviderCublasLt, 2, 1, "cublasLt-native-fp8+custom-epilogue",
-       kDeviceFeatureNativeFp8, true, false, supports_native_fp8,
+       kDeviceFeatureNativeFp8, true, false, false, supports_native_fp8,
        cublaslt_alignment, cublaslt_native_fp8_resource_requirements,
        cublaslt_configurations, prepare_cublaslt_native_fp8, launch_cublaslt,
        destroy_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
-      {kProviderCutlass, 1, 1, "cutlass-fp8", kDeviceFeatureCutlassSm100, true, true,
+      {kProviderCutlass, 1, 1, "cutlass-fp8", kDeviceFeatureCutlassSm100,
+       true, true, false,
        supports_cutlass_fp8, cutlass_fp8_alignment,
        cutlass_fp8_resource_requirements, cutlass_configurations,
        prepare_cutlass_fp8_gemm, launch_cutlass_fp8_gemm, destroy_cutlass},
 #endif
   };
   static const ImplementationRegistry gemm_geglu_entries = {
-      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true,
+      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
-      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false,
+      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
-      {kProviderCutlass, 2, 2, "cutlass-dual-geglu", kDeviceFeatureCutlassSm100, true, true,
+      {kProviderCutlass, 2, 2, "cutlass-dual-geglu",
+       kDeviceFeatureCutlassSm100, true, true, false,
        supports_cutlass_fp8_geglu, cutlass_geglu_alignment,
        cutlass_geglu_resource_requirements, one_configuration,
        prepare_cutlass_geglu, launch_cutlass_fp8_geglu, destroy_cutlass},
       {kProviderCutlass, 3, 2, "cutlass-bf16-dual-geglu",
-       kDeviceFeatureCutlassSm100, true, true, supports_cutlass_bf16_geglu,
+       kDeviceFeatureCutlassSm100, true, true, false, supports_cutlass_bf16_geglu,
        cutlass_geglu_alignment, cutlass_geglu_resource_requirements,
        one_configuration, prepare_cutlass_geglu,
        launch_cutlass_bf16_geglu, destroy_cutlass},
 #endif
   };
+  const ImplementationRegistry* selected = nullptr;
   switch (semantic) {
     case APXINF_GEMM_SEMANTIC_GEMM:
-      return gemm_entries;
+      selected = &gemm_entries;
+      break;
     case APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU:
-      return vendor_entries;
+      selected = &vendor_entries;
+      break;
     case APXINF_GEMM_SEMANTIC_GEMM_GEGLU:
-      return gemm_geglu_entries;
+      selected = &gemm_geglu_entries;
+      break;
     case APXINF_GEMM_SEMANTIC_GEMM_BIAS:
-      return gemm_bias_entries;
+      selected = &gemm_bias_entries;
+      break;
+    default:
+      throw Failure(APXINF_STATUS_INTERNAL_ERROR,
+                    "unknown GEMM semantic registry");
   }
-  throw Failure(APXINF_STATUS_INTERNAL_ERROR, "unknown GEMM semantic registry");
+  const auto fallback_count = std::count_if(
+      selected->begin(), selected->end(),
+      [](const Implementation& implementation) {
+        return implementation.fallback;
+      });
+  if (fallback_count != 1) {
+    throw Failure(APXINF_STATUS_INTERNAL_ERROR,
+                  "GEMM semantic must register exactly one fallback");
+  }
+  return *selected;
 }
 
 Execution::~Execution() {
@@ -310,6 +331,7 @@ extern "C" int apxinf_gemm_test_resource_prefilter(int device) {
       0,
       true,
       true,
+      false,
       test_supports,
       test_alignment,
       test_resource_requirements,

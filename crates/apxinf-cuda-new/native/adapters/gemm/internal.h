@@ -68,6 +68,7 @@ struct Implementation {
   uint64_t required_device_features;
   bool graph_safe;
   bool deterministic;
+  bool fallback;
   bool (*supports)(const Spec&);
   AlignmentFn alignment_requirements;
   ResourceRequirementsFn resource_requirements;

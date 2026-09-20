@@ -772,6 +772,42 @@ fn scaled_fp8_and_w8a8_use_the_canonical_kn_weight_contract() {
 }
 
 #[test]
+fn w8a8_orin_shape_uses_cublas_dequantization_fallback() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (41, 1536, 6144);
+    let a = bytes_tensor(0, vec![m, k], DType::I8, &vec![1; m * k]);
+    let b = bytes_tensor(0, vec![k, n], DType::I8, &vec![1; k * n]);
+    let row_scales = scales(0, &vec![0.5; m]);
+    let channel_scales = scales(0, &vec![2.0; n]);
+    let mut out = zeros_tensor(0, vec![m, n], DType::BF16);
+    let mut args = GemmArgs::w8a8(
+        &a,
+        &row_scales,
+        &b,
+        &channel_scales,
+        &mut out,
+    );
+    args.policy.online_tune = false;
+    args.policy.allow_fallback = true;
+
+    let normalized =
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+    let execution = super::execution::prepare(&ctx, normalized).unwrap();
+    assert!(
+        execution
+            .summary()
+            .starts_with("cublas+custom-epilogue config=0 "),
+        "unexpected W8A8 fallback: {}",
+        execution.summary()
+    );
+    assert!(execution.summary().contains("source=fallback"));
+
+    execution.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+    assert!(values(&out).iter().all(|&value| value == k as f32));
+}
+
+#[test]
 fn execution_session_reuses_one_native_execution_across_forward_traversals() {
     let ctx = CudaContext::new(0).unwrap();
     let a = tensor(0, vec![2, 3], &[1.0; 6]);

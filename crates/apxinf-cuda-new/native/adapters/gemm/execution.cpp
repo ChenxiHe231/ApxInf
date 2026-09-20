@@ -181,7 +181,8 @@ std::unique_ptr<Execution> fallback(
     const apxinf_gemm_bindings_t& bindings, int device) {
   for (const auto& implementation :
        apxinf::gemm::registry(spec.semantic)) {
-    if (!apxinf::gemm::supports_device(implementation, device) ||
+    if (!implementation.fallback ||
+        !apxinf::gemm::supports_device(implementation, device) ||
         !implementation.supports(spec) ||
         (policy.graph_safe && !implementation.graph_safe) ||
         (policy.deterministic && !implementation.deterministic)) {
