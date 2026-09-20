@@ -536,6 +536,30 @@ fn segmented_attention_prepares_before_capture_and_replays_from_cache() {
 }
 
 #[test]
+fn reserved_prefix_uses_session_storage_during_capture() {
+    let ctx = CudaContext::new(0).unwrap();
+    let prefix = tensor(0, vec![2, 2], &[1.0, 2.0, 3.0, 4.0]);
+    let session = ExecutionSession::with_capacity(4096, 0).unwrap();
+
+    let prepared = prepare_with_session(&session, || reserve_prefix(&ctx, &prefix, 4)).unwrap();
+    ctx.synchronize().unwrap();
+    let expected = vec![1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0];
+    assert_eq!(values(&prepared), expected);
+
+    let captured = std::cell::RefCell::new(None);
+    let graph = crate::capture(&ctx, || {
+        let output = with_session(&session, || reserve_prefix(&ctx, &prefix, 4))?;
+        captured.replace(Some(output));
+        Ok(())
+    })
+    .unwrap();
+    let output = captured.into_inner().unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(values(&output), expected);
+}
+
+#[test]
 fn attention_semantics_use_distinct_native_registries() {
     let ctx = CudaContext::new(0).unwrap();
     let query = tensor(0, vec![1, 1, 1, 2], &[0.5, -0.25]);
