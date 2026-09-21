@@ -409,6 +409,14 @@ struct KvCache {
     values: Tensor,
 }
 
+/// Single-token FP8 projection through the general GEMM.
+///
+/// A hand-written one-row-per-block GEMV was tried here and measured at
+/// 0.94 ms against the GEMM's 0.358 ms on the qkv shape -- 2.6x slower. The
+/// GEMM path reaches 146 GB/s at M=1, which is only about half of what the
+/// NVFP4 MLP achieves on the same memory, so there is real headroom; but
+/// closing it needs a properly vectorized kernel, not a naive one. This uses
+/// the faster of the two that exist.
 fn fp8_projection(
     ctx: &CudaContext,
     weight: &Fp8Weight,

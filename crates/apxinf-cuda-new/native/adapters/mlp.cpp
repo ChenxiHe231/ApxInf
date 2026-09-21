@@ -87,3 +87,21 @@ extern "C" apxinf_status_t apxinf_quantize_fp8_per_tensor(
           "FP8 quantization");
   });
 }
+
+extern "C" apxinf_status_t apxinf_fp8_gemv(const void* weight,
+                                           const void* activation,
+                                           void* output, int64_t n, int64_t k,
+                                           float alpha,
+                                           apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (weight == nullptr || activation == nullptr || output == nullptr ||
+        !valid_extent(n) || !valid_extent(k)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid FP8 GEMV arguments");
+    }
+    check(apxinf::cuda::mlp_ops::fp8_gemv(weight, activation, output,
+                                          static_cast<int>(n),
+                                          static_cast<int>(k), alpha,
+                                          static_cast<cudaStream_t>(stream)),
+          "FP8 GEMV");
+  });
+}

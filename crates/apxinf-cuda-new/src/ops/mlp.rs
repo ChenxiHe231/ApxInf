@@ -120,3 +120,50 @@ pub fn quantize_fp8_per_tensor(
         ))
     }
 }
+
+/// Single-token FP8 projection: `y[n] = alpha * sum_k weight[n,k] * a[k]`.
+///
+/// `weight` is `[N, K]`, the orientation a checkpoint stores.
+///
+/// **Measured slower than the general GEMM at M=1** -- 0.94 ms against
+/// 0.358 ms on a 10240x5120 projection. One row per block with a scalar FP8
+/// conversion per element leaves each thread ~20 bytes of work, so launch and
+/// conversion overhead dominate. The GEMM path itself only reaches ~146 GB/s
+/// here, so a vectorized GEMV (16-byte loads, one warp per row, several rows
+/// per block) should beat both; this one does not, and callers should prefer
+/// the GEMM until that exists.
+pub fn fp8_gemv(
+    ctx: &CudaContext,
+    weight: &Tensor,
+    activation: &Tensor,
+    output: &Tensor,
+    alpha: f32,
+) -> Result<()> {
+    let weight_dims = weight.shape().dims().to_vec();
+    if weight_dims.len() != 2 {
+        return Err(invalid("FP8 GEMV weight must be [N, K]"));
+    }
+    let (n, k) = (weight_dims[0], weight_dims[1]);
+    let weight_buffer = tensor_storage(ctx, weight, DType::F8E4M3, &weight_dims)?;
+    let activation_dims = activation.shape().dims().to_vec();
+    if activation_dims.iter().product::<usize>() != k {
+        return Err(invalid("FP8 GEMV activation must hold K elements"));
+    }
+    let activation_buffer = tensor_storage(ctx, activation, DType::F8E4M3, &activation_dims)?;
+    let output_dims = output.shape().dims().to_vec();
+    if output_dims.iter().product::<usize>() != n {
+        return Err(invalid("FP8 GEMV output must hold N elements"));
+    }
+    let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
+    unsafe {
+        status::check(abi::apxinf_fp8_gemv(
+            weight_buffer.ptr(),
+            activation_buffer.ptr(),
+            output_buffer.ptr(),
+            n as i64,
+            k as i64,
+            alpha,
+            ctx.stream().handle(),
+        ))
+    }
+}

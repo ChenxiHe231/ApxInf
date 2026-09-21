@@ -31,6 +31,12 @@ apxinf_status_t apxinf_quantize_fp8_per_tensor(const void* input, void* output,
                                                float input_scale,
                                                apxinf_cuda_stream_t stream);
 
+/* Single-token FP8 projection over a [N, K] weight -- the checkpoint's own
+   orientation, so no transpose is needed. */
+apxinf_status_t apxinf_fp8_gemv(const void* weight, const void* activation,
+                                void* output, int64_t n, int64_t k,
+                                float alpha, apxinf_cuda_stream_t stream);
+
 #ifdef __cplusplus
 }
 #endif
