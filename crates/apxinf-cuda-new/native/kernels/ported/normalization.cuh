@@ -227,7 +227,6 @@ __global__ void rms_norm_quant_f16_e4m3_kernel(
     output[row * cols + col] = static_cast<__nv_fp8_e4m3>(value);
   }
 }
-
 __global__ void rms_norm_quant_bf16_e4m3_kernel(
     const __nv_bfloat16* input, const __nv_bfloat16* weight,
     __nv_fp8_e4m3* output, int rows, int cols, float eps,
@@ -409,4 +408,3 @@ __global__ void ada_rms_norm_bf16_kernel(
         __bfloat162float(style[cols + col]));
   }
 }
-

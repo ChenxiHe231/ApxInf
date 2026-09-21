@@ -72,6 +72,3 @@ __global__ void embedding_bf16_kernel(
         : __float2bfloat16(0.0f);
   }
 }
-
-
-
