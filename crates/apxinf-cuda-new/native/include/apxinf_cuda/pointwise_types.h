@@ -2,8 +2,7 @@
 
 #include <stdint.h>
 
-/* Shares the dtype enum, status codes and tuning policy with the gemm family,
-   the same way attention_types.h does. */
+/* Shares the dtype enum and status codes with the gemm family. */
 #include "gemm_types.h"
 
 /* Element-wise family: one output element per input element (or per pair of
@@ -53,8 +52,6 @@ typedef struct {
   /* Structural scale predicate, not the scale value. */
   uint32_t output_scale_is_unit;
 } apxinf_pointwise_spec_t;
-
-typedef apxinf_tuning_policy_t apxinf_pointwise_policy_t;
 
 typedef struct {
   const void* input;

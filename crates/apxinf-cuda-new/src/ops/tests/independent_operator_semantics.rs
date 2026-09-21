@@ -455,7 +455,6 @@ fn rope_split_rotate_and_bias_split_match_cpu_references() {
                 theta: 10_000.0,
                 position_offset: 1,
                 kv_output_offset: 0,
-                policy: RopePolicy::default(),
             },
         )
         .unwrap();
@@ -494,7 +493,6 @@ fn rope_split_rotate_and_bias_split_match_cpu_references() {
                 theta: 10_000.0,
                 position_offset: 0,
                 kv_output_offset: 0,
-                policy: RopePolicy::default(),
             },
         )
         .unwrap();
@@ -538,7 +536,6 @@ fn rope_rejects_illegal_or_unrelated_arguments() {
             theta: 10_000.0,
             position_offset: 1,
             kv_output_offset: 0,
-            policy: RopePolicy::default(),
         },
     );
     assert!(

@@ -86,7 +86,6 @@ mod linear {
             ctx: &Context,
             activation: &Tensor,
             gemm_policy: &ops::GemmPolicy,
-            quantization_policy: &ops::QuantizationPolicy,
         ) -> Result<Tensor> {
             let shape = activation.shape().dims();
             if activation.dtype() != DType::BF16
@@ -117,7 +116,6 @@ mod linear {
                 &mut quantized,
             );
             quantization.scales = Some(&mut row_scales);
-            quantization.policy = quantization_policy.clone();
             ops::quantization(ctx, quantization)?;
 
             let mut output =
@@ -136,12 +134,7 @@ mod linear {
         }
 
         pub fn gemm(&self, ctx: &Context, activation: &Tensor) -> Result<Tensor> {
-            self.gemm_with_policies(
-                ctx,
-                activation,
-                &ops::GemmPolicy::default(),
-                &ops::QuantizationPolicy::default(),
-            )
+            self.gemm_with_policies(ctx, activation, &ops::GemmPolicy::default())
         }
     }
 

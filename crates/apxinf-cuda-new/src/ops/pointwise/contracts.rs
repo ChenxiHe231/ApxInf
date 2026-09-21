@@ -48,29 +48,6 @@ impl PointwiseActivation {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct PointwisePolicy {
-    pub workspace_limit: usize,
-    pub online_tune: bool,
-    pub allow_fallback: bool,
-    pub graph_safe: bool,
-    pub deterministic: bool,
-    pub cache_dir: Option<String>,
-}
-
-impl Default for PointwisePolicy {
-    fn default() -> Self {
-        Self {
-            workspace_limit: 0,
-            online_tune: false,
-            allow_fallback: true,
-            graph_safe: true,
-            deterministic: true,
-            cache_dir: None,
-        }
-    }
-}
-
 /// Element-wise operation over a contiguous `[rows, cols]` activation, where
 /// `cols` is the *output* width.
 pub struct PointwiseArgs<'a> {
@@ -83,7 +60,6 @@ pub struct PointwiseArgs<'a> {
     pub activation: PointwiseActivation,
     pub dt: f32,
     pub output_scale: f32,
-    pub policy: PointwisePolicy,
 }
 
 impl<'a> PointwiseArgs<'a> {
@@ -97,14 +73,12 @@ impl<'a> PointwiseArgs<'a> {
             activation: PointwiseActivation::None,
             dt: 0.0,
             output_scale: 1.0,
-            policy: PointwisePolicy::default(),
         }
     }
 }
 
 pub(crate) struct Normalized {
     pub spec: abi::Spec,
-    pub policy: PointwisePolicy,
     pub bindings: abi::Bindings,
     pub storage: Vec<CudaBuffer>,
 }
@@ -274,7 +248,6 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
 
     Ok(Normalized {
         spec,
-        policy: args.policy,
         bindings,
         storage,
     })

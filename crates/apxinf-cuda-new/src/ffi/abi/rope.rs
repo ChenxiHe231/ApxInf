@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 
 use super::types::Runtime;
-pub(crate) use super::types::{CudaStream, Policy};
+pub(crate) use super::types::CudaStream;
 
 pub(crate) const SPEC_VERSION: u32 = 2;
 
@@ -45,7 +45,6 @@ unsafe extern "C" {
     pub(crate) fn apxinf_rope_launch(
         runtime: Runtime,
         spec: *const Spec,
-        policy: *const Policy,
         bindings: *const Bindings,
     ) -> i32;
 }

@@ -1,7 +1,7 @@
 use apxinf_core::{DType, Device, Error, Result, Tensor};
 
-use super::contracts::{Normalized, RopePolicy};
-use super::execution;
+use super::contracts::Normalized;
+use super::launch;
 use crate::ffi::abi::rope as abi;
 use crate::{CudaBuffer, CudaContext, CudaDeviceAddress};
 
@@ -13,9 +13,8 @@ use crate::{CudaBuffer, CudaContext, CudaDeviceAddress};
 /// `[1, cache_capacity, kv_heads, head_dim]`.
 ///
 /// `position` points to one device-visible `u32`. Its address is stable and
-/// becomes part of the prepared execution identity, but its value is read by
-/// the kernel on every enqueue/graph replay and is not part of the recipe
-/// identity.
+/// is captured as a stable binding address, but its value is read by the
+/// kernel on every launch/graph replay.
 pub struct DecodeRopeArgs<'a> {
     pub query: &'a Tensor,
     pub key: &'a Tensor,
@@ -25,7 +24,6 @@ pub struct DecodeRopeArgs<'a> {
     pub value_cache: &'a mut Tensor,
     pub position: CudaDeviceAddress,
     pub theta: f32,
-    pub policy: RopePolicy,
 }
 
 impl<'a> DecodeRopeArgs<'a> {
@@ -49,7 +47,6 @@ impl<'a> DecodeRopeArgs<'a> {
             value_cache,
             position,
             theta,
-            policy: RopePolicy::default(),
         }
     }
 }
@@ -176,7 +173,6 @@ pub(crate) fn normalize(ctx: &CudaContext, args: DecodeRopeArgs<'_>) -> Result<N
     };
     Ok(Normalized {
         spec,
-        policy: args.policy,
         bindings,
         storage: vec![q, key_input, value_input, q_out, key_cache, value_cache],
     })
@@ -184,5 +180,5 @@ pub(crate) fn normalize(ctx: &CudaContext, args: DecodeRopeArgs<'_>) -> Result<N
 
 /// Apply dynamic single-token RoPE and append K/V into token-major caches.
 pub fn decode_rope(ctx: &CudaContext, args: DecodeRopeArgs<'_>) -> Result<()> {
-    execution::execute(ctx, normalize(ctx, args)?)
+    launch::execute(ctx, normalize(ctx, args)?)
 }
