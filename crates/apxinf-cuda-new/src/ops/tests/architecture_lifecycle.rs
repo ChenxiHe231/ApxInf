@@ -1,11 +1,22 @@
 //! Source-level guardrails for the direct/prepared lifecycle boundary.
 
-const RUST_DIRECT_EXECUTION: &[(&str, &str)] = &[
-    ("gather", include_str!("../gather/execution.rs")),
-    ("norm", include_str!("../norm/execution.rs")),
-    ("pointwise", include_str!("../pointwise/execution.rs")),
-    ("quantization", include_str!("../quantization/execution.rs")),
-    ("rope", include_str!("../rope/execution.rs")),
+const RUST_DIRECT_LAUNCH: &[(&str, &str)] = &[
+    ("gather", include_str!("../gather/launch.rs")),
+    ("norm", include_str!("../norm/launch.rs")),
+    ("pointwise", include_str!("../pointwise/launch.rs")),
+    ("quantization", include_str!("../quantization/launch.rs")),
+    ("rope", include_str!("../rope/launch.rs")),
+];
+
+const NATIVE_DIRECT_LAUNCH: &[(&str, &str)] = &[
+    ("gather", include_str!("../../../native/adapters/gather.cu")),
+    ("norm", include_str!("../../../native/adapters/norm.cu")),
+    ("pointwise", include_str!("../../../native/adapters/pointwise.cu")),
+    (
+        "quantization",
+        include_str!("../../../native/adapters/quantization.cu"),
+    ),
+    ("rope", include_str!("../../../native/adapters/rope.cu")),
 ];
 
 const NATIVE_DIRECT_HEADERS: &[(&str, &str)] = &[
@@ -21,7 +32,7 @@ const NATIVE_DIRECT_HEADERS: &[(&str, &str)] = &[
 
 #[test]
 fn stateless_families_have_no_execution_cache_or_synchronization() {
-    for (family, source) in RUST_DIRECT_EXECUTION {
+    for (family, source) in RUST_DIRECT_LAUNCH {
         for forbidden in [
             "ExecutionKey",
             "lookup_execution",
@@ -47,6 +58,15 @@ fn stateless_native_abi_exposes_only_direct_launch() {
             assert!(
                 !header.contains(&format!("apxinf_{family}{forbidden}")),
                 "{family} header exposes prepared lifecycle symbol {forbidden}"
+            );
+        }
+        assert!(!header.contains("policy"), "{family} direct ABI exposes policy");
+    }
+    for (family, source) in NATIVE_DIRECT_LAUNCH {
+        for forbidden in ["Implementation", "Execution", "registry(", "candidate"] {
+            assert!(
+                !source.contains(forbidden),
+                "{family} direct adapter contains forbidden {forbidden}"
             );
         }
     }

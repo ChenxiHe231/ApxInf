@@ -2,8 +2,7 @@
 
 #include <stdint.h>
 
-/* Shares the dtype enum, status codes and tuning policy with the gemm family,
-   the same way attention_types.h does. */
+/* Shares the dtype enum and status codes with the gemm family. */
 #include "gemm_types.h"
 
 /* Packed-QKV split family.
@@ -52,8 +51,6 @@ typedef struct {
   int64_t tokens;
   int64_t cache_capacity;
 } apxinf_rope_spec_t;
-
-typedef apxinf_tuning_policy_t apxinf_rope_policy_t;
 
 typedef struct {
   const void* qkv;

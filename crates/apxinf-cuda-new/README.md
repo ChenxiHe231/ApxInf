@@ -1,6 +1,6 @@
 # `apxinf-cuda-new` Architecture Contract
 
-`apxinf-cuda-new` provides stable CUDA L3 semantic interfaces to the model layer. Operator lifecycle follows the implementation's real needs: tunable or stateful GEMM/Attention candidates are prepared and cached, while single-implementation stateless Gather/Norm/Pointwise/Quantization/RoPE candidates launch directly.
+`apxinf-cuda-new` provides stable CUDA L3 semantic interfaces to the model layer. Operator lifecycle follows the implementation's real needs: tunable or stateful GEMM/Attention candidates are prepared and cached, while single-implementation stateless Gather/Norm/Pointwise/Quantization/RoPE launch directly.
 
 - Current public interfaces and mathematical semantics: [L3 operator catalog](cuda-operator.md)
 - Workflow for adding or extending a kernel: [Adding New Kernels](../../doc/adding-new-kernels.md)
@@ -12,8 +12,8 @@ L0-L3 here describe only the CUDA operators inside `apxinf-cuda-new`, not the mo
 | Layer | Responsibility | Input → Output | Main Interfaces and Directories |
 | --- | --- | --- | --- |
 | L3 Semantic (Rust) | Define the complete model-visible mathematical semantic and tensor contract | `CudaContext + Args` → `Result<()>` | `ops::<semantic>`; `src/ops/<operator>/` |
-| L2 Execution (Rust) | Validate and normalize L3 calls; direct-launch stateless operators; cache only genuinely prepared resources; manage session and graph lifecycle | L3 Args → `Spec + Policy + Bindings` → direct launch or opaque native handle | `normalize`, direct `execute` or prepared `prepare/execute`; `src/ops/`, `src/workspace.rs`, `src/graph.rs` |
-| L1 Native operator (C++) | Implement the C ABI; either validate and directly launch one stateless candidate, or perform recipe lookup, selection, autotune, prepare, and enqueue | `Spec + Policy + Bindings` → launch or native `Execution` | `*_launch` for stateless families; `*_prepare/*_enqueue/*_destroy` for prepared families; `native/adapters/`, `native/framework/` |
+| L2 Execution (Rust) | Validate and normalize L3 calls; direct-launch stateless operators; cache only genuinely prepared resources; manage session and graph lifecycle | Direct: `Args → Spec + Bindings`; prepared: `Args → Spec + Policy + Bindings` | `normalize`, direct `launch` or prepared `prepare/execute`; `src/ops/`, `src/workspace.rs`, `src/graph.rs` |
+| L1 Native operator (C++) | Implement the C ABI; either validate and directly launch one stateless implementation, or perform recipe lookup, selection, autotune, prepare, and enqueue | Direct: `Spec + Bindings → launch`; prepared: `Spec + Policy + Bindings → Execution` | `*_launch` for stateless families; `*_prepare/*_enqueue/*_destroy` for prepared families; `native/adapters/`, `native/framework/` |
 | L0 Kernel | Perform the actual GPU computation | provider launch arguments → GPU work | custom CUDA, FA2, CUTLASS, cuBLAS/cuBLASLt; `native/kernels/` or vendor API |
 
 ```text
@@ -35,7 +35,7 @@ L0  CUDA kernel or vendor API
 ```
 
 ```text
-direct:  L2 → L1 *_launch → validate/supports → L0 asynchronous launch
+direct:  L2 → L1 *_launch → validate → L0 asynchronous launch
 prepare: L2 → L1 *_prepare → recipe/selection → native Execution
 run:     L2 → L1 *_enqueue ───────────────────→ L0 asynchronous launch
 capture: direct operators are captured as launches; prepared operators reuse Execution
@@ -45,7 +45,7 @@ capture: direct operators are captured as launches; prepared operators reuse Exe
 
 | Object | Layer | Composition | Relationship to Other Objects |
 | --- | --- | --- | --- |
-| Semantic | L3 | Public mathematical semantic, tensor contract, and semantic ID | One Semantic has one independent candidate registry; L3 exposes it publicly |
+| Semantic | L3 | Public mathematical semantic, tensor contract, and semantic ID | L3 exposes it publicly; prepared families map it to a candidate registry |
 | Provider | L1 (adapts L0) | Implementation-stack identity, such as FA2, CUTLASS, cuBLAS, or custom CUDA | One Provider can supply multiple Candidates; the Provider name does not enter the L3 API |
 | Candidate / Implementation | L1 | Provider ID + implementation ID/version + capability attributes + callbacks | Registered under one Semantic; can enumerate multiple Configurations |
 | Configuration | L1 | A stable configuration number defined by the Candidate | Has meaning only under its owning Candidate |
@@ -61,7 +61,7 @@ Candidate identity + Configuration → Recipe
 Recipe key → Recipe
 Current Spec + Policy + Bindings + resolved Recipe → Prepared Execution
 Prepared Execution → Candidate enqueue → Provider → L0 kernel
-Stateless Spec + Bindings → Candidate launch → L0 kernel
+Stateless Spec + Bindings → direct adapter → L0 kernel
 ```
 
 ```text
@@ -75,7 +75,7 @@ Recipe hit → resolve Candidate → validate → prepare → Execution
 | Data | Contents | Bound to the Current Call |
 | --- | --- | --- |
 | `Spec` | Normalized problem description: semantic, shape, dtype, mask, layout, alignment class, and so on | No; equivalent calls can share it |
-| `Policy` | Constraints such as workspace, graph-safe, deterministic, and whether tune/fallback is allowed | Some fields affect selection or prepared state |
+| `Policy` | Prepared-family constraints such as workspace, graph-safe, deterministic, and whether tune/fallback is allowed | GEMM/Attention only; stateless direct families expose no policy |
 | `Bindings` | Addresses, stream, and actual dynamic values for this call, such as `alpha` and attention scale | Yes |
 
 ## Key Interfaces
@@ -83,15 +83,15 @@ Recipe hit → resolve Candidate → validate → prepare → Execution
 | Interface | Layer | Responsibility |
 | --- | --- | --- |
 | `ops::<semantic>(ctx, args)` | L3 Rust | The only model entry point; expresses the complete mathematical semantic without exposing a provider |
-| `normalize(ctx, args)` | L2 Rust | Validate the L3 contract, produce `Spec + Policy + Bindings`, and keep storage alive |
-| Rust direct `execute` | L2 Rust | Validate capture target/device and call `*_launch`; never cache, allocate a native execution, or synchronize |
+| `normalize(ctx, args)` | L2 Rust | Validate the L3 contract, produce direct `Spec + Bindings` or prepared `Spec + Policy + Bindings`, and keep storage alive |
+| Rust direct `launch` | L2 Rust | Validate capture target and call `*_launch`; never cache, allocate a native execution, or synchronize |
 | Rust prepared `prepare/execute` | L2 Rust | For GEMM/Attention, look up the execution cache and create or enqueue an opaque native execution through FFI |
-| `*_launch(...)` | L1 C++ | For a fixed stateless family, validate the ABI/support/policy and submit the L0 kernel directly; capture-safe and allocation-free |
+| `*_launch(runtime, spec, bindings)` | L1 C++ | For a fixed stateless family, validate the ABI and submit the L0 kernel directly; capture-safe and allocation-free |
 | `*_prepare(..., &execution)` | L1 C++ | Perform recipe/selection and create all provider state/resources outside capture |
 | `*_enqueue(execution)` | L1 C++ | Submit only prepared work to the bound stream; must not select, allocate, or synchronize |
 | `*_destroy(execution)` | L1 C++ | Release provider state and resources |
-| `registry(spec.semantic)` | L1 C++ | Return the candidates eligible for the semantic |
-| `supports(spec)` | L1 C++ | Declare the candidate's correctness domain, not a performance hint |
+| `registry(spec.semantic)` | L1 C++ prepared families | Return the candidates eligible for the semantic |
+| `supports(spec)` | L1 C++ prepared families | Declare the candidate's correctness domain, not a performance hint |
 | `alignment_requirements/resource_requirements` | L1 C++ | Declare address and resource constraints before prepare |
 | `enumerate_configs` | L1 C++ | Return every configuration that requires independent selection or benchmarking |
 | `framework::autotune(problem, report)` | L1 C++ | Only iterate, time, and return a winner; does not interpret semantic or fallback |
@@ -167,9 +167,9 @@ The graph retains prepared executions and session storage used during capture. S
 | Layer | Path | Sole Responsibility |
 | --- | --- | --- |
 | L3 Rust | `cuda-operator.md`, public APIs in `src/ops/<operator>/` | semantic, Args, and model-visible contract |
-| L2 Rust | normalize/execution in `src/ops/<operator>/`, `src/workspace.rs`, `src/graph.rs` | ABI lowering, direct launch or prepared execution cache, session and CUDA Graph lifecycle |
+| L2 Rust | `contracts.rs` + `launch.rs` for stateless operators; prepared execution modules for GEMM/Attention; `src/workspace.rs`, `src/graph.rs` | ABI lowering, direct launch or prepared execution cache, session and CUDA Graph lifecycle |
 | L2/L1 ABI | `src/ffi/abi/`, `native/include/apxinf_cuda/` | Stable Rust/C boundary: `*_launch` or opaque prepared handle according to lifecycle |
-| L1 C++ | `native/adapters/<operator>/` | Direct stateless dispatch, or recipe/selection/provider state and prepared execution |
+| L1 C++ | Flat `native/adapters/<operator>.cu` for stateless families; `native/adapters/<operator>/` for prepared families | Direct stateless launch, or recipe/selection/provider state and prepared execution |
 | L1 Shared | `native/framework/` | Operator-independent registry, autotune, recipe I/O, and error boundary |
 | L0 | `native/kernels/` | Kernel source, template instances, and vendor tree |
 | Build | `build_support/`, `build.rs` | Build target, build fingerprint, and native compilation |
@@ -178,11 +178,12 @@ The graph retains prepared executions and session storage used during capture. S
 
 | Change Type | Required Changes | Possible Changes | Must Not Change |
 | --- | --- | --- | --- |
-| Reuse an existing semantic | Model call site | Args/policy | registry, framework, ABI |
+| Reuse an existing semantic | Model call site | Args; prepared-family policy when applicable | registry, framework, ABI |
+| Extend a direct stateless implementation | flat adapter/kernel; independent numerical and graph-capture tests | build inputs | add Policy, candidate registry, Execution, or cache |
 | Extend a candidate shape/dtype | candidate `supports`; provider/kernel; all-candidate tests | alignment/resource/config; build inputs | add a semantic, framework |
 | Add a candidate | identity/version; all callbacks; correct semantic registry; tests | provider file, kernel, build.rs/fingerprint inputs | Rust L3 API, common autotune |
 | Add a provider | provider callbacks/state; dependency and build integration; candidate registration | vendor provenance/patch | framework provider branch, model provider branch |
 | Add a semantic | Rust Args/normalize/export; ABI enum/Spec; independent registry; fallback; catalog/tests | new fields, provider/kernel, ABI version; exact key/autotune when tuning is required | reuse another semantic's selection domain |
 | Change candidate behavior/performance | implementation version or a build fingerprint covering the change; regression tests | recipe schema/key version | continue reusing old recipes that are no longer equivalent |
 
-Every candidate must be tested on the inputs it claims to support, not only when it becomes the final autotune winner. See [Adding New Kernels](../../doc/adding-new-kernels.md) for complete testing and acceptance steps.
+Every prepared candidate must be tested on the inputs it claims to support, not only when it becomes the final autotune winner. Every direct implementation needs an independent numerical reference and CUDA Graph capture/replay coverage. See [Adding New Kernels](../../doc/adding-new-kernels.md) for complete testing and acceptance steps.

@@ -2,8 +2,7 @@
 
 #include <stdint.h>
 
-/* Shares the dtype enum, status codes and tuning policy with the gemm family,
-   the same way attention_types.h does. */
+/* Shares the dtype enum and status codes with the gemm family. */
 #include "gemm_types.h"
 
 /* Gather / layout family: operations whose output index does not map one to
@@ -53,8 +52,6 @@ typedef struct {
   int64_t rows;
   int64_t cols;
 } apxinf_gather_spec_t;
-
-typedef apxinf_tuning_policy_t apxinf_gather_policy_t;
 
 typedef struct {
   /* Embedding table, activation, or packed u8 images depending on semantic. */

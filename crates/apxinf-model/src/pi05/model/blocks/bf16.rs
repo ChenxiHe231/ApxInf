@@ -311,7 +311,6 @@ fn split_qkv_bias_bf16(
             theta: 1.0,
             position_offset: 0,
             kv_output_offset: 0,
-            policy: Default::default(),
         },
     )?;
     Ok(QkvTensors { q, k, v })
@@ -359,7 +358,6 @@ fn split_qkv_rope_bf16(
             theta,
             position_offset,
             kv_output_offset: 0,
-            policy: Default::default(),
         },
     )?;
     Ok(QkvTensors { q, k, v })
@@ -409,7 +407,6 @@ fn split_qkv_rope_into_cache_bf16(
             theta,
             position_offset,
             kv_output_offset: cache_offset,
-            policy: Default::default(),
         },
     )?;
     Ok(q)

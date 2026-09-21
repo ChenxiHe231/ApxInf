@@ -1,18 +1,36 @@
-#include "internal.h"
+#include "../include/apxinf_cuda/quantization.h"
+#include "../framework/runtime_internal.h"
 
-#include <cmath>
 #include <climits>
-#include <vector>
+#include <cmath>
+#include <cstdint>
+#include <string>
+
+extern "C" cudaError_t apxinf_static_quantize_f16_e4m3(
+    const void*, void*, int64_t, float, cudaStream_t);
+extern "C" cudaError_t apxinf_static_quantize_bf16_e4m3(
+    const void*, void*, int64_t, float, cudaStream_t);
+extern "C" cudaError_t apxinf_dynamic_quantize_rows_bf16_e4m3(
+    const void*, void*, void*, int, int, int, cudaStream_t);
+extern "C" cudaError_t apxinf_static_cast_f16_bf16(
+    const void*, void*, int64_t, cudaStream_t);
+extern "C" cudaError_t apxinf_slice_columns_bf16(
+    const void*, void*, int, int, int, cudaStream_t);
+extern "C" cudaError_t apxinf_static_quantize_rows_bf16_int8(
+    const void*, void*, void*, int, int, cudaStream_t);
 
 namespace {
 
-using apxinf::quantization::Execution;
-using apxinf::quantization::Failure;
-using apxinf::quantization::Spec;
+using apxinf::framework::Failure;
 
 bool valid_alignment(uint32_t alignment) {
   return alignment <= 256 && alignment != 0 &&
          (alignment & (alignment - 1)) == 0;
+}
+
+bool has_row_scales(uint32_t semantic) {
+  return semantic == APXINF_QUANTIZATION_SEMANTIC_ROWWISE_E4M3 ||
+         semantic == APXINF_QUANTIZATION_SEMANTIC_ROWWISE_I8;
 }
 
 uint32_t dtype_bytes(uint32_t dtype) {
@@ -39,7 +57,7 @@ void validate_recorded_alignment(const void* pointer, uint32_t alignment,
   }
 }
 
-void validate_spec(const Spec& spec) {
+void validate_spec(const apxinf_quantization_spec_t& spec) {
   if (spec.version != APXINF_QUANTIZATION_SPEC_VERSION ||
       spec.semantic > APXINF_QUANTIZATION_SEMANTIC_ROWWISE_I8 ||
       spec.scale_dtype != APXINF_DTYPE_F32 || spec.rows <= 0 ||
@@ -54,12 +72,11 @@ void validate_spec(const Spec& spec) {
   }
   if (spec.input_alignment < dtype_bytes(spec.input_dtype) ||
       spec.output_alignment < dtype_bytes(spec.output_dtype) ||
-      (apxinf::quantization::has_row_scales(spec.semantic) &&
+      (has_row_scales(spec.semantic) &&
        spec.scales_alignment < sizeof(float))) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Quantization binding violates dtype alignment");
   }
-
   switch (spec.semantic) {
     case APXINF_QUANTIZATION_SEMANTIC_FIXED_E4M3:
       if ((spec.input_dtype != APXINF_DTYPE_F16 &&
@@ -108,22 +125,13 @@ void validate_spec(const Spec& spec) {
   }
 }
 
-void validate_policy(const apxinf_quantization_policy_t& policy) {
-  if (policy.online_tune > 1 || policy.allow_fallback > 1 ||
-      policy.graph_safe > 1 || policy.deterministic > 1) {
-    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "invalid Quantization Policy");
-  }
-}
-
-void validate_bindings(const Spec& spec,
+void validate_bindings(const apxinf_quantization_spec_t& spec,
                        const apxinf_quantization_bindings_t& bindings) {
   if (bindings.input == nullptr || bindings.output == nullptr) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "missing Quantization binding");
   }
-  const bool needs_scales = apxinf::quantization::has_row_scales(spec.semantic);
-  if (needs_scales != (bindings.scales != nullptr)) {
+  if (has_row_scales(spec.semantic) != (bindings.scales != nullptr)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Quantization scales binding disagrees with semantic");
   }
@@ -144,84 +152,55 @@ void validate_bindings(const Spec& spec,
                               "Quantization scales");
 }
 
+cudaError_t launch(const apxinf_quantization_spec_t& spec,
+                   const apxinf_quantization_bindings_t& bindings) {
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+  const int rows = static_cast<int>(spec.rows);
+  const int input_cols = static_cast<int>(spec.input_cols);
+  const int output_cols = static_cast<int>(spec.output_cols);
+  const int64_t input_count = spec.rows * spec.input_cols;
+
+  switch (spec.semantic) {
+    case APXINF_QUANTIZATION_SEMANTIC_FIXED_E4M3:
+      return spec.input_dtype == APXINF_DTYPE_F16
+                 ? apxinf_static_quantize_f16_e4m3(
+                       bindings.input, bindings.output, input_count,
+                       bindings.scale, stream)
+                 : apxinf_static_quantize_bf16_e4m3(
+                       bindings.input, bindings.output, input_count,
+                       bindings.scale, stream);
+    case APXINF_QUANTIZATION_SEMANTIC_ROWWISE_E4M3:
+      return apxinf_dynamic_quantize_rows_bf16_e4m3(
+          bindings.input, bindings.output, bindings.scales, rows, input_cols,
+          output_cols, stream);
+    case APXINF_QUANTIZATION_SEMANTIC_CAST_F16_BF16:
+      return apxinf_static_cast_f16_bf16(
+          bindings.input, bindings.output, input_count, stream);
+    case APXINF_QUANTIZATION_SEMANTIC_SLICE_BF16:
+      return apxinf_slice_columns_bf16(bindings.input, bindings.output, rows,
+                                       input_cols, output_cols, stream);
+    case APXINF_QUANTIZATION_SEMANTIC_ROWWISE_I8:
+      return apxinf_static_quantize_rows_bf16_int8(
+          bindings.input, bindings.output, bindings.scales, rows, input_cols,
+          stream);
+    default:
+      return cudaErrorInvalidValue;
+  }
+}
+
 }  // namespace
-
-namespace apxinf::quantization {
-
-bool supports_device(const Implementation& implementation, int,
-                     std::string* reason) {
-  if (implementation.required_device_features == 0) return true;
-  if (reason != nullptr) *reason = "missing required device feature";
-  return false;
-}
-
-bool supports_alignment(const Implementation& implementation,
-                        const Spec& spec) {
-  const auto required = implementation.alignment_requirements(spec);
-  return spec.input_alignment >= required.input &&
-         spec.output_alignment >= required.output &&
-         spec.scales_alignment >=
-             (has_row_scales(spec.semantic) ? required.scales : 0);
-}
-
-void initialize(Execution& execution, const Implementation& implementation,
-                int configuration, const Spec& spec,
-                const apxinf_quantization_policy_t& policy,
-                const apxinf_quantization_bindings_t& bindings, int device) {
-  execution.spec = spec;
-  execution.bindings = bindings;
-  execution.configuration = configuration;
-  execution.device = device;
-  execution.implementation = &implementation;
-  (void)policy;
-}
-
-}  // namespace apxinf::quantization
 
 extern "C" apxinf_status_t apxinf_quantization_launch(
     apxinf_runtime_t runtime, const apxinf_quantization_spec_t* spec,
-    const apxinf_quantization_policy_t* policy,
     const apxinf_quantization_bindings_t* bindings) {
-  return apxinf::quantization::abi_boundary([&] {
-    if (runtime == nullptr || spec == nullptr || policy == nullptr ||
-        bindings == nullptr) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "null Quantization argument");
     }
-    const apxinf::quantization::Spec normalized{*spec};
-    validate_spec(normalized);
-    validate_policy(*policy);
-    validate_bindings(normalized, *bindings);
-
-    apxinf::quantization::Execution execution;
-    bool selected = false;
-    for (const auto& implementation :
-         apxinf::quantization::registry(normalized.semantic)) {
-      if (!implementation.supports(normalized) ||
-          !apxinf::quantization::supports_device(implementation,
-                                                 runtime->device) ||
-          !apxinf::quantization::supports_alignment(implementation,
-                                                    normalized)) {
-        continue;
-      }
-      if (policy->graph_safe && !implementation.graph_safe) continue;
-      if (policy->deterministic && !implementation.deterministic) continue;
-      if (!policy->allow_fallback && implementation.fallback) continue;
-      std::vector<int> configurations;
-      implementation.enumerate_configs(normalized, configurations);
-      if (configurations.empty()) continue;
-      apxinf::quantization::initialize(execution, implementation,
-                                       configurations.front(), normalized,
-                                       *policy, *bindings, runtime->device);
-      selected = true;
-      break;
-    }
-    if (!selected) {
-      throw Failure(APXINF_STATUS_UNSUPPORTED,
-                    "no Quantization candidate supports this Spec");
-    }
-    apxinf::quantization::check_cuda(cudaSetDevice(execution.device));
-    apxinf::quantization::check_cuda(
-        execution.implementation->enqueue(execution));
+    validate_spec(*spec);
+    validate_bindings(*spec, *bindings);
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    apxinf::framework::check_cuda(launch(*spec, *bindings));
   });
 }

@@ -25,29 +25,6 @@ impl RopeSemantic {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct RopePolicy {
-    pub workspace_limit: usize,
-    pub online_tune: bool,
-    pub allow_fallback: bool,
-    pub graph_safe: bool,
-    pub deterministic: bool,
-    pub cache_dir: Option<String>,
-}
-
-impl Default for RopePolicy {
-    fn default() -> Self {
-        Self {
-            workspace_limit: 0,
-            online_tune: false,
-            allow_fallback: true,
-            graph_safe: true,
-            deterministic: true,
-            cache_dir: None,
-        }
-    }
-}
-
 /// Splits a packed QKV projection into separate Q, K and V buffers.
 ///
 /// `k` and `v` may point either at fresh per-call buffers (`kv_output_offset`
@@ -66,12 +43,10 @@ pub struct RopeArgs<'a> {
     pub theta: f32,
     pub position_offset: usize,
     pub kv_output_offset: usize,
-    pub policy: RopePolicy,
 }
 
 pub(crate) struct Normalized {
     pub spec: abi::Spec,
-    pub policy: RopePolicy,
     pub bindings: abi::Bindings,
     pub storage: Vec<CudaBuffer>,
 }
@@ -264,7 +239,6 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RopeArgs<'_>) -> Result<Normali
 
     Ok(Normalized {
         spec,
-        policy: args.policy,
         bindings,
         storage,
     })

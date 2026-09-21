@@ -39,8 +39,6 @@ typedef struct {
   int64_t output_cols;
 } apxinf_quantization_spec_t;
 
-typedef apxinf_tuning_policy_t apxinf_quantization_policy_t;
-
 typedef struct {
   const void* input;
   void* output;

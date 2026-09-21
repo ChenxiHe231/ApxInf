@@ -29,29 +29,6 @@ impl GatherSemantic {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct GatherPolicy {
-    pub workspace_limit: usize,
-    pub online_tune: bool,
-    pub allow_fallback: bool,
-    pub graph_safe: bool,
-    pub deterministic: bool,
-    pub cache_dir: Option<String>,
-}
-
-impl Default for GatherPolicy {
-    fn default() -> Self {
-        Self {
-            workspace_limit: 0,
-            online_tune: false,
-            allow_fallback: true,
-            graph_safe: true,
-            deterministic: true,
-            cache_dir: None,
-        }
-    }
-}
-
 /// Geometry for [`GatherSemantic::RgbToPatches`].
 #[derive(Clone, Copy, Debug)]
 pub struct PatchGeometry {
@@ -82,7 +59,6 @@ pub struct GatherArgs<'a> {
     pub vocab_size: usize,
     pub tokens_per_view: usize,
     pub patches: Option<PatchGeometry>,
-    pub policy: GatherPolicy,
 }
 
 impl<'a> GatherArgs<'a> {
@@ -99,7 +75,6 @@ impl<'a> GatherArgs<'a> {
             vocab_size: 0,
             tokens_per_view: 0,
             patches: None,
-            policy: GatherPolicy::default(),
         }
     }
 
@@ -120,13 +95,12 @@ impl<'a> GatherArgs<'a> {
             vocab_size: 0,
             tokens_per_view: 0,
             patches: Some(geometry),
-            policy: GatherPolicy::default(),
         }
     }
 
     /// Bind token ids through a stable device address. The pointed-to values
-    /// are read by the kernel at enqueue/replay time and are deliberately not
-    /// part of the prepared-execution or recipe identity.
+    /// are read by the kernel at launch/replay time and are deliberately not
+    /// part of the normalized structural spec.
     pub fn with_ids_address(mut self, ids: CudaDeviceAddress) -> Self {
         self.ids = None;
         self.ids_address = Some(ids);
@@ -136,7 +110,6 @@ impl<'a> GatherArgs<'a> {
 
 pub(crate) struct Normalized {
     pub spec: abi::Spec,
-    pub policy: GatherPolicy,
     pub bindings: abi::Bindings,
     pub storage: Vec<CudaBuffer>,
 }
@@ -430,7 +403,6 @@ pub(crate) fn normalize(ctx: &CudaContext, args: GatherArgs<'_>) -> Result<Norma
 
     Ok(Normalized {
         spec,
-        policy: args.policy,
         bindings,
         storage,
     })

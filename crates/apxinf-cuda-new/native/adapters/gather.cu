@@ -1,19 +1,28 @@
-#include "internal.h"
+#include "../include/apxinf_cuda/gather.h"
+#include "../framework/runtime_internal.h"
+#include "../kernels/custom/gather.cuh"
 
-#include <vector>
+#include <climits>
+#include <cstdint>
 
 namespace {
 
-using apxinf::gather::Execution;
-using apxinf::gather::Failure;
-using apxinf::gather::Spec;
+using apxinf::framework::Failure;
+namespace kernels = apxinf::gather::kernels;
+
+constexpr int kThreads = 256;
+constexpr int kMaxBlocks = 4096;
 
 bool valid_alignment(uint32_t alignment) {
   return alignment <= 256 && alignment != 0 &&
          (alignment & (alignment - 1)) == 0;
 }
 
-void validate_spec(const Spec& spec) {
+bool may_have_bias(uint32_t semantic) {
+  return semantic == APXINF_GATHER_SEMANTIC_BIAS_POSITION;
+}
+
+void validate_spec(const apxinf_gather_spec_t& spec) {
   if (spec.version != APXINF_GATHER_SPEC_VERSION ||
       spec.semantic > APXINF_GATHER_SEMANTIC_RGB_TO_PATCHES ||
       (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
@@ -21,13 +30,12 @@ void validate_spec(const Spec& spec) {
       spec.rows > INT32_MAX || spec.cols > INT32_MAX ||
       spec.vocab_size > INT32_MAX || spec.tokens_per_view > INT32_MAX ||
       spec.views > INT32_MAX || spec.image_size > INT32_MAX ||
-      spec.patch_size > INT32_MAX ||
-      !valid_alignment(spec.input_alignment) ||
+      spec.patch_size > INT32_MAX || !valid_alignment(spec.input_alignment) ||
       !valid_alignment(spec.bias_alignment) ||
       !valid_alignment(spec.output_alignment)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Gather Spec");
   }
-  if (spec.has_bias != 0 && !apxinf::gather::may_have_bias(spec.semantic)) {
+  if (spec.has_bias != 0 && !may_have_bias(spec.semantic)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Gather semantic does not take a bias");
   }
@@ -48,8 +56,6 @@ void validate_spec(const Spec& spec) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid RGB-to-patches geometry");
     }
-    // The Spec carries the output shape twice, once as rows/cols and once as
-    // the image geometry; disagreeing values would silently truncate.
     const int64_t per_side = spec.image_size / spec.patch_size;
     const int64_t expected_rows =
         static_cast<int64_t>(spec.views) * per_side * per_side;
@@ -62,7 +68,7 @@ void validate_spec(const Spec& spec) {
   }
 }
 
-void validate_bindings(const Spec& spec,
+void validate_bindings(const apxinf_gather_spec_t& spec,
                        const apxinf_gather_bindings_t& bindings) {
   if (bindings.input == nullptr || bindings.output == nullptr) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "missing Gather binding");
@@ -83,79 +89,72 @@ void validate_bindings(const Spec& spec,
   }
 }
 
+int blocks_for(int64_t count) {
+  const int64_t blocks = (count + kThreads - 1) / kThreads;
+  if (blocks < 1) return 1;
+  return static_cast<int>(blocks < kMaxBlocks ? blocks : kMaxBlocks);
+}
+
+template <class T>
+cudaError_t launch(const apxinf_gather_spec_t& spec,
+                   const apxinf_gather_bindings_t& bindings) {
+  const auto* input = static_cast<const T*>(bindings.input);
+  const auto* bias = static_cast<const T*>(bindings.bias);
+  const auto* position = static_cast<const T*>(bindings.position);
+  auto* output = static_cast<T*>(bindings.output);
+  const int rows = static_cast<int>(spec.rows);
+  const int cols = static_cast<int>(spec.cols);
+  const int64_t count = spec.rows * spec.cols;
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+  const int grid = blocks_for(count);
+
+  switch (spec.semantic) {
+    case APXINF_GATHER_SEMANTIC_EMBEDDING_LOOKUP:
+      kernels::embedding_lookup<T><<<grid, kThreads, 0, stream>>>(
+          input, bindings.ids, output, rows, cols,
+          static_cast<int>(spec.vocab_size));
+      break;
+    case APXINF_GATHER_SEMANTIC_BIAS_POSITION:
+      kernels::bias_position<T><<<grid, kThreads, 0, stream>>>(
+          input, bias, position, output, count, cols,
+          static_cast<int>(spec.tokens_per_view));
+      break;
+    case APXINF_GATHER_SEMANTIC_RGB_TO_PATCHES: {
+      const auto* images = static_cast<const uint8_t*>(bindings.input);
+      if (spec.nhwc != 0) {
+        kernels::rgb_u8_to_patches<T, true><<<grid, kThreads, 0, stream>>>(
+            images, output, static_cast<int>(spec.views),
+            static_cast<int>(spec.image_size),
+            static_cast<int>(spec.patch_size));
+      } else {
+        kernels::rgb_u8_to_patches<T, false><<<grid, kThreads, 0, stream>>>(
+            images, output, static_cast<int>(spec.views),
+            static_cast<int>(spec.image_size),
+            static_cast<int>(spec.patch_size));
+      }
+      break;
+    }
+    default:
+      return cudaErrorInvalidValue;
+  }
+  return cudaGetLastError();
+}
+
 }  // namespace
-
-namespace apxinf::gather {
-
-bool supports_device(const Implementation& implementation, int,
-                     std::string* reason) {
-  if (implementation.required_device_features == 0) return true;
-  if (reason != nullptr) *reason = "missing required device feature";
-  return false;
-}
-
-bool supports_alignment(const Implementation& implementation,
-                        const Spec& spec) {
-  const auto required = implementation.alignment_requirements(spec);
-  return spec.input_alignment >= required.input &&
-         spec.output_alignment >= required.output &&
-         spec.bias_alignment >= (spec.has_bias != 0 ? required.bias : 0);
-}
-
-void initialize(Execution& execution, const Implementation& implementation,
-                int configuration, const Spec& spec,
-                const apxinf_gather_policy_t& policy,
-                const apxinf_gather_bindings_t& bindings, int device) {
-  execution.spec = spec;
-  execution.bindings = bindings;
-  execution.configuration = configuration;
-  execution.device = device;
-  execution.implementation = &implementation;
-  (void)policy;
-}
-
-}  // namespace apxinf::gather
 
 extern "C" apxinf_status_t apxinf_gather_launch(
     apxinf_runtime_t runtime, const apxinf_gather_spec_t* spec,
-    const apxinf_gather_policy_t* policy,
     const apxinf_gather_bindings_t* bindings) {
-  return apxinf::gather::abi_boundary([&] {
-    if (runtime == nullptr || spec == nullptr || policy == nullptr ||
-        bindings == nullptr) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "null Gather argument");
     }
-    const apxinf::gather::Spec normalized{*spec};
-    validate_spec(normalized);
-    validate_bindings(normalized, *bindings);
-
-    apxinf::gather::Execution execution;
-    bool selected = false;
-    for (const auto& implementation :
-         apxinf::gather::registry(normalized.semantic)) {
-      if (!implementation.supports(normalized) ||
-          !apxinf::gather::supports_device(implementation, runtime->device) ||
-          !apxinf::gather::supports_alignment(implementation, normalized)) {
-        continue;
-      }
-      if (policy->graph_safe && !implementation.graph_safe) continue;
-      if (policy->deterministic && !implementation.deterministic) continue;
-      if (!policy->allow_fallback && implementation.fallback) continue;
-      std::vector<int> configurations;
-      implementation.enumerate_configs(normalized, configurations);
-      if (configurations.empty()) continue;
-      apxinf::gather::initialize(execution, implementation,
-                                 configurations.front(), normalized, *policy,
-                                 *bindings, runtime->device);
-      selected = true;
-      break;
-    }
-    if (!selected) {
-      throw Failure(APXINF_STATUS_UNSUPPORTED,
-                    "no Gather candidate supports this Spec");
-    }
-    apxinf::gather::check_cuda(cudaSetDevice(execution.device));
-    apxinf::gather::check_cuda(
-        execution.implementation->enqueue(execution));
+    validate_spec(*spec);
+    validate_bindings(*spec, *bindings);
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    apxinf::framework::check_cuda(
+        spec->dtype == APXINF_DTYPE_BF16
+            ? launch<__nv_bfloat16>(*spec, *bindings)
+            : launch<__half>(*spec, *bindings));
   });
 }

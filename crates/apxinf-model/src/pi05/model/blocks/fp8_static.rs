@@ -26,11 +26,6 @@ pub struct Fp8StaticActionLayerOutput {
 pub(in crate::pi05::model) struct Fp8L3Policies {
     gemm: ops::GemmPolicy,
     attention: ops::AttentionPolicy,
-    norm: ops::NormPolicy,
-    pointwise: ops::PointwisePolicy,
-    gather: ops::GatherPolicy,
-    rope: ops::RopePolicy,
-    quantization: ops::QuantizationPolicy,
 }
 
 struct QkvTensors {
@@ -45,7 +40,7 @@ fn output(ctx: &Context, shape: impl Into<Vec<usize>>, dtype: DType) -> Result<T
 
 fn fixed_quantize(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     input: &Tensor,
     scale: f32,
 ) -> Result<Tensor> {
@@ -56,7 +51,6 @@ fn fixed_quantize(
         &mut out,
     );
     args.scale = scale;
-    args.policy = policies.quantization.clone();
     ops::quantization(ctx, args)?;
     Ok(out)
 }
@@ -136,7 +130,7 @@ fn fp8_gemm_geglu(
 
 fn bias_activation(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     input: &Tensor,
     bias: Option<&Tensor>,
     activation: ops::PointwiseActivation,
@@ -145,7 +139,6 @@ fn bias_activation(
     let mut args = ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut out);
     args.bias = bias;
     args.activation = activation;
-    args.policy = policies.pointwise.clone();
     ops::pointwise(ctx, args)?;
     Ok(out)
 }
@@ -161,8 +154,7 @@ fn rms_normalized_fp8(
     let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
     ops::rms_norm(
         ctx,
-        ops::RmsNormArgs::new(input, weight, &mut normalized, eps)
-            .with_policy(policies.norm.clone()),
+        ops::RmsNormArgs::new(input, weight, &mut normalized, eps),
     )?;
     fixed_quantize(ctx, policies, &normalized, scale)
 }
@@ -179,8 +171,7 @@ fn layer_normalized_fp8(
     let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
     ops::layer_norm(
         ctx,
-        ops::LayerNormArgs::new(input, weight, bias, &mut normalized, eps)
-            .with_policy(policies.norm.clone()),
+        ops::LayerNormArgs::new(input, weight, bias, &mut normalized, eps),
     )?;
     fixed_quantize(ctx, policies, &normalized, scale)
 }
@@ -196,15 +187,14 @@ fn adaptive_rms_normalized_fp8(
     let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
     ops::adaptive_rms_norm(
         ctx,
-        ops::AdaptiveRmsNormArgs::new(input, norm_style, &mut normalized, eps)
-            .with_policy(policies.norm.clone()),
+        ops::AdaptiveRmsNormArgs::new(input, norm_style, &mut normalized, eps),
     )?;
     fixed_quantize(ctx, policies, &normalized, scale)
 }
 
 fn bias_residual(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     input: &Tensor,
     bias: Option<&Tensor>,
     residual: &Tensor,
@@ -212,8 +202,7 @@ fn bias_residual(
     let mut hidden = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
     ops::bias_residual(
         ctx,
-        ops::BiasResidualArgs::new(input, bias, residual, &mut hidden)
-            .with_policy(policies.norm.clone()),
+        ops::BiasResidualArgs::new(input, bias, residual, &mut hidden),
     )?;
     Ok(hidden)
 }
@@ -236,8 +225,7 @@ fn bias_residual_rms_normalized_fp8(
         ctx,
         ops::BiasResidualRmsNormArgs::new(
             input, bias, residual, weight, &mut hidden, &mut normalized, eps,
-        )
-        .with_policy(policies.norm.clone()),
+        ),
     )?;
     Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
 }
@@ -261,8 +249,7 @@ fn bias_residual_layer_normalized_fp8(
         ctx,
         ops::BiasResidualLayerNormArgs::new(
             input, bias, residual, weight, norm_bias, &mut hidden, &mut normalized, eps,
-        )
-        .with_policy(policies.norm.clone()),
+        ),
     )?;
     Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
 }
@@ -285,8 +272,7 @@ fn ada_gate_residual_rms_normalized_fp8(
         ctx,
         ops::AdaGateResidualRmsNormArgs::new(
             input, residual, norm_style, gate_style, &mut hidden, &mut normalized, eps,
-        )
-        .with_policy(policies.norm.clone()),
+        ),
     )?;
     Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
 }
@@ -294,7 +280,7 @@ fn ada_gate_residual_rms_normalized_fp8(
 #[allow(clippy::too_many_arguments)]
 fn split_qkv(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     qkv: &Tensor,
     bias: Option<&Tensor>,
     q_heads: usize,
@@ -320,7 +306,6 @@ fn split_qkv(
         theta,
         position_offset,
         kv_output_offset: 0,
-        policy: policies.rope.clone(),
     };
     ops::rope(ctx, args)?;
     Ok(QkvTensors { q, k, v })
@@ -329,7 +314,7 @@ fn split_qkv(
 #[allow(clippy::too_many_arguments)]
 fn split_qkv_to_cache(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     qkv: &Tensor,
     bias: Option<&Tensor>,
     q_heads: usize,
@@ -357,7 +342,6 @@ fn split_qkv_to_cache(
         theta,
         position_offset,
         kv_output_offset: position_offset,
-        policy: policies.rope.clone(),
     };
     ops::rope(ctx, args)?;
     Ok(q)
@@ -702,7 +686,6 @@ fn vision_patch_embed_fp8_static_native_with_policies(
     args.bias = weights.bias.as_ref();
     args.position = Some(position_embedding);
     args.tokens_per_view = patches_per_view;
-    args.policy = policies.gather.clone();
     ops::gather(ctx, args)?;
     Ok(out)
 }
@@ -772,7 +755,6 @@ fn vision_layer_fp8_static_with_policies(
             theta: 1.0,
             position_offset: 0,
             kv_output_offset: 0,
-            policy: policies.rope.clone(),
         },
     )?;
     let views = tokens / patches_per_view;
@@ -1038,7 +1020,6 @@ pub(in crate::pi05::model) mod backbone {
             );
             args.ids = Some(token_ids);
             args.vocab_size = self.weights.token_embedding.shape().dims()[0];
-            args.policy = self.policies.gather.clone();
             ops::gather(self.ctx(), args)?;
             ops::concat_rows(self.ctx(), vision_tokens, &language)
         }
@@ -1295,7 +1276,6 @@ pub(in crate::pi05::model) mod backbone {
                 ops::PointwiseArgs::new(ops::PointwiseSemantic::EulerUpdate, state, &mut updated);
             args.secondary = Some(&velocity);
             args.dt = dt;
-            args.policy = self.policies.pointwise.clone();
             ops::pointwise(self.ctx(), args)?;
             Ok(updated)
         }
@@ -1446,8 +1426,7 @@ impl crate::pi05::model::PrepareBlocks for backbone::Fp8StaticBlocks {
             patch_size: self.config.patch_size,
             nhwc: matches!(layout, crate::pi05::Pi05ImageLayout::Nhwc),
         };
-        let mut gather = ops::GatherArgs::rgb_to_patches(images, &mut f16_patches, geometry);
-        gather.policy = self.policies.gather.clone();
+        let gather = ops::GatherArgs::rgb_to_patches(images, &mut f16_patches, geometry);
         ops::gather(ctx, gather)?;
         let mut patches = patches.clone();
         let mut quantization = ops::QuantizationArgs::new(
@@ -1456,7 +1435,6 @@ impl crate::pi05::model::PrepareBlocks for backbone::Fp8StaticBlocks {
             &mut patches,
         );
         quantization.scale = self.scales.vision_patch_input;
-        quantization.policy = self.policies.quantization.clone();
         ops::quantization(ctx, quantization)
     }
 }

@@ -26,12 +26,12 @@ pub use ops::{
     gather, kv_cache_attention, layer_norm, pointwise, quantization, reserve_prefix, rms_norm, rope,
     segmented_attention, AttentionArgs, AttentionMask, AttentionPolicy,
     DecodeRopeArgs, ExecutionSession,
-    GatherArgs, GatherPatchGeometry, GatherPolicy, GatherSemantic, GraphWorkspace,
+    GatherArgs, GatherPatchGeometry, GatherSemantic, GraphWorkspace,
     AdaGateResidualArgs, AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, BiasResidualArgs,
     BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, BiasThenResidualArgs,
-    KvCacheAttentionArgs, LayerNormArgs, NormPolicy, PointwiseActivation, PointwiseArgs,
-    PointwisePolicy, PointwiseSemantic, QuantizationArgs, QuantizationPolicy, RmsNormArgs,
-    QuantizationSemantic, RopeArgs, RopePolicy, RopeSemantic, SegmentedAttentionArgs,
+    KvCacheAttentionArgs, LayerNormArgs, PointwiseActivation, PointwiseArgs,
+    PointwiseSemantic, QuantizationArgs, RmsNormArgs, QuantizationSemantic, RopeArgs,
+    RopeSemantic, SegmentedAttentionArgs,
 };
 pub use stream::CudaStream;
 pub use timing::CudaEventTimer;

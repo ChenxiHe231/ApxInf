@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 
 use super::types::Runtime;
-pub(crate) use super::types::{CudaStream, Policy};
+pub(crate) use super::types::CudaStream;
 
 pub(crate) const SPEC_VERSION: u32 = 1;
 
@@ -40,17 +40,6 @@ unsafe extern "C" {
     pub(crate) fn apxinf_pointwise_launch(
         runtime: Runtime,
         spec: *const Spec,
-        policy: *const Policy,
         bindings: *const Bindings,
-    ) -> i32;
-
-    #[cfg(test)]
-    pub(crate) fn apxinf_pointwise_test_validate_candidates(
-        runtime: Runtime,
-        spec: *const Spec,
-        policy: *const Policy,
-        bindings: *const Bindings,
-        expected_output: *const f32,
-        expected_output_len: u64,
     ) -> i32;
 }

@@ -1,6 +1,6 @@
 pub(crate) mod contracts;
-pub(crate) mod execution;
+pub(crate) mod launch;
 mod pointwise;
 
-pub use contracts::{PointwiseActivation, PointwiseArgs, PointwisePolicy, PointwiseSemantic};
+pub use contracts::{PointwiseActivation, PointwiseArgs, PointwiseSemantic};
 pub use pointwise::pointwise;

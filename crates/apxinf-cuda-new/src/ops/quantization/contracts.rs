@@ -33,29 +33,6 @@ impl QuantizationSemantic {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct QuantizationPolicy {
-    pub workspace_limit: usize,
-    pub online_tune: bool,
-    pub allow_fallback: bool,
-    pub graph_safe: bool,
-    pub deterministic: bool,
-    pub cache_dir: Option<String>,
-}
-
-impl Default for QuantizationPolicy {
-    fn default() -> Self {
-        Self {
-            workspace_limit: 0,
-            online_tune: false,
-            allow_fallback: true,
-            graph_safe: true,
-            deterministic: true,
-            cache_dir: None,
-        }
-    }
-}
-
 pub struct QuantizationArgs<'a> {
     pub semantic: QuantizationSemantic,
     pub input: &'a Tensor,
@@ -64,7 +41,6 @@ pub struct QuantizationArgs<'a> {
     pub scales: Option<&'a mut Tensor>,
     /// Used only by [`QuantizationSemantic::FixedScaleE4m3`].
     pub scale: f32,
-    pub policy: QuantizationPolicy,
 }
 
 impl<'a> QuantizationArgs<'a> {
@@ -75,14 +51,12 @@ impl<'a> QuantizationArgs<'a> {
             out,
             scales: None,
             scale: 1.0,
-            policy: QuantizationPolicy::default(),
         }
     }
 }
 
 pub(crate) struct Normalized {
     pub spec: abi::Spec,
-    pub policy: QuantizationPolicy,
     pub bindings: abi::Bindings,
     pub storage: Vec<CudaBuffer>,
 }
@@ -260,7 +234,6 @@ pub(crate) fn normalize(ctx: &CudaContext, args: QuantizationArgs<'_>) -> Result
             input_cols: input_cols as i64,
             output_cols: output_cols as i64,
         },
-        policy: args.policy,
         bindings: abi::Bindings {
             input,
             output,

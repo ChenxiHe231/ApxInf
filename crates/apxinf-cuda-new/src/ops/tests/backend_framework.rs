@@ -1245,7 +1245,6 @@ fn nonblocking_output_initialization_is_ordered_before_operator_writes() {
                 theta: 1.0,
                 position_offset: 0,
                 kv_output_offset: 0,
-                policy: RopePolicy::default(),
             },
         )
         .unwrap();

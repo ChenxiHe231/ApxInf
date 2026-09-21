@@ -81,33 +81,6 @@ impl Semantic {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct NormPolicy {
-    pub workspace_limit: usize,
-    pub online_tune: bool,
-    pub allow_fallback: bool,
-    pub graph_safe: bool,
-    pub deterministic: bool,
-    pub cache_dir: Option<String>,
-}
-
-impl Default for NormPolicy {
-    fn default() -> Self {
-        Self {
-            // These kernels own no scratch, so the limit only guards against a
-            // future candidate that does.
-            workspace_limit: 0,
-            // One memory-bound implementation per semantic: there is nothing to
-            // time, and the native side resolves the candidate directly.
-            online_tune: false,
-            allow_fallback: true,
-            graph_safe: true,
-            deterministic: true,
-            cache_dir: None,
-        }
-    }
-}
-
 /// Row-wise normalization over a contiguous `[rows, cols]` activation.
 ///
 /// `norm_style` is `[2 * cols]` (scale then shift) and `gate_style` is
@@ -124,12 +97,10 @@ pub(crate) struct RawArgs<'a> {
     pub(crate) hidden: Option<&'a mut Tensor>,
     pub(crate) normalized: Option<&'a mut Tensor>,
     pub(crate) eps: f32,
-    pub(crate) policy: NormPolicy,
 }
 
 pub(crate) struct Normalized {
     pub spec: abi::Spec,
-    pub policy: NormPolicy,
     pub bindings: abi::Bindings,
     pub storage: Vec<CudaBuffer>,
 }
@@ -365,7 +336,6 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
 
     Ok(Normalized {
         spec,
-        policy: args.policy,
         bindings,
         storage,
     })
