@@ -196,18 +196,18 @@ fn load_fp8(
     n: usize,
     k: usize,
 ) -> Fp8Weight {
-    let source = cpu_bytes(&tensors[&format!("{prefix}.weight")]);
-    // The checkpoint stores [N, K]; the GEMM contract wants [K, N].
-    let mut transposed = vec![0u8; n * k];
-    for row in 0..n {
-        for column in 0..k {
-            transposed[column * n + row] = source[row * k + column];
-        }
-    }
+    // Kept as [N, K], the checkpoint's own orientation and the one the GEMV
+    // reads. No transpose: the [K, N] form exists for the GEMM contract, and
+    // decode does not use it.
     let weight_scale = scalar(tensors, &format!("{prefix}.weight_scale"));
     let input_scale = scalar(tensors, &format!("{prefix}.input_scale"));
     Fp8Weight {
-        weight: upload(ctx, &transposed, vec![k, n], DType::F8E4M3),
+        weight: upload(
+            ctx,
+            cpu_bytes(&tensors[&format!("{prefix}.weight")]),
+            vec![n, k],
+            DType::F8E4M3,
+        ),
         input_scale,
         alpha: weight_scale * input_scale,
     }
@@ -409,14 +409,12 @@ struct KvCache {
     values: Tensor,
 }
 
-/// Single-token FP8 projection through the general GEMM.
+/// Single-token FP8 projection: quantize against the checkpoint's
+/// `input_scale`, then one GEMV with both per-tensor scales in alpha.
 ///
-/// A hand-written one-row-per-block GEMV was tried here and measured at
-/// 0.94 ms against the GEMM's 0.358 ms on the qkv shape -- 2.6x slower. The
-/// GEMM path reaches 146 GB/s at M=1, which is only about half of what the
-/// NVFP4 MLP achieves on the same memory, so there is real headroom; but
-/// closing it needs a properly vectorized kernel, not a naive one. This uses
-/// the faster of the two that exist.
+/// The GEMV reaches 249.7 GB/s on the qkv shape against the general GEMM's
+/// 146.8 GB/s. A GEMM's tiling is built for large M and leaves half this
+/// device's bandwidth on the table at M=1.
 fn fp8_projection(
     ctx: &CudaContext,
     weight: &Fp8Weight,
@@ -425,10 +423,7 @@ fn fp8_projection(
     output: &mut Tensor,
 ) {
     ops::quantize_fp8_per_tensor(ctx, source, quantized, weight.input_scale).unwrap();
-    let mut args = ops::GemmArgs::new(quantized, &weight.weight, output);
-    args.quantization = ops::GemmQuantization::Fp8UnitScale;
-    args.alpha = weight.alpha;
-    ops::gemm(ctx, args).unwrap();
+    ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha).unwrap();
 }
 
 /// residual = residual + MLP(RMSNorm(residual)), with the residual being the
@@ -742,12 +737,34 @@ fn full_model_decodes_and_is_timed() {
         _ => None,
     }).unwrap();
 
-    let qkv_source = view(&probe.normalized, vec![1, HIDDEN], DType::BF16);
     let qkv_quantized = view(&probe.fp8_activation, vec![1, HIDDEN], DType::F8E4M3);
     let mut qkv_out = view(&probe.gdn_qkv, vec![1, QKV_WIDTH], DType::BF16);
-    let qkv_each = phase!("fp8 qkv projection", 50, {
-        fp8_projection(&ctx, &gdn_layer.qkv, &qkv_source, &qkv_quantized, &mut qkv_out);
+    // The GEMM contract reads [K, N]; reinterpreting the [N, K] weight gives
+    // wrong numbers but the same sequential sweep, which is what is timed.
+    let gemm_weight = view(&gdn_layer.qkv.weight, vec![HIDDEN, QKV_WIDTH], DType::F8E4M3);
+    let qkv_each = phase!("fp8 qkv via GEMM", 50, {
+        let mut args = ops::GemmArgs::new(&qkv_quantized, &gemm_weight, &mut qkv_out);
+        args.quantization = ops::GemmQuantization::Fp8UnitScale;
+        args.alpha = gdn_layer.qkv.alpha;
+        ops::gemm(&ctx, args).unwrap();
     });
+
+    // The decode path now uses the GEMV; keep the comparison so a regression
+    // in either shows up.
+    let gemv_weight = view(&gdn_layer.qkv.weight, vec![QKV_WIDTH, HIDDEN], DType::F8E4M3);
+    let gemv_activation = view(&probe.fp8_activation, vec![HIDDEN], DType::F8E4M3);
+    let gemv_out = view(&probe.gdn_qkv, vec![QKV_WIDTH], DType::BF16);
+    let gemv_each = phase!("fp8 qkv via vectorized GEMV", 50, {
+        ops::fp8_gemv(&ctx, &gemv_weight, &gemv_activation, &gemv_out,
+                      gdn_layer.qkv.alpha).unwrap();
+    });
+    let weight_bytes = (QKV_WIDTH * HIDDEN) as f64;
+    println!(
+        "    GEMM {:6.1} GB/s   GEMV {:6.1} GB/s   ({:+.0}%)",
+        weight_bytes / qkv_each / 1e9,
+        weight_bytes / gemv_each / 1e9,
+        (qkv_each / gemv_each - 1.0) * 100.0
+    );
 
     let state = zeros(&ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM, GDN_HEAD_DIM], DType::F32);
     let (gq, gk, gv) = split_gdn_qkv(&ctx, &probe.gdn_conv);
