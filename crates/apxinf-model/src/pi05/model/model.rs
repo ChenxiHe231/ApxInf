@@ -1,5 +1,5 @@
 //! Construction and typed dispatch of loaded PI0.5 computation. No execution policy or capture ownership.
-use super::blocks::{Bf16Blocks, Fp8StaticBlocks, Int8DynamicBlocks};
+use super::blocks::{Bf16Blocks, Fp8StaticBlocks, Int8DynamicBlocks, L3Policies};
 use super::Pi05Model;
 use super::{Bf16Model, Fp8StaticModel, Int8DynamicModel};
 use crate::pi05::backend::RuntimeBackend;
@@ -14,8 +14,16 @@ pub fn build_bf16_model(
     config: Arc<Pi05Config>,
     weights: Arc<Bf16Weights>,
 ) -> Result<Arc<Pi05Model<Bf16Blocks>>> {
+    build_bf16_model_with_policies(backend, config, weights, L3Policies::default())
+}
+pub(in crate::pi05) fn build_bf16_model_with_policies(
+    backend: Arc<Context>,
+    config: Arc<Pi05Config>,
+    weights: Arc<Bf16Weights>,
+    policies: L3Policies,
+) -> Result<Arc<Pi05Model<Bf16Blocks>>> {
     Ok(Arc::new(Pi05Model::from_blocks(Bf16Blocks::new(
-        backend, config, weights,
+        backend, config, weights, policies,
     )?)))
 }
 pub fn build_fp8_static_model(
@@ -24,8 +32,17 @@ pub fn build_fp8_static_model(
     weights: Arc<Fp8StaticWeights>,
     scales: Arc<Fp8StaticActivationScales>,
 ) -> Result<Arc<Pi05Model<Fp8StaticBlocks>>> {
+    build_fp8_static_model_with_policies(backend, config, weights, scales, L3Policies::default())
+}
+pub(in crate::pi05) fn build_fp8_static_model_with_policies(
+    backend: Arc<Context>,
+    config: Arc<Pi05Config>,
+    weights: Arc<Fp8StaticWeights>,
+    scales: Arc<Fp8StaticActivationScales>,
+    policies: L3Policies,
+) -> Result<Arc<Pi05Model<Fp8StaticBlocks>>> {
     Ok(Arc::new(Pi05Model::from_blocks(Fp8StaticBlocks::new(
-        backend, config, weights, scales,
+        backend, config, weights, scales, policies,
     )?)))
 }
 pub fn build_int8_dynamic_model(
@@ -33,8 +50,16 @@ pub fn build_int8_dynamic_model(
     config: Arc<Pi05Config>,
     weights: Arc<Int8DynamicWeights>,
 ) -> Result<Arc<Pi05Model<Int8DynamicBlocks>>> {
+    build_int8_dynamic_model_with_policies(backend, config, weights, L3Policies::default())
+}
+pub(in crate::pi05) fn build_int8_dynamic_model_with_policies(
+    backend: Arc<Context>,
+    config: Arc<Pi05Config>,
+    weights: Arc<Int8DynamicWeights>,
+    policies: L3Policies,
+) -> Result<Arc<Pi05Model<Int8DynamicBlocks>>> {
     Ok(Arc::new(Pi05Model::from_blocks(Int8DynamicBlocks::new(
-        backend, config, weights,
+        backend, config, weights, policies,
     )?)))
 }
 pub fn upload_time_embeddings_bf16(
@@ -108,6 +133,15 @@ impl ModelVariant {
             Self::Bf16 { .. } => "bf16",
             Self::Fp8Static { .. } => "fp8_static",
             Self::Int8Dynamic { .. } => "int8_dynamic",
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::pi05) fn l3_policy_snapshot(&self) -> super::L3PolicySnapshot {
+        match self {
+            Self::Bf16 { model, .. } => model.blocks.policies.snapshot(),
+            Self::Fp8Static { model, .. } => model.blocks.policies.snapshot(),
+            Self::Int8Dynamic { model, .. } => model.blocks.policies.snapshot(),
         }
     }
 

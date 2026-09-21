@@ -36,11 +36,7 @@ fn action_attention_args<'a>(
     args
 }
 
-#[derive(Clone, Default)]
-pub(in crate::pi05::model) struct Fp8L3Policies {
-    gemm: ops::GemmPolicy,
-    attention: ops::AttentionPolicy,
-}
+pub(in crate::pi05) type Fp8L3Policies = super::L3Policies;
 
 struct QkvTensors {
     q: Tensor,
@@ -1038,7 +1034,7 @@ mod tests {
 // Precision-specific backbone operations share this file with their layers.
 pub(in crate::pi05::model) mod backbone {
     use super::*;
-    use crate::pi05::backend::{Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
+    use crate::pi05::backend::{Context, DeviceBuffer as CudaBuffer};
     use crate::pi05::weights::*;
     use crate::pi05::Pi05Config;
     use apxinf_core::{Error, Result, Tensor};
@@ -1055,18 +1051,19 @@ pub(in crate::pi05::model) mod backbone {
         final_norm: Tensor,
     }
     pub struct Fp8StaticBlocks {
-        pub(in crate::pi05::model) backend: Arc<RuntimeBackend>,
+        pub(in crate::pi05::model) backend: Arc<Context>,
         pub(in crate::pi05::model) config: Arc<Pi05Config>,
         pub(in crate::pi05::model) weights: Arc<Fp8StaticWeights>,
         pub(in crate::pi05::model) scales: Arc<Fp8StaticActivationScales>,
         pub(in crate::pi05::model) policies: Fp8L3Policies,
     }
     impl Fp8StaticBlocks {
-        pub fn new(
-            backend: Arc<RuntimeBackend>,
+        pub(in crate::pi05) fn new(
+            backend: Arc<Context>,
             config: Arc<Pi05Config>,
             weights: Arc<Fp8StaticWeights>,
             scales: Arc<Fp8StaticActivationScales>,
+            policies: Fp8L3Policies,
         ) -> Result<Self> {
             config.validate()?;
             scales.validate(&config)?;
@@ -1081,7 +1078,7 @@ pub(in crate::pi05::model) mod backbone {
                 config,
                 weights,
                 scales,
-                policies: Fp8L3Policies::default(),
+                policies,
             })
         }
 
@@ -1498,7 +1495,7 @@ pub(in crate::pi05::model) mod backbone {
 }
 
 impl crate::pi05::model::PrepareBlocks for backbone::Fp8StaticBlocks {
-    fn backend(&self) -> &std::sync::Arc<crate::pi05::backend::RuntimeBackend> {
+    fn backend(&self) -> &std::sync::Arc<crate::pi05::backend::Context> {
         &self.backend
     }
     fn workspace_requirements(
