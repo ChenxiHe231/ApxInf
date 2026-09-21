@@ -425,9 +425,9 @@ fn main() {
             // exact compile policy part of the Attention build fingerprint.
             command.args(attention_fingerprint::FA2_FIXED_FEATURE_DEFINES);
             command.arg(if is_fa2_e4m3 {
-                "-DFLASH_NAMESPACE=apxinf_fa2_direct_e4m3"
+                "-DFLASH_NAMESPACE=apxinf_cuda_new_fa2_direct_e4m3"
             } else {
-                "-DFLASH_NAMESPACE=apxinf_fa2"
+                "-DFLASH_NAMESPACE=apxinf_cuda_new_fa2"
             });
             if is_fa2_e4m3 {
                 command.arg("-DAPXINF_FA2_DIRECT_E4M3=1");
