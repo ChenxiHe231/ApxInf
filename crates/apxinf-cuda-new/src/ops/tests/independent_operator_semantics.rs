@@ -19,6 +19,12 @@ fn tensor_for(dtype: DType, shape: Vec<usize>, values: &[f32]) -> Tensor {
 }
 
 fn tensor_values(value: &Tensor) -> Vec<f32> {
+    // Direct operators enqueue on CudaContext's non-blocking stream. A
+    // synchronous copy on the legacy default stream does not order that work,
+    // so establish the test's host-observation boundary explicitly.
+    unsafe {
+        crate::ffi::check_cuda(crate::ffi::cudaDeviceSynchronize()).unwrap();
+    }
     let buffer = CudaBuffer::from_tensor(value).unwrap();
     let mut bytes = vec![0; buffer.len()];
     buffer.copy_to_host(&mut bytes).unwrap();
