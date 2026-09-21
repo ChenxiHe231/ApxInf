@@ -50,9 +50,11 @@ void validate_spec(const apxinf_pointwise_spec_t& spec) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Pointwise Spec");
   }
   if ((!quantized_geglu && spec.output_scale_is_unit != 1) ||
-      (quantized_geglu && spec.cols % 2 != 0)) {
+      (quantized_geglu &&
+       (spec.cols % 2 != 0 || spec.input_alignment < 4 ||
+        spec.output_alignment < 2 || spec.rows * spec.cols > INT32_MAX))) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "invalid Pointwise output scale contract");
+                  "invalid Pointwise quantized GeGLU contract");
   }
   if (spec.has_bias != 0 && !may_have_bias(spec.semantic)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
@@ -87,6 +89,23 @@ void validate_bindings(const apxinf_pointwise_spec_t& spec,
        (spec.output_scale_is_unit != 0)) ||
       !std::isfinite(bindings.dt)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Pointwise scalar");
+  }
+  if (spec.semantic == APXINF_POINTWISE_SEMANTIC_GEGLU &&
+      spec.dtype == APXINF_DTYPE_F16 &&
+      spec.output_dtype == APXINF_DTYPE_E4M3) {
+    const auto input = reinterpret_cast<uintptr_t>(bindings.input);
+    const auto output = reinterpret_cast<uintptr_t>(bindings.output);
+    const size_t count = static_cast<size_t>(spec.rows) * spec.cols;
+    const size_t input_bytes = count * 2 * sizeof(half);
+    const size_t output_bytes = count * sizeof(__nv_fp8_e4m3);
+    const bool range_overflow = input_bytes > UINTPTR_MAX - input ||
+                                output_bytes > UINTPTR_MAX - output;
+    const bool overlap = !range_overflow && input < output + output_bytes &&
+                         output < input + input_bytes;
+    if (input % 4 != 0 || output % 2 != 0 || range_overflow || overlap) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid F16-to-E4M3 GeGLU storage");
+    }
   }
 }
 
