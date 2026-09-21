@@ -638,6 +638,43 @@ fn gemm_geglu_all_candidates_match_torch() {
 }
 
 #[test]
+fn fp8_production_geglu_non_unit_scale_matches_independent_reference() {
+    let ctx = CudaContext::new(0).unwrap();
+    if !matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
+        return;
+    }
+
+    // This is the PI0.5 language-layer production shape.  Make the first K
+    // element one for every activation row and every gate/up weight column,
+    // leaving the remaining operands zero.  Every projection is therefore
+    // exactly one, independent of the production weight-column packing.
+    let (m, k, n) = (522, 2048, 32768);
+    let mut a_values = vec![0; m * k];
+    for row in 0..m {
+        a_values[row * k] = 0x38; // E4M3 1.0
+    }
+    let mut b_values = vec![0; k * n];
+    b_values[..n].fill(0x38); // E4M3 1.0 in logical K row zero
+    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &a_values);
+    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &b_values);
+    let mut out = zeros_tensor(0, vec![m, n / 2], DType::F8E4M3);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    let gelu_one = 0.5_f32
+        * (1.0
+            + (0.7978845608028654_f32 * (1.0 + 0.044715_f32)).tanh());
+    configure_torch_case(&mut args, 1.0, gelu_one);
+    validate_all_candidates(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmGeglu,
+        None,
+        &vec![1.0; m * n / 2],
+    )
+    .unwrap();
+}
+
+#[test]
 fn bf16_gemm_geglu_all_candidates_cover_packed_output_path() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, inner) = (2, 4, 4);
