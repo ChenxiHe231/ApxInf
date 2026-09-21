@@ -53,22 +53,18 @@ pub use gemm::{
 };
 pub use cache::{concat_rows, reserve_prefix};
 pub use gather::{
-    gather, GatherArgs, GatherPolicy, GatherSemantic, PatchGeometry as GatherPatchGeometry,
+    gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry,
 };
 pub use norm::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,
     bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, layer_norm, rms_norm,
     AdaGateResidualArgs, AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, BiasResidualArgs,
     BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, BiasThenResidualArgs, LayerNormArgs,
-    NormPolicy, RmsNormArgs,
+    RmsNormArgs,
 };
-pub use pointwise::{
-    pointwise, PointwiseActivation, PointwiseArgs, PointwisePolicy, PointwiseSemantic,
-};
-pub use quantization::{
-    quantization, QuantizationArgs, QuantizationPolicy, QuantizationSemantic,
-};
-pub use rope::{decode_rope, rope, DecodeRopeArgs, RopeArgs, RopePolicy, RopeSemantic};
+pub use pointwise::{pointwise, PointwiseActivation, PointwiseArgs, PointwiseSemantic};
+pub use quantization::{quantization, QuantizationArgs, QuantizationSemantic};
+pub use rope::{decode_rope, rope, DecodeRopeArgs, RopeArgs, RopeSemantic};
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
 pub fn prepare_with_session<T>(

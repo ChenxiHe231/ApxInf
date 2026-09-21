@@ -34,11 +34,6 @@ struct ResidualNormTensors {
 pub(in crate::pi05) struct Int8DynamicL3Policies {
     pub gemm: ops::GemmPolicy,
     pub attention: ops::AttentionPolicy,
-    pub norm: ops::NormPolicy,
-    pub pointwise: ops::PointwisePolicy,
-    pub gather: ops::GatherPolicy,
-    pub rope: ops::RopePolicy,
-    pub quantization: ops::QuantizationPolicy,
 }
 
 fn l3_rms_bf16(
@@ -46,12 +41,11 @@ fn l3_rms_bf16(
     input: &Tensor,
     weight: &Tensor,
     eps: f32,
-    policy: &ops::NormPolicy,
 ) -> Result<Tensor> {
     let mut output = ctx.allocate_output(input.shape().clone(), DType::BF16)?;
     ops::rms_norm(
         ctx,
-        ops::RmsNormArgs::new(input, weight, &mut output, eps).with_policy(policy.clone()),
+        ops::RmsNormArgs::new(input, weight, &mut output, eps),
     )?;
     Ok(output)
 }
@@ -62,13 +56,11 @@ fn l3_layer_bf16(
     weight: &Tensor,
     bias: &Tensor,
     eps: f32,
-    policy: &ops::NormPolicy,
 ) -> Result<Tensor> {
     let mut output = ctx.allocate_output(input.shape().clone(), DType::BF16)?;
     ops::layer_norm(
         ctx,
-        ops::LayerNormArgs::new(input, weight, bias, &mut output, eps)
-            .with_policy(policy.clone()),
+        ops::LayerNormArgs::new(input, weight, bias, &mut output, eps),
     )?;
     Ok(output)
 }
@@ -88,7 +80,6 @@ fn l3_adaptive_rms_bf16(
     input: &Tensor,
     style: &Tensor,
     eps: f32,
-    policy: &ops::NormPolicy,
 ) -> Result<Tensor> {
     let cols = input
         .shape()
@@ -100,8 +91,7 @@ fn l3_adaptive_rms_bf16(
     let mut output = ctx.allocate_output(input.shape().clone(), DType::BF16)?;
     ops::adaptive_rms_norm(
         ctx,
-        ops::AdaptiveRmsNormArgs::new(input, &style, &mut output, eps)
-            .with_policy(policy.clone()),
+        ops::AdaptiveRmsNormArgs::new(input, &style, &mut output, eps),
     )?;
     Ok(output)
 }
@@ -111,23 +101,17 @@ fn l3_bias_activation_bf16(
     input: &Tensor,
     bias: Option<&Tensor>,
     activation: ops::PointwiseActivation,
-    policy: &ops::PointwisePolicy,
 ) -> Result<Tensor> {
     let mut output = ctx.allocate_output(input.shape().clone(), DType::BF16)?;
     let mut args =
         ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
     args.bias = bias;
     args.activation = activation;
-    args.policy = policy.clone();
     ops::pointwise(ctx, args)?;
     Ok(output)
 }
 
-fn l3_geglu_bf16(
-    ctx: &Context,
-    input: &Tensor,
-    policy: &ops::PointwisePolicy,
-) -> Result<Tensor> {
+fn l3_geglu_bf16(ctx: &Context, input: &Tensor) -> Result<Tensor> {
     let shape = input.shape().dims();
     if input.dtype() != DType::BF16 || shape.len() != 2 || shape[1] % 2 != 0 {
         return Err(Error::Other(
@@ -136,8 +120,7 @@ fn l3_geglu_bf16(
     }
     let mut output =
         ctx.allocate_output(Shape::new(vec![shape[0], shape[1] / 2]), DType::BF16)?;
-    let mut args = ops::PointwiseArgs::new(ops::PointwiseSemantic::Geglu, input, &mut output);
-    args.policy = policy.clone();
+    let args = ops::PointwiseArgs::new(ops::PointwiseSemantic::Geglu, input, &mut output);
     ops::pointwise(ctx, args)?;
     Ok(output)
 }
@@ -147,14 +130,12 @@ fn l3_euler_update_bf16(
     state: &Tensor,
     velocity: &Tensor,
     dt: f32,
-    policy: &ops::PointwisePolicy,
 ) -> Result<Tensor> {
     let mut output = ctx.allocate_output(state.shape().clone(), DType::BF16)?;
     let mut args =
         ops::PointwiseArgs::new(ops::PointwiseSemantic::EulerUpdate, state, &mut output);
     args.secondary = Some(velocity);
     args.dt = dt;
-    args.policy = policy.clone();
     ops::pointwise(ctx, args)?;
     Ok(output)
 }
@@ -259,7 +240,6 @@ fn l3_split_qkv_bias_bf16(
     bias: Option<&Tensor>,
     heads: usize,
     head_dim: usize,
-    policy: &ops::RopePolicy,
 ) -> Result<QkvTensors> {
     let shape = qkv.shape().dims();
     if qkv.dtype() != DType::BF16
@@ -289,7 +269,6 @@ fn l3_split_qkv_bias_bf16(
             theta: 1.0,
             position_offset: 0,
             kv_output_offset: 0,
-            policy: policy.clone(),
         },
     )?;
     Ok(QkvTensors { q, k, v })
@@ -305,7 +284,6 @@ fn l3_split_qkv_rope_bf16(
     head_dim: usize,
     theta: f32,
     position_offset: usize,
-    policy: &ops::RopePolicy,
 ) -> Result<QkvTensors> {
     let shape = qkv.shape().dims();
     let expected_width = (q_heads + 2 * kv_heads)
@@ -338,7 +316,6 @@ fn l3_split_qkv_rope_bf16(
             theta,
             position_offset,
             kv_output_offset: 0,
-            policy: policy.clone(),
         },
     )?;
     Ok(QkvTensors { q, k, v })
@@ -357,7 +334,6 @@ fn l3_split_qkv_rope_into_cache_bf16(
     key_cache: &Tensor,
     value_cache: &Tensor,
     cache_offset: usize,
-    policy: &ops::RopePolicy,
 ) -> Result<Tensor> {
     let shape = qkv.shape().dims();
     let expected_width = (q_heads + 2 * kv_heads)
@@ -389,7 +365,6 @@ fn l3_split_qkv_rope_into_cache_bf16(
             theta,
             position_offset,
             kv_output_offset: cache_offset,
-            policy: policy.clone(),
         },
     )?;
     Ok(q)
@@ -400,13 +375,11 @@ fn l3_bias_residual_bf16(
     projection: &Tensor,
     bias: Option<&Tensor>,
     residual: &Tensor,
-    policy: &ops::NormPolicy,
 ) -> Result<Tensor> {
     let mut hidden = ctx.allocate_output(projection.shape().clone(), DType::BF16)?;
     ops::bias_residual(
         ctx,
-        ops::BiasResidualArgs::new(projection, bias, residual, &mut hidden)
-            .with_policy(policy.clone()),
+        ops::BiasResidualArgs::new(projection, bias, residual, &mut hidden),
     )?;
     Ok(hidden)
 }
@@ -418,7 +391,6 @@ fn l3_bias_residual_rms_bf16(
     residual: &Tensor,
     weight: &Tensor,
     eps: f32,
-    policy: &ops::NormPolicy,
 ) -> Result<ResidualNormTensors> {
     let mut hidden = ctx.allocate_output(projection.shape().clone(), DType::BF16)?;
     let mut normalized = ctx.allocate_output(projection.shape().clone(), DType::BF16)?;
@@ -432,8 +404,7 @@ fn l3_bias_residual_rms_bf16(
             &mut hidden,
             &mut normalized,
             eps,
-        )
-        .with_policy(policy.clone()),
+        ),
     )?;
     Ok(ResidualNormTensors { hidden, normalized })
 }
@@ -447,7 +418,6 @@ fn l3_bias_residual_layer_bf16(
     norm_weight: &Tensor,
     norm_bias: &Tensor,
     eps: f32,
-    policy: &ops::NormPolicy,
 ) -> Result<ResidualNormTensors> {
     let mut hidden = ctx.allocate_output(projection.shape().clone(), DType::BF16)?;
     let mut normalized = ctx.allocate_output(projection.shape().clone(), DType::BF16)?;
@@ -462,8 +432,7 @@ fn l3_bias_residual_layer_bf16(
             &mut hidden,
             &mut normalized,
             eps,
-        )
-        .with_policy(policy.clone()),
+        ),
     )?;
     Ok(ResidualNormTensors { hidden, normalized })
 }
@@ -475,7 +444,6 @@ fn l3_adaptive_gate_residual_rms_bf16(
     gate_style: &Tensor,
     norm_style: &Tensor,
     eps: f32,
-    policy: &ops::NormPolicy,
 ) -> Result<ResidualNormTensors> {
     let cols = projection
         .shape()
@@ -496,8 +464,7 @@ fn l3_adaptive_gate_residual_rms_bf16(
             &mut hidden,
             &mut normalized,
             eps,
-        )
-        .with_policy(policy.clone()),
+        ),
     )?;
     Ok(ResidualNormTensors { hidden, normalized })
 }
@@ -508,7 +475,6 @@ fn l3_bias_position_bf16(
     bias: Option<&Tensor>,
     position: &Tensor,
     tokens_per_view: usize,
-    policy: &ops::GatherPolicy,
 ) -> Result<Tensor> {
     let mut output = ctx.allocate_output(projection.shape().clone(), DType::BF16)?;
     let mut args =
@@ -516,7 +482,6 @@ fn l3_bias_position_bf16(
     args.bias = bias;
     args.position = Some(position);
     args.tokens_per_view = tokens_per_view;
-    args.policy = policy.clone();
     ops::gather(ctx, args)?;
     Ok(output)
 }
@@ -526,7 +491,6 @@ fn l3_embedding_lookup_bf16(
     table: &Tensor,
     ids: &DeviceBuffer,
     tokens: usize,
-    policy: &ops::GatherPolicy,
 ) -> Result<Tensor> {
     let shape = table.shape().dims();
     if table.dtype() != DType::BF16 || shape.len() != 2 || tokens == 0 {
@@ -538,7 +502,6 @@ fn l3_embedding_lookup_bf16(
     let mut args = ops::GatherArgs::new(ops::GatherSemantic::EmbeddingLookup, table, &mut output);
     args.ids = Some(ids);
     args.vocab_size = shape[0];
-    args.policy = policy.clone();
     ops::gather(ctx, args)?;
     Ok(output)
 }
@@ -555,10 +518,10 @@ fn language_layer_int8_dynamic_with_policies(
     rope_theta: f32,
     policies: &Int8DynamicL3Policies,
 ) -> Result<Int8DynamicLanguageLayerOutput> {
-    let normalized = l3_rms_bf16(ctx, input, &weights.input_norm_scale, rms_eps, &policies.norm)?;
+    let normalized = l3_rms_bf16(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = weights
         .qkv
-        .gemm_with_policies(ctx, &normalized, &policies.gemm, &policies.quantization)?;
+        .gemm_with_policies(ctx, &normalized, &policies.gemm)?;
     let qkv = l3_split_qkv_rope_bf16(
         ctx,
         &qkv,
@@ -568,7 +531,6 @@ fn language_layer_int8_dynamic_with_policies(
         config.head_dim,
         rope_theta,
         position_offset,
-        &policies.rope,
     )?;
     let tokens = input.shape().dims()[0];
     if !compute_tail {
@@ -582,7 +544,7 @@ fn language_layer_int8_dynamic_with_policies(
         .reshape(vec![tokens, config.num_heads * config.head_dim])?;
     let projected = weights
         .output
-        .gemm_with_policies(ctx, &attention, &policies.gemm, &policies.quantization)?;
+        .gemm_with_policies(ctx, &attention, &policies.gemm)?;
     let fused = l3_bias_residual_rms_bf16(
         ctx,
         &projected,
@@ -590,24 +552,21 @@ fn language_layer_int8_dynamic_with_policies(
         input,
         &weights.post_attention_norm_scale,
         rms_eps,
-        &policies.norm,
     )?;
     let gate_up = weights.gate_up.gemm_with_policies(
         ctx,
         &fused.normalized,
         &policies.gemm,
-        &policies.quantization,
     )?;
-    let activated = l3_geglu_bf16(ctx, &gate_up, &policies.pointwise)?;
+    let activated = l3_geglu_bf16(ctx, &gate_up)?;
     let projected = weights
         .down
-        .gemm_with_policies(ctx, &activated, &policies.gemm, &policies.quantization)?;
+        .gemm_with_policies(ctx, &activated, &policies.gemm)?;
     let hidden = l3_bias_residual_bf16(
         ctx,
         &projected,
         weights.down.bias.as_ref(),
         &fused.hidden,
-        &policies.norm,
     )?;
     Ok(Int8DynamicLanguageLayerOutput {
         hidden,
@@ -664,12 +623,11 @@ fn action_layer_int8_dynamic_with_policies(
             input,
             attention_modulation,
             rms_eps,
-            &policies.norm,
         )?,
     };
     let qkv = weights
         .qkv
-        .gemm_with_policies(ctx, &normalized, &policies.gemm, &policies.quantization)?;
+        .gemm_with_policies(ctx, &normalized, &policies.gemm)?;
     let q = l3_split_qkv_rope_into_cache_bf16(
         ctx,
         &qkv,
@@ -682,7 +640,6 @@ fn action_layer_int8_dynamic_with_policies(
         prefix_k,
         prefix_v,
         position_offset,
-        &policies.rope,
     )?;
     let attention = l3_mqa_bf16(
         ctx,
@@ -698,7 +655,7 @@ fn action_layer_int8_dynamic_with_policies(
     ])?;
     let projected = weights
         .output
-        .gemm_with_policies(ctx, &attention, &policies.gemm, &policies.quantization)?;
+        .gemm_with_policies(ctx, &attention, &policies.gemm)?;
     let fused = l3_adaptive_gate_residual_rms_bf16(
         ctx,
         &projected,
@@ -706,18 +663,16 @@ fn action_layer_int8_dynamic_with_policies(
         attention_modulation,
         mlp_modulation,
         rms_eps,
-        &policies.norm,
     )?;
     let gate_up = weights.gate_up.gemm_with_policies(
         ctx,
         &fused.normalized,
         &policies.gemm,
-        &policies.quantization,
     )?;
-    let activated = l3_geglu_bf16(ctx, &gate_up, &policies.pointwise)?;
+    let activated = l3_geglu_bf16(ctx, &gate_up)?;
     let projected = weights
         .down
-        .gemm_with_policies(ctx, &activated, &policies.gemm, &policies.quantization)?;
+        .gemm_with_policies(ctx, &activated, &policies.gemm)?;
     let fused = l3_adaptive_gate_residual_rms_bf16(
         ctx,
         &projected,
@@ -725,7 +680,6 @@ fn action_layer_int8_dynamic_with_policies(
         mlp_modulation,
         next_norm_modulation,
         rms_eps,
-        &policies.norm,
     )?;
     Ok(Int8DynamicActionLayerOutput {
         hidden: fused.hidden,
@@ -775,14 +729,13 @@ fn vision_patch_embed_int8_dynamic_with_policies(
     patches_per_view: usize,
     policies: &Int8DynamicL3Policies,
 ) -> Result<Tensor> {
-    let projection = weights.gemm_with_policies(ctx, patches, &policies.gemm, &policies.quantization)?;
+    let projection = weights.gemm_with_policies(ctx, patches, &policies.gemm)?;
     l3_bias_position_bf16(
         ctx,
         &projection,
         weights.bias.as_ref(),
         position_embedding,
         patches_per_view,
-        &policies.gather,
     )
 }
 
@@ -820,18 +773,16 @@ fn vision_layer_int8_dynamic_with_policies(
         &weights.norm1.weight,
         &weights.norm1.bias,
         layer_norm_eps,
-        &policies.norm,
     )?;
     let qkv = weights
         .qkv
-        .gemm_with_policies(ctx, &normalized, &policies.gemm, &policies.quantization)?;
+        .gemm_with_policies(ctx, &normalized, &policies.gemm)?;
     let qkv = l3_split_qkv_bias_bf16(
         ctx,
         &qkv,
         weights.qkv.bias.as_ref(),
         heads,
         head_dim,
-        &policies.rope,
     )?;
     let attention = l3_mha_bf16(
         ctx,
@@ -844,7 +795,7 @@ fn vision_layer_int8_dynamic_with_policies(
         .reshape(vec![input.shape().dims()[0], heads * head_dim])?;
     let projection = weights
         .output
-        .gemm_with_policies(ctx, &attention, &policies.gemm, &policies.quantization)?;
+        .gemm_with_policies(ctx, &attention, &policies.gemm)?;
     let fused = l3_bias_residual_layer_bf16(
         ctx,
         &projection,
@@ -853,30 +804,26 @@ fn vision_layer_int8_dynamic_with_policies(
         &weights.norm2.weight,
         &weights.norm2.bias,
         layer_norm_eps,
-        &policies.norm,
     )?;
     let activation = weights.fc1.gemm_with_policies(
         ctx,
         &fused.normalized,
         &policies.gemm,
-        &policies.quantization,
     )?;
     let activation = l3_bias_activation_bf16(
         ctx,
         &activation,
         weights.fc1.bias.as_ref(),
         ops::PointwiseActivation::Gelu,
-        &policies.pointwise,
     )?;
     let projection = weights
         .fc2
-        .gemm_with_policies(ctx, &activation, &policies.gemm, &policies.quantization)?;
+        .gemm_with_policies(ctx, &activation, &policies.gemm)?;
     l3_bias_residual_bf16(
         ctx,
         &projection,
         weights.fc2.bias.as_ref(),
         &fused.hidden,
-        &policies.norm,
     )
 }
 
@@ -1010,7 +957,6 @@ pub(in crate::pi05::model) mod backbone {
                 &self.weights.vision_post_norm.weight,
                 &self.weights.vision_post_norm.bias,
                 self.config.layer_norm_eps,
-                &self.policies.norm,
             )?;
             let projected = self
                 .weights
@@ -1019,14 +965,12 @@ pub(in crate::pi05::model) mod backbone {
                     self.ctx(),
                     &hidden,
                     &self.policies.gemm,
-                    &self.policies.quantization,
                 )?;
             l3_bias_activation_bf16(
                 self.ctx(),
                 &projected,
                 self.weights.multimodal_projector.bias.as_ref(),
                 ops::PointwiseActivation::None,
-                &self.policies.pointwise,
             )
         }
 
@@ -1047,7 +991,6 @@ pub(in crate::pi05::model) mod backbone {
                 &self.weights.token_embedding,
                 token_ids,
                 token_count,
-                &self.policies.gather,
             )?;
             ops::concat_rows(self.ctx(), vision_tokens, &language)
         }
@@ -1085,27 +1028,23 @@ pub(in crate::pi05::model) mod backbone {
                 self.ctx(),
                 time_embedding,
                 &self.policies.gemm,
-                &self.policies.quantization,
             )?;
             let hidden = l3_bias_activation_bf16(
                 self.ctx(),
                 &hidden,
                 self.weights.time_mlp_in.bias.as_ref(),
                 ops::PointwiseActivation::Silu,
-                &self.policies.pointwise,
             )?;
             let output = self.weights.time_mlp_out.gemm_with_policies(
                 self.ctx(),
                 &hidden,
                 &self.policies.gemm,
-                &self.policies.quantization,
             )?;
             l3_bias_activation_bf16(
                 self.ctx(),
                 &output,
                 self.weights.time_mlp_out.bias.as_ref(),
                 ops::PointwiseActivation::Silu,
-                &self.policies.pointwise,
             )
         }
 
@@ -1118,14 +1057,12 @@ pub(in crate::pi05::model) mod backbone {
                 self.ctx(),
                 conditioning,
                 &self.policies.gemm,
-                &self.policies.quantization,
             )?;
             let modulation = l3_bias_activation_bf16(
                 self.ctx(),
                 &projected,
                 weights.bias.as_ref(),
                 ops::PointwiseActivation::None,
-                &self.policies.pointwise,
             )?;
             modulation.reshape(vec![modulation.numel()])
         }
@@ -1187,14 +1124,12 @@ pub(in crate::pi05::model) mod backbone {
                 self.ctx(),
                 state,
                 &self.policies.gemm,
-                &self.policies.quantization,
             )?;
             let mut hidden = l3_bias_activation_bf16(
                 self.ctx(),
                 &hidden,
                 self.weights.action_in.bias.as_ref(),
                 ops::PointwiseActivation::None,
-                &self.policies.pointwise,
             )?;
             let mut attention_normalized = None;
             for index in 0..self.config.action_expert.depth {
@@ -1230,16 +1165,14 @@ pub(in crate::pi05::model) mod backbone {
                 self.ctx(),
                 &hidden,
                 &self.policies.gemm,
-                &self.policies.quantization,
             )?;
             let velocity = l3_bias_activation_bf16(
                 self.ctx(),
                 &velocity,
                 self.weights.action_out.bias.as_ref(),
                 ops::PointwiseActivation::None,
-                &self.policies.pointwise,
             )?;
-            l3_euler_update_bf16(self.ctx(), state, &velocity, dt, &self.policies.pointwise)
+            l3_euler_update_bf16(self.ctx(), state, &velocity, dt)
         }
 
         pub fn denoise_step(
@@ -1324,7 +1257,7 @@ impl crate::pi05::model::PrepareBlocks for backbone::Int8DynamicBlocks {
         layout: crate::pi05::Pi05ImageLayout,
     ) -> Result<()> {
         let mut patches = patches.clone();
-        let mut args = ops::GatherArgs::rgb_to_patches(
+        let args = ops::GatherArgs::rgb_to_patches(
             images,
             &mut patches,
             ops::GatherPatchGeometry {
@@ -1334,7 +1267,6 @@ impl crate::pi05::model::PrepareBlocks for backbone::Int8DynamicBlocks {
                 nhwc: matches!(layout, crate::pi05::Pi05ImageLayout::Nhwc),
             },
         );
-        args.policy = self.policies.gather.clone();
         ops::gather(self.backend.context(), args)
     }
 }

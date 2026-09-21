@@ -2,8 +2,7 @@
 
 #include <stdint.h>
 
-/* Shares the dtype enum, status codes and tuning policy with the gemm family,
-   the same way attention_types.h does. */
+/* Shares the dtype enum and status codes with the gemm family. */
 #include "gemm_types.h"
 
 /* Normalization family.
@@ -81,8 +80,6 @@ typedef struct {
      by its calibration scale. */
   uint32_t output_scale_is_unit;
 } apxinf_norm_spec_t;
-
-typedef apxinf_tuning_policy_t apxinf_norm_policy_t;
 
 typedef struct {
   const void* input;

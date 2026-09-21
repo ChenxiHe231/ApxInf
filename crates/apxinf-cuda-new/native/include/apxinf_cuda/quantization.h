@@ -8,7 +8,6 @@ extern "C" {
 
 apxinf_status_t apxinf_quantization_launch(
     apxinf_runtime_t runtime, const apxinf_quantization_spec_t* spec,
-    const apxinf_quantization_policy_t* policy,
     const apxinf_quantization_bindings_t* bindings);
 
 #ifdef __cplusplus
