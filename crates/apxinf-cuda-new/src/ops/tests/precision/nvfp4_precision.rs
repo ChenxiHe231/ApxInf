@@ -5,7 +5,7 @@
 //! packing, the load-time scale relayout, candidate selection and the kernel --
 //! rather than any one link.
 
-use super::framework::{bytes_tensor, zeros_tensor};
+use super::framework::{bytes_tensor, tensor, values, zeros_tensor};
 use super::*;
 use crate::CudaContext;
 use apxinf_core::{DType, Tensor};
@@ -191,5 +191,116 @@ fn nvfp4_scale_buffer_is_padded_beyond_the_checkpoint_layout() {
     assert!(
         actual >= logical,
         "atom layout {actual} must not be smaller than the logical grid {logical}"
+    );
+}
+
+#[test]
+fn quantized_activation_reproduces_the_bf16_projection() {
+    // The W4A4 chain is only useful if quantizing the activation preserves the
+    // projection. Compare a BF16 activation quantized on device, run through
+    // the NVFP4 GEMM, against the same projection computed in f64 from the
+    // unquantized BF16 values.
+    let ctx = CudaContext::new(0).unwrap();
+    let device = ctx.device_id();
+    let (m, n, k, block_size) = (64usize, 128usize, 512usize, 16u32);
+    let blocks = k / block_size as usize;
+
+    // A smoothly varying activation with a per-row magnitude spread, which is
+    // what block scaling exists to handle.
+    let activation_values: Vec<f32> = (0..m * k)
+        .map(|index| {
+            let row = index / k;
+            let column = index % k;
+            let magnitude = 1.0 + (row % 4) as f32 * 3.0;
+            magnitude * ((column as f32 * 0.037).sin() + 0.25 * (row as f32 * 0.11).cos())
+        })
+        .collect();
+    let activation = tensor(device, vec![m, k], &activation_values);
+
+    let (b_packed, b_values) = pack_operand(n, k, 5);
+    let (b_scale_codes, b_scale_values) = block_scales(n, blocks, 2);
+    let b = bytes_tensor(device, vec![n, k / 2], DType::E2M1Pair, &b_packed);
+    let b_scales = packed_scale_tensor(&ctx, &b_scale_codes, n, k, block_size).unwrap();
+
+    // A plausible calibration: input_scale sets the representable range to
+    // roughly the activation's actual amax, as ModelOpt's calibration would.
+    let amax = activation_values.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+    let input_scale = amax / (6.0 * 448.0);
+
+    let packed = zeros_tensor(device, vec![m, k / 2], DType::E2M1Pair);
+    let scale_bytes = crate::ops::nvfp4_scale_buffer_bytes(m, k, block_size).unwrap();
+    let a_scales = zeros_tensor(device, vec![scale_bytes], DType::F8E4M3);
+    crate::ops::nvfp4_quantize_activation(
+        &ctx,
+        &activation,
+        &packed,
+        &a_scales,
+        input_scale,
+        block_size,
+    )
+    .unwrap();
+
+    let mut out = zeros_tensor(device, vec![m, n], DType::BF16);
+    let args = GemmArgs::nvfp4(
+        &packed,
+        &a_scales,
+        &b,
+        &b_scales,
+        block_size,
+        input_scale,
+        &mut out,
+    );
+    crate::ops::gemm(&ctx, args).unwrap();
+    ctx.synchronize().map_err(apxinf_core::Error::Cuda).unwrap();
+
+    let produced = values(&out);
+
+    // Measure relative L2 over the whole output, not per-element relative
+    // error. FP4 carries ~2 significant bits, so an output that happens to sum
+    // near zero has a large *relative* error while contributing almost nothing
+    // to the projection -- per-element ratios would report that as failure
+    // while the layer is fine.
+    let mut error_energy = 0.0f64;
+    let mut signal_energy = 0.0f64;
+    for row in 0..m {
+        for column in 0..n {
+            let mut accumulator = 0.0f64;
+            for index in 0..k {
+                // Reference uses the *unquantized* activation: this measures
+                // the cost of quantization, not just kernel arithmetic.
+                accumulator += activation_values[row * k + index] as f64
+                    * b_values[column * k + index]
+                    * b_scale_values[column * blocks + index / block_size as usize];
+            }
+            let got = produced[row * n + column] as f64;
+            error_energy += (got - accumulator).powi(2);
+            signal_energy += accumulator.powi(2);
+        }
+    }
+    let relative_l2 = (error_energy / signal_energy).sqrt();
+
+    // Diagnostic: a constant ratio points at a scale that is applied in the
+    // wrong place; scattered ratios point at a layout or packing fault.
+    for (row, column) in [(0usize, 0usize), (0, 1), (1, 0), (5, 7), (32, 64)] {
+        let mut accumulator = 0.0f64;
+        for index in 0..k {
+            accumulator += activation_values[row * k + index] as f64
+                * b_values[column * k + index]
+                * b_scale_values[column * blocks + index / block_size as usize];
+        }
+        println!(
+            "  [{row},{column}] got={:.5} expected={:.5} ratio={:.5}",
+            produced[row * n + column],
+            accumulator,
+            produced[row * n + column] as f64 / accumulator
+        );
+    }
+    println!("activation quantization relative L2: {relative_l2:.4}");
+    // Quantizing both operands to ~2 significant bits over a 512-deep
+    // reduction lands in the low percent. A wrong scale direction or nibble
+    // order would be an order of magnitude worse.
+    assert!(
+        relative_l2 < 0.12,
+        "quantized projection drifted by relative L2 {relative_l2}"
     );
 }
