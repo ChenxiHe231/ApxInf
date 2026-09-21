@@ -282,6 +282,7 @@ fn main() {
                 "fa2.cu",
                 "flash_attn/flash_fwd_hdim128_bf16_sm80.cu",
                 "flash_attn/flash_fwd_hdim256_bf16_sm80.cu",
+                "flash_attn/flash_fwd_split_hdim256_bf16_sm80.cu",
             ]
             .map(|source| fa2_root.join(source)),
         );
@@ -431,19 +432,19 @@ fn main() {
                 "-U__CUDA_NO_HALF2_OPERATORS__",
                 "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             ]);
+            // The runtime never enables these FA2 feature axes. Keep the
+            // legacy compile-time pruning so every compiled specialization
+            // matches the contract and split-KV does not instantiate an
+            // unused combinatorial kernel set. The shared constant makes the
+            // exact compile policy part of the Attention build fingerprint.
+            command.args(attention_fingerprint::FA2_FIXED_FEATURE_DEFINES);
             command.arg(if is_fa2_e4m3 {
                 "-DFLASH_NAMESPACE=apxinf_fa2_direct_e4m3"
             } else {
                 "-DFLASH_NAMESPACE=apxinf_fa2"
             });
             if is_fa2_e4m3 {
-                command.args([
-                    "-DAPXINF_FA2_DIRECT_E4M3=1",
-                    "-DFLASHATTENTION_DISABLE_DROPOUT",
-                    "-DFLASHATTENTION_DISABLE_ALIBI",
-                    "-DFLASHATTENTION_DISABLE_SOFTCAP",
-                    "-DFLASHATTENTION_DISABLE_LOCAL",
-                ]);
+                command.arg("-DAPXINF_FA2_DIRECT_E4M3=1");
             }
             command.arg(format!("-I{}", fa2_compat_root.display()));
             if is_fa2_e4m3 {

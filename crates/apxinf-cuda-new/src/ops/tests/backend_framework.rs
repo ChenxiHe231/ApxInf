@@ -543,6 +543,144 @@ fn scratch_cache_dir(label: &str) -> std::path::PathBuf {
     dir
 }
 
+#[test]
+#[ignore = "SM89-focused route selection"]
+fn attention_pi05_action_sm89_workspace_and_recipe_lifecycle() {
+    fn run(ctx: &CudaContext, cache: Option<&str>, workspace_limit: usize, tune: bool) -> String {
+        let (batch, query_tokens, key_tokens, query_heads, kv_heads, head_dim) =
+            (1, 10, 522, 8, 1, 256);
+        let query_shape = vec![batch, query_tokens, query_heads, head_dim];
+        let key_value_shape = vec![batch, key_tokens, kv_heads, head_dim];
+        let query = zeros_tensor(0, query_shape.clone(), DType::BF16);
+        let key = zeros_tensor(0, key_value_shape.clone(), DType::BF16);
+        let value = zeros_tensor(0, key_value_shape, DType::BF16);
+        let mut output = zeros_tensor(0, query_shape, DType::BF16);
+        let mut args = AttentionArgs::new(&query, &key, &value, &mut output);
+        args.policy.allow_fallback = false;
+        args.policy.graph_safe = true;
+        args.policy.online_tune = tune;
+        args.policy.workspace_limit = workspace_limit;
+        args.policy.cache_dir = cache.map(str::to_owned);
+        let normalized = super::attention_contracts::normalize(ctx, args).unwrap();
+        super::attention_execution::prepare(ctx, normalized)
+            .unwrap()
+            .summary()
+            .to_owned()
+    }
+
+    let low_workspace = run(&CudaContext::new(0).unwrap(), None, 1024, true);
+    assert!(
+        low_workspace.starts_with("flash-attention-2 config=0 "),
+        "low workspace must retain the direct candidate: {low_workspace}"
+    );
+    for configuration in [2, 3, 5, 9] {
+        assert!(
+            low_workspace.contains(&format!(
+                "flash-attention-2-split-kv#{configuration}=reject(Attention workspace policy exceeded before allocation)"
+            )),
+            "split-KV config {configuration} was not rejected by the workspace prefilter: {low_workspace}"
+        );
+    }
+
+    let cache_dir = scratch_cache_dir("attention-splitkv-recipe");
+    let cache = cache_dir.to_string_lossy().into_owned();
+    let ctx = CudaContext::new(0).unwrap();
+    let cold = run(&ctx, Some(&cache), 256 * 1024 * 1024, true);
+    assert!(
+        cold.starts_with("flash-attention-2-split-kv config=") && cold.contains("source=tuned"),
+        "cold SM89 tune did not select split-KV: {cold}"
+    );
+    let selected = cold.split(" workspace=").next().unwrap();
+    let warm = run(&ctx, Some(&cache), 256 * 1024 * 1024, false);
+    assert!(
+        warm.starts_with(selected) && warm.contains("source=memory-recipe"),
+        "warm restore did not reuse {selected}: {warm}"
+    );
+    let restored = run(
+        &CudaContext::new(0).unwrap(),
+        Some(&cache),
+        256 * 1024 * 1024,
+        false,
+    );
+    assert!(
+        restored.starts_with(selected) && restored.contains("source=recipe"),
+        "cold runtime did not restore persisted {selected}: {restored}"
+    );
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}
+
+#[test]
+fn attention_splitkv_supports_boundary_excludes_mha() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (batch, query_tokens, key_tokens, heads, head_dim) = (1, 3, 65, 1, 256);
+    let query_shape = vec![batch, query_tokens, heads, head_dim];
+    let key_value_shape = vec![batch, key_tokens, heads, head_dim];
+    let query = zeros_tensor(0, query_shape.clone(), DType::BF16);
+    let key = zeros_tensor(0, key_value_shape.clone(), DType::BF16);
+    let value = zeros_tensor(0, key_value_shape, DType::BF16);
+    let mut output = zeros_tensor(0, query_shape, DType::BF16);
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut output);
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    args.policy.online_tune = true;
+    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
+    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
+    assert!(
+        !execution
+            .summary()
+            .starts_with("flash-attention-2-split-kv ")
+            && execution
+                .summary()
+                .contains("flash-attention-2-split-kv=skip(contract)"),
+        "MHA must remain outside the split-KV candidate contract: {}",
+        execution.summary()
+    );
+}
+
+#[test]
+fn attention_splitkv_alignment_boundary_uses_custom_fallback() {
+    fn misaligned_zeros(shape: Vec<usize>) -> Tensor {
+        let bytes = shape.iter().product::<usize>() * DType::BF16.size_in_bytes();
+        let backing = crate::CudaBuffer::alloc_zeros(bytes + 2, 0).unwrap();
+        backing
+            .view(2, bytes)
+            .unwrap()
+            .as_tensor(Shape::new(shape), DType::BF16)
+            .unwrap()
+    }
+
+    let ctx = CudaContext::new(0).unwrap();
+    let (batch, query_tokens, key_tokens, query_heads, kv_heads, head_dim) =
+        (1, 10, 522, 8, 1, 256);
+    let query_shape = vec![batch, query_tokens, query_heads, head_dim];
+    let key_value_shape = vec![batch, key_tokens, kv_heads, head_dim];
+    let query = misaligned_zeros(query_shape.clone());
+    let key = misaligned_zeros(key_value_shape.clone());
+    let value = misaligned_zeros(key_value_shape);
+    let mut output = misaligned_zeros(query_shape);
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut output);
+    args.policy.allow_fallback = true;
+    args.policy.graph_safe = true;
+    args.policy.online_tune = true;
+    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
+    assert_eq!(normalized.spec.q_alignment, 2);
+    assert_eq!(normalized.spec.k_alignment, 2);
+    assert_eq!(normalized.spec.v_alignment, 2);
+    assert_eq!(normalized.spec.output_alignment, 2);
+    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
+    assert!(
+        execution.summary().starts_with("custom-attention-fallback ")
+            && execution
+                .summary()
+                .contains("flash-attention-2-split-kv=skip(alignment)"),
+        "misaligned Attention did not skip split-KV and choose custom: {}",
+        execution.summary()
+    );
+    execution.enqueue_for_test().unwrap();
+    ctx.synchronize().unwrap();
+    assert!(values(&output).iter().all(|&value| value == 0.0));
+}
+
 /// A Recipe is shared by every caller whose Spec matches, and alpha is no longer
 /// part of that Spec. Executing the same shape twice with different alphas
 /// must therefore still scale each result independently: if alpha were cached

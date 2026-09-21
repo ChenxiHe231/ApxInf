@@ -148,6 +148,7 @@ fn gemm_bf16(ctx: &Context, activation: &Tensor, weight: &Tensor) -> Result<Tens
             weight.dtype()
         )));
     }
+    crate::pi05::model::calibration::observe_bf16_activation(activation, weight)?;
     let mut output = ctx.allocate_output(Shape::new(vec![a[0], b[1]]), DType::BF16)?;
     l3_gemm(ctx, GemmArgs::new(activation, weight, &mut output))?;
     Ok(output)
@@ -173,6 +174,10 @@ fn gemm_geglu_bf16(
             canonical_weight.dtype()
         )));
     }
+    crate::pi05::model::calibration::observe_bf16_activation(
+        activation,
+        canonical_weight,
+    )?;
     let mut output = ctx.allocate_output(Shape::new(vec![a[0], b[1] / 2]), DType::BF16)?;
     l3_gemm_geglu(
         ctx,
@@ -1047,7 +1052,7 @@ impl crate::pi05::model::PrepareBlocks for backbone::Bf16Blocks {
         tokens: usize,
     ) -> apxinf_core::Result<crate::pi05::model::WorkspaceRequirements> {
         Ok(crate::pi05::model::WorkspaceRequirements {
-            bytes: self.graph_workspace_bytes(tokens)?,
+            bytes: self.config.cuda_graph_workspace_bytes_bf16(tokens)?,
         })
     }
     fn raw_patch_dtype(&self) -> apxinf_core::DType {
@@ -1073,47 +1078,5 @@ impl crate::pi05::model::PrepareBlocks for backbone::Bf16Blocks {
                 },
             ),
         )
-    }
-}
-impl backbone::Bf16Blocks {
-    fn graph_workspace_bytes(&self, token_count: usize) -> Result<usize> {
-        let mut bytes = self.config.cuda_graph_workspace_bytes_bf16(token_count)?;
-        if self.backend.context().caps().arch_family == apxinf_cuda::CudaArchFamily::Sm80 {
-            bytes = bytes
-                .checked_add(self.splitkv_workspace_bytes(token_count)?)
-                .ok_or_else(|| Error::Other("pi05 BF16 split-KV workspace overflow".into()))?;
-        }
-        Ok(bytes)
-    }
-
-    fn splitkv_workspace_bytes(&self, token_count: usize) -> Result<usize> {
-        let patches = self.config.num_views * self.config.patches_per_view();
-        let prefix = patches
-            .checked_add(token_count)
-            .ok_or_else(|| Error::Other("pi05 split-KV prefix length overflow".into()))?;
-        let horizon = self.config.action_horizon;
-        let action = self.config.action_expert;
-        if action.num_heads <= action.num_kv_heads || action.head_dim != 256 || horizon > 64 {
-            return Ok(0);
-        }
-        let key_tokens = prefix
-            .checked_add(horizon)
-            .ok_or_else(|| Error::Other("pi05 split-KV key length overflow".into()))?;
-        let max_splits = key_tokens.div_ceil(64).min(128);
-        let lse = max_splits
-            .checked_mul(horizon)
-            .and_then(|value| value.checked_mul(action.num_heads))
-            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| Error::Other("pi05 split-KV LSE workspace overflow".into()))?;
-        let output = max_splits
-            .checked_mul(horizon)
-            .and_then(|value| value.checked_mul(action.num_heads))
-            .and_then(|value| value.checked_mul(action.head_dim))
-            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| Error::Other("pi05 split-KV output workspace overflow".into()))?;
-        lse.checked_add(output)
-            .and_then(|value| value.checked_mul(self.config.action_expert.depth))
-            .and_then(|value| value.checked_mul(self.config.num_flow_steps))
-            .ok_or_else(|| Error::Other("pi05 split-KV workspace overflow".into()))
     }
 }

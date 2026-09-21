@@ -32,8 +32,7 @@ pub use gather::{
 };
 pub use gemm::{
     gemm, gemm_bias, gemm_bias_gelu, gemm_geglu, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs,
-    GemmGegluArgs, GemmPolicy, GemmQuantization, WeightVersion, Bf16ActivationObserver,
-    Bf16ObserverGuard, install_bf16_observer,
+    GemmGegluArgs, GemmPolicy, GemmQuantization, WeightVersion,
 };
 pub use norm::{norm, NormArgs, NormPolicy, NormSemantic};
 pub use pointwise::{

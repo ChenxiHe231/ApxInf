@@ -255,6 +255,43 @@ void check_output(const std::vector<float>& actual, const float* expected,
   }
 }
 
+struct CandidateGraph {
+  cudaGraph_t graph = nullptr;
+  cudaGraphExec_t executable = nullptr;
+
+  CandidateGraph() = default;
+  CandidateGraph(const CandidateGraph&) = delete;
+  CandidateGraph& operator=(const CandidateGraph&) = delete;
+  CandidateGraph(CandidateGraph&& other) noexcept
+      : graph(other.graph), executable(other.executable) {
+    other.graph = nullptr;
+    other.executable = nullptr;
+  }
+
+  ~CandidateGraph() {
+    if (executable != nullptr) cudaGraphExecDestroy(executable);
+    if (graph != nullptr) cudaGraphDestroy(graph);
+  }
+};
+
+CandidateGraph capture_candidate(
+    const apxinf::attention::Implementation& implementation,
+    Execution& candidate, cudaStream_t stream) {
+  CandidateGraph captured;
+  apxinf::attention::check_cuda(
+      cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+  try {
+    apxinf::attention::check_cuda(implementation.enqueue(candidate));
+  } catch (...) {
+    cudaStreamEndCapture(stream, &captured.graph);
+    throw;
+  }
+  apxinf::attention::check_cuda(cudaStreamEndCapture(stream, &captured.graph));
+  apxinf::attention::check_cuda(cudaGraphInstantiate(
+      &captured.executable, captured.graph, nullptr, nullptr, 0));
+  return captured;
+}
+
 }  // namespace
 
 extern "C" apxinf_status_t apxinf_attention_prepare(
@@ -461,6 +498,17 @@ extern "C" apxinf_status_t apxinf_attention_test_validate_candidates(
         check_output(read_output(normalized, *bindings, count), expected_output,
                      std::string(implementation.name) + "#" +
                          std::to_string(configuration));
+        if (policy->graph_safe) {
+          auto graph = capture_candidate(implementation, *candidate, stream);
+          apxinf::attention::check_cuda(
+              cudaMemsetAsync(bindings->output, 0xff, bytes, stream));
+          apxinf::attention::check_cuda(
+              cudaGraphLaunch(graph.executable, stream));
+          check_output(
+              read_output(normalized, *bindings, count), expected_output,
+              std::string(implementation.name) + "#" +
+                  std::to_string(configuration) + " graph");
+        }
       }
       ++implementations_checked;
     }
