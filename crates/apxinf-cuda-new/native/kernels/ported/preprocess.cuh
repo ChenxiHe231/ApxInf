@@ -60,7 +60,6 @@ __global__ void rgb_u8_to_patches_e4m3_kernel(
   }
 }
 
-
 template <bool kNhwc>
 __global__ void rgb_u8_to_patches_bf16_kernel(
     const uint8_t* images, __nv_bfloat16* patches, int views,
@@ -153,4 +152,3 @@ __global__ void rgb_u8_to_normalized_temporal_merged_patches_bf16_kernel(
     patches[output_index] = __float2bfloat16(normalized);
   }
 }
-
