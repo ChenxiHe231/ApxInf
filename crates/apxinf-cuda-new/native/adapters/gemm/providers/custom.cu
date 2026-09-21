@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <cstdint>
+#include <cuda_fp8.h>
 
 namespace {
 #include "../../../kernels/ported/math.cuh"
