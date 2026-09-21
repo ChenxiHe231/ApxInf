@@ -488,6 +488,68 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_activation(
 #endif
 }
 
+extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_rms_norm(
+    const void* source_bf16, const void* norm_weight,
+    void* destination_packed, void* destination_scales, int64_t rows,
+    int64_t k, uint32_t sf_vec_size, float epsilon, float input_scale,
+    apxinf_cuda_stream_t stream) {
+#ifdef APXINF_GEMM_CUTLASS
+  return apxinf::framework::abi_boundary([&] {
+    if (source_bf16 == nullptr || norm_weight == nullptr ||
+        destination_packed == nullptr || destination_scales == nullptr ||
+        rows <= 0 || k <= 0 || rows > INT32_MAX || k > INT32_MAX) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid fused RMSNorm quantization arguments");
+    }
+    const int status = apxinf::cuda::cutlass_ops::nvfp4_quantize_rms_norm(
+        source_bf16, norm_weight, destination_packed, destination_scales,
+        static_cast<int>(rows), static_cast<int>(k),
+        static_cast<int>(sf_vec_size), epsilon, input_scale,
+        static_cast<cudaStream_t>(stream));
+    if (status != 0) {
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                    "fused RMSNorm quantization failed with status " +
+                        std::to_string(status));
+    }
+  });
+#else
+  (void)source_bf16; (void)norm_weight; (void)destination_packed;
+  (void)destination_scales; (void)rows; (void)k; (void)sf_vec_size;
+  (void)epsilon; (void)input_scale; (void)stream;
+  return APXINF_STATUS_UNSUPPORTED;
+#endif
+}
+
+extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_swiglu(
+    const void* source_bf16, void* destination_packed,
+    void* destination_scales, int64_t rows, int64_t k, uint32_t sf_vec_size,
+    float input_scale, apxinf_cuda_stream_t stream) {
+#ifdef APXINF_GEMM_CUTLASS
+  return apxinf::framework::abi_boundary([&] {
+    if (source_bf16 == nullptr || destination_packed == nullptr ||
+        destination_scales == nullptr || rows <= 0 || k <= 0 ||
+        rows > INT32_MAX || k > INT32_MAX) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid fused SwiGLU quantization arguments");
+    }
+    const int status = apxinf::cuda::cutlass_ops::nvfp4_quantize_swiglu(
+        source_bf16, destination_packed, destination_scales,
+        static_cast<int>(rows), static_cast<int>(k),
+        static_cast<int>(sf_vec_size), input_scale,
+        static_cast<cudaStream_t>(stream));
+    if (status != 0) {
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                    "fused SwiGLU quantization failed with status " +
+                        std::to_string(status));
+    }
+  });
+#else
+  (void)source_bf16; (void)destination_packed; (void)destination_scales;
+  (void)rows; (void)k; (void)sf_vec_size; (void)input_scale; (void)stream;
+  return APXINF_STATUS_UNSUPPORTED;
+#endif
+}
+
 extern "C" uint64_t apxinf_gemm_execution_weight_prepack_count(
     apxinf_gemm_execution_t handle) {
   const auto* execution = reinterpret_cast<const Execution*>(handle);

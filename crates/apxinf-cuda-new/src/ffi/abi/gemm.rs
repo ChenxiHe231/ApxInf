@@ -75,6 +75,28 @@ unsafe extern "C" {
         sf_vec_size: u32,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_gemm_nvfp4_quantize_rms_norm(
+        source_bf16: *const c_void,
+        norm_weight: *const c_void,
+        destination_packed: *mut c_void,
+        destination_scales: *mut c_void,
+        rows: i64,
+        k: i64,
+        sf_vec_size: u32,
+        epsilon: f32,
+        input_scale: f32,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_gemm_nvfp4_quantize_swiglu(
+        source_bf16: *const c_void,
+        destination_packed: *mut c_void,
+        destination_scales: *mut c_void,
+        rows: i64,
+        k: i64,
+        sf_vec_size: u32,
+        input_scale: f32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_gemm_nvfp4_quantize_activation(
         source_bf16: *const c_void,
         destination_packed: *mut c_void,
