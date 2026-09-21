@@ -1,131 +1,118 @@
-# CUDA L3 算子目录
+# CUDA L3 Operator Catalog
 
-本文档列出 `apxinf-cuda-new` 当前公开的模型无关 L3 semantic。模型代码必须匹配完整的
-数学语义和张量契约，不能只按算子名称匹配；没有完全匹配的接口时，应记录 operator gap，
-并按照 [`doc/adding-new-kernels.md`](../../doc/adding-new-kernels.md) 处理。
+This document lists the model-independent L3 semantics currently exposed by `apxinf-cuda-new`. Model code must match the complete mathematical semantic and tensor contract, not only the operator name. If no interface matches completely, record an operator gap and follow [`doc/adding-new-kernels.md`](../../doc/adding-new-kernels.md).
 
-本文档只描述公共契约，不承诺具体 provider、candidate 或 autotune winner。所有算子都支持
-eager execution 和 `prepare_with_session` → capture → replay。
+This document describes only public contracts and does not promise a specific provider, candidate, or autotune winner. Every operator supports eager execution and `prepare_with_session` → capture → replay.
 
-## 共享约束
+## Shared Constraints
 
-- 输入、输出、bias 和 scale tensor 必须位于当前 `CudaContext` 的 CUDA device。
-- tensor 使用连续 row-major layout；输出 storage 不能与只读输入重叠。
-- shape 非空，传入 native 层的维度不能超过 `i32::MAX`。
-- policy 中的 workspace、graph-safe、deterministic 等字段只影响 candidate 合法性和
-  recipe，不改变 L3 数学语义。
-- `l3-operator` 注释是机器可读标记。单元测试会将其与各 operator family 注册的 Rust
-  semantic metadata 比较，保证每个公开 semantic 恰好出现一次；新增 family 必须加入该集合。
+- Input, output, bias, and scale tensors must reside on the CUDA device of the current `CudaContext`.
+- Tensors use contiguous row-major layout; output storage must not overlap read-only inputs.
+- Shapes must be nonempty, and dimensions passed to the native layer must not exceed `i32::MAX`.
+- Policy fields such as workspace, graph-safe, and deterministic affect only candidate eligibility and the recipe; they do not change the L3 mathematical semantic.
+- `l3-operator` comments are machine-readable markers. A unit test compares them with the Rust semantic metadata registered by each operator family to ensure that every public semantic appears exactly once; a new family must be added to that set.
 
-## GEMM 共享契约
+## Shared GEMM Contract
 
-GEMM 使用 `A=[M,K]`、`B=[K,N]`。`alpha` 作用于 projection，最终结果除以有限正数
-`output_scale`。`projection(A,B)` 按以下量化契约解释输入：
+GEMM uses `A=[M,K]` and `B=[K,N]`. `alpha` applies to the projection, and the final result is divided by a finite positive `output_scale`. `projection(A,B)` interprets inputs according to the following quantization contract:
 
-- `None`：A/B dtype 相同，且不是 E4M3 或 INT8。
-- `Fp8UnitScale`：A/B 均为已包含预期缩放的 E4M3 tensor。
-- `Fp8`：A/B 均为 E4M3；FP32 `row_scales=[M]` 和 `channel_scales=[N]`
-  分别按 A 的行和 B 的列反量化。
-- `W8A8`：A/B 均为 INT8，并使用相同形状的 FP32 row/channel scales；输出为 BF16，
-  `K <= 131071`，且只适用于 `gemm` 和 `gemm_bias`。
+- `None`: A/B have the same dtype, which is neither E4M3 nor INT8.
+- `Fp8UnitScale`: A/B are both E4M3 tensors with the expected scaling already applied.
+- `Fp8`: A/B are both E4M3; FP32 `row_scales=[M]` and `channel_scales=[N]` dequantize rows of A and columns of B, respectively.
+- `W8A8`: A/B are both INT8 and use FP32 row/channel scales with the same shapes; output is BF16, `K <= 131071`, and the mode applies only to `gemm` and `gemm_bias`.
 
-量化发生在 API 调用之前；当前 L3 契约不包含动态量化。具体 spec 仍需至少一个已注册
-candidate 支持。
+Quantization occurs before the API call; the current L3 contract does not include dynamic quantization. At least one registered candidate must still support the concrete spec.
 
 <!-- l3-operator:gemm -->
 ### `gemm`
 
-| 项目 | 契约 |
+| Item | Contract |
 | --- | --- |
 | Rust API | `ops::gemm(ctx, GemmArgs)` |
-| 输入 | `A=[M,K]`，`B=[K,N]`；支持 `None`、`Fp8UnitScale`、`Fp8`、`W8A8` |
-| 输出 | `Y=[M,N]` |
-| 数学语义 | `Y = alpha * projection(A,B) / output_scale` |
-| 限制 | W8A8 输出只能为 BF16；`WeightVersion` 可声明不可变权重并允许 prepare 阶段缓存内部预打包副本 |
+| Inputs | `A=[M,K]`, `B=[K,N]`; supports `None`, `Fp8UnitScale`, `Fp8`, and `W8A8` |
+| Output | `Y=[M,N]` |
+| Mathematical semantic | `Y = alpha * projection(A,B) / output_scale` |
+| Constraints | W8A8 output must be BF16; `WeightVersion` may declare immutable weights and allow prepare to cache an internal prepacked copy |
 | Reference test | `gemm_all_candidates_match_torch` |
 
 <!-- l3-operator:gemm_bias -->
 ### `gemm_bias`
 
-| 项目 | 契约 |
+| Item | Contract |
 | --- | --- |
 | Rust API | `ops::gemm_bias(ctx, GemmBiasArgs { gemm, bias })` |
-| 输入 | `A=[M,K]`，`B=[K,N]`，`bias=[N]`；支持全部四种 GEMM 量化契约 |
-| 输出 | `Y=[M,N]` |
-| 数学语义 | `Y = (alpha * projection(A,B) + bias) / output_scale`，bias 按 M 维广播 |
-| 限制 | bias dtype 与 projection dtype 相同；W8A8 输出只能为 BF16 |
+| Inputs | `A=[M,K]`, `B=[K,N]`, `bias=[N]`; supports all four GEMM quantization contracts |
+| Output | `Y=[M,N]` |
+| Mathematical semantic | `Y = (alpha * projection(A,B) + bias) / output_scale`, with bias broadcast across M |
+| Constraints | bias dtype matches the projection dtype; W8A8 output must be BF16 |
 | Reference test | `gemm_bias_all_candidates_match_torch` |
 
 <!-- l3-operator:gemm_bias_gelu -->
 ### `gemm_bias_gelu`
 
-| 项目 | 契约 |
+| Item | Contract |
 | --- | --- |
 | Rust API | `ops::gemm_bias_gelu(ctx, GemmBiasGeluArgs { gemm, bias })` |
-| 输入 | `A=[M,K]`，`B=[K,N]`，`bias=[N]`；支持 `None`、`Fp8UnitScale`、`Fp8` |
-| 输出 | `Y=[M,N]` |
-| 数学语义 | `Y = GELU_tanh(alpha * projection(A,B) + bias) / output_scale` |
-| 限制 | bias dtype 与 projection dtype 相同；GELU 使用 Torch reference 的 tanh approximation；不支持 W8A8 |
+| Inputs | `A=[M,K]`, `B=[K,N]`, `bias=[N]`; supports `None`, `Fp8UnitScale`, and `Fp8` |
+| Output | `Y=[M,N]` |
+| Mathematical semantic | `Y = GELU_tanh(alpha * projection(A,B) + bias) / output_scale` |
+| Constraints | bias dtype matches the projection dtype; GELU uses the Torch reference's tanh approximation; W8A8 is unsupported |
 | Reference test | `gemm_bias_gelu_all_candidates_match_torch` |
 
 <!-- l3-operator:gemm_geglu -->
 ### `gemm_geglu`
 
-| 项目 | 契约 |
+| Item | Contract |
 | --- | --- |
 | Rust API | `ops::gemm_geglu(ctx, GemmGegluArgs { gemm })` |
-| 输入 | `A=[M,K]`，`B=[K,2N]`；B 的前 N 列为 `B_gate`，后 N 列为 `B_up`；支持 `None`、`Fp8UnitScale` |
-| 输出 | `Y=[M,N]` |
-| 数学语义 | `Y = GELU_tanh(alpha*(A@B_gate)) * (alpha*(A@B_up)) / output_scale` |
-| 限制 | B 的第二维为偶数；不支持带 row/channel scales 的 FP8 或 W8A8；candidate-specific packing 只能在内部完成 |
+| Inputs | `A=[M,K]`, `B=[K,2N]`; the first N columns of B are `B_gate`, and the last N columns are `B_up`; supports `None` and `Fp8UnitScale` |
+| Output | `Y=[M,N]` |
+| Mathematical semantic | `Y = GELU_tanh(alpha*(A@B_gate)) * (alpha*(A@B_up)) / output_scale` |
+| Constraints | The second dimension of B is even; FP8 with row/channel scales and W8A8 are unsupported; candidate-specific packing may occur only internally |
 | Reference test | `gemm_geglu_all_candidates_match_torch` |
 
-## Attention 共享契约
+## Shared Attention Contract
 
-Attention 计算 `softmax(mask(scale * (Q @ K^T))) @ V`。Q/K/V dtype 相同，`scale`
-是有限正数，默认值为 `1/sqrt(head_dim)`。Dense 和 KV-cache 支持 MHA、GQA 和 MQA，
-且要求 `query_heads % kv_heads == 0`。
+Attention computes `softmax(mask(scale * (Q @ K^T))) @ V`. Q/K/V have the same dtype, and `scale` is finite and positive with a default of `1/sqrt(head_dim)`. Dense and KV-cache support MHA, GQA, and MQA and require `query_heads % kv_heads == 0`.
 
 <!-- l3-operator:attention -->
 ### `attention`
 
-| 项目 | 契约 |
+| Item | Contract |
 | --- | --- |
 | Rust API | `ops::attention(ctx, AttentionArgs)` |
-| 输入 | `Q=[B,Tq,Hq,D]`，`K/V=[B,Tk,Hkv,D]`；Q/K/V 为相同的 F16 或 BF16；mask 为 `None` 或 `Causal` |
-| 输出 | `Y=[B,Tq,Hq,D]`；普通输出与输入 dtype 相同，也支持 F16 输入写入 E4M3 |
-| 数学语义 | dense scaled dot-product attention |
-| 限制 | causal 要求 `Tk>=Tq`，query 对应 key 序列末尾位置；普通输出要求 `output_scale=1`；E4M3 存储 `round_to_e4m3(attention/output_scale)` |
+| Inputs | `Q=[B,Tq,Hq,D]`, `K/V=[B,Tk,Hkv,D]`; Q/K/V share F16 or BF16 dtype; mask is `None` or `Causal` |
+| Output | `Y=[B,Tq,Hq,D]`; ordinary output uses the input dtype, and F16 input may also be written as E4M3 |
+| Mathematical semantic | dense scaled dot-product attention |
+| Constraints | Causal requires `Tk>=Tq`, with queries aligned to the final positions of the key sequence; ordinary output requires `output_scale=1`; E4M3 stores `round_to_e4m3(attention/output_scale)` |
 | Reference test | `attention_all_candidates_match_reference` |
 
 <!-- l3-operator:kv_cache_attention -->
 ### `kv_cache_attention`
 
-| 项目 | 契约 |
+| Item | Contract |
 | --- | --- |
 | Rust API | `ops::kv_cache_attention(ctx, KvCacheAttentionArgs)` |
-| 输入 | `Q=[B,Tq,Hq,D]`，`K_cache/V_cache=[B,key_capacity,Hkv,D]`；全部为相同的 F16 或 BF16；mask 为 `None` 或 `Causal` |
-| 输出 | `Y=[B,Tq,Hq,D]`，dtype 与输入相同 |
-| 数学语义 | query 对 cache 的前 `valid_key_tokens` 行执行 scaled dot-product attention |
-| 限制 | `0<valid_key_tokens<=key_capacity`；causal 时 token i 位于 `query_start+i`，并要求 `query_start+Tq<=valid_key_tokens` |
+| Inputs | `Q=[B,Tq,Hq,D]`, `K_cache/V_cache=[B,key_capacity,Hkv,D]`; all share F16 or BF16 dtype; mask is `None` or `Causal` |
+| Output | `Y=[B,Tq,Hq,D]`, with the same dtype as the inputs |
+| Mathematical semantic | scaled dot-product attention from the query to the first `valid_key_tokens` rows of the cache |
+| Constraints | `0<valid_key_tokens<=key_capacity`; when causal, token i is at `query_start+i`, and `query_start+Tq<=valid_key_tokens` is required |
 | Reference test | `kv_cache_attention_all_candidates_match_reference` |
 
 <!-- l3-operator:segmented_attention -->
 ### `segmented_attention`
 
-| 项目 | 契约 |
+| Item | Contract |
 | --- | --- |
 | Rust API | `ops::segmented_attention(ctx, SegmentedAttentionArgs)` |
-| 输入 | Q/K/V 均为 `[total_tokens,H,D]` 且 dtype 相同（F16 或 BF16）；device U32 offsets 与 `host_offsets` 内容一致 |
-| 输出 | `Y=[total_tokens,H,D]`，dtype 与输入相同 |
-| 数学语义 | 对 packed token 序列的每个 segment 独立执行 non-causal self-attention |
-| 限制 | offsets 至少两个元素、单调不减、首项为 0、末项为 `total_tokens`；允许空 segment；不支持 causal 或不同 Q/KV head 数 |
+| Inputs | Q/K/V are all `[total_tokens,H,D]` with the same dtype (F16 or BF16); device U32 offsets match the contents of `host_offsets` |
+| Output | `Y=[total_tokens,H,D]`, with the same dtype as the inputs |
+| Mathematical semantic | independent non-causal self-attention for each segment of a packed token sequence |
+| Constraints | offsets contain at least two elements, are monotonically nondecreasing, begin at 0, and end at `total_tokens`; empty segments are allowed; causal and differing Q/KV head counts are unsupported |
 | Reference test | `segmented_attention_all_candidates_match_reference` |
 
-## 测试责任
+## Testing Responsibilities
 
-catalog 测试只保证 semantic 不缺失、不重复，不能验证文字契约。新增 L3 semantic 还必须在
-`src/ops/tests/l3_behavior.rs` 增加语义测试，并在
-`src/ops/tests/precision/precision.rs` 增加独立 reference 的 all-candidate 数值测试。
-测试需通过 `crates/apxinf-cuda-new/test-new.sh` 运行；普通根目录 `cargo test` 不会自动测试
-本 crate。
+The catalog test ensures only that semantics are neither missing nor duplicated; it cannot validate the written contracts. A new L3 semantic must also add a semantic test to `src/ops/tests/l3_behavior.rs` and an independent-reference all-candidate numerical test to `src/ops/tests/precision/precision.rs`.
+
+Tests must run through `crates/apxinf-cuda-new/test-new.sh`; a normal `cargo test` from the repository root does not automatically test this crate.

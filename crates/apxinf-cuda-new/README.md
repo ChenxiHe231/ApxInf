@@ -1,20 +1,20 @@
-# `apxinf-cuda-new` 架构契约
+# `apxinf-cuda-new` Architecture Contract
 
-`apxinf-cuda-new` 向模型层提供稳定的 CUDA L3 语义接口，在 native 层为同一语义选择并准备 provider kernel。GEMM 和 Attention 是当前已接入的两个 operator family，不是框架允许的全部类型。
+`apxinf-cuda-new` provides stable CUDA L3 semantic interfaces to the model layer and selects and prepares a provider kernel for the same semantic in the native layer. GEMM and Attention are the two operator families currently integrated, not the full set of types supported by the framework.
 
-- 当前公开接口及数学语义：[L3 operator catalog](cuda-operator.md)
-- 新增或扩展 kernel 的工作流：[Adding New Kernels](../../doc/adding-new-kernels.md)
+- Current public interfaces and mathematical semantics: [L3 operator catalog](cuda-operator.md)
+- Workflow for adding or extending a kernel: [Adding New Kernels](../../doc/adding-new-kernels.md)
 
-## 算子分层：L3 到 L0
+## Operator Layers: L3 to L0
 
-这里的 L0–L3 只描述 `apxinf-cuda-new` 内部的 CUDA 算子，不是仓库根文档中的模型、policy、serving 分层。
+L0-L3 here describe only the CUDA operators inside `apxinf-cuda-new`, not the model, policy, and serving layers in the repository root documentation.
 
-| 层级 | 职责 | 输入 → 输出 | 主要接口和目录 |
+| Layer | Responsibility | Input → Output | Main Interfaces and Directories |
 | --- | --- | --- | --- |
-| L3 Semantic（Rust） | 定义模型可见的完整数学语义和 tensor contract | `CudaContext + Args` → `Result<()>` | `ops::<semantic>`；`src/ops/<operator>/` |
-| L2 Execution（Rust） | 校验并归一化 L3 调用；管理 execution cache、session、storage 和 graph 生命周期 | L3 Args → `Spec + Policy + Bindings` → opaque native handle | `normalize`、`prepare/execute`、Rust FFI declaration；`src/ops/`、`src/workspace.rs`、`src/graph.rs` |
-| L1 Native operator（C++） | 实现 C ABI；完成 recipe lookup、选核、autotune、fallback、candidate/provider prepare 和 enqueue | `Spec + Policy + Bindings` → native `Execution` | `*_prepare/*_enqueue/*_destroy`、registry 和 candidate callbacks；`native/adapters/`、`native/framework/` |
-| L0 Kernel | 执行实际 GPU 计算 | provider launch 参数 → GPU work | custom CUDA、FA2、CUTLASS、cuBLAS/cuBLASLt；`native/kernels/` 或 vendor API |
+| L3 Semantic (Rust) | Define the complete model-visible mathematical semantic and tensor contract | `CudaContext + Args` → `Result<()>` | `ops::<semantic>`; `src/ops/<operator>/` |
+| L2 Execution (Rust) | Validate and normalize L3 calls; manage the execution cache, session, storage, and graph lifecycle | L3 Args → `Spec + Policy + Bindings` → opaque native handle | `normalize`, `prepare/execute`, Rust FFI declaration; `src/ops/`, `src/workspace.rs`, `src/graph.rs` |
+| L1 Native operator (C++) | Implement the C ABI; perform recipe lookup, kernel selection, autotune, fallback, candidate/provider prepare, and enqueue | `Spec + Policy + Bindings` → native `Execution` | `*_prepare/*_enqueue/*_destroy`, registry and candidate callbacks; `native/adapters/`, `native/framework/` |
+| L0 Kernel | Perform the actual GPU computation | provider launch arguments → GPU work | custom CUDA, FA2, CUTLASS, cuBLAS/cuBLASLt; `native/kernels/` or vendor API |
 
 ```text
 L3 Rust → L2 Rust │ C ABI │ L1 C++ → L0 CUDA
@@ -23,7 +23,7 @@ L3: no provider       L2: no candidate selection
 L1: owns selection    L0: no recipe/fallback/model logic
 ```
 
-## 调用链
+## Call Chain
 
 ```text
 L3  Rust semantic API
@@ -39,25 +39,25 @@ run:     L2 → L1 *_enqueue ─────────────────
 capture: prepare_with_session once → capture/with_session reuses Execution
 ```
 
-## 六个核心对象
+## Six Core Objects
 
-| 对象 | 所属层 | 由什么组成 | 与其他对象的关系 |
+| Object | Layer | Composition | Relationship to Other Objects |
 | --- | --- | --- | --- |
-| Semantic | L3 | 公开数学语义、tensor contract 和 semantic ID | 一个 Semantic 对应一个独立 candidate registry；L3 对外暴露它 |
-| Provider | L1（适配 L0） | 实现技术栈身份，例如 FA2、CUTLASS、cuBLAS 或 custom CUDA | 一个 Provider 可以提供多个 Candidates；Provider 名称不进入 L3 API |
-| Candidate / Implementation | L1 | Provider ID + implementation ID/version + 能力属性 + callbacks | 注册到某个 Semantic；可以枚举多个 Configurations |
-| Configuration | L1 | Candidate 自己定义的稳定配置编号 | 只有放在所属 Candidate 下才有含义 |
-| Recipe | L1 | Candidate 的稳定 identity + 一个 Configuration | recipe cache 的 value；记录 winner，但不保存指针、handle 或 provider state |
-| Prepared Execution | L1；L2 持有 opaque handle | 当前 `Spec + Bindings + device + Candidate + Configuration + policy-derived limits + provider state/resources` | 由 Recipe 或本次选核结果重新 prepare；可 enqueue 多次，只在当前进程有效 |
+| Semantic | L3 | Public mathematical semantic, tensor contract, and semantic ID | One Semantic has one independent candidate registry; L3 exposes it publicly |
+| Provider | L1 (adapts L0) | Implementation-stack identity, such as FA2, CUTLASS, cuBLAS, or custom CUDA | One Provider can supply multiple Candidates; the Provider name does not enter the L3 API |
+| Candidate / Implementation | L1 | Provider ID + implementation ID/version + capability attributes + callbacks | Registered under one Semantic; can enumerate multiple Configurations |
+| Configuration | L1 | A stable configuration number defined by the Candidate | Has meaning only under its owning Candidate |
+| Recipe | L1 | The Candidate's stable identity + one Configuration | Value in the recipe cache; records the winner but does not store pointers, handles, or provider state |
+| Prepared Execution | L1; L2 holds an opaque handle | Current `Spec + Bindings + device + Candidate + Configuration + policy-derived limits + provider state/resources` | Prepared again from a Recipe or the current selection result; can be enqueued multiple times and is valid only in the current process |
 
-组合关系：
+Composition:
 
 ```text
 Semantic → Registry<Candidate>
 Provider + implementation identity + callbacks → Candidate
 Candidate identity + Configuration → Recipe
 Recipe key → Recipe
-当前 Spec + Policy + Bindings + 已解析 Recipe → Prepared Execution
+Current Spec + Policy + Bindings + resolved Recipe → Prepared Execution
 Prepared Execution → Candidate enqueue → Provider → L0 kernel
 ```
 
@@ -67,115 +67,115 @@ Recipe   = winner identity              # not executable
 Recipe hit → resolve Candidate → validate → prepare → Execution
 ```
 
-## 三类跨层数据
+## Three Kinds of Cross-Layer Data
 
-| 数据 | 内容 | 是否绑定本次调用 |
+| Data | Contents | Bound to the Current Call |
 | --- | --- | --- |
-| `Spec` | semantic、shape、dtype、mask、layout、alignment class 等归一化问题描述 | 否；等价调用可相同 |
-| `Policy` | workspace、graph-safe、deterministic、是否允许 tune/fallback 等约束 | 部分字段影响选核或 prepared state |
-| `Bindings` | 本次地址、stream 和实际动态数值，例如 `alpha`、attention scale | 是 |
+| `Spec` | Normalized problem description: semantic, shape, dtype, mask, layout, alignment class, and so on | No; equivalent calls can share it |
+| `Policy` | Constraints such as workspace, graph-safe, deterministic, and whether tune/fallback is allowed | Some fields affect selection or prepared state |
+| `Bindings` | Addresses, stream, and actual dynamic values for this call, such as `alpha` and attention scale | Yes |
 
-## 关键接口
+## Key Interfaces
 
-| 接口 | 层级 | 责任 |
+| Interface | Layer | Responsibility |
 | --- | --- | --- |
-| `ops::<semantic>(ctx, args)` | L3 Rust | 唯一模型入口；表达完整数学语义，不暴露 provider |
-| `normalize(ctx, args)` | L2 Rust | 校验 L3 contract，生成 `Spec + Policy + Bindings` 并保活 storage |
-| Rust `prepare/execute` | L2 Rust | 查 execution cache；通过 FFI 创建或 enqueue opaque native execution |
-| `*_prepare(..., &execution)` | L1 C++ | 在 capture 外完成 recipe/选核和所有 provider state/resource 创建 |
-| `*_enqueue(execution)` | L1 C++ | 只向绑定 stream 提交已准备的工作；不得选核、分配或同步 |
-| `*_destroy(execution)` | L1 C++ | 释放 provider state 和资源 |
-| `registry(spec.semantic)` | L1 C++ | 返回该 semantic 可参与选择的 candidates |
-| `supports(spec)` | L1 C++ | 声明 candidate 的正确性适用范围，不是性能提示 |
-| `alignment_requirements/resource_requirements` | L1 C++ | 在 prepare 前声明地址和资源约束 |
-| `enumerate_configs` | L1 C++ | 返回需要独立选择或测速的所有 configuration |
-| `framework::autotune(problem, report)` | L1 C++ | 只负责遍历、计时和返回 winner，不解释 semantic 或 fallback |
+| `ops::<semantic>(ctx, args)` | L3 Rust | The only model entry point; expresses the complete mathematical semantic without exposing a provider |
+| `normalize(ctx, args)` | L2 Rust | Validate the L3 contract, produce `Spec + Policy + Bindings`, and keep storage alive |
+| Rust `prepare/execute` | L2 Rust | Look up the execution cache; create or enqueue an opaque native execution through FFI |
+| `*_prepare(..., &execution)` | L1 C++ | Perform recipe/selection and create all provider state/resources outside capture |
+| `*_enqueue(execution)` | L1 C++ | Submit only prepared work to the bound stream; must not select, allocate, or synchronize |
+| `*_destroy(execution)` | L1 C++ | Release provider state and resources |
+| `registry(spec.semantic)` | L1 C++ | Return the candidates eligible for the semantic |
+| `supports(spec)` | L1 C++ | Declare the candidate's correctness domain, not a performance hint |
+| `alignment_requirements/resource_requirements` | L1 C++ | Declare address and resource constraints before prepare |
+| `enumerate_configs` | L1 C++ | Return every configuration that requires independent selection or benchmarking |
+| `framework::autotune(problem, report)` | L1 C++ | Only iterate, time, and return a winner; does not interpret semantic or fallback |
 
 ```text
 *_prepare → *_enqueue [0..N] → *_destroy
 ```
 
-## Key 与 cache
+## Keys and Caches
 
-| Cache | 层级 | Key → Value | 生命周期 |
+| Cache | Layer | Key → Value | Lifetime |
 | --- | --- | --- | --- |
-| Execution cache | L2 Rust | `ExecutionKey → Rc<Execution wrapper>` | 一个 `ExecutionSession` |
-| Recipe cache | L1 C++ | `exact recipe key → Recipe` | native runtime 内存；可选磁盘持久化 |
+| Execution cache | L2 Rust | `ExecutionKey → Rc<Execution wrapper>` | One `ExecutionSession` |
+| Recipe cache | L1 C++ | `exact recipe key → Recipe` | Native runtime memory; optional disk persistence |
 
-### Execution key
+### Execution Key
 
-| 组成 | Attention | GEMM |
+| Component | Attention | GEMM |
 | --- | --- | --- |
-| 问题 | 完整 normalized `Spec` | 完整 normalized `Spec` |
-| 设备与执行位置 | device、Q/K/V/offsets/output 地址、stream | device、A/B/bias/scales/output 地址、stream |
-| 实际动态值 | `scale`、`output_scale` 的 bit pattern | `alpha`、`output_scale` 的 bit pattern；B version/immutable 标志 |
-| 影响 prepared state 的 policy | workspace limit、graph-safe、deterministic | workspace limit、graph-safe、deterministic |
-| 不进入 key | `online_tune`、`allow_fallback`、`cache_dir` | `online_tune`、`allow_fallback`、`cache_dir` |
+| Problem | Complete normalized `Spec` | Complete normalized `Spec` |
+| Device and execution location | device, Q/K/V/offsets/output addresses, stream | device, A/B/bias/scales/output addresses, stream |
+| Actual dynamic values | Bit patterns of `scale` and `output_scale` | Bit patterns of `alpha` and `output_scale`; B version/immutable flag |
+| Policy affecting prepared state | workspace limit, graph-safe, deterministic | workspace limit, graph-safe, deterministic |
+| Excluded from key | `online_tune`, `allow_fallback`, `cache_dir` | `online_tune`, `allow_fallback`, `cache_dir` |
 
-### Exact recipe key
+### Exact Recipe Key
 
-| 组成 | 内容 |
+| Component | Contents |
 | --- | --- |
-| Cache/build namespace | recipe schema version、operator build fingerprint、编译 CUDA toolkit |
-| 运行环境 | GPU compute capability、SM 数；CUDA runtime/driver 兼容版本；GEMM 还包含 cuBLASLt 版本 |
-| Attention 等价类 | semantic、input/output dtype、mask、batch、Q/K tokens、key capacity、Q/KV heads、head dim、query start、segments/max segment、default-scale predicate |
-| GEMM 等价类 | semantic、M/N/K、A/B/accumulation/output dtype、quantization、B immutable、unit-alpha/unit-output-scale predicates |
-| Candidate 合法性 | 各 binding 的 alignment class、workspace limit、graph-safe、deterministic |
-| 不进入 key | 原始指针、stream、输入内容、实际 scale、B version、device UUID、cache dir、tune/fallback 开关、Attention offsets 内容 |
+| Cache/build namespace | recipe schema version, operator build fingerprint, compiled CUDA toolkit |
+| Runtime environment | GPU compute capability, SM count; compatible CUDA runtime/driver version; GEMM also includes the cuBLASLt version |
+| Attention equivalence class | semantic, input/output dtype, mask, batch, Q/K tokens, key capacity, Q/KV heads, head dim, query start, segments/max segment, default-scale predicate |
+| GEMM equivalence class | semantic, M/N/K, A/B/accumulation/output dtype, quantization, B immutable, unit-alpha/unit-output-scale predicates |
+| Candidate eligibility | Alignment class for each binding, workspace limit, graph-safe, deterministic |
+| Excluded from key | Raw pointers, stream, input contents, actual scale, B version, device UUID, cache dir, tune/fallback switches, Attention offsets contents |
 
-### 其他 identity 不是第二个 recipe key
+### Other Identities Are Not a Second Recipe Key
 
-| 名称 | 作用 |
+| Name | Purpose |
 | --- | --- |
-| Build fingerprint | recipe key 的一个字段；candidate/kernel/ABI/framework 构建输入变化时使旧 recipe miss |
-| Recipe value | `(provider_id, implementation_id, implementation_version, configuration)`，即 winner，不是 key |
-| `.recipe` 文件名 | exact recipe key 的 FNV-1a 哈希，只用于定位文件；文件内仍保存并比较完整 key |
-| Typed cache `TypeId` | 隔离不同 Rust `ExecutionKey/Execution` 类型，不表达算子等价类 |
-| Prepared sequence identity | 校验 prepare 与 capture 的 operator 顺序一致，不参与 recipe lookup |
+| Build fingerprint | One field of the recipe key; changes to candidate/kernel/ABI/framework build inputs make old recipes miss |
+| Recipe value | `(provider_id, implementation_id, implementation_version, configuration)`, the winner, not a key |
+| `.recipe` filename | FNV-1a hash of the exact recipe key, used only to locate the file; the complete key is still stored and compared inside the file |
+| Typed cache `TypeId` | Separates different Rust `ExecutionKey/Execution` types; does not express operator equivalence classes |
+| Prepared sequence identity | Verifies that prepare and capture use the same operator order; does not participate in recipe lookup |
 
-### Recipe 命中规则
+### Recipe Hit Rules
 
-| 情况 | 行为 |
+| Condition | Behavior |
 | --- | --- |
-| Key 模式 | 仅 exact key；没有 compatible/bucket key |
-| hit 且 identity、supports、configuration、policy、prepare 均有效 | 直接创建 execution，不测速 |
-| miss、损坏或 hit 后验证失败，且 `online_tune=true` | 完整测速全部合法 candidate/configuration |
-| 无可用 recipe 且允许 fallback | 使用该 semantic 明确标记的 baseline；不持久化为 tuned winner |
-| 无可用 recipe且 tune/fallback 均不可用 | 返回 cache miss/unsupported |
-| 持久化条件 | tune winner 的真实 prepare 成功 |
+| Key mode | Exact key only; no compatible/bucket key |
+| hit and identity, supports, configuration, policy, and prepare are all valid | Create the execution directly without benchmarking |
+| miss, corruption, or failed validation after a hit, with `online_tune=true` | Fully benchmark every legal candidate/configuration |
+| no usable recipe and fallback allowed | Use the baseline explicitly marked for the semantic; do not persist it as a tuned winner |
+| no usable recipe and both tune/fallback unavailable | Return cache miss/unsupported |
+| Persistence condition | Real prepare of the tune winner succeeds |
 
-## Session / CUDA Graph 状态机
+## Session / CUDA Graph State Machine
 
-| 阶段 | 入口 | 允许 | 禁止/失败条件 | 产物 |
+| Stage | Entry Point | Allowed | Forbidden/Failure Conditions | Result |
 | --- | --- | --- | --- | --- |
-| Prepare traversal | `prepare_with_session(&session, forward)` | recipe lookup、autotune、native prepare、provider resource 创建、执行并记录顺序 | nested session | session typed execution cache + prepared sequence |
-| Capture traversal | `capture(&ctx, || with_session(&session, forward))` | 按相同顺序命中 execution 并 enqueue | cache miss、顺序变化、device/stream 变化、native prepare | `CapturedGraph` |
-| Eager reuse | `with_session(&session, forward)` | capture 外复用同一批 execution | cache miss或顺序变化 | 异步 enqueue |
-| Replay | `CapturedGraph::replay()` | 启动已实例化 graph | 改变已捕获结构 | GPU work |
+| Prepare traversal | `prepare_with_session(&session, forward)` | recipe lookup, autotune, native prepare, provider resource creation, execute and record order | nested session | session typed execution cache + prepared sequence |
+| Capture traversal | `capture(&ctx, || with_session(&session, forward))` | Hit executions in the same order and enqueue | cache miss, order change, device/stream change, native prepare | `CapturedGraph` |
+| Eager reuse | `with_session(&session, forward)` | Reuse the same executions outside capture | cache miss or order change | asynchronous enqueue |
+| Replay | `CapturedGraph::replay()` | Launch the instantiated graph | changing the captured structure | GPU work |
 
-graph 保留捕获时使用的 execution 和 storage。recipe key 不包含原始指针；固定地址和 stream 属于 Rust execution cache key。
+The graph retains the executions and storage used during capture. The recipe key does not contain raw pointers; fixed addresses and the stream belong to the Rust execution cache key.
 
-## 目录职责
+## Directory Responsibilities
 
-| 层级 | 路径 | 唯一职责 |
+| Layer | Path | Sole Responsibility |
 | --- | --- | --- |
-| L3 Rust | `cuda-operator.md`、`src/ops/<operator>/` 的公开 API | semantic、Args 和模型可见 contract |
-| L2 Rust | `src/ops/<operator>/` 的 normalize/execution、`src/workspace.rs`、`src/graph.rs` | ABI lowering、execution cache、session 与 CUDA Graph 生命周期 |
-| L2/L1 ABI | `src/ffi/abi/`、`native/include/apxinf_cuda/` | Rust/C 稳定边界和 opaque execution handle |
-| L1 C++ | `native/adapters/<operator>/` | recipe key、registry、选核、fallback、candidate/provider state 和 prepared execution |
-| L1 Shared | `native/framework/` | operator-independent registry、autotune、recipe I/O 和错误边界 |
-| L0 | `native/kernels/` | kernel 源码、模板实例和 vendor tree |
-| Build | `build_support/`、`build.rs` | 构建目标、build fingerprint 和 native 编译 |
+| L3 Rust | `cuda-operator.md`, public APIs in `src/ops/<operator>/` | semantic, Args, and model-visible contract |
+| L2 Rust | normalize/execution in `src/ops/<operator>/`, `src/workspace.rs`, `src/graph.rs` | ABI lowering, execution cache, session and CUDA Graph lifecycle |
+| L2/L1 ABI | `src/ffi/abi/`, `native/include/apxinf_cuda/` | Stable Rust/C boundary and opaque execution handle |
+| L1 C++ | `native/adapters/<operator>/` | recipe key, registry, selection, fallback, candidate/provider state, and prepared execution |
+| L1 Shared | `native/framework/` | Operator-independent registry, autotune, recipe I/O, and error boundary |
+| L0 | `native/kernels/` | Kernel source, template instances, and vendor tree |
+| Build | `build_support/`, `build.rs` | Build target, build fingerprint, and native compilation |
 
-## 变更矩阵
+## Change Matrix
 
-| 变更类型 | 必改 | 可能需要改 | 不应改 |
+| Change Type | Required Changes | Possible Changes | Must Not Change |
 | --- | --- | --- | --- |
-| 复用已有 semantic | 模型调用代码 | Args/policy | registry、framework、ABI |
-| 扩展 candidate shape/dtype | candidate `supports`；provider/kernel；all-candidate 测试 | alignment/resource/config；build 输入 | 新增 semantic、framework |
-| 新增 candidate | identity/version；全部 callbacks；正确 semantic registry；测试 | provider 文件、kernel、build.rs/fingerprint 输入 | Rust L3 API、通用 autotune |
-| 新增 provider | provider callbacks/state；依赖和编译接入；candidate registration | vendor provenance/patch | framework provider 分支、模型 provider 分支 |
-| 新增 semantic | Rust Args/normalize/export；ABI enum/Spec；独立 registry；fallback；catalog/测试 | 新字段、provider/kernel、ABI version；需要调优时增加 exact key/autotune | 复用其他 semantic 的 selection domain |
-| 修改 candidate 行为/性能 | implementation version 或能覆盖变更的 build fingerprint；回归测试 | recipe schema/key version | 继续复用不再等价的旧 recipe |
+| Reuse an existing semantic | Model call site | Args/policy | registry, framework, ABI |
+| Extend a candidate shape/dtype | candidate `supports`; provider/kernel; all-candidate tests | alignment/resource/config; build inputs | add a semantic, framework |
+| Add a candidate | identity/version; all callbacks; correct semantic registry; tests | provider file, kernel, build.rs/fingerprint inputs | Rust L3 API, common autotune |
+| Add a provider | provider callbacks/state; dependency and build integration; candidate registration | vendor provenance/patch | framework provider branch, model provider branch |
+| Add a semantic | Rust Args/normalize/export; ABI enum/Spec; independent registry; fallback; catalog/tests | new fields, provider/kernel, ABI version; exact key/autotune when tuning is required | reuse another semantic's selection domain |
+| Change candidate behavior/performance | implementation version or a build fingerprint covering the change; regression tests | recipe schema/key version | continue reusing old recipes that are no longer equivalent |
 
-任何 candidate 都必须测试其声明支持的输入，而不能只测试最终 autotune winner。完整测试与验收步骤见 [Adding New Kernels](../../doc/adding-new-kernels.md)。
+Every candidate must be tested on the inputs it claims to support, not only when it becomes the final autotune winner. See [Adding New Kernels](../../doc/adding-new-kernels.md) for complete testing and acceptance steps.
