@@ -154,7 +154,7 @@ cudaError_t launch_postprocess(const Spec& spec,
   const int64_t count = spec.m * output_width;
   const int blocks = static_cast<int>(
       std::min<int64_t>((count + 255) / 256, 4096));
-  apxinf::cuda::custom::finish<<<blocks, 256, 0,
+  apxinf::cuda_new::custom::finish<<<blocks, 256, 0,
                                  static_cast<cudaStream_t>(bindings.stream)>>>(
       projection, resources.projection_dtype, bindings.output,
       spec.output_dtype,

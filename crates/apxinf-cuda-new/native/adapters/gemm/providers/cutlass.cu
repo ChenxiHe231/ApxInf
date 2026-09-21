@@ -39,7 +39,7 @@ void pack_geglu_weight(Execution& state,
   const auto& spec = state.spec;
   const int blocks = static_cast<int>(
       std::min<int64_t>((spec.k * spec.n + 255) / 256, 4096));
-  apxinf::cuda::custom::pack_gate_up<<<blocks, 256, 0, stream>>>(
+  apxinf::cuda_new::custom::pack_gate_up<<<blocks, 256, 0, stream>>>(
       bindings.b, resources.packed_weight, spec.b_dtype, spec.k, spec.n);
   check_cuda(cudaGetLastError());
   ++resources.prepack_count;
@@ -97,7 +97,7 @@ cudaError_t launch_cutlass_fp8_gemm(Execution& state) {
 #ifdef APXINF_GEMM_CUTLASS
   const auto& spec = state.spec;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
-  using namespace apxinf::cuda::cutlass_ops;
+  using namespace apxinf::cuda_new::cutlass_ops;
   check_cutlass_status(fp8_gemm_f16(
       bindings.a, bindings.b, bindings.output, spec.m, spec.n, spec.k,
       bindings.alpha, state.configuration, stream));
@@ -127,7 +127,7 @@ cudaError_t launch_cutlass_fp8_geglu(Execution& state) {
   }
   const void* weight = resources.packed_weight;
   check_cutlass_status(
-      apxinf::cuda::cutlass_ops::fp8_dual_geglu_detail::production_dual_geglu(
+      apxinf::cuda_new::cutlass_ops::fp8_dual_geglu_detail::production_dual_geglu(
           bindings.a, weight, bindings.output, spec.m, spec.n / 2, spec.k,
           spec.n, bindings.alpha, bindings.output_scale, stream));
   return cudaSuccess;
@@ -155,7 +155,7 @@ cudaError_t launch_cutlass_bf16_geglu(Execution& state) {
     pack_geglu_weight(state, bindings);
   }
   const void* weight = resources.packed_weight;
-  check_cutlass_status(apxinf::cuda::cutlass_ops::bf16_dual_geglu_detail::
+  check_cutlass_status(apxinf::cuda_new::cutlass_ops::bf16_dual_geglu_detail::
                            production_dual_geglu_bf16(
                                bindings.a, weight, bindings.output, spec.m,
                                spec.n / 2, spec.k, spec.n, stream));

@@ -163,11 +163,11 @@ cudaError_t launch_cublaslt(Execution& state) {
   const void* activation = bindings.a;
   const void* weight = bindings.b;
   if (resources.common.unpack_a != nullptr) {
-    check_cuda(apxinf::cuda::custom::unpack_gemm(
+    check_cuda(apxinf::cuda_new::custom::unpack_gemm(
         activation, resources.common.unpack_a,
         resources.common.projection_dtype, spec.a_dtype,
         spec.m, spec.k, APXINF_GEMM_LAYOUT_KN, stream));
-    check_cuda(apxinf::cuda::custom::unpack_gemm(
+    check_cuda(apxinf::cuda_new::custom::unpack_gemm(
         weight, resources.common.unpack_b,
         resources.common.projection_dtype, spec.b_dtype, spec.k, spec.n,
         APXINF_GEMM_LAYOUT_KN, stream));

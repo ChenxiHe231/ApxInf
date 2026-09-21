@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <limits>
 
-namespace apxinf::cuda::cutlass_ops {
+namespace apxinf::cuda_new::cutlass_ops {
 
 int fa2_bf16(const void* q, const void* k, const void* v, void* output,
              void* softmax_lse, int batch, int query_tokens, int key_tokens,
@@ -36,7 +36,7 @@ int fa2_f16_direct_e4m3_522(
     int query_heads, int kv_heads, int head_dim, float softmax_scale,
     float output_scale, cudaStream_t stream);
 #endif
-}  // namespace apxinf::cuda::cutlass_ops
+}  // namespace apxinf::cuda_new::cutlass_ops
 
 namespace apxinf::attention {
 namespace {
@@ -171,8 +171,8 @@ cudaError_t launch_fa2_splitkv(Execution& execution) {
   const auto& bindings = execution.bindings;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
   const auto launch = spec.mask == APXINF_ATTENTION_MASK_CAUSAL
-                          ? apxinf::cuda::cutlass_ops::fa2_bf16_causal_splitkv
-                          : apxinf::cuda::cutlass_ops::fa2_bf16_splitkv;
+                          ? apxinf::cuda_new::cutlass_ops::fa2_bf16_causal_splitkv
+                          : apxinf::cuda_new::cutlass_ops::fa2_bf16_splitkv;
   return static_cast<cudaError_t>(launch(
       bindings.query, bindings.key, bindings.value, bindings.output,
       state->softmax_lse, state->softmax_lse_accum, state->output_accum,
@@ -196,7 +196,7 @@ cudaError_t launch_fa2(Execution& execution) {
   if (spec.dtype == APXINF_DTYPE_F16 &&
       spec.output_dtype == APXINF_DTYPE_E4M3) {
     return static_cast<cudaError_t>(
-        apxinf::cuda::cutlass_ops::fa2_f16_direct_e4m3_522(
+        apxinf::cuda_new::cutlass_ops::fa2_f16_direct_e4m3_522(
             bindings.query, bindings.key, bindings.value, bindings.output,
             state->softmax_lse, static_cast<int>(spec.batch),
             static_cast<int>(spec.query_tokens),
@@ -209,8 +209,8 @@ cudaError_t launch_fa2(Execution& execution) {
   int status = static_cast<int>(cudaErrorInvalidValue);
   if (spec.dtype == APXINF_DTYPE_BF16) {
     const auto launch = spec.mask == APXINF_ATTENTION_MASK_CAUSAL
-                            ? apxinf::cuda::cutlass_ops::fa2_bf16_causal
-                            : apxinf::cuda::cutlass_ops::fa2_bf16;
+                            ? apxinf::cuda_new::cutlass_ops::fa2_bf16_causal
+                            : apxinf::cuda_new::cutlass_ops::fa2_bf16;
     status = launch(
         bindings.query, bindings.key, bindings.value, bindings.output,
         state->softmax_lse, static_cast<int>(spec.batch),
@@ -219,7 +219,7 @@ cudaError_t launch_fa2(Execution& execution) {
         static_cast<int>(spec.head_dim), bindings.scale, stream);
   } else if (spec.dtype == APXINF_DTYPE_F16 &&
              spec.mask == APXINF_ATTENTION_MASK_NONE) {
-    status = apxinf::cuda::cutlass_ops::fa2_f16(
+    status = apxinf::cuda_new::cutlass_ops::fa2_f16(
         bindings.query, bindings.key, bindings.value, bindings.output,
         state->softmax_lse, static_cast<int>(spec.batch),
         static_cast<int>(spec.query_tokens), static_cast<int>(spec.key_tokens),
