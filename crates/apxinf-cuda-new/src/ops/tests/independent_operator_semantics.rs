@@ -2,7 +2,7 @@
 //! families.  Expected values in this file are deliberately computed from the
 //! public mathematical contracts rather than from native implementation code.
 
-use super::framework::{f16_tensor, tensor};
+use super::framework::{f16_tensor, tensor, zeros_tensor};
 use super::*;
 use crate::{CudaBuffer, CudaContext};
 use apxinf_core::{DType, Tensor};
@@ -391,6 +391,44 @@ fn pointwise_all_semantics_and_activations_match_cpu_references() {
         pointwise(&ctx, args).unwrap();
         assert_close(&out, &euler_expected, 0.01);
     }
+}
+
+#[test]
+fn pointwise_f16_geglu_can_quantize_directly_to_e4m3() {
+    let ctx = CudaContext::new(0).unwrap();
+    let values = [-1.0, -0.5, 0.5, 1.5, 2.0, -2.0, 0.25, 4.0];
+    let input = f16_tensor(0, vec![1, 8], &values);
+
+    let mut f16_geglu = f16_tensor(0, vec![1, 4], &[0.0; 4]);
+    pointwise(
+        &ctx,
+        PointwiseArgs::new(PointwiseSemantic::Geglu, &input, &mut f16_geglu),
+    )
+    .unwrap();
+    let mut expected = zeros_tensor(0, vec![1, 4], DType::F8E4M3);
+    let mut quantize = QuantizationArgs::new(
+        QuantizationSemantic::FixedScaleE4m3,
+        &f16_geglu,
+        &mut expected,
+    );
+    quantize.scale = 2.0;
+    quantization(&ctx, quantize).unwrap();
+
+    let mut actual = zeros_tensor(0, vec![1, 4], DType::F8E4M3);
+    let mut direct = PointwiseArgs::new(PointwiseSemantic::Geglu, &input, &mut actual);
+    direct.output_scale = 2.0;
+    pointwise(&ctx, direct).unwrap();
+
+    unsafe {
+        crate::ffi::check_cuda(crate::ffi::cudaDeviceSynchronize()).unwrap();
+    }
+    let bytes = |tensor: &Tensor| {
+        let buffer = CudaBuffer::from_tensor(tensor).unwrap();
+        let mut host = vec![0; buffer.len()];
+        buffer.copy_to_host(&mut host).unwrap();
+        host
+    };
+    assert_eq!(bytes(&actual), bytes(&expected));
 }
 
 #[test]
