@@ -312,7 +312,8 @@ Ordinary callers use AutoModel and prepare/run.
 
 PI0.5 位于 `apxinf-model` crate；model_runner、model、weights 是它内部的三个 Rust
 module，不是三个 crate。模型层定义模型语义与执行生命周期，CUDA crate 提供设备
-资源和算子。当前实际连接的是 **apxinf-cuda**，不是 apxinf-cuda-new。
+资源和算子。Cargo package 与 Rust API 名仍为 **apxinf-cuda**；它的唯一实现目录是
+`crates/apxinf-cuda-new`，已不存在并行的旧 CUDA crate。
 
 ```mermaid
 flowchart TD
@@ -326,7 +327,7 @@ flowchart TD
     N --> B
     W --> B
     B --> A[apxinf-model/accelerator.rs：CUDA 类型映射]
-    A --> D[apxinf-cuda：CudaBackend、Buffer、Graph、kernels]
+    A --> D[apxinf-cuda package / crates/apxinf-cuda-new：CudaBackend、Buffer、Graph、kernels]
     D --> G[CUDA runtime / 原生算子库]
 ```
 
