@@ -5,14 +5,14 @@ use std::ffi::c_void;
 use super::cuda_runtime::{cudaError_t, cudaStream_t};
 
 extern "C" {
-    pub fn apxinf_token_sampling_workspace_sizes(
+    pub fn apxinf_cuda_new_token_sampling_workspace_sizes(
         vocab_size: u32,
         sort_bytes: *mut usize,
         scan_bytes: *mut usize,
     ) -> cudaError_t;
 
     #[allow(clippy::too_many_arguments)]
-    pub fn apxinf_sample_token(
+    pub fn apxinf_cuda_new_sample_token(
         logits: *const c_void,
         dtype: i32,
         vocab_size: u32,
@@ -45,7 +45,7 @@ extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
 
-    pub fn apxinf_fill_standard_normal(
+    pub fn apxinf_cuda_new_fill_standard_normal(
         output: *mut c_void,
         dtype: i32,
         count: u64,
