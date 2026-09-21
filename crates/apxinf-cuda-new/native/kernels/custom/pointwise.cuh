@@ -42,7 +42,7 @@ __device__ __forceinline__ float silu(float value) {
   return value / (1.0f + expf(-value));
 }
 
-// Matches the legacy activation encoding so ported call sites keep meaning.
+// Matches the stable pointwise activation ABI encoding.
 enum Activation : int {
   kActivationNone = 0,
   kActivationGelu = 1,

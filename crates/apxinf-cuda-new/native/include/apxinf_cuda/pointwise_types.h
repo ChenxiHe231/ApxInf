@@ -23,7 +23,7 @@ typedef enum {
   APXINF_POINTWISE_SEMANTIC_EULER_UPDATE = 2,
 } apxinf_pointwise_semantic_t;
 
-/* Matches the legacy activation encoding so ported call sites keep meaning. */
+/* Stable pointwise activation ABI encoding. */
 typedef enum {
   APXINF_POINTWISE_ACTIVATION_NONE = 0,
   APXINF_POINTWISE_ACTIVATION_GELU = 1,

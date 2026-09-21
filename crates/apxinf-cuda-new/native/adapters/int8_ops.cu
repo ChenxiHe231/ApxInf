@@ -1,5 +1,5 @@
 // Copyright 2026 apxinf contributors.
-// Stable C ABI and CUDA launch policy for dynamic W8A8 operators.
+// Stable C ABI and CUDA launch policy for INT8 operators.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -10,9 +10,9 @@
 #include <cstdint>
 
 namespace {
-#include "../../kernels/ported/math.cuh"
-#include "../../kernels/ported/reduction.cuh"
-#include "../../kernels/ported/quantization.cuh"
+#include "../kernels/primitives/math.cuh"
+#include "../kernels/primitives/reduction.cuh"
+#include "../kernels/primitives/quantization.cuh"
 }  // namespace
 
 extern "C" cudaError_t apxinf_static_quantize_rows_bf16_int8(

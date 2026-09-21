@@ -342,7 +342,7 @@ pub(crate) fn retain_resource<T: Any>(resource: &Rc<T>) {
     });
 }
 
-/// Compatibility allocation for ported direct-launch operators. During an
+/// Session-aware allocation for direct-launch operators. During an
 /// execution session it sub-allocates deterministically from the session
 /// arena; eager calls own a zeroed allocation directly.
 pub(crate) fn output_buffer(ctx: &crate::CudaContext, bytes: usize) -> Result<CudaBuffer> {

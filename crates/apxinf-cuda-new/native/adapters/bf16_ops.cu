@@ -1,5 +1,5 @@
 // Copyright 2026 apxinf contributors.
-// Stable C ABI and CUDA launch policy for static-path BF16 operators.
+// Stable C ABI and CUDA launch policy for BF16 inference operators.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -10,16 +10,16 @@
 #include <cstdint>
 
 namespace {
-#include "../../kernels/ported/math.cuh"
-#include "../../kernels/ported/reduction.cuh"
-#include "../../kernels/ported/preprocess.cuh"
-#include "../../kernels/ported/activation.cuh"
-#include "../../kernels/ported/embedding.cuh"
-#include "../../kernels/ported/elementwise.cuh"
-#include "../../kernels/ported/normalization.cuh"
-#include "../../kernels/ported/quantization.cuh"
-#include "../../kernels/ported/fused.cuh"
-#include "../../kernels/ported/attention.cuh"
+#include "../kernels/primitives/math.cuh"
+#include "../kernels/primitives/reduction.cuh"
+#include "../kernels/primitives/preprocess.cuh"
+#include "../kernels/primitives/activation.cuh"
+#include "../kernels/primitives/embedding.cuh"
+#include "../kernels/primitives/elementwise.cuh"
+#include "../kernels/primitives/normalization.cuh"
+#include "../kernels/primitives/quantization.cuh"
+#include "../kernels/primitives/fused.cuh"
+#include "../kernels/primitives/attention.cuh"
 
 int blocks_for(int64_t count) {
   return static_cast<int>((count + kThreads - 1) / kThreads);
