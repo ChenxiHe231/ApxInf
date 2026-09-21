@@ -481,6 +481,23 @@ fn attention_f16_mqa_522_uses_direct_e4m3_fa2() {
     args.policy.graph_safe = true;
     let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
     let expected = vec![1.0; batch * tokens * query_heads * head_dim];
+
+    if !matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
+        let validation_error =
+            super::attention_execution::validate_candidates(&ctx, &normalized, &expected)
+                .expect_err("direct E4M3 FA2 must remain unavailable outside SM100");
+        assert!(validation_error
+            .to_string()
+            .contains("no registered Attention candidate applies"));
+        let prepare_error = super::attention_execution::prepare(&ctx, normalized)
+            .err()
+            .expect("direct E4M3 FA2 must not prepare outside SM100");
+        assert!(prepare_error
+            .to_string()
+            .contains("no registered Attention candidate applies"));
+        return;
+    }
+
     super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
     let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
     assert!(
