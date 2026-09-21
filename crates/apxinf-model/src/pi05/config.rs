@@ -221,13 +221,17 @@ impl Pi05Config {
             allocate(patches * vision);
             allocate(patches * vision * 2);
             allocate(patches * vision * 2);
+            allocate(patches * vision * 2);
+            allocate(patches * vision * 2);
             allocate(patches * vision);
+            allocate(patches * self.vision_mlp_dim * 2);
             allocate(patches * self.vision_mlp_dim * 2);
             allocate(patches * self.vision_mlp_dim);
             allocate(patches * vision * 2);
             allocate(patches * vision * 2);
         }
         allocate(patches * vision);
+        allocate(patches * vision * 2);
         allocate(patches * self.language.width * 2);
         allocate(patches * self.language.width * 2);
 
@@ -243,10 +247,12 @@ impl Pi05Config {
             allocate(prefix * language_q * 2);
             allocate(prefix * language_kv * 2);
             allocate(prefix * language_kv * 2);
+            allocate(prefix * self.language.width * 2);
             if layer_index + 1 < self.language.depth {
                 allocate(prefix * language_q * 2);
                 allocate(prefix * self.language.num_heads * std::mem::size_of::<f32>());
                 allocate(prefix * language_q);
+                allocate(prefix * self.language.width * 2);
                 allocate(prefix * self.language.width * 2);
                 allocate(prefix * self.language.width * 2);
                 allocate(prefix * self.language.width);
@@ -268,12 +274,15 @@ impl Pi05Config {
             allocate(horizon * self.action_dim);
             allocate(horizon * action * 2);
             allocate(horizon * action * 2);
+            allocate(horizon * action * 2);
             for _ in 0..self.action_expert.depth {
                 allocate(horizon * action);
                 allocate(horizon * action_qkv * 2);
                 allocate(horizon * action_q * 2);
                 allocate(horizon * action_q * 2);
                 allocate(horizon * action_q);
+                allocate(horizon * action * 2);
+                allocate(horizon * action * 2);
                 allocate(horizon * action * 2);
                 allocate(horizon * action * 2);
                 allocate(horizon * action);

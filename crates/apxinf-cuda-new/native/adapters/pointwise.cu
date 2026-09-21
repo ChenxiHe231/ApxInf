@@ -31,19 +31,28 @@ bool may_have_bias(uint32_t semantic) {
 }
 
 void validate_spec(const apxinf_pointwise_spec_t& spec) {
+  const bool quantized_geglu =
+      spec.semantic == APXINF_POINTWISE_SEMANTIC_GEGLU &&
+      spec.dtype == APXINF_DTYPE_F16 &&
+      spec.output_dtype == APXINF_DTYPE_E4M3;
   if (spec.version != APXINF_POINTWISE_SPEC_VERSION ||
       spec.semantic > APXINF_POINTWISE_SEMANTIC_EULER_UPDATE ||
       (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
-      spec.output_dtype != spec.dtype ||
+      (!quantized_geglu && spec.output_dtype != spec.dtype) ||
       spec.activation > APXINF_POINTWISE_ACTIVATION_SILU ||
       spec.has_bias > 1 || spec.rows <= 0 || spec.cols <= 0 ||
       spec.rows > INT32_MAX || spec.cols > INT32_MAX ||
-      spec.output_scale_is_unit != 1 ||
+      spec.output_scale_is_unit > 1 ||
       !valid_alignment(spec.input_alignment) ||
       !valid_alignment(spec.secondary_alignment) ||
       !valid_alignment(spec.bias_alignment) ||
       !valid_alignment(spec.output_alignment)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Pointwise Spec");
+  }
+  if ((!quantized_geglu && spec.output_scale_is_unit != 1) ||
+      (quantized_geglu && spec.cols % 2 != 0)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid Pointwise output scale contract");
   }
   if (spec.has_bias != 0 && !may_have_bias(spec.semantic)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
@@ -73,7 +82,10 @@ void validate_bindings(const apxinf_pointwise_spec_t& spec,
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Pointwise bias binding disagrees with Spec.has_bias");
   }
-  if (bindings.output_scale != 1.0f || !std::isfinite(bindings.dt)) {
+  if (!std::isfinite(bindings.output_scale) || bindings.output_scale <= 0.0f ||
+      ((bindings.output_scale == 1.0f) !=
+       (spec.output_scale_is_unit != 0)) ||
+      !std::isfinite(bindings.dt)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Pointwise scalar");
   }
 }
@@ -86,6 +98,37 @@ int blocks_for(int64_t count) {
 
 int elementwise_blocks_for(int64_t count) {
   return static_cast<int>((count + kThreads - 1) / kThreads);
+}
+
+cudaError_t launch_f16_e4m3_geglu(
+    const half* input, __nv_fp8_e4m3* output, int rows, int cols,
+    float output_scale, cudaStream_t stream) {
+  const float inverse_scale = 1.0f / output_scale;
+  const bool packed8 = cols % 8 == 0 &&
+      reinterpret_cast<uintptr_t>(input) % 8 == 0 &&
+      reinterpret_cast<uintptr_t>(output) % 8 == 0;
+  if (packed8) {
+    const int64_t groups = static_cast<int64_t>(rows) * (cols / 8);
+    geglu_quant_f16_e4m3_packed8_kernel<<<
+        blocks_for(groups), kDirectThreads, 0, stream>>>(
+        input, output, rows, cols, inverse_scale);
+    return cudaGetLastError();
+  }
+  const bool packed4 = cols % 4 == 0 &&
+      reinterpret_cast<uintptr_t>(input) % 4 == 0 &&
+      reinterpret_cast<uintptr_t>(output) % 4 == 0;
+  if (packed4) {
+    const int64_t groups = static_cast<int64_t>(rows) * (cols / 4);
+    geglu_quant_f16_e4m3_packed4_kernel<<<
+        blocks_for(groups), kDirectThreads, 0, stream>>>(
+        input, output, rows, cols, inverse_scale);
+    return cudaGetLastError();
+  }
+  const int64_t pairs = static_cast<int64_t>(rows) * (cols / 2);
+  geglu_quant_f16_e4m3_kernel<<<
+      blocks_for(pairs), kDirectThreads, 0, stream>>>(
+      input, output, rows, cols, inverse_scale);
+  return cudaGetLastError();
 }
 
 cudaError_t launch_bf16_geglu(const __nv_bfloat16* input,
@@ -210,6 +253,17 @@ extern "C" apxinf_status_t apxinf_pointwise_launch(
     validate_spec(*spec);
     validate_bindings(*spec, *bindings);
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    if (spec->semantic == APXINF_POINTWISE_SEMANTIC_GEGLU &&
+        spec->dtype == APXINF_DTYPE_F16 &&
+        spec->output_dtype == APXINF_DTYPE_E4M3) {
+      apxinf::framework::check_cuda(launch_f16_e4m3_geglu(
+          static_cast<const half*>(bindings->input),
+          static_cast<__nv_fp8_e4m3*>(bindings->output),
+          static_cast<int>(spec->rows), static_cast<int>(spec->cols),
+          bindings->output_scale,
+          static_cast<cudaStream_t>(bindings->stream)));
+      return;
+    }
     apxinf::framework::check_cuda(
         spec->dtype == APXINF_DTYPE_BF16
             ? launch_bf16(*spec, *bindings)

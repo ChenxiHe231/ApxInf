@@ -87,11 +87,22 @@ pub(crate) fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
 }
 
-fn dtype_code(dtype: DType) -> Result<u32> {
+fn input_dtype_code(dtype: DType) -> Result<u32> {
     match dtype {
         DType::F16 => Ok(1),
         DType::BF16 => Ok(2),
-        _ => Err(invalid("Pointwise currently supports F16 and BF16")),
+        _ => Err(invalid("Pointwise input currently supports F16 and BF16")),
+    }
+}
+
+fn output_dtype_code(dtype: DType) -> Result<u32> {
+    match dtype {
+        DType::F16 => Ok(1),
+        DType::BF16 => Ok(2),
+        DType::F8E4M3 => Ok(3),
+        _ => Err(invalid(
+            "Pointwise output currently supports F16, BF16, and E4M3",
+        )),
     }
 }
 
@@ -138,7 +149,16 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
         .map_err(|_| invalid("Pointwise row count exceeds the CUDA kernel range"))?;
     let cols_abi = i32::try_from(cols)
         .map_err(|_| invalid("Pointwise column count exceeds the CUDA kernel range"))?;
-    let dtype = args.out.dtype();
+    let input_dtype = args.input.dtype();
+    let output_dtype = args.out.dtype();
+    let quantized_geglu = matches!(semantic, PointwiseSemantic::Geglu)
+        && input_dtype == DType::F16
+        && output_dtype == DType::F8E4M3;
+    if !quantized_geglu && input_dtype != output_dtype {
+        return Err(invalid(
+            "Pointwise input/output dtypes must match except for F16-to-E4M3 GeGLU",
+        ));
+    }
     let count = rows
         .checked_mul(cols)
         .ok_or_else(|| invalid("Pointwise size overflow"))?;
@@ -159,8 +179,15 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
             "Pointwise output_scale must be finite and positive",
         ));
     }
-    if args.output_scale != 1.0 {
-        return Err(invalid("Pointwise E4M3 output is not implemented yet"));
+    if !quantized_geglu && args.output_scale != 1.0 {
+        return Err(invalid(
+            "Pointwise output_scale is only supported for F16-to-E4M3 GeGLU",
+        ));
+    }
+    if quantized_geglu && cols % 2 != 0 {
+        return Err(invalid(
+            "F16-to-E4M3 GeGLU requires an even output width",
+        ));
     }
     if args.bias.is_some() && !semantic.may_have_bias() {
         return Err(invalid("Pointwise semantic does not take a bias"));
@@ -184,14 +211,14 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
 
     let mut storage = Vec::new();
 
-    let input_buffer = tensor_storage(ctx, args.input, dtype, input_count)?;
+    let input_buffer = tensor_storage(ctx, args.input, input_dtype, input_count)?;
     let input = input_buffer.ptr() as *const std::ffi::c_void;
     let input_alignment = alignment_of(input_buffer.ptr() as usize);
     storage.push(input_buffer);
 
     let (secondary, secondary_alignment) = match args.secondary {
         Some(tensor) => {
-            let buffer = tensor_storage(ctx, tensor, dtype, count)?;
+            let buffer = tensor_storage(ctx, tensor, input_dtype, count)?;
             let pointer = buffer.ptr() as *const std::ffi::c_void;
             let alignment = alignment_of(buffer.ptr() as usize);
             storage.push(buffer);
@@ -205,7 +232,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
 
     let (bias, bias_alignment) = match args.bias {
         Some(tensor) => {
-            let buffer = tensor_storage(ctx, tensor, dtype, cols)?;
+            let buffer = tensor_storage(ctx, tensor, input_dtype, cols)?;
             let pointer = buffer.ptr() as *const std::ffi::c_void;
             let alignment = alignment_of(buffer.ptr() as usize);
             storage.push(buffer);
@@ -214,17 +241,16 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
         None => (std::ptr::null(), 256),
     };
 
-    let output_buffer = tensor_storage(ctx, args.out, dtype, count)?;
+    let output_buffer = tensor_storage(ctx, args.out, output_dtype, count)?;
     let output = output_buffer.ptr() as *mut std::ffi::c_void;
     let output_alignment = alignment_of(output_buffer.ptr() as usize);
     storage.push(output_buffer);
 
-    let dtype_value = dtype_code(dtype)?;
     let spec = abi::Spec {
         version: abi::SPEC_VERSION,
         semantic: semantic.code(),
-        dtype: dtype_value,
-        output_dtype: dtype_value,
+        dtype: input_dtype_code(input_dtype)?,
+        output_dtype: output_dtype_code(output_dtype)?,
         activation: args.activation.code(),
         has_bias: u32::from(!bias.is_null()),
         input_alignment,
@@ -233,7 +259,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
         output_alignment,
         rows: i64::from(rows_abi),
         cols: i64::from(cols_abi),
-        output_scale_is_unit: 1,
+        output_scale_is_unit: u32::from(args.output_scale == 1.0),
     };
 
     let bindings = abi::Bindings {

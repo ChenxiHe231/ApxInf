@@ -113,18 +113,26 @@ fn fp8_gemm_geglu(
     if weight_dims[1] % 2 != 0 {
         return Err(Error::Other("π0.5 FP8 GeGLU width must be even".into()));
     }
-    let mut out = output(
-        ctx,
-        vec![dims[0], weight_dims[1] / 2],
-        DType::F8E4M3,
-    )?;
-    let mut gemm = ops::GemmArgs::new(input, &weights.weight, &mut out)
-        .with_immutable_weight(ops::WeightVersion::new(1));
-    gemm.quantization = ops::GemmQuantization::Fp8UnitScale;
-    gemm.alpha = input_scale * weights.weight_scale;
-    gemm.output_scale = output_scale;
-    gemm.policy = policies.gemm.clone();
-    ops::gemm_geglu(ctx, ops::GemmGegluArgs { gemm })?;
+    let fused_shape = matches!(dims[0], 522 | 533)
+        && dims[1] == 2048
+        && weight_dims == [2048, 32768];
+    if fused_shape {
+        let mut out = output(ctx, vec![dims[0], weight_dims[1] / 2], DType::F8E4M3)?;
+        let mut gemm = ops::GemmArgs::new(input, &weights.weight, &mut out)
+            .with_immutable_weight(ops::WeightVersion::new(1));
+        gemm.quantization = ops::GemmQuantization::Fp8UnitScale;
+        gemm.alpha = input_scale * weights.weight_scale;
+        gemm.output_scale = output_scale;
+        gemm.policy = policies.gemm.clone();
+        ops::gemm_geglu(ctx, ops::GemmGegluArgs { gemm })?;
+        return Ok(out);
+    }
+
+    let gate_up = fp8_gemm(ctx, policies, input, input_scale, weights)?;
+    let mut out = output(ctx, vec![dims[0], weight_dims[1] / 2], DType::F8E4M3)?;
+    let mut args = ops::PointwiseArgs::new(ops::PointwiseSemantic::Geglu, &gate_up, &mut out);
+    args.output_scale = output_scale;
+    ops::pointwise(ctx, args)?;
     Ok(out)
 }
 
