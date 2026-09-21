@@ -1,6 +1,6 @@
 //! π0.5 FP8 CUDA transformer-layer computation.
 
-use crate::pi05::backend::{ops, Context};
+use crate::pi05::backend::{ops, Context, DeviceBuffer};
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
 use crate::pi05::{
@@ -176,6 +176,22 @@ fn layer_normalized_fp8(
     fixed_quantize(ctx, policies, &normalized, scale)
 }
 
+fn f16_vector_prefix(tensor: &Tensor, elements: usize) -> Result<Tensor> {
+    if tensor.dtype() != DType::F16 {
+        return Err(Error::Other(format!(
+            "PI0.5 FP8 modulation must use F16 storage, got {}",
+            tensor.dtype()
+        )));
+    }
+    let bytes = elements
+        .checked_mul(DType::F16.size_in_bytes())
+        .ok_or_else(|| Error::Other("PI0.5 F16 vector size overflow".into()))?;
+    DeviceBuffer::from_tensor(tensor)
+        .and_then(|buffer| buffer.view(0, bytes))
+        .and_then(|buffer| buffer.as_tensor(Shape::new(vec![elements]), DType::F16))
+        .map_err(Error::Cuda)
+}
+
 fn adaptive_rms_normalized_fp8(
     ctx: &Context,
     policies: &Fp8L3Policies,
@@ -184,10 +200,17 @@ fn adaptive_rms_normalized_fp8(
     eps: f32,
     scale: f32,
 ) -> Result<Tensor> {
+    let cols = input
+        .shape()
+        .dims()
+        .last()
+        .copied()
+        .ok_or_else(|| Error::Other("PI0.5 adaptive RMS input has no columns".into()))?;
+    let norm_style = f16_vector_prefix(norm_style, 2 * cols)?;
     let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
     ops::adaptive_rms_norm(
         ctx,
-        ops::AdaptiveRmsNormArgs::new(input, norm_style, &mut normalized, eps),
+        ops::AdaptiveRmsNormArgs::new(input, &norm_style, &mut normalized, eps),
     )?;
     fixed_quantize(ctx, policies, &normalized, scale)
 }
@@ -265,13 +288,20 @@ fn ada_gate_residual_rms_normalized_fp8(
     eps: f32,
     scale: f32,
 ) -> Result<(Tensor, Tensor)> {
+    let cols = input
+        .shape()
+        .dims()
+        .last()
+        .copied()
+        .ok_or_else(|| Error::Other("PI0.5 AdaRMS input has no columns".into()))?;
+    let norm_style = f16_vector_prefix(norm_style, 2 * cols)?;
     let shape = input.shape().dims().to_vec();
     let mut hidden = output(ctx, shape.clone(), input.dtype())?;
     let mut normalized = output(ctx, shape, input.dtype())?;
     ops::ada_gate_residual_rms_norm(
         ctx,
         ops::AdaGateResidualRmsNormArgs::new(
-            input, residual, norm_style, gate_style, &mut hidden, &mut normalized, eps,
+            input, residual, &norm_style, gate_style, &mut hidden, &mut normalized, eps,
         ),
     )?;
     Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
