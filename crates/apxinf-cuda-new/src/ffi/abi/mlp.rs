@@ -19,6 +19,13 @@ unsafe extern "C" {
         width: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_quantize_fp8_per_tensor(
+        input: *const c_void,
+        output: *mut c_void,
+        count: i64,
+        input_scale: f32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_add_bf16(
         addend: *const c_void,
         accumulator: *mut c_void,
