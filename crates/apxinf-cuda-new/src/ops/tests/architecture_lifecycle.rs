@@ -94,21 +94,27 @@ fn norm_public_surface_is_typed_by_semantic() {
 }
 
 #[test]
-fn native_sources_use_operation_names_instead_of_migration_labels() {
+fn compatibility_layers_are_absent() {
     let build = include_str!("../../../build.rs");
     let raw_ffi = include_str!("../../ffi/raw/mod.rs");
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 
     for obsolete in ["ported/", "ported.rs", "mod ported"] {
         assert!(!build.contains(obsolete), "build still names {obsolete}");
         assert!(!raw_ffi.contains(obsolete), "FFI still names {obsolete}");
     }
-    for source in [
-        "tensor_ops.cu",
-        "bf16_ops.cu",
-        "mixed_precision_ops.cu",
-        "int8_ops.cu",
+    for removed in [
+        "src/kernels",
+        "src/backend.rs",
+        "src/kv_cache.rs",
+        "src/ffi/raw/operators.rs",
+        "native/adapters/tensor_ops.cu",
+        "native/adapters/bf16_ops.cu",
+        "native/adapters/mixed_precision_ops.cu",
+        "native/adapters/int8_ops.cu",
     ] {
-        assert!(build.contains(source), "build omits renamed source {source}");
+        assert!(!manifest.join(removed).exists(), "compatibility path remains: {removed}");
     }
-    assert!(raw_ffi.contains("mod operators"));
+    assert!(raw_ffi.contains("mod sampling"));
+    assert!(!raw_ffi.contains("mod operators"));
 }
