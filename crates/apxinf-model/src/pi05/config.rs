@@ -208,7 +208,7 @@ impl Pi05Config {
         let patches = self.num_views * self.patches_per_view();
         let patch_width = 3 * self.patch_size * self.patch_size;
         let vision = self.vision_width;
-        allocate(patches * patch_width);
+        allocate(patches * patch_width * 2);
         allocate(patches * vision * 2);
         allocate(patches * vision * 2);
         for _ in 0..self.vision_depth {
@@ -611,6 +611,19 @@ mod tests {
             .unwrap();
         assert!(bytes > 1_800_000_000);
         assert!(bytes < 2_500_000_000);
+    }
+
+    #[test]
+    fn thor_three_view_fp8_workspace_covers_t10_and_t21() {
+        let config = Pi05Config::thor_three_view();
+        assert_eq!(
+            config.cuda_graph_workspace_bytes_fp8_static(10).unwrap(),
+            2_954_794_880
+        );
+        assert_eq!(
+            config.cuda_graph_workspace_bytes_fp8_static(21).unwrap(),
+            2_979_016_832
+        );
     }
 
     #[test]

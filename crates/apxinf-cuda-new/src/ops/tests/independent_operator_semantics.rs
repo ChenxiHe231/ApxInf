@@ -5,7 +5,7 @@
 use super::framework::{f16_tensor, tensor, zeros_tensor};
 use super::*;
 use crate::{CudaBuffer, CudaContext};
-use apxinf_core::{DType, Tensor};
+use apxinf_core::{DType, Shape, Tensor};
 use half::{bf16, f16};
 
 const EPS: f32 = 1.0e-6;
@@ -429,6 +429,102 @@ fn pointwise_f16_geglu_can_quantize_directly_to_e4m3() {
         host
     };
     assert_eq!(bytes(&actual), bytes(&expected));
+}
+
+#[test]
+fn pointwise_f16_geglu_pair_fallback_matches_quantization() {
+    let ctx = CudaContext::new(0).unwrap();
+    let input = f16_tensor(0, vec![1, 4], &[-1.0, 0.5, 2.0, -2.0]);
+
+    let mut f16_geglu = f16_tensor(0, vec![1, 2], &[0.0; 2]);
+    pointwise(
+        &ctx,
+        PointwiseArgs::new(PointwiseSemantic::Geglu, &input, &mut f16_geglu),
+    )
+    .unwrap();
+    let mut expected = zeros_tensor(0, vec![1, 2], DType::F8E4M3);
+    let mut quantize = QuantizationArgs::new(
+        QuantizationSemantic::FixedScaleE4m3,
+        &f16_geglu,
+        &mut expected,
+    );
+    quantize.scale = 1.5;
+    quantization(&ctx, quantize).unwrap();
+
+    let mut actual = zeros_tensor(0, vec![1, 2], DType::F8E4M3);
+    let mut direct = PointwiseArgs::new(PointwiseSemantic::Geglu, &input, &mut actual);
+    direct.output_scale = 1.5;
+    pointwise(&ctx, direct).unwrap();
+
+    unsafe {
+        crate::ffi::check_cuda(crate::ffi::cudaDeviceSynchronize()).unwrap();
+    }
+    let bytes = |tensor: &Tensor| {
+        let buffer = CudaBuffer::from_tensor(tensor).unwrap();
+        let mut host = vec![0; buffer.len()];
+        buffer.copy_to_host(&mut host).unwrap();
+        host
+    };
+    assert_eq!(bytes(&actual), bytes(&expected));
+}
+
+#[test]
+fn pointwise_f16_geglu_rejects_overlapping_and_misaligned_storage() {
+    let ctx = CudaContext::new(0).unwrap();
+
+    let aliased = CudaBuffer::alloc(16, 0).unwrap();
+    let input = aliased
+        .view(0, 16)
+        .unwrap()
+        .as_tensor(Shape::new(vec![1, 8]), DType::F16)
+        .unwrap();
+    let mut output = aliased
+        .view(0, 4)
+        .unwrap()
+        .as_tensor(Shape::new(vec![1, 4]), DType::F8E4M3)
+        .unwrap();
+    let error = pointwise(
+        &ctx,
+        PointwiseArgs::new(PointwiseSemantic::Geglu, &input, &mut output),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("must not overlap"), "{error}");
+
+    let input_backing = CudaBuffer::alloc(18, 0).unwrap();
+    let misaligned_input = input_backing
+        .view(2, 16)
+        .unwrap()
+        .as_tensor(Shape::new(vec![1, 8]), DType::F16)
+        .unwrap();
+    let mut aligned_output = zeros_tensor(0, vec![1, 4], DType::F8E4M3);
+    let error = pointwise(
+        &ctx,
+        PointwiseArgs::new(
+            PointwiseSemantic::Geglu,
+            &misaligned_input,
+            &mut aligned_output,
+        ),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("4-byte input"), "{error}");
+
+    let aligned_input = f16_tensor(0, vec![1, 8], &[0.0; 8]);
+    let output_backing = CudaBuffer::alloc(5, 0).unwrap();
+    let mut misaligned_output = output_backing
+        .view(1, 4)
+        .unwrap()
+        .as_tensor(Shape::new(vec![1, 4]), DType::F8E4M3)
+        .unwrap();
+    let error = pointwise(
+        &ctx,
+        PointwiseArgs::new(
+            PointwiseSemantic::Geglu,
+            &aligned_input,
+            &mut misaligned_output,
+        ),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("2-byte output"), "{error}");
 }
 
 #[test]
