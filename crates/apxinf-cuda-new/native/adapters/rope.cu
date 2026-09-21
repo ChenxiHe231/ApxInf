@@ -5,19 +5,56 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
-
-extern "C" cudaError_t apxinf_rope_decode_bf16(
-    const void*, void*, uint32_t, uint32_t, float, const void*, void*);
-extern "C" cudaError_t apxinf_kv_cache_append_decode_bf16(
-    void*, const void*, uint32_t, uint32_t, uint32_t, const void*, void*);
-extern "C" cudaError_t apxinf_rope_k_write_bf16(
-    const void*, void*, uint32_t, uint32_t, uint32_t, float, const void*,
-    void*);
+#include <cuda_bf16.h>
 
 namespace {
 
+#include "../kernels/primitives/cache.cuh"
+#include "../kernels/primitives/rope.cuh"
+
 using apxinf::framework::Failure;
 namespace kernels = apxinf::rope::kernels;
+
+constexpr int kDecodeThreads = 256;
+
+cudaError_t launch_rope_decode_bf16(
+    const void* input, void* output, uint32_t head_dim, uint32_t n_heads,
+    float rope_theta, const void* position, cudaStream_t stream) {
+  dim3 grid((head_dim / 2 + kDecodeThreads - 1) / kDecodeThreads, n_heads, 1);
+  dim3 block(kDecodeThreads, 1, 1);
+  rope_decode_bf16_kernel<<<grid, block, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<__nv_bfloat16*>(output), head_dim, n_heads, rope_theta,
+      static_cast<const uint32_t*>(position));
+  return cudaGetLastError();
+}
+
+cudaError_t launch_kv_cache_append_decode_bf16(
+    void* cache, const void* new_data, uint32_t n_kv_heads,
+    uint32_t head_dim, uint32_t max_seq_len, const void* position,
+    cudaStream_t stream) {
+  dim3 grid((head_dim + kDecodeThreads - 1) / kDecodeThreads, n_kv_heads, 1);
+  dim3 block(kDecodeThreads, 1, 1);
+  kv_cache_append_decode_bf16_kernel<<<grid, block, 0, stream>>>(
+      static_cast<__nv_bfloat16*>(cache),
+      static_cast<const __nv_bfloat16*>(new_data), n_kv_heads, head_dim,
+      max_seq_len, static_cast<const uint32_t*>(position));
+  return cudaGetLastError();
+}
+
+cudaError_t launch_rope_k_write_bf16(
+    const void* input, void* cache, uint32_t head_dim, uint32_t n_kv_heads,
+    uint32_t max_seq_len, float rope_theta, const void* position,
+    cudaStream_t stream) {
+  dim3 grid((head_dim / 2 + kDecodeThreads - 1) / kDecodeThreads, n_kv_heads,
+            1);
+  dim3 block(kDecodeThreads, 1, 1);
+  rope_k_write_bf16_kernel<<<grid, block, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<__nv_bfloat16*>(cache), head_dim, n_kv_heads, max_seq_len,
+      rope_theta, static_cast<const uint32_t*>(position));
+  return cudaGetLastError();
+}
 
 bool valid_alignment(uint32_t alignment) {
   return alignment <= 256 && alignment != 0 &&
@@ -137,17 +174,18 @@ cudaError_t launch_split(const apxinf_rope_spec_t& spec,
 cudaError_t launch_decode(const apxinf_rope_spec_t& spec,
                           const apxinf_rope_bindings_t& bindings) {
   const uint32_t capacity = static_cast<uint32_t>(spec.cache_capacity);
-  cudaError_t status = apxinf_rope_decode_bf16(
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+  cudaError_t status = launch_rope_decode_bf16(
       bindings.qkv, bindings.q, spec.head_dim, spec.q_heads, bindings.theta,
-      bindings.position, bindings.stream);
+      bindings.position, stream);
   if (status != cudaSuccess) return status;
-  status = apxinf_rope_k_write_bf16(
+  status = launch_rope_k_write_bf16(
       bindings.key_input, bindings.k, spec.head_dim, spec.kv_heads, capacity,
-      bindings.theta, bindings.position, bindings.stream);
+      bindings.theta, bindings.position, stream);
   if (status != cudaSuccess) return status;
-  return apxinf_kv_cache_append_decode_bf16(
+  return launch_kv_cache_append_decode_bf16(
       bindings.v, bindings.value_input, spec.kv_heads, spec.head_dim, capacity,
-      bindings.position, bindings.stream);
+      bindings.position, stream);
 }
 
 }  // namespace
