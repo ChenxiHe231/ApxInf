@@ -18,6 +18,7 @@ use crate::pi05::backend::{
 };
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
+use super::L3Policies;
 use crate::pi05::{
     Bf16DeviceActionLayer, Bf16DeviceLanguageLayer, Bf16DeviceVisionBlock, Bf16LinearWeights,
     GemmaVariantConfig,
@@ -131,7 +132,12 @@ fn add_position_bf16(
     Ok(output)
 }
 
-fn gemm_bf16(ctx: &Context, activation: &Tensor, weight: &Tensor) -> Result<Tensor> {
+fn gemm_bf16(
+    ctx: &Context,
+    policies: &L3Policies,
+    activation: &Tensor,
+    weight: &Tensor,
+) -> Result<Tensor> {
     let a = activation.shape().dims();
     let b = weight.shape().dims();
     if activation.dtype() != DType::BF16
@@ -148,12 +154,15 @@ fn gemm_bf16(ctx: &Context, activation: &Tensor, weight: &Tensor) -> Result<Tens
     }
     crate::pi05::model::calibration::observe_bf16_activation(activation, weight)?;
     let mut output = ctx.allocate_output(Shape::new(vec![a[0], b[1]]), DType::BF16)?;
-    l3_gemm(ctx, GemmArgs::new(activation, weight, &mut output))?;
+    let mut args = GemmArgs::new(activation, weight, &mut output);
+    args.policy = policies.gemm.clone();
+    l3_gemm(ctx, args)?;
     Ok(output)
 }
 
 fn gemm_geglu_bf16(
     ctx: &Context,
+    policies: &L3Policies,
     activation: &Tensor,
     canonical_weight: &Tensor,
 ) -> Result<Tensor> {
@@ -177,17 +186,15 @@ fn gemm_geglu_bf16(
         canonical_weight,
     )?;
     let mut output = ctx.allocate_output(Shape::new(vec![a[0], b[1] / 2]), DType::BF16)?;
-    l3_gemm_geglu(
-        ctx,
-        GemmGegluArgs {
-            gemm: GemmArgs::new(activation, canonical_weight, &mut output),
-        },
-    )?;
+    let mut gemm = GemmArgs::new(activation, canonical_weight, &mut output);
+    gemm.policy = policies.gemm.clone();
+    l3_gemm_geglu(ctx, GemmGegluArgs { gemm })?;
     Ok(output)
 }
 
 fn mqa_bf16(
     ctx: &Context,
+    policies: &L3Policies,
     query: &Tensor,
     key: &Tensor,
     value: &Tensor,
@@ -237,15 +244,15 @@ fn mqa_bf16(
         .map_err(Error::Cuda)?;
     let query4 = query.reshape(Shape::new(vec![1, q[0], q[1], q[2]]))?;
     let mut output = ctx.allocate_output(query4.shape().clone(), DType::BF16)?;
-    l3_attention(
-        ctx,
-        AttentionArgs::new(&query4, &key, &value, &mut output),
-    )?;
+    let mut args = AttentionArgs::new(&query4, &key, &value, &mut output);
+    args.policy = policies.attention.clone();
+    l3_attention(ctx, args)?;
     output.reshape(query.shape().clone())
 }
 
 fn mha_bf16(
     ctx: &Context,
+    policies: &L3Policies,
     query: &Tensor,
     key: &Tensor,
     value: &Tensor,
@@ -269,10 +276,9 @@ fn mha_bf16(
     let key4 = key.reshape(shape4.clone())?;
     let value4 = value.reshape(shape4.clone())?;
     let mut output = ctx.allocate_output(shape4, DType::BF16)?;
-    l3_attention(
-        ctx,
-        AttentionArgs::new(&query4, &key4, &value4, &mut output),
-    )?;
+    let mut args = AttentionArgs::new(&query4, &key4, &value4, &mut output);
+    args.policy = policies.attention.clone();
+    l3_attention(ctx, args)?;
     output.reshape(query.shape().clone())
 }
 
@@ -532,8 +538,33 @@ pub fn language_layer_bf16(
     rms_eps: f32,
     rope_theta: f32,
 ) -> Result<Bf16LanguageLayerOutput> {
+    language_layer_bf16_with_policies(
+        ctx,
+        &L3Policies::default(),
+        config,
+        weights,
+        input,
+        compute_tail,
+        position_offset,
+        rms_eps,
+        rope_theta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn language_layer_bf16_with_policies(
+    ctx: &Context,
+    policies: &L3Policies,
+    config: GemmaVariantConfig,
+    weights: &Bf16DeviceLanguageLayer,
+    input: &Tensor,
+    compute_tail: bool,
+    position_offset: usize,
+    rms_eps: f32,
+    rope_theta: f32,
+) -> Result<Bf16LanguageLayerOutput> {
     let normalized = rms_bf16(ctx, input, &weights.input_norm_scale, rms_eps)?;
-    let qkv = gemm_bf16(ctx, &normalized, &weights.qkv.weight)?;
+    let qkv = gemm_bf16(ctx, policies, &normalized, &weights.qkv.weight)?;
     let qkv = split_qkv_rope_bf16(
         ctx,
         &qkv,
@@ -552,9 +583,9 @@ pub fn language_layer_bf16(
             value: qkv.value_2d(tokens, config.head_dim)?,
         });
     }
-    let attention = mqa_bf16(ctx, &qkv.q, &qkv.k, &qkv.v, tokens)?
+    let attention = mqa_bf16(ctx, policies, &qkv.q, &qkv.k, &qkv.v, tokens)?
         .reshape(vec![tokens, config.num_heads * config.head_dim])?;
-    let projected = gemm_bf16(ctx, &attention, &weights.output.weight)?;
+    let projected = gemm_bf16(ctx, policies, &attention, &weights.output.weight)?;
     let fused = bias_residual_rms_bf16(
         ctx,
         &projected,
@@ -563,8 +594,8 @@ pub fn language_layer_bf16(
         &weights.post_attention_norm_scale,
         rms_eps,
     )?;
-    let activated = gemm_geglu_bf16(ctx, &fused.normalized, &weights.gate_up.weight)?;
-    let projected = gemm_bf16(ctx, &activated, &weights.down.weight)?;
+    let activated = gemm_geglu_bf16(ctx, policies, &fused.normalized, &weights.gate_up.weight)?;
+    let projected = gemm_bf16(ctx, policies, &activated, &weights.down.weight)?;
     let hidden =
         bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)?;
     Ok(Bf16LanguageLayerOutput {
@@ -590,11 +621,46 @@ pub fn action_layer_bf16(
     rms_eps: f32,
     rope_theta: f32,
 ) -> Result<Bf16ActionLayerOutput> {
+    action_layer_bf16_with_policies(
+        ctx,
+        &L3Policies::default(),
+        config,
+        weights,
+        input,
+        attention_normalized,
+        attention_modulation,
+        mlp_modulation,
+        next_norm_modulation,
+        prefix_k,
+        prefix_v,
+        position_offset,
+        rms_eps,
+        rope_theta,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn action_layer_bf16_with_policies(
+    ctx: &Context,
+    policies: &L3Policies,
+    config: GemmaVariantConfig,
+    weights: &Bf16DeviceActionLayer,
+    input: &Tensor,
+    attention_normalized: Option<&Tensor>,
+    attention_modulation: &Tensor,
+    mlp_modulation: &Tensor,
+    next_norm_modulation: &Tensor,
+    prefix_k: &Tensor,
+    prefix_v: &Tensor,
+    position_offset: usize,
+    rms_eps: f32,
+    rope_theta: f32,
+) -> Result<Bf16ActionLayerOutput> {
     let normalized = match attention_normalized {
         Some(value) => value.clone(),
         None => adaptive_rms_bf16(ctx, input, attention_modulation, rms_eps)?,
     };
-    let qkv = gemm_bf16(ctx, &normalized, &weights.qkv.weight)?;
+    let qkv = gemm_bf16(ctx, policies, &normalized, &weights.qkv.weight)?;
     let q = split_qkv_rope_into_cache_bf16(
         ctx,
         &qkv,
@@ -610,6 +676,7 @@ pub fn action_layer_bf16(
     )?;
     let attention = mqa_bf16(
         ctx,
+        policies,
         &q,
         prefix_k,
         prefix_v,
@@ -619,7 +686,7 @@ pub fn action_layer_bf16(
         input.shape().dims()[0],
         config.num_heads * config.head_dim,
     ])?;
-    let projected = gemm_bf16(ctx, &attention, &weights.output.weight)?;
+    let projected = gemm_bf16(ctx, policies, &attention, &weights.output.weight)?;
     let fused = adaptive_gate_residual_rms_bf16(
         ctx,
         &projected,
@@ -628,8 +695,8 @@ pub fn action_layer_bf16(
         mlp_modulation,
         rms_eps,
     )?;
-    let activated = gemm_geglu_bf16(ctx, &fused.normalized, &weights.gate_up.weight)?;
-    let projected = gemm_bf16(ctx, &activated, &weights.down.weight)?;
+    let activated = gemm_geglu_bf16(ctx, policies, &fused.normalized, &weights.gate_up.weight)?;
+    let projected = gemm_bf16(ctx, policies, &activated, &weights.down.weight)?;
     let fused = adaptive_gate_residual_rms_bf16(
         ctx,
         &projected,
@@ -651,7 +718,25 @@ pub fn vision_patch_embed_bf16(
     patches: &Tensor,
     patches_per_view: usize,
 ) -> Result<Tensor> {
-    let projection = gemm_bf16(ctx, patches, &weights.weight)?;
+    vision_patch_embed_bf16_with_policies(
+        ctx,
+        &L3Policies::default(),
+        weights,
+        position_embedding,
+        patches,
+        patches_per_view,
+    )
+}
+
+fn vision_patch_embed_bf16_with_policies(
+    ctx: &Context,
+    policies: &L3Policies,
+    weights: &Bf16LinearWeights,
+    position_embedding: &Tensor,
+    patches: &Tensor,
+    patches_per_view: usize,
+) -> Result<Tensor> {
+    let projection = gemm_bf16(ctx, policies, patches, &weights.weight)?;
     add_position_bf16(
         ctx,
         &projection,
@@ -671,6 +756,29 @@ pub fn vision_layer_bf16(
     head_dim: usize,
     layer_norm_eps: f32,
 ) -> Result<Tensor> {
+    vision_layer_bf16_with_policies(
+        ctx,
+        &L3Policies::default(),
+        weights,
+        input,
+        patches_per_view,
+        heads,
+        head_dim,
+        layer_norm_eps,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn vision_layer_bf16_with_policies(
+    ctx: &Context,
+    policies: &L3Policies,
+    weights: &Bf16DeviceVisionBlock,
+    input: &Tensor,
+    patches_per_view: usize,
+    heads: usize,
+    head_dim: usize,
+    layer_norm_eps: f32,
+) -> Result<Tensor> {
     let normalized = layer_bf16(
         ctx,
         input,
@@ -678,11 +786,11 @@ pub fn vision_layer_bf16(
         &weights.norm1.bias,
         layer_norm_eps,
     )?;
-    let qkv = gemm_bf16(ctx, &normalized, &weights.qkv.weight)?;
+    let qkv = gemm_bf16(ctx, policies, &normalized, &weights.qkv.weight)?;
     let qkv = split_qkv_bias_bf16(ctx, &qkv, weights.qkv.bias.as_ref(), heads, head_dim)?;
-    let attention = mha_bf16(ctx, &qkv.q, &qkv.k, &qkv.v, patches_per_view)?
+    let attention = mha_bf16(ctx, policies, &qkv.q, &qkv.k, &qkv.v, patches_per_view)?
         .reshape(vec![input.shape().dims()[0], heads * head_dim])?;
-    let projection = gemm_bf16(ctx, &attention, &weights.output.weight)?;
+    let projection = gemm_bf16(ctx, policies, &attention, &weights.output.weight)?;
     let fused = bias_residual_layer_bf16(
         ctx,
         &projection,
@@ -692,14 +800,14 @@ pub fn vision_layer_bf16(
         &weights.norm2.bias,
         layer_norm_eps,
     )?;
-    let activation = gemm_bf16(ctx, &fused.normalized, &weights.fc1.weight)?;
+    let activation = gemm_bf16(ctx, policies, &fused.normalized, &weights.fc1.weight)?;
     let activation = bias_activation_bf16(
         ctx,
         &activation,
         weights.fc1.bias.as_ref(),
         PointwiseActivation::Gelu,
     )?;
-    let projection = gemm_bf16(ctx, &activation, &weights.fc2.weight)?;
+    let projection = gemm_bf16(ctx, policies, &activation, &weights.fc2.weight)?;
     bias_residual_bf16(ctx, &projection, weights.fc2.bias.as_ref(), &fused.hidden)
 }
 
@@ -721,7 +829,7 @@ impl QkvViews for QkvTensors {
 // Precision-specific backbone operations share this file with their layers.
 pub(in crate::pi05::model) mod backbone {
     use super::*;
-    use crate::pi05::backend::{Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
+    use crate::pi05::backend::{Context, DeviceBuffer as CudaBuffer};
     use crate::pi05::weights::*;
     use crate::pi05::Pi05Config;
     use apxinf_core::{DType, Error, Result, Tensor};
@@ -738,15 +846,17 @@ pub(in crate::pi05::model) mod backbone {
         final_norm: Tensor,
     }
     pub struct Bf16Blocks {
-        pub(in crate::pi05::model) backend: Arc<RuntimeBackend>,
+        pub(in crate::pi05::model) backend: Arc<Context>,
         pub(in crate::pi05::model) config: Arc<Pi05Config>,
         pub(in crate::pi05::model) weights: Arc<Bf16Weights>,
+        pub(in crate::pi05::model) policies: L3Policies,
     }
     impl Bf16Blocks {
-        pub fn new(
-            backend: Arc<RuntimeBackend>,
+        pub(in crate::pi05) fn new(
+            backend: Arc<Context>,
             config: Arc<Pi05Config>,
             weights: Arc<Bf16Weights>,
+            policies: L3Policies,
         ) -> Result<Self> {
             config.validate()?;
             if weights.vision_layers.len() != config.vision_depth
@@ -761,6 +871,7 @@ pub(in crate::pi05::model) mod backbone {
                 backend,
                 config,
                 weights,
+                policies,
             })
         }
 
@@ -775,16 +886,18 @@ pub(in crate::pi05::model) mod backbone {
                     got: patches.dtype(),
                 });
             }
-            let mut hidden = vision_patch_embed_bf16(
+            let mut hidden = vision_patch_embed_bf16_with_policies(
                 self.ctx(),
+                &self.policies,
                 &self.weights.patch_embedding,
                 &self.weights.position_embedding,
                 patches,
                 self.config.patches_per_view(),
             )?;
             for layer in &self.weights.vision_layers {
-                hidden = vision_layer_bf16(
+                hidden = vision_layer_bf16_with_policies(
                     self.ctx(),
+                    &self.policies,
                     layer,
                     &hidden,
                     self.config.patches_per_view(),
@@ -802,6 +915,7 @@ pub(in crate::pi05::model) mod backbone {
             )?;
             let projected = gemm_bf16(
                 self.ctx(),
+                &self.policies,
                 &hidden,
                 &self.weights.multimodal_projector.weight,
             )?;
@@ -845,8 +959,9 @@ pub(in crate::pi05::model) mod backbone {
             let mut keys = Vec::with_capacity(self.config.language.depth);
             let mut values = Vec::with_capacity(self.config.language.depth);
             for (index, layer) in self.weights.language_layers.iter().enumerate() {
-                let output = language_layer_bf16(
+                let output = language_layer_bf16_with_policies(
                     self.ctx(),
+                    &self.policies,
                     self.config.language,
                     layer,
                     &hidden,
@@ -868,14 +983,24 @@ pub(in crate::pi05::model) mod backbone {
         }
 
         fn conditioning(&self, time_embedding: &Tensor) -> Result<Tensor> {
-            let hidden = gemm_bf16(self.ctx(), time_embedding, &self.weights.time_mlp_in.weight)?;
+            let hidden = gemm_bf16(
+                self.ctx(),
+                &self.policies,
+                time_embedding,
+                &self.weights.time_mlp_in.weight,
+            )?;
             let hidden = bias_activation_bf16(
                 self.ctx(),
                 &hidden,
                 self.weights.time_mlp_in.bias.as_ref(),
                 PointwiseActivation::Silu,
             )?;
-            let output = gemm_bf16(self.ctx(), &hidden, &self.weights.time_mlp_out.weight)?;
+            let output = gemm_bf16(
+                self.ctx(),
+                &self.policies,
+                &hidden,
+                &self.weights.time_mlp_out.weight,
+            )?;
             bias_activation_bf16(
                 self.ctx(),
                 &output,
@@ -885,7 +1010,7 @@ pub(in crate::pi05::model) mod backbone {
         }
 
         fn modulation(&self, conditioning: &Tensor, weights: &Bf16LinearWeights) -> Result<Tensor> {
-            let projected = gemm_bf16(self.ctx(), conditioning, &weights.weight)?;
+            let projected = gemm_bf16(self.ctx(), &self.policies, conditioning, &weights.weight)?;
             let modulation = bias_activation_bf16(
                 self.ctx(),
                 &projected,
@@ -945,7 +1070,12 @@ pub(in crate::pi05::model) mod backbone {
                     "π0.5 BF16 prefix/modulation depth mismatch".into(),
                 ));
             }
-            let hidden = gemm_bf16(self.ctx(), state, &self.weights.action_in.weight)?;
+            let hidden = gemm_bf16(
+                self.ctx(),
+                &self.policies,
+                state,
+                &self.weights.action_in.weight,
+            )?;
             let mut hidden = bias_activation_bf16(
                 self.ctx(),
                 &hidden,
@@ -960,8 +1090,9 @@ pub(in crate::pi05::model) mod backbone {
                 } else {
                     &modulation.final_norm
                 };
-                let output = action_layer_bf16(
+                let output = action_layer_bf16_with_policies(
                     self.ctx(),
+                    &self.policies,
                     self.config.action_expert,
                     layer,
                     &hidden,
@@ -981,7 +1112,12 @@ pub(in crate::pi05::model) mod backbone {
             let hidden = attention_normalized.ok_or_else(|| {
                 Error::Other("π0.5 action expert must contain at least one layer".into())
             })?;
-            let velocity = gemm_bf16(self.ctx(), &hidden, &self.weights.action_out.weight)?;
+            let velocity = gemm_bf16(
+                self.ctx(),
+                &self.policies,
+                &hidden,
+                &self.weights.action_out.weight,
+            )?;
             let velocity = bias_activation_bf16(
                 self.ctx(),
                 &velocity,
@@ -1050,7 +1186,7 @@ pub(in crate::pi05::model) mod backbone {
 }
 
 impl crate::pi05::model::PrepareBlocks for backbone::Bf16Blocks {
-    fn backend(&self) -> &std::sync::Arc<crate::pi05::backend::RuntimeBackend> {
+    fn backend(&self) -> &std::sync::Arc<crate::pi05::backend::Context> {
         &self.backend
     }
     fn workspace_requirements(
