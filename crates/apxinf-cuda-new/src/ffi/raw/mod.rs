@@ -1,5 +1,5 @@
 pub(crate) mod cuda_runtime;
-pub(crate) mod ported;
+pub(crate) mod operators;
 
 pub(crate) use cuda_runtime::*;
-pub(crate) use ported::*;
+pub(crate) use operators::*;

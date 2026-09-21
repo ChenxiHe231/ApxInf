@@ -92,3 +92,23 @@ fn norm_public_surface_is_typed_by_semantic() {
         assert!(public.contains(&format!("pub struct {args}")), "missing {args}");
     }
 }
+
+#[test]
+fn native_sources_use_operation_names_instead_of_migration_labels() {
+    let build = include_str!("../../../build.rs");
+    let raw_ffi = include_str!("../../ffi/raw/mod.rs");
+
+    for obsolete in ["ported/", "ported.rs", "mod ported"] {
+        assert!(!build.contains(obsolete), "build still names {obsolete}");
+        assert!(!raw_ffi.contains(obsolete), "FFI still names {obsolete}");
+    }
+    for source in [
+        "tensor_ops.cu",
+        "bf16_ops.cu",
+        "mixed_precision_ops.cu",
+        "int8_ops.cu",
+    ] {
+        assert!(build.contains(source), "build omits renamed source {source}");
+    }
+    assert!(raw_ffi.contains("mod operators"));
+}

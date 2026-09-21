@@ -1,4 +1,4 @@
-//! Raw bindings for project-owned CUDA kernels and host adapters.
+//! Raw bindings for model-oriented CUDA operators and host adapters.
 
 use std::ffi::c_void;
 
