@@ -2,7 +2,7 @@
 //!
 //! This single example replaces the former `pi05_{bf16,thor,int8}_bench.rs`. It
 //! bypasses the unified `AutoModel`/`infer` frontend and drives the variant-specific
-//! `Pi05{Bf16,,Int8Dynamic}CudaRuntime` directly, because it needs `apxinf_cuda`
+//! `Pi05{Bf16,,Int8Dynamic}CudaRuntime` directly, because it needs `apxinf_cuda_new`
 //! profiler hooks and raw device inputs that the model
 //! abstraction does not (and should not) expose. For an abstraction-level entry
 //! point see `pi05_auto_smoke`.
@@ -35,8 +35,8 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use apxinf_core::{Backend, DType, Tensor};
-use apxinf_cuda::{CudaBackend, CudaBuffer};
+use apxinf_core::{DType, Tensor};
+use apxinf_cuda_new::{transfers, CudaBuffer, CudaContext};
 use apxinf_model::pi05::{
     upload_time_embeddings_bf16, upload_time_embeddings_fp8_static,
     upload_time_embeddings_int8_dynamic, Bf16Model, Bf16Weights, CapturedGraph,
@@ -126,6 +126,14 @@ struct Thresholds {
 const EAGER_GRAPH_MIN_COSINE: f64 = 0.999_999;
 const DEVICE_MEMORY_SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
 
+fn to_device(context: &CudaContext, tensor: &Tensor) -> apxinf_core::Result<Tensor> {
+    transfers::to_cuda(tensor, context.device_id())
+}
+
+fn to_cpu(tensor: &Tensor) -> apxinf_core::Result<Tensor> {
+    transfers::to_cpu(tensor)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DeviceMemoryObservation {
     baseline_used_bytes: usize,
@@ -141,7 +149,7 @@ struct DeviceMemoryMonitor {
 
 impl DeviceMemoryMonitor {
     fn start(device_id: usize) -> Result<Self, String> {
-        let baseline = apxinf_cuda::device_memory_info(device_id)?;
+        let baseline = apxinf_cuda_new::device_memory_info(device_id)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let handle = thread::Builder::new()
@@ -152,7 +160,7 @@ impl DeviceMemoryMonitor {
                 let mut sample_count = 1usize;
                 while !thread_stop.load(Ordering::Acquire) {
                     thread::sleep(DEVICE_MEMORY_SAMPLE_INTERVAL);
-                    let memory = apxinf_cuda::device_memory_info(device_id)?;
+                    let memory = apxinf_cuda_new::device_memory_info(device_id)?;
                     min_free_bytes = min_free_bytes.min(memory.free_bytes);
                     observed_peak_used_bytes = observed_peak_used_bytes.max(memory.used_bytes());
                     sample_count += 1;
@@ -880,11 +888,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.validate()?;
     let config = Arc::new(config);
 
-    let backend = Arc::new(CudaBackend::new(0)?);
+    let context = Arc::new(CudaContext::new(0).map_err(std::io::Error::other)?);
     if model_variant == BenchVariant::Fp8Static {
-        ModelVariantChoice::Fp8Static.ensure_supported(backend.context().caps().sm)?;
+        ModelVariantChoice::Fp8Static.ensure_supported(context.caps().sm)?;
     }
-    let memory_monitor = DeviceMemoryMonitor::start(backend.device_id())?;
+    let memory_monitor = DeviceMemoryMonitor::start(context.device_id())?;
 
     // cuda-new selects and prepares exact L3 executions before graph capture.
     // That one-time work is outside both timed steady-state boundaries below.
@@ -908,10 +916,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("converting and uploading native BF16 weights...");
             let device_weights = Arc::new(Bf16Weights::from_host(
                 &host_weights,
-                &*backend,
+                &context,
             )?);
             Bench::Bf16(build_bf16_model(
-                backend.clone(),
+                context.clone(),
                 config.clone(),
                 device_weights,
             )?)
@@ -960,10 +968,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("quantizing and uploading static FP8 weights...");
             let device_weights = Arc::new(Fp8StaticWeights::from_host(
                 &host_weights,
-                &*backend,
+                &context,
             )?);
             Bench::Fp8Static(build_fp8_static_model(
-                backend.clone(),
+                context.clone(),
                 config.clone(),
                 device_weights,
                 scales,
@@ -971,9 +979,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         BenchVariant::Int8Dynamic => {
             eprintln!("quantizing and uploading per-channel INT8 weights...");
-            let device_weights = Arc::new(Int8DynamicWeights::from_host(&host_weights, &backend)?);
+            let device_weights = Arc::new(Int8DynamicWeights::from_host(&host_weights, &context)?);
             Bench::Int8Dynamic(build_int8_dynamic_model(
-                backend.clone(),
+                context.clone(),
                 config.clone(),
                 device_weights,
             )?)
@@ -992,23 +1000,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (Some(images), patches)
         }
     };
-    let patches = backend.to_device(&patches_host)?;
+    let patches = to_device(&context, &patches_host)?;
     let noise_host = noise_fixture(args.noise_bf16_u16le.as_deref(), &config, io_dtype)?;
-    let noise = backend.to_device(&noise_host)?;
+    let noise = to_device(&context, &noise_host)?;
     let host_token_ids = token_fixture(args.token_ids_u32le.as_deref(), token_count)?;
     let token_bytes = host_token_ids
         .iter()
         .flat_map(|token| token.to_le_bytes())
         .collect::<Vec<_>>();
-    let token_ids = CudaBuffer::alloc_zeros(token_bytes.len(), backend.device_id())
+    let token_ids = CudaBuffer::alloc_zeros(token_bytes.len(), context.device_id())
         .map_err(std::io::Error::other)?;
     token_ids
         .copy_from_host(&token_bytes)
         .map_err(std::io::Error::other)?;
     let time_embeddings = match model_variant {
-        BenchVariant::Bf16 => upload_time_embeddings_bf16(&config, &*backend)?,
-        BenchVariant::Fp8Static => upload_time_embeddings_fp8_static(&config, &*backend)?,
-        BenchVariant::Int8Dynamic => upload_time_embeddings_int8_dynamic(&config, &*backend)?,
+        BenchVariant::Bf16 => upload_time_embeddings_bf16(&config, &context)?,
+        BenchVariant::Fp8Static => upload_time_embeddings_fp8_static(&config, &context)?,
+        BenchVariant::Int8Dynamic => upload_time_embeddings_int8_dynamic(&config, &context)?,
     };
 
     eprintln!(
@@ -1016,7 +1024,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         model_variant.variant_label()
     );
     let eager_output = bench.infer(&patches, &token_ids, token_count, &noise, &time_embeddings)?;
-    let eager = backend.to_cpu(&eager_output)?.to_f32_vec()?;
+    let eager = to_cpu(&eager_output)?.to_f32_vec()?;
     drop(eager_output);
 
     if std::env::var_os("APXINF_PI05_EAGER_ONLY").is_some() {
@@ -1051,7 +1059,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         graph.update_raw_image_inputs(images, &host_token_ids, &noise_host)?;
     }
     graph.replay_and_synchronize()?;
-    let captured = backend.to_cpu(graph.output())?.to_f32_vec()?;
+    let captured = to_cpu(graph.output())?.to_f32_vec()?;
     let eager_graph = ErrorMetrics::measure(&captured, &eager)?;
     let eager_graph_passed = eager_graph.cosine >= EAGER_GRAPH_MIN_COSINE
         && eager_graph.max_abs <= thresholds.eager_graph_max_abs;
@@ -1075,7 +1083,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..10 {
         graph.replay()?;
     }
-    backend.synchronize()?;
+    context.synchronize().map_err(std::io::Error::other)?;
     // Stop the polling thread before profiling or latency measurement so the
     // monitor cannot perturb the formal timing loops.
     let device_memory = memory_monitor.finish()?;
@@ -1092,17 +1100,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile_replay = std::env::var_os("APXINF_PI05_PROFILE_REPLAY").is_some();
     if profile_replay {
         eprintln!("profiling one steady-state CUDA graph replay...");
-        apxinf_cuda::profiler::start().map_err(std::io::Error::other)?;
+        apxinf_cuda_new::profiler::start().map_err(std::io::Error::other)?;
         let replay_result = {
-            let _range = apxinf_cuda::nvtx::range("pi05.graph_replay");
+            let _range = apxinf_cuda_new::nvtx::range("pi05.graph_replay");
             graph.replay_and_synchronize()
         };
-        let stop_result = apxinf_cuda::profiler::stop().map_err(std::io::Error::other);
+        let stop_result = apxinf_cuda_new::profiler::stop().map_err(std::io::Error::other);
         replay_result?;
         stop_result?;
     }
 
-    let timer = apxinf_cuda::CudaEventTimer::new(backend.context())?;
+    let timer = apxinf_cuda_new::CudaEventTimer::new(&context)?;
     let mut milliseconds = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let (_, elapsed_ms) = timer.measure(|| graph.replay())?;
@@ -1144,7 +1152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    let output = backend.to_cpu(graph.output())?.to_f32_vec()?;
+    let output = to_cpu(graph.output())?.to_f32_vec()?;
     let checksum = output.iter().map(|value| value.abs() as f64).sum::<f64>();
     let profile = format!(
         "pi05_{}view_h{}_steps{}",

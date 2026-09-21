@@ -9,8 +9,8 @@ use apxinf_model::pi05::build_fp8_static_model;
 use std::path::Path;
 use std::sync::Arc;
 
-use apxinf_core::{Backend, DType, Tensor};
-use apxinf_cuda::{CudaBackend, CudaBuffer};
+use apxinf_core::{DType, Tensor};
+use apxinf_cuda_new::{transfers, CudaBuffer, CudaContext};
 use apxinf_model::pi05::{
     upload_time_embeddings_fp8_static, vision_layer_fp8_static, vision_patch_embed_fp8_static,
     Fp8StaticActivationScales, Fp8StaticCalibration, Fp8StaticWeights, Pi05Config, Pi05Weights,
@@ -51,10 +51,9 @@ fn signature(values: &[f32]) -> serde_json::Value {
 }
 
 fn device_signature(
-    backend: &CudaBackend,
     tensor: &Tensor,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let values = backend.to_cpu(tensor)?.to_f32_vec()?;
+    let values = transfers::to_cpu(tensor)?.to_f32_vec()?;
     Ok(signature(&values))
 }
 
@@ -79,28 +78,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config,
         &calibration,
     )?);
-    let backend = Arc::new(CudaBackend::new(0)?);
+    let context = Arc::new(CudaContext::new(0).map_err(std::io::Error::other)?);
     eprintln!("loading π0.5 checkpoint...");
     let host_weights = Pi05Weights::from_safetensors(&config, Path::new(&arguments[1]))?;
     eprintln!("quantizing and uploading static FP8 weights...");
     let device_weights = Arc::new(Fp8StaticWeights::from_host(
         &host_weights,
-        &*backend,
+        &context,
     )?);
     drop(host_weights);
 
     let patch_tokens = config.num_views * config.patches_per_view();
     let patch_width = 3 * config.patch_size * config.patch_size;
-    let patches = backend.to_device(&Tensor::zeros(vec![patch_tokens, patch_width], DType::F16))?;
-    let noise = backend.to_device(&Tensor::zeros(
-        vec![config.action_horizon, config.action_dim],
-        DType::F16,
-    ))?;
-    let token_ids = CudaBuffer::alloc_zeros(token_count * 4, backend.device_id())
+    let patches = transfers::to_cuda(
+        &Tensor::zeros(vec![patch_tokens, patch_width], DType::F16),
+        context.device_id(),
+    )?;
+    let noise = transfers::to_cuda(
+        &Tensor::zeros(
+            vec![config.action_horizon, config.action_dim],
+            DType::F16,
+        ),
+        context.device_id(),
+    )?;
+    let token_ids = CudaBuffer::alloc_zeros(token_count * 4, context.device_id())
         .map_err(std::io::Error::other)?;
-    let time_embeddings = upload_time_embeddings_fp8_static(&config, &*backend)?;
+    let time_embeddings = upload_time_embeddings_fp8_static(&config, &context)?;
     let runtime = build_fp8_static_model(
-        backend.clone(),
+        context.clone(),
         config.clone(),
         device_weights.clone(),
         scales.clone(),
@@ -109,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut signatures = serde_json::Map::new();
     eprintln!("probing patch embedding and each vision layer...");
     let mut vision_hidden = vision_patch_embed_fp8_static(
-        backend.context(),
+        &context,
         &device_weights.patch_embedding,
         &device_weights.position_embedding,
         &patches,
@@ -118,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     signatures.insert(
         "vision_patch_embed_fp8_static".into(),
-        device_signature(&backend, &vision_hidden)?,
+        device_signature(&vision_hidden)?,
     );
     for (index, (weights, layer_scales)) in device_weights
         .vision_layers
@@ -127,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enumerate()
     {
         vision_hidden = vision_layer_fp8_static(
-            backend.context(),
+            &context,
             weights,
             *layer_scales,
             &vision_hidden,
@@ -138,14 +143,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         signatures.insert(
             format!("vision_layer_{index}"),
-            device_signature(&backend, &vision_hidden)?,
+            device_signature(&vision_hidden)?,
         );
     }
     eprintln!("probing vision projection...");
     let vision = runtime.encode_vision(&patches)?;
     signatures.insert(
         "vision_projected".into(),
-        device_signature(&backend, &vision)?,
+        device_signature(&vision)?,
     );
     eprintln!("probing language prefix K/V...");
     let prefix_input = runtime.embed_prefix(&vision, &token_ids, token_count)?;
@@ -153,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for layer in [0usize, config.language.depth - 1] {
         signatures.insert(
             format!("prefix_v_layer{layer}"),
-            device_signature(&backend, &prefix.values[layer])?,
+            device_signature(&prefix.values[layer])?,
         );
     }
 
@@ -164,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         state = runtime.denoise_step(&state, embedding, &prefix, dt)?;
         signatures.insert(
             format!("denoise_step_{step}"),
-            device_signature(&backend, &state)?,
+            device_signature(&state)?,
         );
     }
     println!(
