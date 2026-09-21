@@ -6,9 +6,7 @@ license = "Apache-2.0"
 
 [features]
 default = []
-# Transitional opt-in for storage types used by `apxinf-cuda-new`. Keeping
-# these variants out of the default API lets the existing CUDA crate continue
-# to exhaustively match `DType` until the backend replacement is complete.
+# Opt in to CUDA quantized storage types without expanding the default CPU API.
 quantized-dtypes = []
 # BLAS backends — enable one at a time. If none is enabled, a naive
 # Rust fallback is used.

@@ -50,11 +50,13 @@ Useful starting locations relative to the selected checkout are:
   and execution scheduling. In PI0.5, `model/` owns forward order and Blocks,
   `model_runner/` owns preparation/cache/input binding, and `weights/` owns
   fixed representations. `backend.rs` is an import/type-alias seam.
-- `crates/apxinf-cuda/src/kernels/`: typed operation contracts and dispatch.
-- `crates/apxinf-cuda/src/ffi/`, `src/cublas.rs`, `src/graph.rs`, and
-  `src/backend.rs` within that crate: ABI, vendor calls, and graph lifecycle.
-- `crates/apxinf-cuda/adapters/`: exported launchers and template selection.
-- `crates/apxinf-cuda/kernels/`: custom and vendored device implementations.
+- `crates/apxinf-cuda-new/src/ops/`: typed L3 operation contracts and dispatch.
+- `crates/apxinf-cuda-new/src/ffi/`, `src/context.rs`, `src/graph.rs`, and
+  `src/workspace.rs`: ABI, runtime resources, and graph lifecycle.
+- `crates/apxinf-cuda-new/native/adapters/`: L1 exported launchers, provider
+  selection, and tuning.
+- `crates/apxinf-cuda-new/native/kernels/`: project-owned and vendored L0
+  device implementations.
 
 Use `rg --files` to locate the real files before assuming a directory layout.
 Search exact symbols in the relevant subtree, then expand into vendor code only

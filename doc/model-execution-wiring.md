@@ -57,9 +57,9 @@ Search for an implementation in this order:
    dispatch, and `pi05/model_runner/` for preparation/resource ownership under
    `crates/apxinf-model/src/`. WallOSS/GR00T retain their actual runtime/executor
    filenames; locate them before copying patterns;
-2. safe model-neutral interfaces under `crates/apxinf-cuda/src/kernels/`, with
-   particular attention to `fused.rs`, `attention.rs`, `rope.rs`, `norm.rs`,
-   `activation.rs`, `gemm/`, `cache.rs`, and `elementwise.rs`;
+2. safe model-neutral L3 interfaces under `crates/apxinf-cuda-new/src/ops/`,
+   with particular attention to the physical operator families such as
+   `attention/` and `gemm/`;
 3. the portable `Backend` trait when the operation belongs in a portable path;
 4. a new safe, model-neutral operator when required semantics really are absent.
 

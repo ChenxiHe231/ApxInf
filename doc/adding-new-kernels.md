@@ -1,6 +1,9 @@
 # Adding or Extending CUDA Kernels in ApxInf
 
-This document is the kernel development procedure for `crates/apxinf-cuda-new`. The old `crates/apxinf-cuda` is no longer the recommended path for new implementations.
+This document is the kernel development procedure for
+`crates/apxinf-cuda-new`, the repository's only CUDA crate. The retired
+`crates/apxinf-cuda` tree has been removed; do not recreate a parallel or
+transitional implementation path.
 
 GEMM and Attention are the current reference implementations, not the complete set of allowed operator families. Future operators may define their own Spec, Bindings, and candidate descriptor, but they must follow the cross-layer boundaries and execution lifecycle specified here.
 

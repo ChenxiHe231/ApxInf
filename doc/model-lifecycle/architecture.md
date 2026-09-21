@@ -815,7 +815,7 @@ crates/apxinf-model/src/
       action/
         mod.rs                        semantic interface / shared implementation
         bf16.rs / fp8_static.rs / int8_dynamic.rs     only where implementations actually differ
-crates/apxinf-cuda*/                   backend mechanisms and kernel weight views
+crates/apxinf-cuda-new/                backend mechanisms and kernel weight views
 python/apxinf/.../policies/            VLA facade and model processing
 crates/apxinf-tokenizer/               existing tokenizer capability
 ```
