@@ -150,61 +150,56 @@ fn bias_activation(
     Ok(out)
 }
 
-fn normalized_fp8(
+fn rms_normalized_fp8(
     ctx: &Context,
     policies: &Fp8L3Policies,
-    semantic: ops::NormSemantic,
     input: &Tensor,
-    weight: Option<&Tensor>,
-    norm_bias: Option<&Tensor>,
-    norm_style: Option<&Tensor>,
+    weight: &Tensor,
     eps: f32,
     scale: f32,
 ) -> Result<Tensor> {
     let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
-    let mut args = ops::NormArgs::new(semantic, input);
-    args.weight = weight;
-    args.norm_bias = norm_bias;
-    args.norm_style = norm_style;
-    args.normalized = Some(&mut normalized);
-    args.eps = eps;
-    args.policy = policies.norm.clone();
-    ops::norm(ctx, args)?;
+    ops::rms_norm(
+        ctx,
+        ops::RmsNormArgs::new(input, weight, &mut normalized, eps)
+            .with_policy(policies.norm.clone()),
+    )?;
     fixed_quantize(ctx, policies, &normalized, scale)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn residual_normalized_fp8(
+fn layer_normalized_fp8(
     ctx: &Context,
     policies: &Fp8L3Policies,
-    semantic: ops::NormSemantic,
     input: &Tensor,
-    bias: Option<&Tensor>,
-    residual: &Tensor,
-    weight: Option<&Tensor>,
-    norm_bias: Option<&Tensor>,
-    norm_style: Option<&Tensor>,
-    gate_style: Option<&Tensor>,
+    weight: &Tensor,
+    bias: &Tensor,
     eps: f32,
     scale: f32,
-) -> Result<(Tensor, Tensor)> {
-    let shape = input.shape().dims().to_vec();
-    let mut hidden = output(ctx, shape.clone(), input.dtype())?;
-    let mut normalized = output(ctx, shape, input.dtype())?;
-    let mut args = ops::NormArgs::new(semantic, input);
-    args.bias = bias;
-    args.residual = Some(residual);
-    args.weight = weight;
-    args.norm_bias = norm_bias;
-    args.norm_style = norm_style;
-    args.gate_style = gate_style;
-    args.hidden = Some(&mut hidden);
-    args.normalized = Some(&mut normalized);
-    args.eps = eps;
-    args.policy = policies.norm.clone();
-    ops::norm(ctx, args)?;
-    let normalized = fixed_quantize(ctx, policies, &normalized, scale)?;
-    Ok((hidden, normalized))
+) -> Result<Tensor> {
+    let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
+    ops::layer_norm(
+        ctx,
+        ops::LayerNormArgs::new(input, weight, bias, &mut normalized, eps)
+            .with_policy(policies.norm.clone()),
+    )?;
+    fixed_quantize(ctx, policies, &normalized, scale)
+}
+
+fn adaptive_rms_normalized_fp8(
+    ctx: &Context,
+    policies: &Fp8L3Policies,
+    input: &Tensor,
+    norm_style: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<Tensor> {
+    let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
+    ops::adaptive_rms_norm(
+        ctx,
+        ops::AdaptiveRmsNormArgs::new(input, norm_style, &mut normalized, eps)
+            .with_policy(policies.norm.clone()),
+    )?;
+    fixed_quantize(ctx, policies, &normalized, scale)
 }
 
 fn bias_residual(
@@ -215,13 +210,85 @@ fn bias_residual(
     residual: &Tensor,
 ) -> Result<Tensor> {
     let mut hidden = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
-    let mut args = ops::NormArgs::new(ops::NormSemantic::BiasResidual, input);
-    args.bias = bias;
-    args.residual = Some(residual);
-    args.hidden = Some(&mut hidden);
-    args.policy = policies.norm.clone();
-    ops::norm(ctx, args)?;
+    ops::bias_residual(
+        ctx,
+        ops::BiasResidualArgs::new(input, bias, residual, &mut hidden)
+            .with_policy(policies.norm.clone()),
+    )?;
     Ok(hidden)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bias_residual_rms_normalized_fp8(
+    ctx: &Context,
+    policies: &Fp8L3Policies,
+    input: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<(Tensor, Tensor)> {
+    let shape = input.shape().dims().to_vec();
+    let mut hidden = output(ctx, shape.clone(), input.dtype())?;
+    let mut normalized = output(ctx, shape, input.dtype())?;
+    ops::bias_residual_rms_norm(
+        ctx,
+        ops::BiasResidualRmsNormArgs::new(
+            input, bias, residual, weight, &mut hidden, &mut normalized, eps,
+        )
+        .with_policy(policies.norm.clone()),
+    )?;
+    Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bias_residual_layer_normalized_fp8(
+    ctx: &Context,
+    policies: &Fp8L3Policies,
+    input: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+    weight: &Tensor,
+    norm_bias: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<(Tensor, Tensor)> {
+    let shape = input.shape().dims().to_vec();
+    let mut hidden = output(ctx, shape.clone(), input.dtype())?;
+    let mut normalized = output(ctx, shape, input.dtype())?;
+    ops::bias_residual_layer_norm(
+        ctx,
+        ops::BiasResidualLayerNormArgs::new(
+            input, bias, residual, weight, norm_bias, &mut hidden, &mut normalized, eps,
+        )
+        .with_policy(policies.norm.clone()),
+    )?;
+    Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ada_gate_residual_rms_normalized_fp8(
+    ctx: &Context,
+    policies: &Fp8L3Policies,
+    input: &Tensor,
+    residual: &Tensor,
+    norm_style: &Tensor,
+    gate_style: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<(Tensor, Tensor)> {
+    let shape = input.shape().dims().to_vec();
+    let mut hidden = output(ctx, shape.clone(), input.dtype())?;
+    let mut normalized = output(ctx, shape, input.dtype())?;
+    ops::ada_gate_residual_rms_norm(
+        ctx,
+        ops::AdaGateResidualRmsNormArgs::new(
+            input, residual, norm_style, gate_style, &mut hidden, &mut normalized, eps,
+        )
+        .with_policy(policies.norm.clone()),
+    )?;
+    Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -358,14 +425,11 @@ fn language_layer_fp8_static_with_policies(
     rms_eps: f32,
     rope_theta: f32,
 ) -> Result<Fp8StaticLanguageLayerOutput> {
-    let normalized = normalized_fp8(
+    let normalized = rms_normalized_fp8(
         ctx,
         policies,
-        ops::NormSemantic::Rms,
         input,
-        Some(&weights.input_norm_scale),
-        None,
-        None,
+        &weights.input_norm_scale,
         rms_eps,
         scales.attention_norm,
     )?;
@@ -404,17 +468,13 @@ fn language_layer_fp8_static_with_policies(
         scales.attention_output,
         &weights.output,
     )?;
-    let (hidden, normalized) = residual_normalized_fp8(
+    let (hidden, normalized) = bias_residual_rms_normalized_fp8(
         ctx,
         policies,
-        ops::NormSemantic::BiasResidualRms,
         &projected,
         weights.output.bias.as_ref(),
         input,
-        Some(&weights.post_attention_norm_scale),
-        None,
-        None,
-        None,
+        &weights.post_attention_norm_scale,
         rms_eps,
         scales.mlp_norm,
     )?;
@@ -500,14 +560,11 @@ fn action_layer_fp8_static_with_policies(
 ) -> Result<Fp8StaticActionLayerOutput> {
     let normalized = match attention_normalized {
         Some(normalized) => normalized.clone(),
-        None => normalized_fp8(
+        None => adaptive_rms_normalized_fp8(
             ctx,
             policies,
-            ops::NormSemantic::AdaptiveRms,
             input,
-            None,
-            None,
-            Some(attention_modulation),
+            attention_modulation,
             rms_eps,
             scales.attention_norm,
         )?,
@@ -547,17 +604,13 @@ fn action_layer_fp8_static_with_policies(
         scales.attention_output,
         &weights.output,
     )?;
-    let (hidden, normalized) = residual_normalized_fp8(
+    let (hidden, normalized) = ada_gate_residual_rms_normalized_fp8(
         ctx,
         policies,
-        ops::NormSemantic::AdaGateResidualRms,
         &projected,
-        None,
         input,
-        None,
-        None,
-        Some(mlp_modulation),
-        Some(attention_modulation),
+        mlp_modulation,
+        attention_modulation,
         rms_eps,
         scales.mlp_norm,
     )?;
@@ -576,17 +629,13 @@ fn action_layer_fp8_static_with_policies(
         scales.mlp_activation,
         &weights.down,
     )?;
-    let (hidden, normalized) = residual_normalized_fp8(
+    let (hidden, normalized) = ada_gate_residual_rms_normalized_fp8(
         ctx,
         policies,
-        ops::NormSemantic::AdaGateResidualRms,
         &projected,
-        None,
         &hidden,
-        None,
-        None,
-        Some(next_norm_modulation),
-        Some(mlp_modulation),
+        next_norm_modulation,
+        mlp_modulation,
         rms_eps,
         next_norm_scale,
     )?;
@@ -694,14 +743,12 @@ fn vision_layer_fp8_static_with_policies(
     head_dim: usize,
     layer_norm_eps: f32,
 ) -> Result<Tensor> {
-    let normalized = normalized_fp8(
+    let normalized = layer_normalized_fp8(
         ctx,
         policies,
-        ops::NormSemantic::Layer,
         input,
-        Some(&weights.norm1.weight),
-        Some(&weights.norm1.bias),
-        None,
+        &weights.norm1.weight,
+        &weights.norm1.bias,
         layer_norm_eps,
         scales.attention_norm,
     )?;
@@ -745,17 +792,14 @@ fn vision_layer_fp8_static_with_policies(
         scales.attention_output,
         &weights.output,
     )?;
-    let (hidden, normalized) = residual_normalized_fp8(
+    let (hidden, normalized) = bias_residual_layer_normalized_fp8(
         ctx,
         policies,
-        ops::NormSemantic::BiasResidualLayer,
         &projection,
         weights.output.bias.as_ref(),
         input,
-        Some(&weights.norm2.weight),
-        Some(&weights.norm2.bias),
-        None,
-        None,
+        &weights.norm2.weight,
+        &weights.norm2.bias,
         layer_norm_eps,
         scales.mlp_norm,
     )?;
@@ -1295,14 +1339,12 @@ pub(in crate::pi05::model) mod backbone {
                     self.config.layer_norm_eps,
                 )?;
             }
-            let hidden = normalized_fp8(
+            let hidden = layer_normalized_fp8(
                 self.ctx(),
                 &self.policies,
-                ops::NormSemantic::Layer,
                 &hidden,
-                Some(&self.weights.vision_post_norm.weight),
-                Some(&self.weights.vision_post_norm.bias),
-                None,
+                &self.weights.vision_post_norm.weight,
+                &self.weights.vision_post_norm.bias,
                 self.config.layer_norm_eps,
                 self.scales.vision_post_norm,
             )?;

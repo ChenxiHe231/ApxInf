@@ -49,8 +49,7 @@ void one_configuration(const Spec&, std::vector<int>& configurations) {
 const ImplementationRegistry& registry(uint32_t semantic) {
   static const ImplementationRegistry entries = {
       {kProviderPorted, 1, 1, "ported-quantization", 0, true, true, false,
-       supports_ported, natural_alignment, ported_resource_requirements,
-       one_configuration, prepare_ported, launch_ported, destroy_ported},
+       supports_ported, natural_alignment, one_configuration, launch_ported},
   };
   (void)semantic;
   return entries;

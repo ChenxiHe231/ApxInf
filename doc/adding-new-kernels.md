@@ -2,7 +2,7 @@
 
 This document is the kernel development procedure for `crates/apxinf-cuda-new`. The old `crates/apxinf-cuda` is no longer the recommended path for new implementations.
 
-GEMM and Attention are the current reference implementations, not the complete set of allowed operator families. Future operators may define their own Spec, Bindings, and candidate descriptor, but they must follow the cross-layer boundaries and execution lifecycle specified here.
+There are two reviewed lifecycles. GEMM/Attention are prepared because they tune, own provider state, or use workspace. Gather/Norm/Pointwise/Quantization/RoPE are direct because each semantic has one stateless, zero-workspace implementation. Choose the lifecycle from concrete resource and selection requirements; do not copy the prepared framework into a simple operator for structural uniformity.
 
 Before starting, read the [`apxinf-cuda-new` architecture](../crates/apxinf-cuda-new/README.md) and the [CUDA L3 operator catalog](../crates/apxinf-cuda-new/cuda-operator.md). This document does not repeat the architecture; it specifies only the files and interfaces that must change, prohibited practices, and acceptance criteria.
 
@@ -34,6 +34,8 @@ First record the mathematical semantic, shape, layout, dtype, quantization, mask
 | The semantic exists, but a different implementation or technology stack is required | Add a candidate/provider | 4 |
 | The public mathematical semantic or a contract that the caller must express differs | Add an L3 semantic | 5 |
 | A new semantic cannot reasonably reuse an existing family's Spec, Bindings, or execution lifecycle | Create an operator family under Section 5 | 5 |
+
+Before adding an execution cache, answer all four questions: does the operator have multiple candidates/configurations requiring selection; does it create descriptors/handles/prepacked state; does it own workspace beyond caller outputs; does capture require a resource created beforehand? If every answer is no, use `normalize → *_launch` and keep it out of `ExecutionSession`. If any answer is yes, use the prepared lifecycle and document the owned state.
 
 Do not add a semantic in the following cases: only the provider changes; only a configuration, shape, dtype, alignment, or GPU is added; only packing, workspace, or epilogue changes; only the model function name differs; fallback is correct but too slow. If uncertain, do not add a semantic. First complete a comparison of the public mathematical contracts; if uncertainty remains, submit an interface review rather than letting the implementer choose the layer independently.
 
@@ -168,13 +170,21 @@ src/ffi/abi/<operator>.rs
 src/ffi/abi/mod.rs
 ```
 
-Required ABI:
+Prepared/tunable ABI:
 
 ```c
 *_prepare(runtime, spec, policy, bindings, &execution);
 *_enqueue(execution);
 *_destroy(execution);
 ```
+
+Stateless direct ABI:
+
+```c
+*_launch(runtime, spec, policy, bindings);
+```
+
+A direct launch must validate the complete ABI contract and candidate eligibility, submit work asynchronously, and remain legal during CUDA Graph capture. It must not allocate a heap execution, enter the Rust execution cache/prepared sequence, initialize lazily, tune, or synchronize. Do not provide both ABIs for one family as a transition layer.
 
 MUST: Spec has an explicit version that changes when layout or semantics change; use only C-compatible fixed-width fields and opaque pointers; Rust and C declarations match exactly; exceptions become status/last-error through the common ABI boundary; no failure path leaks an execution or provider resource.
 
@@ -195,21 +205,23 @@ native/adapters/<operator>/tuning_key.cpp
 native/adapters/<operator>/autotune.cpp
 ```
 
-Required types: `Spec`, `Implementation`, `Execution`, and `ImplementationRegistry`. When persistent tuning is used, also add `TuningKeys` containing only one exact key.
+Required types are `Spec`, `Implementation`, and `ImplementationRegistry`; a direct adapter may use an ephemeral stack launch descriptor. A prepared adapter additionally owns `Execution`. When persistent tuning is used, also add `TuningKeys` containing only one exact key.
 
 | Required Function | MUST |
 | --- | --- |
 | `registry(spec.semantic)` | Return the immutable candidate set for the semantic |
 | `tuning_keys(spec, policy, device)` | For a tunable operator, construct the single exact key |
 | `tune(spec, policy, bindings, device, report)` | For a tunable operator, adapt `framework::autotune` |
-| operator `prepare(...)` | Validate candidate/policy/resource and create an Execution |
-| C ABI `*_prepare` | Validate the ABI; for a tunable operator, look up recipe/tune/fallback; for a non-tuning operator, select a legal baseline directly; return the execution |
-| C ABI `*_enqueue` | Only enqueue the prepared execution |
-| C ABI `*_destroy` | Safely release all state |
+| operator `prepare(...)` | Prepared lifecycle only: validate candidate/policy/resource and create an Execution |
+| C ABI `*_prepare` | Prepared lifecycle only: validate the ABI, look up recipe/tune/fallback, and return the execution |
+| C ABI `*_enqueue` | Prepared lifecycle only: enqueue the prepared execution |
+| C ABI `*_destroy` | Prepared lifecycle only: safely release all state |
+| C ABI `*_launch` | Direct lifecycle only: validate, resolve the sole legal candidate without timing, and asynchronously launch it |
 
 | L1 Prepare Strategy | Implementation |
 | --- | --- |
-| Single implementation | Validate + prepare directly |
+| Single stateless, zero-workspace implementation | Validate + direct launch; no Execution/cache |
+| Single implementation with persistent state/resources | Validate + prepare directly |
 | Stable heuristic | Select from Spec/Policy inside the adapter; add `selection.cpp` only when the logic becomes complex |
 | Measurement required | Exact recipe lookup; call `framework::autotune` on a miss |
 
@@ -218,7 +230,7 @@ Required types: `Spec`, `Implementation`, `Execution`, and `ImplementationRegist
 | Add semantic-specific shape/dtype/registry/fallback logic to `native/framework` |
 | Add a compatible/hint key or runtime selection-mode metadata/dispatcher |
 | Put pointers/streams into a persistent key |
-| Perform first prepare inside capture |
+| Perform first prepare inside capture; allocate/cache/synchronize in a direct launch |
 
 ### Step 4: L1 Provider Callbacks + L0 Kernel
 

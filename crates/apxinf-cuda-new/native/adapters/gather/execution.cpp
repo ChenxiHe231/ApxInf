@@ -87,12 +87,6 @@ void validate_bindings(const Spec& spec,
 
 namespace apxinf::gather {
 
-Execution::~Execution() {
-  if (implementation != nullptr && implementation->destroy != nullptr) {
-    implementation->destroy(*this);
-  }
-}
-
 bool supports_device(const Implementation& implementation, int,
                      std::string* reason) {
   if (implementation.required_device_features == 0) return true;
@@ -108,52 +102,35 @@ bool supports_alignment(const Implementation& implementation,
          spec.bias_alignment >= (spec.has_bias != 0 ? required.bias : 0);
 }
 
-std::unique_ptr<Execution> prepare(const Implementation& implementation,
-                                   int configuration, const Spec& spec,
-                                   const apxinf_gather_policy_t& policy,
-                                   const apxinf_gather_bindings_t& bindings,
-                                   int device) {
-  auto execution = std::make_unique<Execution>();
-  execution->spec = spec;
-  execution->bindings = bindings;
-  execution->configuration = configuration;
-  execution->device = device;
-  execution->implementation = &implementation;
-  execution->resource_limit = policy.workspace_limit;
-  implementation.prepare(*execution);
-  if (execution->resource_bytes > execution->resource_limit &&
-      execution->resource_limit != 0) {
-    throw Failure(APXINF_STATUS_UNSUPPORTED,
-                  "Gather candidate exceeds the workspace limit");
-  }
-  return execution;
+void initialize(Execution& execution, const Implementation& implementation,
+                int configuration, const Spec& spec,
+                const apxinf_gather_policy_t& policy,
+                const apxinf_gather_bindings_t& bindings, int device) {
+  execution.spec = spec;
+  execution.bindings = bindings;
+  execution.configuration = configuration;
+  execution.device = device;
+  execution.implementation = &implementation;
+  (void)policy;
 }
 
 }  // namespace apxinf::gather
 
-extern "C" apxinf_status_t apxinf_gather_prepare(
+extern "C" apxinf_status_t apxinf_gather_launch(
     apxinf_runtime_t runtime, const apxinf_gather_spec_t* spec,
     const apxinf_gather_policy_t* policy,
-    const apxinf_gather_bindings_t* bindings,
-    apxinf_gather_execution_t* output) {
+    const apxinf_gather_bindings_t* bindings) {
   return apxinf::gather::abi_boundary([&] {
     if (runtime == nullptr || spec == nullptr || policy == nullptr ||
-        bindings == nullptr || output == nullptr) {
+        bindings == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "null Gather argument");
     }
     const apxinf::gather::Spec normalized{*spec};
     validate_spec(normalized);
     validate_bindings(normalized, *bindings);
 
-    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
-    if (cudaStreamIsCapturing(static_cast<cudaStream_t>(bindings->stream),
-                              &capture) == cudaSuccess &&
-        capture != cudaStreamCaptureStatusNone) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "Gather preparation is not allowed during capture");
-    }
-
-    std::unique_ptr<apxinf::gather::Execution> execution;
+    apxinf::gather::Execution execution;
+    bool selected = false;
     for (const auto& implementation :
          apxinf::gather::registry(normalized.semantic)) {
       if (!implementation.supports(normalized) ||
@@ -167,44 +144,18 @@ extern "C" apxinf_status_t apxinf_gather_prepare(
       std::vector<int> configurations;
       implementation.enumerate_configs(normalized, configurations);
       if (configurations.empty()) continue;
-      execution = apxinf::gather::prepare(
-          implementation, configurations.front(), normalized, *policy,
-          *bindings, runtime->device);
+      apxinf::gather::initialize(execution, implementation,
+                                 configurations.front(), normalized, *policy,
+                                 *bindings, runtime->device);
+      selected = true;
       break;
     }
-    if (execution == nullptr) {
+    if (!selected) {
       throw Failure(APXINF_STATUS_UNSUPPORTED,
                     "no Gather candidate supports this Spec");
     }
-    execution->summary = std::string(execution->implementation->name) +
-                         " config=" +
-                         std::to_string(execution->configuration) +
-                         " source=direct";
-    auto wrapper = std::make_unique<apxinf_gather_execution>();
-    wrapper->state = std::move(execution);
-    *output = wrapper.release();
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gather_enqueue(
-    apxinf_gather_execution_t execution) {
-  return apxinf::gather::abi_boundary([&] {
-    if (execution == nullptr || execution->state == nullptr) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "null Gather execution");
-    }
-    apxinf::gather::check_cuda(cudaSetDevice(execution->state->device));
+    apxinf::gather::check_cuda(cudaSetDevice(execution.device));
     apxinf::gather::check_cuda(
-        execution->state->implementation->enqueue(*execution->state));
+        execution.implementation->enqueue(execution));
   });
-}
-
-extern "C" void apxinf_gather_destroy(apxinf_gather_execution_t execution) {
-  delete execution;
-}
-
-extern "C" const char* apxinf_gather_summary(
-    apxinf_gather_execution_t execution) {
-  return execution == nullptr || execution->state == nullptr
-             ? ""
-             : execution->state->summary.c_str();
 }

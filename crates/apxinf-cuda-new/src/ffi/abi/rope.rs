@@ -1,4 +1,4 @@
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 
 use super::types::Runtime;
 pub(crate) use super::types::{CudaStream, Policy};
@@ -41,18 +41,11 @@ pub(crate) struct Bindings {
     pub kv_output_offset: i32,
 }
 
-pub(crate) type Execution = *mut c_void;
-
 unsafe extern "C" {
-    pub(crate) fn apxinf_rope_prepare(
+    pub(crate) fn apxinf_rope_launch(
         runtime: Runtime,
         spec: *const Spec,
         policy: *const Policy,
         bindings: *const Bindings,
-        execution: *mut Execution,
     ) -> i32;
-    pub(crate) fn apxinf_rope_enqueue(execution: Execution) -> i32;
-    pub(crate) fn apxinf_rope_destroy(execution: Execution);
-    #[cfg(test)]
-    pub(crate) fn apxinf_rope_summary(execution: Execution) -> *const c_char;
 }

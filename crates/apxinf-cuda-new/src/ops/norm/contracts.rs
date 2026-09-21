@@ -6,7 +6,7 @@ use crate::{CudaBuffer, CudaContext};
 /// Which row-wise operation the bindings describe. See `norm_types.h` for the
 /// binding table; every variant here matches one native semantic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum NormSemantic {
+pub(crate) enum Semantic {
     Rms,
     Layer,
     AdaptiveRms,
@@ -21,7 +21,7 @@ pub enum NormSemantic {
     BiasThenResidual,
 }
 
-impl NormSemantic {
+impl Semantic {
     fn code(self) -> u32 {
         match self {
             Self::Rms => 0,
@@ -112,40 +112,19 @@ impl Default for NormPolicy {
 ///
 /// `norm_style` is `[2 * cols]` (scale then shift) and `gate_style` is
 /// `[3 * cols]` whose third segment is the gate; they are not interchangeable.
-pub struct NormArgs<'a> {
-    pub semantic: NormSemantic,
-    pub input: &'a Tensor,
-    pub bias: Option<&'a Tensor>,
-    pub residual: Option<&'a Tensor>,
-    pub weight: Option<&'a Tensor>,
-    pub norm_bias: Option<&'a Tensor>,
-    pub norm_style: Option<&'a Tensor>,
-    pub gate_style: Option<&'a Tensor>,
-    pub hidden: Option<&'a mut Tensor>,
-    pub normalized: Option<&'a mut Tensor>,
-    pub eps: f32,
-    pub output_scale: f32,
-    pub policy: NormPolicy,
-}
-
-impl<'a> NormArgs<'a> {
-    pub fn new(semantic: NormSemantic, input: &'a Tensor) -> Self {
-        Self {
-            semantic,
-            input,
-            bias: None,
-            residual: None,
-            weight: None,
-            norm_bias: None,
-            norm_style: None,
-            gate_style: None,
-            hidden: None,
-            normalized: None,
-            eps: 1e-6,
-            output_scale: 1.0,
-            policy: NormPolicy::default(),
-        }
-    }
+pub(crate) struct RawArgs<'a> {
+    pub(crate) semantic: Semantic,
+    pub(crate) input: &'a Tensor,
+    pub(crate) bias: Option<&'a Tensor>,
+    pub(crate) residual: Option<&'a Tensor>,
+    pub(crate) weight: Option<&'a Tensor>,
+    pub(crate) norm_bias: Option<&'a Tensor>,
+    pub(crate) norm_style: Option<&'a Tensor>,
+    pub(crate) gate_style: Option<&'a Tensor>,
+    pub(crate) hidden: Option<&'a mut Tensor>,
+    pub(crate) normalized: Option<&'a mut Tensor>,
+    pub(crate) eps: f32,
+    pub(crate) policy: NormPolicy,
 }
 
 pub(crate) struct Normalized {
@@ -199,7 +178,7 @@ fn tensor_storage(
     Ok(buffer)
 }
 
-pub(crate) fn normalize(ctx: &CudaContext, args: NormArgs<'_>) -> Result<Normalized> {
+pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normalized> {
     let semantic = args.semantic;
     let dims = args.input.shape().dims();
     if dims.len() != 2 {
@@ -214,7 +193,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: NormArgs<'_>) -> Result<Normali
     let cols_abi = i32::try_from(cols)
         .map_err(|_| invalid("Norm column count exceeds the CUDA kernel range"))?;
     let dtype = args.input.dtype();
-    if semantic == NormSemantic::BiasThenResidual && dtype != DType::BF16 {
+    if semantic == Semantic::BiasThenResidual && dtype != DType::BF16 {
         return Err(invalid(
             "BiasThenResidual is a BF16-only semantic because its intermediate rounding is part of the contract",
         ));
@@ -225,14 +204,6 @@ pub(crate) fn normalize(ctx: &CudaContext, args: NormArgs<'_>) -> Result<Normali
 
     if !(args.eps.is_finite() && args.eps > 0.0) {
         return Err(invalid("Norm eps must be finite and positive"));
-    }
-    if !(args.output_scale.is_finite() && args.output_scale > 0.0) {
-        return Err(invalid("Norm output_scale must be finite and positive"));
-    }
-    // Unquantized output is the only implemented form, so the scale must be
-    // exactly one; the Spec carries the predicate, the bindings the value.
-    if args.output_scale != 1.0 {
-        return Err(invalid("Norm E4M3 output is not implemented yet"));
     }
     if args.bias.is_some() && !semantic.may_have_bias() {
         return Err(invalid("Norm semantic does not take a bias"));
@@ -389,7 +360,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: NormArgs<'_>) -> Result<Normali
         normalized,
         stream: ctx.stream().handle() as abi::CudaStream,
         eps: args.eps,
-        output_scale: args.output_scale,
+        output_scale: 1.0,
     };
 
     Ok(Normalized {
