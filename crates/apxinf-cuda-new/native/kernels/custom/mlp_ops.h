@@ -23,4 +23,15 @@ int swiglu_bf16(const void* fused_gate_up, void* output, int rows, int width,
 int add_bf16(const void* addend, void* accumulator, long long count,
              cudaStream_t stream);
 
+// Quantize BF16 to E4M3 against a single per-tensor scale.
+//
+// This is the activation side of the FP8 projections in a ModelOpt checkpoint,
+// whose weight_scale and input_scale are scalars rather than the [M]/[N]
+// vectors the scaled-FP8 GEMM contract expects. Quantizing against
+// input_scale lets the projection run as unit-scale FP8 with
+// `alpha = weight_scale * input_scale`, so no new quantization contract is
+// needed for attention or GDN.
+int quantize_fp8_per_tensor(const void* input, void* output, long long count,
+                            float input_scale, cudaStream_t stream);
+
 }  // namespace apxinf::cuda::mlp_ops

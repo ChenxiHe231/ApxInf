@@ -87,3 +87,36 @@ pub fn add_into(ctx: &CudaContext, addend: &Tensor, accumulator: &Tensor) -> Res
         ))
     }
 }
+
+/// Quantize BF16 to E4M3 against a single per-tensor scale.
+///
+/// The FP8 projections in a ModelOpt checkpoint carry scalar `weight_scale`
+/// and `input_scale`, not the `[M]`/`[N]` vectors [`GemmQuantization::Fp8`]
+/// expects. Quantizing here against `input_scale` lets the projection run as
+/// `Fp8UnitScale` with `alpha = weight_scale * input_scale`, so attention and
+/// GDN need no new quantization contract.
+pub fn quantize_fp8_per_tensor(
+    ctx: &CudaContext,
+    input: &Tensor,
+    output: &Tensor,
+    input_scale: f32,
+) -> Result<()> {
+    let dims = input.shape().dims().to_vec();
+    if dims != output.shape().dims() {
+        return Err(invalid("FP8 quantization requires matching shapes"));
+    }
+    if !(input_scale > 0.0) || !input_scale.is_finite() {
+        return Err(invalid("FP8 input_scale must be finite and positive"));
+    }
+    let source = tensor_storage(ctx, input, DType::BF16, &dims)?;
+    let destination = tensor_storage(ctx, output, DType::F8E4M3, &dims)?;
+    unsafe {
+        status::check(abi::apxinf_quantize_fp8_per_tensor(
+            source.ptr(),
+            destination.ptr(),
+            dims.iter().product::<usize>() as i64,
+            input_scale,
+            ctx.stream().handle(),
+        ))
+    }
+}

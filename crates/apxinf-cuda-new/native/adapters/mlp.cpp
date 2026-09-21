@@ -71,3 +71,19 @@ extern "C" apxinf_status_t apxinf_add_bf16(const void* addend,
           "add");
   });
 }
+
+extern "C" apxinf_status_t apxinf_quantize_fp8_per_tensor(
+    const void* input, void* output, int64_t count, float input_scale,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || output == nullptr || count <= 0 ||
+        !(input_scale > 0.0F)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid FP8 quantization arguments");
+    }
+    check(apxinf::cuda::mlp_ops::quantize_fp8_per_tensor(
+              input, output, count, input_scale,
+              static_cast<cudaStream_t>(stream)),
+          "FP8 quantization");
+  });
+}

@@ -9,6 +9,8 @@
 
 #include <cuda_bf16.h>
 
+#include <cstdint>
+
 namespace apxinf::cuda::mlp_ops {
 namespace {
 
@@ -89,7 +91,48 @@ __global__ void add_kernel(const __nv_bfloat16* __restrict__ addend,
                                         __bfloat162float(addend[index]));
 }
 
+// E4M3 with bias 7, saturating at +-448. Values are pre-divided by the
+// per-tensor scale, so the representable range maps onto the calibrated one.
+__device__ __forceinline__ uint8_t to_e4m3(float value) {
+  const uint8_t sign = value < 0.0f ? 0x80 : 0x00;
+  float magnitude = fabsf(value);
+  if (!(magnitude > 0.0f)) return sign;
+  if (magnitude >= 448.0f) return sign | 0x7E;  // saturate, never NaN
+  int exponent;
+  float mantissa = frexpf(magnitude, &exponent);
+  mantissa *= 2.0f;
+  exponent -= 1;
+  int biased = exponent + 7;
+  int fraction = __float2int_rn((mantissa - 1.0f) * 8.0f);
+  if (fraction > 7) {
+    fraction = 0;
+    ++biased;
+  }
+  if (biased <= 0) return sign;                 // flush subnormals to zero
+  if (biased > 15) return sign | 0x7E;
+  return sign | static_cast<uint8_t>((biased << 3) | fraction);
+}
+
+__global__ void quantize_fp8_kernel(const __nv_bfloat16* __restrict__ input,
+                                    uint8_t* __restrict__ output,
+                                    long long count, float inverse_scale) {
+  const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (index >= count) return;
+  output[index] = to_e4m3(__bfloat162float(input[index]) * inverse_scale);
+}
+
 }  // namespace
+
+int quantize_fp8_per_tensor(const void* input, void* output, long long count,
+                            float input_scale, cudaStream_t stream) {
+  if (count <= 0 || !(input_scale > 0.0f)) return -1;
+  const int threads = 256;
+  const long long blocks = (count + threads - 1) / threads;
+  quantize_fp8_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input), static_cast<uint8_t*>(output),
+      count, 1.0f / input_scale);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
 
 int rms_norm_bf16(const void* input, const void* weight, void* output,
                   int rows, int width, float epsilon, cudaStream_t stream) {
