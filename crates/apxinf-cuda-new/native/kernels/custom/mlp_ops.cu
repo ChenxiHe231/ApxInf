@@ -122,39 +122,45 @@ __global__ void quantize_fp8_kernel(const __nv_bfloat16* __restrict__ input,
   output[index] = to_e4m3(__bfloat162float(input[index]) * inverse_scale);
 }
 
-// One block per output row, streaming that row contiguously.
+// One warp per output row, four rows per block, 16-byte loads.
 //
-// The activation is read straight from global memory rather than staged in
-// shared. Staging looked like an obvious win and was the opposite: every one
-// of the N blocks would stage the same K bytes, so at N=10240 and K=5120 that
-// is 52 MB of redundant reads -- as much traffic as the weights themselves --
-// and the 20 KB of shared memory per block collapsed occupancy. The
-// activation is a few KB and stays in cache on its own.
-__global__ void fp8_gemv_kernel(const __nv_fp8_storage_t* __restrict__ weight,
-                                const __nv_fp8_storage_t* __restrict__ activation,
+// The shape of this kernel is set by what the first attempt got wrong. One
+// block per row with scalar loads gave each thread ~20 bytes of work over
+// 10240 blocks, and launch plus per-element conversion overhead buried the
+// memory traffic it was trying to optimize. Here each thread issues 16-byte
+// vector loads and carries ~160 bytes, and the block count drops 4x.
+//
+// The activation is read from global rather than staged in shared: staging
+// makes every block re-read the same K bytes, which at N=10240 is 52 MB of
+// redundant traffic -- as much as the weights.
+__global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
+                                const uint4* __restrict__ activation,
                                 __nv_bfloat16* __restrict__ output, int n,
-                                int k, float alpha) {
-  const int row = blockIdx.x;
+                                int k_vectors, float alpha) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int row = blockIdx.x * (blockDim.x >> 5) + warp;
   if (row >= n) return;
 
-  const __nv_fp8_storage_t* weight_row = weight + (long long)row * k;
+  const uint4* weight_row = weight + (long long)row * k_vectors;
   float sum = 0.0f;
-  for (int index = threadIdx.x; index < k; index += blockDim.x) {
-    sum += __half2float(__nv_cvt_fp8_to_halfraw(weight_row[index], __NV_E4M3)) *
-           __half2float(__nv_cvt_fp8_to_halfraw(activation[index], __NV_E4M3));
+  for (int index = lane; index < k_vectors; index += 32) {
+    const uint4 w = weight_row[index];
+    const uint4 a = activation[index];
+    const __nv_fp8_storage_t* wb =
+        reinterpret_cast<const __nv_fp8_storage_t*>(&w);
+    const __nv_fp8_storage_t* ab =
+        reinterpret_cast<const __nv_fp8_storage_t*>(&a);
+#pragma unroll
+    for (int element = 0; element < 16; ++element) {
+      sum += __half2float(__nv_cvt_fp8_to_halfraw(wb[element], __NV_E4M3)) *
+             __half2float(__nv_cvt_fp8_to_halfraw(ab[element], __NV_E4M3));
+    }
   }
   for (int offset = 16; offset > 0; offset >>= 1) {
     sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
   }
-  __shared__ float partial[32];
-  if ((threadIdx.x & 31) == 0) partial[threadIdx.x >> 5] = sum;
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    const int warps = (blockDim.x + 31) / 32;
-    float total = 0.0f;
-    for (int index = 0; index < warps; ++index) total += partial[index];
-    output[row] = __float2bfloat16(alpha * total);
-  }
+  if (lane == 0) output[row] = __float2bfloat16(alpha * sum);
 }
 
 }  // namespace
@@ -162,11 +168,15 @@ __global__ void fp8_gemv_kernel(const __nv_fp8_storage_t* __restrict__ weight,
 int fp8_gemv(const void* weight, const void* activation, void* output, int n,
              int k, float alpha, cudaStream_t stream) {
   if (n <= 0 || k <= 0) return -1;
-  const int threads = 256;
-  fp8_gemv_kernel<<<n, threads, 0, stream>>>(
-      static_cast<const __nv_fp8_storage_t*>(weight),
-      static_cast<const __nv_fp8_storage_t*>(activation),
-      static_cast<__nv_bfloat16*>(output), n, k, alpha);
+  // 16-byte loads need K to be a multiple of 16. Every projection in this
+  // model satisfies that; reject rather than silently scalarize.
+  if (k % 16 != 0) return -2;
+  constexpr int kRowsPerBlock = 4;
+  const int threads = kRowsPerBlock * 32;
+  const int blocks = (n + kRowsPerBlock - 1) / kRowsPerBlock;
+  fp8_gemv_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const uint4*>(weight), static_cast<const uint4*>(activation),
+      static_cast<__nv_bfloat16*>(output), n, k / 16, alpha);
   return cudaGetLastError() == cudaSuccess ? 0 : -3;
 }
 
