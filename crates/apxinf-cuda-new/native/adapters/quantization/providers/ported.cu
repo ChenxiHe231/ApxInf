@@ -15,13 +15,6 @@ extern "C" cudaError_t apxinf_static_quantize_rows_bf16_int8(
 
 namespace apxinf::quantization {
 
-size_t ported_resource_requirements(const Spec&) { return 0; }
-
-void prepare_ported(Execution& execution) {
-  execution.provider_state = nullptr;
-  execution.resource_bytes = 0;
-}
-
 cudaError_t launch_ported(Execution& execution) {
   const auto& spec = execution.spec;
   const auto& bindings = execution.bindings;
@@ -58,7 +51,5 @@ cudaError_t launch_ported(Execution& execution) {
       return cudaErrorInvalidValue;
   }
 }
-
-void destroy_ported(Execution&) noexcept {}
 
 }  // namespace apxinf::quantization

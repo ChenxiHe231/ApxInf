@@ -10,8 +10,8 @@ use apxinf_core::{
 };
 
 use crate::ops::{
-    self, AttentionArgs, AttentionMask, GemmArgs, KvCacheAttentionArgs, NormArgs, NormSemantic,
-    PointwiseActivation, PointwiseArgs, PointwiseSemantic,
+    self, AttentionArgs, AttentionMask, GemmArgs, KvCacheAttentionArgs, LayerNormArgs,
+    PointwiseActivation, PointwiseArgs, PointwiseSemantic, RmsNormArgs,
 };
 use crate::{kernels, transfers, CudaBuffer, CudaContext, CudaKVCache};
 
@@ -66,22 +66,33 @@ impl CudaBackend {
         }
     }
 
-    fn norm(
+    fn rms_norm_l3(&self, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+        let (matrix, was_vector) = Self::matrix_view(input, "normalization")?;
+        let mut output = self.output(matrix.shape().clone(), input.dtype())?;
+        ops::rms_norm(
+            &self.ctx,
+            RmsNormArgs::new(&matrix, weight, &mut output, eps),
+        )?;
+        if was_vector {
+            output.reshape(input.shape().clone())
+        } else {
+            Ok(output)
+        }
+    }
+
+    fn layer_norm_l3(
         &self,
-        semantic: NormSemantic,
         input: &Tensor,
         weight: &Tensor,
-        bias: Option<&Tensor>,
+        bias: &Tensor,
         eps: f32,
     ) -> Result<Tensor> {
         let (matrix, was_vector) = Self::matrix_view(input, "normalization")?;
         let mut output = self.output(matrix.shape().clone(), input.dtype())?;
-        let mut args = NormArgs::new(semantic, &matrix);
-        args.weight = Some(weight);
-        args.norm_bias = bias;
-        args.normalized = Some(&mut output);
-        args.eps = eps;
-        ops::norm(&self.ctx, args)?;
+        ops::layer_norm(
+            &self.ctx,
+            LayerNormArgs::new(&matrix, weight, bias, &mut output, eps),
+        )?;
         if was_vector {
             output.reshape(input.shape().clone())
         } else {
@@ -180,7 +191,7 @@ impl SamplingBackend for CudaBackend {
 impl Backend for CudaBackend {
     fn rms_norm(&self, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         match input.dtype() {
-            DType::F16 | DType::BF16 => self.norm(NormSemantic::Rms, input, weight, None, eps),
+            DType::F16 | DType::BF16 => self.rms_norm_l3(input, weight, eps),
             // Standalone F32 normalization is not yet an L3 semantic.  Keep
             // the already-safe migrated primitive available to the portable
             // backend until that candidate exists.
@@ -272,9 +283,7 @@ impl Backend for CudaBackend {
         eps: f32,
     ) -> Result<Tensor> {
         match input.dtype() {
-            DType::F16 | DType::BF16 => {
-                self.norm(NormSemantic::Layer, input, weight, Some(bias), eps)
-            }
+            DType::F16 | DType::BF16 => self.layer_norm_l3(input, weight, bias, eps),
             dtype => Err(Error::Other(format!(
                 "portable CUDA LayerNorm does not support {dtype}"
             ))),

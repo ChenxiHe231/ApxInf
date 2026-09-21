@@ -28,16 +28,15 @@ void one_configuration(const Spec&, std::vector<int>& configurations) {
 const ImplementationRegistry& registry(uint32_t semantic) {
   static const ImplementationRegistry general = {
       {kProviderCustom, 1, 1, "custom-norm", 0, true, true, false,
-       supports_custom, natural_alignment, custom_resource_requirements,
-       one_configuration, prepare_custom, launch_custom, destroy_custom},
+       supports_custom, natural_alignment, one_configuration, launch_custom},
   };
   // Keep the two-rounding contract visible in candidate identity and
   // diagnostics. It shares a provider implementation today but is not an
   // alias of the ordinary bias/residual candidate.
   static const ImplementationRegistry bias_then_residual = {
       {kProviderCustom, 2, 1, "custom-bias-then-residual-bf16", 0, true, true,
-       false, supports_custom, natural_alignment, custom_resource_requirements,
-       one_configuration, prepare_custom, launch_custom, destroy_custom},
+       false, supports_custom, natural_alignment, one_configuration,
+       launch_custom},
   };
   return semantic == APXINF_NORM_SEMANTIC_BIAS_THEN_RESIDUAL
              ? bias_then_residual

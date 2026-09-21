@@ -1,4 +1,4 @@
-//! Persistent graph memory and session-owned native executions.
+//! Persistent graph memory and session-owned prepared native executions.
 
 use std::any::{Any, TypeId};
 use std::cell::{Cell, RefCell};
@@ -108,8 +108,9 @@ impl ExecutionSessionInner {
     }
 }
 
-/// Owns reusable native executions for one eager/capture/replay session.
-/// Its typed cache is operator-independent.
+/// Owns reusable prepared resources for one eager/capture/replay session.
+/// Only operators with real prepare state (currently GEMM and Attention) use
+/// the typed cache and prepared sequence. Stateless operators launch directly.
 #[derive(Clone)]
 pub struct ExecutionSession {
     inner: Rc<ExecutionSessionInner>,
@@ -137,10 +138,9 @@ impl ExecutionSession {
 
     /// Traverse the real execution once before graph capture.
     ///
-    /// This allocates deterministic workspace slices, prepares native operator
-    /// executions, and records their exact call order. The caller must invoke
-    /// the same operator sequence through [`Self::run`] when capturing or
-    /// replaying a fixed-shape workload.
+    /// This allocates deterministic workspace slices, prepares native resources,
+    /// and records the order of prepared operators. Stateless operators execute
+    /// directly and do not enter the cache or sequence.
     pub fn prepare<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         prepare_with_session(self, operation)
     }

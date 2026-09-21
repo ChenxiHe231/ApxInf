@@ -34,7 +34,13 @@ pub use gemm::{
     gemm, gemm_bias, gemm_bias_gelu, gemm_geglu, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs,
     GemmGegluArgs, GemmPolicy, GemmQuantization, WeightVersion,
 };
-pub use norm::{norm, NormArgs, NormPolicy, NormSemantic};
+pub use norm::{
+    ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,
+    bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, layer_norm, rms_norm,
+    AdaGateResidualArgs, AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, BiasResidualArgs,
+    BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, BiasThenResidualArgs, LayerNormArgs,
+    NormPolicy, RmsNormArgs,
+};
 pub use pointwise::{
     pointwise, PointwiseActivation, PointwiseArgs, PointwisePolicy, PointwiseSemantic,
 };

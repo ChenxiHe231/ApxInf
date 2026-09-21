@@ -51,19 +51,10 @@ cudaError_t launch(const Spec& spec, const apxinf_rope_bindings_t& bindings) {
 
 }  // namespace
 
-size_t custom_resource_requirements(const Spec&) { return 0; }
-
-void prepare_custom(Execution& execution) {
-  execution.provider_state = nullptr;
-  execution.resource_bytes = 0;
-}
-
 cudaError_t launch_custom(Execution& execution) {
   return execution.spec.dtype == APXINF_DTYPE_BF16
              ? launch<__nv_bfloat16>(execution.spec, execution.bindings)
              : launch<__half>(execution.spec, execution.bindings);
 }
-
-void destroy_custom(Execution&) noexcept {}
 
 }  // namespace apxinf::rope

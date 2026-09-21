@@ -21,12 +21,16 @@ pub use device_caps::{CudaArchFamily, CudaDeviceCaps};
 pub use graph::{capture, CapturedGraph};
 pub use kv_cache::CudaKVCache;
 pub use ops::{
-    attention, concat_rows, decode_rope, gather, kv_cache_attention, norm, pointwise, quantization,
-    reserve_prefix, rope, segmented_attention, AttentionArgs, AttentionMask, AttentionPolicy,
+    ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, attention, bias_residual,
+    bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, concat_rows, decode_rope,
+    gather, kv_cache_attention, layer_norm, pointwise, quantization, reserve_prefix, rms_norm, rope,
+    segmented_attention, AttentionArgs, AttentionMask, AttentionPolicy,
     DecodeRopeArgs, ExecutionSession,
     GatherArgs, GatherPatchGeometry, GatherPolicy, GatherSemantic, GraphWorkspace,
-    KvCacheAttentionArgs, NormArgs, NormPolicy, NormSemantic, PointwiseActivation, PointwiseArgs,
-    PointwisePolicy, PointwiseSemantic, QuantizationArgs, QuantizationPolicy,
+    AdaGateResidualArgs, AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, BiasResidualArgs,
+    BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, BiasThenResidualArgs,
+    KvCacheAttentionArgs, LayerNormArgs, NormPolicy, PointwiseActivation, PointwiseArgs,
+    PointwisePolicy, PointwiseSemantic, QuantizationArgs, QuantizationPolicy, RmsNormArgs,
     QuantizationSemantic, RopeArgs, RopePolicy, RopeSemantic, SegmentedAttentionArgs,
 };
 pub use stream::CudaStream;
