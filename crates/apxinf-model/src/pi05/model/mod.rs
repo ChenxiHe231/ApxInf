@@ -9,11 +9,18 @@ use blocks::Blocks;
 mod blocks;
 mod calibration;
 mod model;
+pub(in crate::pi05) use blocks::L3Policies;
+#[cfg(test)]
+pub(in crate::pi05) use blocks::L3PolicySnapshot;
 pub use calibration::Pi05CalibrationObserver;
 pub use model::{
     build_bf16_model, build_fp8_static_model, build_int8_dynamic_model,
     upload_time_embeddings_bf16, upload_time_embeddings_fp8_static,
     upload_time_embeddings_int8_dynamic,
+};
+pub(in crate::pi05) use model::{
+    build_bf16_model_with_policies, build_fp8_static_model_with_policies,
+    build_int8_dynamic_model_with_policies,
 };
 pub(super) use model::{ModelOperation, ModelVariant};
 

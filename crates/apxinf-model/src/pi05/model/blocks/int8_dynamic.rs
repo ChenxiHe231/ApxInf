@@ -30,11 +30,7 @@ struct ResidualNormTensors {
     normalized: Tensor,
 }
 
-#[derive(Clone, Default)]
-pub(in crate::pi05) struct Int8DynamicL3Policies {
-    pub gemm: ops::GemmPolicy,
-    pub attention: ops::AttentionPolicy,
-}
+pub(in crate::pi05) type Int8DynamicL3Policies = super::L3Policies;
 
 fn l3_rms_bf16(
     ctx: &Context,
@@ -867,7 +863,7 @@ impl QkvViews for QkvTensors {
 // Precision-specific backbone operations share this file with their layers.
 pub(in crate::pi05::model) mod backbone {
     use super::*;
-    use crate::pi05::backend::{Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
+    use crate::pi05::backend::{Context, DeviceBuffer as CudaBuffer};
     use crate::pi05::weights::*;
     use crate::pi05::Pi05Config;
     use apxinf_core::{DType, Error, Result, Tensor};
@@ -884,16 +880,17 @@ pub(in crate::pi05::model) mod backbone {
         final_norm: Tensor,
     }
     pub struct Int8DynamicBlocks {
-        pub(in crate::pi05::model) backend: Arc<RuntimeBackend>,
+        pub(in crate::pi05::model) backend: Arc<Context>,
         pub(in crate::pi05::model) config: Arc<Pi05Config>,
         pub(in crate::pi05::model) weights: Arc<Int8DynamicWeights>,
         pub(in crate::pi05::model) policies: Int8DynamicL3Policies,
     }
     impl Int8DynamicBlocks {
-        pub fn new(
-            backend: Arc<RuntimeBackend>,
+        pub(in crate::pi05) fn new(
+            backend: Arc<Context>,
             config: Arc<Pi05Config>,
             weights: Arc<Int8DynamicWeights>,
+            policies: Int8DynamicL3Policies,
         ) -> Result<Self> {
             config.validate()?;
             if weights.vision_layers.len() != config.vision_depth
@@ -908,16 +905,8 @@ pub(in crate::pi05::model) mod backbone {
                 backend,
                 config,
                 weights,
-                policies: Int8DynamicL3Policies::default(),
+                policies,
             })
-        }
-
-        pub(in crate::pi05) fn with_l3_policies(
-            mut self,
-            policies: Int8DynamicL3Policies,
-        ) -> Self {
-            self.policies = policies;
-            self
         }
 
         fn ctx(&self) -> &Context {
@@ -1234,7 +1223,7 @@ pub(in crate::pi05::model) mod backbone {
 }
 
 impl crate::pi05::model::PrepareBlocks for backbone::Int8DynamicBlocks {
-    fn backend(&self) -> &std::sync::Arc<crate::pi05::backend::RuntimeBackend> {
+    fn backend(&self) -> &std::sync::Arc<crate::pi05::backend::Context> {
         &self.backend
     }
     fn workspace_requirements(

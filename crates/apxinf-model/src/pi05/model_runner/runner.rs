@@ -329,6 +329,11 @@ impl Pi05ModelRunner {
         }
     }
 
+    #[cfg(test)]
+    pub(in crate::pi05) fn l3_policy_snapshot(&self) -> crate::pi05::model::L3PolicySnapshot {
+        self.model.l3_policy_snapshot()
+    }
+
     fn allocate_prepared_buffers(&self, spec: &InferenceSpec) -> Result<PreparedBuffers> {
         spec.validate()?;
         if spec.token_count > self.config.max_token_len {
