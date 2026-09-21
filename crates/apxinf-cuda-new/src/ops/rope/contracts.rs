@@ -215,7 +215,10 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RopeArgs<'_>) -> Result<Normali
         bias_alignment,
         q_alignment,
         kv_alignment,
-        position_alignment: 0,
+        // No position pointer is bound for split/prefill semantics. The ABI
+        // uses the maximum guaranteed alignment as the canonical null value,
+        // matching the other optional bindings.
+        position_alignment: 256,
         tokens: i64::from(tokens_abi),
         cache_capacity: 0,
     };
