@@ -34,4 +34,16 @@ int add_bf16(const void* addend, void* accumulator, long long count,
 int quantize_fp8_per_tensor(const void* input, void* output, long long count,
                             float input_scale, cudaStream_t stream);
 
+// y[n] = alpha * sum_k weight[n, k] * activation[k], E4M3 operands, BF16 out.
+//
+// The single-token projection. A general GEMM reaches about half of this
+// device's bandwidth at M=1 because its tiling is built for large M; here one
+// block owns one output row and reads that row contiguously, which is the
+// access pattern the hardware wants.
+//
+// `weight` is [N, K] -- the checkpoint's own orientation, so this path also
+// skips the transpose the [K, N] GEMM contract requires.
+int fp8_gemv(const void* weight, const void* activation, void* output, int n,
+             int k, float alpha, cudaStream_t stream);
+
 }  // namespace apxinf::cuda::mlp_ops

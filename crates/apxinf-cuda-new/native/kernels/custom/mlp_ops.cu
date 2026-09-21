@@ -8,6 +8,7 @@
 #include "mlp_ops.h"
 
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 
 #include <cstdint>
 
@@ -121,7 +122,53 @@ __global__ void quantize_fp8_kernel(const __nv_bfloat16* __restrict__ input,
   output[index] = to_e4m3(__bfloat162float(input[index]) * inverse_scale);
 }
 
+// One block per output row, streaming that row contiguously.
+//
+// The activation is read straight from global memory rather than staged in
+// shared. Staging looked like an obvious win and was the opposite: every one
+// of the N blocks would stage the same K bytes, so at N=10240 and K=5120 that
+// is 52 MB of redundant reads -- as much traffic as the weights themselves --
+// and the 20 KB of shared memory per block collapsed occupancy. The
+// activation is a few KB and stays in cache on its own.
+__global__ void fp8_gemv_kernel(const __nv_fp8_storage_t* __restrict__ weight,
+                                const __nv_fp8_storage_t* __restrict__ activation,
+                                __nv_bfloat16* __restrict__ output, int n,
+                                int k, float alpha) {
+  const int row = blockIdx.x;
+  if (row >= n) return;
+
+  const __nv_fp8_storage_t* weight_row = weight + (long long)row * k;
+  float sum = 0.0f;
+  for (int index = threadIdx.x; index < k; index += blockDim.x) {
+    sum += __half2float(__nv_cvt_fp8_to_halfraw(weight_row[index], __NV_E4M3)) *
+           __half2float(__nv_cvt_fp8_to_halfraw(activation[index], __NV_E4M3));
+  }
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
+  }
+  __shared__ float partial[32];
+  if ((threadIdx.x & 31) == 0) partial[threadIdx.x >> 5] = sum;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const int warps = (blockDim.x + 31) / 32;
+    float total = 0.0f;
+    for (int index = 0; index < warps; ++index) total += partial[index];
+    output[row] = __float2bfloat16(alpha * total);
+  }
+}
+
 }  // namespace
+
+int fp8_gemv(const void* weight, const void* activation, void* output, int n,
+             int k, float alpha, cudaStream_t stream) {
+  if (n <= 0 || k <= 0) return -1;
+  const int threads = 256;
+  fp8_gemv_kernel<<<n, threads, 0, stream>>>(
+      static_cast<const __nv_fp8_storage_t*>(weight),
+      static_cast<const __nv_fp8_storage_t*>(activation),
+      static_cast<__nv_bfloat16*>(output), n, k, alpha);
+  return cudaGetLastError() == cudaSuccess ? 0 : -3;
+}
 
 int quantize_fp8_per_tensor(const void* input, void* output, long long count,
                             float input_scale, cudaStream_t stream) {
