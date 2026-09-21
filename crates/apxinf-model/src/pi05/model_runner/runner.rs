@@ -825,6 +825,7 @@ mod tests {
         let expected = crate::pi05::Pi05CalibrationPlan::for_config(&runner.config)
             .sites()
             .len();
+        assert_eq!(expected, 256);
         assert_eq!(records.len(), expected);
         assert!(records.values().all(|amax| amax.is_finite()));
     }

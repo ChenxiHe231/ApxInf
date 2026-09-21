@@ -95,6 +95,94 @@ fn attention_all_candidates_match_reference() {
     super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
 }
 
+#[allow(clippy::too_many_arguments)]
+fn validate_splitkv_attention_shape(
+    query_tokens: usize,
+    key_tokens: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    causal: bool,
+    constant_value_by_dimension: bool,
+) {
+    let ctx = CudaContext::new(0).unwrap();
+    let batch = 1;
+    let query_values: Vec<_> = (0..batch * query_tokens * query_heads * head_dim)
+        .map(|index| ((index * 3 % 17) as f32 - 8.0) / 16.0)
+        .collect();
+    let key_values: Vec<_> = (0..batch * key_tokens * kv_heads * head_dim)
+        .map(|index| ((index * 5 % 19) as f32 - 9.0) / 16.0)
+        .collect();
+    let value_values: Vec<_> = (0..batch * key_tokens * kv_heads * head_dim)
+        .map(|index| {
+            if constant_value_by_dimension {
+                ((index % head_dim) as f32 % 13.0 - 6.0) / 16.0
+            } else {
+                ((index * 7 % 23) as f32 - 11.0) / 16.0
+            }
+        })
+        .collect();
+    let query = tensor(
+        0,
+        vec![batch, query_tokens, query_heads, head_dim],
+        &query_values,
+    );
+    let key = tensor(
+        0,
+        vec![batch, key_tokens, kv_heads, head_dim],
+        &key_values,
+    );
+    let value = tensor(
+        0,
+        vec![batch, key_tokens, kv_heads, head_dim],
+        &value_values,
+    );
+    let mut out = zeros_tensor(
+        0,
+        vec![batch, query_tokens, query_heads, head_dim],
+        DType::BF16,
+    );
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut out);
+    if causal {
+        args = args.causal();
+    }
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
+    let expected = if constant_value_by_dimension {
+        (0..batch * query_tokens * query_heads * head_dim)
+            .map(|index| ((index % head_dim) as f32 % 13.0 - 6.0) / 16.0)
+            .collect()
+    } else {
+        attention_reference(
+            &query_values,
+            &key_values,
+            &value_values,
+            batch,
+            query_tokens,
+            key_tokens,
+            query_heads,
+            kv_heads,
+            head_dim,
+            1.0 / (head_dim as f32).sqrt(),
+            causal,
+        )
+    };
+    super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
+}
+
+#[test]
+fn attention_pi05_action_splitkv_all_candidates_match_reference_and_graph() {
+    validate_splitkv_attention_shape(10, 522, 8, 1, 256, false, true);
+}
+
+#[test]
+fn attention_splitkv_causal_and_noncausal_match_independent_reference_and_graph() {
+    validate_splitkv_attention_shape(3, 129, 2, 1, 128, false, false);
+    validate_splitkv_attention_shape(3, 129, 2, 1, 128, true, false);
+    validate_splitkv_attention_shape(3, 65, 2, 1, 256, false, false);
+}
+
 #[test]
 fn kv_cache_attention_all_candidates_match_reference() {
     let ctx = CudaContext::new(0).unwrap();

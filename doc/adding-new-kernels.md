@@ -70,7 +70,7 @@ Use this path only when the underlying implementation already has the capability
 | --- | --- |
 | `supports(spec)` | Cover the semantic, shape, dtype, layout, mask, scale predicate, and quantization exactly |
 | `alignment_requirements(spec)` | Declare the minimum alignment for each binding |
-| `resource_requirements(spec)` | Report resource requirements knowable before provider construction so the workspace budget can prefilter candidates |
+| `resource_requirements(spec[, configuration])` | Report resource requirements knowable before provider construction so the workspace budget can prefilter candidates; Attention passes the enumerated configuration because its workspace may vary by tactic, while GEMM is currently spec-only |
 | `enumerate_configs(spec, out)` | Return every stable configuration that requires independent benchmarking |
 | `prepare(execution)` | Construct complete provider state for every enumerated configuration |
 | `enqueue(execution)` | Be correct and asynchronous across the new domain |
@@ -109,7 +109,8 @@ The current GEMM/Attention candidate descriptors use the following interfaces. W
 
 1. `supports(spec)`;
 2. `alignment_requirements(spec)`;
-3. `resource_requirements(spec)`;
+3. `resource_requirements(spec, configuration)` for Attention and
+   `resource_requirements(spec)` for GEMM;
 4. `enumerate_configs(spec, out)`;
 5. `prepare(execution)`;
 6. `enqueue(execution)`;

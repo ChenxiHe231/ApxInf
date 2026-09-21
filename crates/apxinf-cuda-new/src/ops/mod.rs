@@ -50,7 +50,6 @@ pub use gemm::{
     nvfp4_quantize_activation, nvfp4_quantize_rms_norm, nvfp4_quantize_swiglu,
     nvfp4_scale_buffer_bytes, ScaleLayout, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs, GemmGegluArgs,
     GemmPolicy, GemmQuantization, WeightVersion,
-    Bf16ActivationObserver, Bf16ObserverGuard, install_bf16_observer,
 };
 pub use cache::{concat_rows, reserve_prefix};
 pub use gather::{
