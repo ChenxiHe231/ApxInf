@@ -11,6 +11,12 @@ use apxinf_core::{DType, Tensor};
 use half::bf16;
 
 fn bf16_bits(tensor: &Tensor) -> Vec<u16> {
+    // Direct pointwise operators enqueue on the context stream.  Synchronize
+    // only at this host-observation boundary; production launches remain
+    // asynchronous and graph-capturable.
+    unsafe {
+        crate::ffi::check_cuda(crate::ffi::cudaDeviceSynchronize()).unwrap();
+    }
     let buffer = CudaBuffer::from_tensor(tensor).unwrap();
     let mut bytes = vec![0; buffer.len()];
     buffer.copy_to_host(&mut bytes).unwrap();

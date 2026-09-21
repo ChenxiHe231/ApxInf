@@ -1211,6 +1211,10 @@ fn nonblocking_output_initialization_is_ordered_before_operator_writes() {
         .collect();
     let output_shape = Shape::new(vec![TOKENS, HEADS, HEAD_DIM]);
     let read_bf16 = |tensor: &Tensor| {
+        // The allocation memset and direct operator launch are intentionally
+        // asynchronous on the context stream.  Synchronize only when the test
+        // crosses back to host memory to observe their ordered result.
+        ctx.synchronize().unwrap();
         let buffer = CudaBuffer::from_tensor(tensor).unwrap();
         let mut bytes = vec![0; buffer.len()];
         buffer.copy_to_host(&mut bytes).unwrap();
