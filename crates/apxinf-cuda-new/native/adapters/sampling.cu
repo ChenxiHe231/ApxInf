@@ -22,7 +22,7 @@ cudaError_t launch_prepare(
     cudaStream_t stream) {
   int blocks = static_cast<int>((vocab_size + kThreads - 1) / kThreads);
   blocks = std::min(blocks, 1024);
-  apxinf_prepare_logits_kernel<<<blocks, kThreads, 0, stream>>>(
+  apxinf_cuda_new_prepare_logits_kernel<<<blocks, kThreads, 0, stream>>>(
       static_cast<const T*>(logits), counts, adjusted, token_ids, vocab_size,
       repetition, frequency, presence, inverse_temperature);
   return cudaGetLastError();
@@ -86,11 +86,11 @@ extern "C" cudaError_t apxinf_cuda_new_sample_token(
   if (status != cudaSuccess) return status;
 
   if (selection == 0 && return_logprob == 0) {
-    apxinf_argmax_stage1_kernel<<<partial_count, kThreads, 0, stream>>>(
+    apxinf_cuda_new_argmax_stage1_kernel<<<partial_count, kThreads, 0, stream>>>(
         adjusted, vocab_size, partial_values, partial_tokens);
     status = cudaGetLastError();
     if (status != cudaSuccess) return status;
-    apxinf_argmax_stage2_kernel<<<1, kThreads, 0, stream>>>(
+    apxinf_cuda_new_argmax_stage2_kernel<<<1, kThreads, 0, stream>>>(
         partial_values, partial_tokens, partial_count, counts, output);
     return cudaGetLastError();
   }
@@ -107,14 +107,14 @@ extern "C" cudaError_t apxinf_cuda_new_sample_token(
       top_k == 0 ? vocab_size : std::min(top_k, vocab_size);
   int blocks = static_cast<int>((vocab_size + kThreads - 1) / kThreads);
   blocks = std::min(blocks, 1024);
-  apxinf_softmax_weights_kernel<<<blocks, kThreads, 0, stream>>>(
+  apxinf_cuda_new_softmax_weights_kernel<<<blocks, kThreads, 0, stream>>>(
       sorted_logits, weights, vocab_size, candidate_limit);
   status = cudaGetLastError();
   if (status != cudaSuccess) return status;
   status = cub::DeviceScan::InclusiveSum(
       scan_workspace, scan_workspace_bytes, weights, cdf, vocab_size, stream);
   if (status != cudaSuccess) return status;
-  apxinf_select_cdf_kernel<<<1, 1, 0, stream>>>(
+  apxinf_cuda_new_select_cdf_kernel<<<1, 1, 0, stream>>>(
       sorted_tokens, weights, cdf, candidate_limit,
       selection == 0 ? 1.0f : top_p, selection != 0, return_logprob, seed,
       sequence, draw, counts, output);
@@ -129,15 +129,15 @@ extern "C" cudaError_t apxinf_cuda_new_fill_standard_normal(
   blocks = std::min(blocks, 1024);
   switch (dtype) {
     case 0:
-      apxinf_standard_normal_kernel<<<blocks, kThreads, 0, stream>>>(
+      apxinf_cuda_new_standard_normal_kernel<<<blocks, kThreads, 0, stream>>>(
           static_cast<float*>(output), count, seed, sequence, draw);
       break;
     case 1:
-      apxinf_standard_normal_kernel<<<blocks, kThreads, 0, stream>>>(
+      apxinf_cuda_new_standard_normal_kernel<<<blocks, kThreads, 0, stream>>>(
           static_cast<half*>(output), count, seed, sequence, draw);
       break;
     case 2:
-      apxinf_standard_normal_kernel<<<blocks, kThreads, 0, stream>>>(
+      apxinf_cuda_new_standard_normal_kernel<<<blocks, kThreads, 0, stream>>>(
           static_cast<__nv_bfloat16*>(output), count, seed, sequence, draw);
       break;
     default:
