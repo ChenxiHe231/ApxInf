@@ -30,7 +30,7 @@ cudaError_t launch_prepare(
 
 }  // namespace
 
-extern "C" cudaError_t apxinf_token_sampling_workspace_sizes(
+extern "C" cudaError_t apxinf_cuda_new_token_sampling_workspace_sizes(
     uint32_t vocab_size, size_t* sort_bytes, size_t* scan_bytes) {
   if (vocab_size == 0 || sort_bytes == nullptr || scan_bytes == nullptr)
     return cudaErrorInvalidValue;
@@ -46,7 +46,7 @@ extern "C" cudaError_t apxinf_token_sampling_workspace_sizes(
       static_cast<float*>(nullptr), vocab_size);
 }
 
-extern "C" cudaError_t apxinf_sample_token(
+extern "C" cudaError_t apxinf_cuda_new_sample_token(
     const void* logits, int dtype, uint32_t vocab_size, uint32_t* counts,
     float repetition, float frequency, float presence, int selection,
     float temperature, uint32_t top_k, float top_p, uint64_t seed,
@@ -121,7 +121,7 @@ extern "C" cudaError_t apxinf_sample_token(
   return cudaGetLastError();
 }
 
-extern "C" cudaError_t apxinf_fill_standard_normal(
+extern "C" cudaError_t apxinf_cuda_new_fill_standard_normal(
     void* output, int dtype, uint64_t count, uint64_t seed,
     uint64_t sequence, uint64_t draw, cudaStream_t stream) {
   if (output == nullptr || count == 0) return cudaErrorInvalidValue;
