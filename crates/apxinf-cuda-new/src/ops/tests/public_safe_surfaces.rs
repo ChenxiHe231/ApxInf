@@ -4,7 +4,8 @@
 //! tensor byte round trips, counter-based RNG keys, standard E4M3 encoding,
 //! and the documented prefix-cache layout.
 
-use crate::kernels::quantization::{cast_f16_bf16, quantize_bf16_e4m3, quantize_f16_e4m3};
+use super::framework::zeros_tensor;
+use crate::ops::{quantization, QuantizationArgs, QuantizationSemantic};
 use crate::sampling::{create_normal_generator, create_token_sampler};
 use crate::transfers::{copy_cpu_to_cuda, to_cpu, to_cuda};
 use crate::{reserve_prefix, CudaContext};
@@ -189,33 +190,71 @@ fn normal_generator_matches_public_counter_based_cpu_reference() {
 }
 
 #[test]
-fn compatibility_quantizers_match_standard_e4m3_at_unit_scale() {
+fn fixed_scale_quantization_matches_standard_e4m3_at_unit_scale() {
     let ctx = CudaContext::new(0).unwrap();
     let values = [0.0, 0.5, 1.0, -1.0, 2.0];
     // Standard finite E4M3 encodings at scale 1.
     let expected = [0x00, 0x30, 0x38, 0xb8, 0x40];
 
     let f16_input = to_cuda(&cpu_tensor(DType::F16, vec![5], &values), 0).unwrap();
-    let f16_output = quantize_f16_e4m3(&ctx, &f16_input, 1.0).unwrap();
+    let mut f16_output = zeros_tensor(0, vec![5], DType::F8E4M3);
+    quantization(
+        &ctx,
+        QuantizationArgs::new(
+            QuantizationSemantic::FixedScaleE4m3,
+            &f16_input,
+            &mut f16_output,
+        ),
+    )
+    .unwrap();
     assert_eq!(f16_output.dtype(), DType::F8E4M3);
     assert_eq!(cpu_bytes(&to_cpu(&f16_output).unwrap()), expected);
 
     let bf16_input = to_cuda(&cpu_tensor(DType::BF16, vec![5], &values), 0).unwrap();
-    let bf16_output = quantize_bf16_e4m3(&ctx, &bf16_input, 1.0).unwrap();
+    let mut bf16_output = zeros_tensor(0, vec![5], DType::F8E4M3);
+    quantization(
+        &ctx,
+        QuantizationArgs::new(
+            QuantizationSemantic::FixedScaleE4m3,
+            &bf16_input,
+            &mut bf16_output,
+        ),
+    )
+    .unwrap();
     assert_eq!(bf16_output.dtype(), DType::F8E4M3);
     assert_eq!(cpu_bytes(&to_cpu(&bf16_output).unwrap()), expected);
 
-    assert!(quantize_f16_e4m3(&ctx, &f16_input, 0.0).is_err());
-    assert!(quantize_bf16_e4m3(&ctx, &bf16_input, f32::NAN).is_err());
+    let mut invalid_output = zeros_tensor(0, vec![5], DType::F8E4M3);
+    let mut invalid = QuantizationArgs::new(
+        QuantizationSemantic::FixedScaleE4m3,
+        &f16_input,
+        &mut invalid_output,
+    );
+    invalid.scale = 0.0;
+    assert!(quantization(&ctx, invalid).is_err());
+
+    let mut invalid_output = zeros_tensor(0, vec![5], DType::F8E4M3);
+    let mut invalid = QuantizationArgs::new(
+        QuantizationSemantic::FixedScaleE4m3,
+        &bf16_input,
+        &mut invalid_output,
+    );
+    invalid.scale = f32::NAN;
+    assert!(quantization(&ctx, invalid).is_err());
 }
 
 #[test]
-fn compatibility_cast_matches_independent_f16_to_bf16_rounding() {
+fn f16_to_bf16_cast_matches_independent_rounding() {
     let ctx = CudaContext::new(0).unwrap();
     let values = [0.0, 0.1, -0.25, 1.5, 1000.0, -7.75];
     let input_host = cpu_tensor(DType::F16, vec![2, 3], &values);
     let input = to_cuda(&input_host, 0).unwrap();
-    let output = cast_f16_bf16(&ctx, &input).unwrap();
+    let mut output = zeros_tensor(0, vec![2, 3], DType::BF16);
+    quantization(
+        &ctx,
+        QuantizationArgs::new(QuantizationSemantic::CastF16ToBf16, &input, &mut output),
+    )
+    .unwrap();
     let output = to_cpu(&output).unwrap();
     let expected: Vec<_> = input_host
         .as_f16()

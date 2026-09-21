@@ -7,6 +7,7 @@ use apxinf_core::{
 
 use crate::buffer::CudaBuffer;
 use crate::ffi;
+use crate::ffi::raw::sampling as sampling_ffi;
 use crate::CudaContext;
 
 const OUTPUT_BYTES: usize = 16;
@@ -59,7 +60,11 @@ impl CudaTokenSampler {
         let mut sort_bytes = 0usize;
         let mut scan_bytes = 0usize;
         let status = unsafe {
-            ffi::apxinf_token_sampling_workspace_sizes(vocab_size, &mut sort_bytes, &mut scan_bytes)
+            sampling_ffi::apxinf_token_sampling_workspace_sizes(
+                vocab_size,
+                &mut sort_bytes,
+                &mut scan_bytes,
+            )
         };
         ffi::check_cuda(status).map_err(Error::Cuda)?;
         let alloc = |bytes: usize| CudaBuffer::alloc(bytes.max(1), device_id).map_err(Error::Cuda);
@@ -185,7 +190,7 @@ impl TokenSampler for CudaTokenSampler {
         };
         let penalties = params.penalties;
         let status = unsafe {
-            ffi::apxinf_sample_token(
+            sampling_ffi::apxinf_sample_token(
                 logits_row.ptr(),
                 dtype_tag,
                 u32::try_from(self.spec.vocab_size).map_err(|_| {
@@ -283,7 +288,7 @@ impl NormalGenerator for CudaNormalGenerator {
     fn generate(&mut self, rng: RngKey) -> Result<&Tensor> {
         let output = CudaBuffer::from_tensor(&self.output).map_err(Error::Cuda)?;
         let status = unsafe {
-            ffi::apxinf_fill_standard_normal(
+            sampling_ffi::apxinf_fill_standard_normal(
                 output.ptr(),
                 dtype_tag(self.output.dtype())?,
                 u64::try_from(self.output.numel()).map_err(|_| {

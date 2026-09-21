@@ -4,24 +4,127 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <string>
-
-extern "C" cudaError_t apxinf_static_quantize_f16_e4m3(
-    const void*, void*, int64_t, float, cudaStream_t);
-extern "C" cudaError_t apxinf_static_quantize_bf16_e4m3(
-    const void*, void*, int64_t, float, cudaStream_t);
-extern "C" cudaError_t apxinf_dynamic_quantize_rows_bf16_e4m3(
-    const void*, void*, void*, int, int, int, cudaStream_t);
-extern "C" cudaError_t apxinf_static_cast_f16_bf16(
-    const void*, void*, int64_t, cudaStream_t);
-extern "C" cudaError_t apxinf_slice_columns_bf16(
-    const void*, void*, int, int, int, cudaStream_t);
-extern "C" cudaError_t apxinf_static_quantize_rows_bf16_int8(
-    const void*, void*, void*, int, int, cudaStream_t);
 
 namespace {
 
+#include "../kernels/primitives/math.cuh"
+#include "../kernels/primitives/reduction.cuh"
+#include "../kernels/primitives/quantization.cuh"
+
 using apxinf::framework::Failure;
+
+cudaError_t launch_quantize_f16_e4m3(
+    const void* input, void* output, int64_t count, float scale,
+    cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0 || !(scale > 0.0f))
+    return cudaErrorInvalidValue;
+  constexpr int threads = 256;
+  const float inverse_scale = 1.0f / scale;
+  const bool aligned =
+      (reinterpret_cast<uintptr_t>(input) & 3U) == 0 &&
+      (reinterpret_cast<uintptr_t>(output) & 3U) == 0;
+  int64_t vector_count = aligned ? count & ~int64_t{3} : 0;
+  if (vector_count != 0) {
+    const int64_t groups = vector_count / 4;
+    int blocks = static_cast<int>((groups + threads - 1) / threads);
+    blocks = blocks > 1024 ? 1024 : blocks;
+    quantize_f16_e4m3_packed4_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const half*>(input),
+        static_cast<__nv_fp8_e4m3*>(output), vector_count, inverse_scale);
+  }
+  const int64_t tail = count - vector_count;
+  if (tail != 0) {
+    int blocks = static_cast<int>((tail + threads - 1) / threads);
+    blocks = blocks > 1024 ? 1024 : blocks;
+    quantize_f16_e4m3_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const half*>(input) + vector_count,
+        static_cast<__nv_fp8_e4m3*>(output) + vector_count,
+        tail, inverse_scale);
+  }
+  return cudaGetLastError();
+}
+
+cudaError_t launch_quantize_bf16_e4m3(
+    const void* input, void* output, int64_t count, float scale,
+    cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0 || !(scale > 0.0f))
+    return cudaErrorInvalidValue;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  quantize_bf16_e4m3_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<__nv_fp8_e4m3*>(output), count, 1.0f / scale);
+  return cudaGetLastError();
+}
+
+cudaError_t launch_quantize_rows_bf16_e4m3(
+    const void* input, void* output, void* scales, int rows,
+    int input_cols, int output_cols, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || scales == nullptr ||
+      rows <= 0 || input_cols <= 0 || output_cols < input_cols) {
+    return cudaErrorInvalidValue;
+  }
+  constexpr int threads = 256;
+  if (input_cols % 8 == 0 && output_cols % 8 == 0) {
+    constexpr int rows_per_block = threads / 32;
+    const int blocks = (rows + rows_per_block - 1) / rows_per_block;
+    quantize_rows_bf16_e4m3_vec8_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<__nv_fp8_e4m3*>(output), static_cast<float*>(scales),
+        rows, input_cols, output_cols);
+  } else {
+    quantize_rows_bf16_e4m3_kernel<<<rows, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<__nv_fp8_e4m3*>(output), static_cast<float*>(scales),
+        rows, input_cols, output_cols);
+  }
+  return cudaGetLastError();
+}
+
+cudaError_t launch_cast_f16_bf16(
+    const void* input, void* output, int64_t count, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0)
+    return cudaErrorInvalidValue;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  cast_f16_bf16_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const half*>(input),
+      static_cast<__nv_bfloat16*>(output), count);
+  return cudaGetLastError();
+}
+
+cudaError_t launch_slice_columns_bf16(
+    const void* input, void* output, int rows, int input_cols,
+    int output_cols, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || rows <= 0 ||
+      output_cols <= 0 || output_cols > input_cols) {
+    return cudaErrorInvalidValue;
+  }
+  const int64_t count = static_cast<int64_t>(rows) * output_cols;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  slice_columns_bf16_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<__nv_bfloat16*>(output), rows, input_cols, output_cols);
+  return cudaGetLastError();
+}
+
+cudaError_t launch_quantize_rows_bf16_int8(
+    const void* input, void* output, void* scales,
+    int rows, int cols, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || scales == nullptr ||
+      rows <= 0 || cols <= 0) {
+    return cudaErrorInvalidValue;
+  }
+  quantize_rows_bf16_int8_kernel<<<rows, kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<int8_t*>(output), static_cast<float*>(scales), rows, cols);
+  return cudaGetLastError();
+}
 
 bool valid_alignment(uint32_t alignment) {
   return alignment <= 256 && alignment != 0 &&
@@ -163,24 +266,24 @@ cudaError_t launch(const apxinf_quantization_spec_t& spec,
   switch (spec.semantic) {
     case APXINF_QUANTIZATION_SEMANTIC_FIXED_E4M3:
       return spec.input_dtype == APXINF_DTYPE_F16
-                 ? apxinf_static_quantize_f16_e4m3(
+                 ? launch_quantize_f16_e4m3(
                        bindings.input, bindings.output, input_count,
                        bindings.scale, stream)
-                 : apxinf_static_quantize_bf16_e4m3(
+                 : launch_quantize_bf16_e4m3(
                        bindings.input, bindings.output, input_count,
                        bindings.scale, stream);
     case APXINF_QUANTIZATION_SEMANTIC_ROWWISE_E4M3:
-      return apxinf_dynamic_quantize_rows_bf16_e4m3(
+      return launch_quantize_rows_bf16_e4m3(
           bindings.input, bindings.output, bindings.scales, rows, input_cols,
           output_cols, stream);
     case APXINF_QUANTIZATION_SEMANTIC_CAST_F16_BF16:
-      return apxinf_static_cast_f16_bf16(
+      return launch_cast_f16_bf16(
           bindings.input, bindings.output, input_count, stream);
     case APXINF_QUANTIZATION_SEMANTIC_SLICE_BF16:
-      return apxinf_slice_columns_bf16(bindings.input, bindings.output, rows,
+      return launch_slice_columns_bf16(bindings.input, bindings.output, rows,
                                        input_cols, output_cols, stream);
     case APXINF_QUANTIZATION_SEMANTIC_ROWWISE_I8:
-      return apxinf_static_quantize_rows_bf16_int8(
+      return launch_quantize_rows_bf16_int8(
           bindings.input, bindings.output, bindings.scales, rows, input_cols,
           stream);
     default:
