@@ -401,6 +401,12 @@ fn dense_attention(
     Ok(out.reshape(vec![q_dims[0], q_dims[1] * q_dims[2]])?)
 }
 
+fn uses_direct_e4m3_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> bool {
+    q.shape().dims() == [522, 8, 256]
+        && k.shape().dims() == [522, 1, 256]
+        && v.shape().dims() == [522, 1, 256]
+}
+
 pub fn language_layer_fp8_static(
     ctx: &Context,
     config: GemmaVariantConfig,
@@ -467,14 +473,22 @@ fn language_layer_fp8_static_with_policies(
             value: qkv.v.reshape(vec![tokens, config.head_dim])?,
         });
     }
-    let attention = dense_attention(
-        ctx,
-        policies,
-        &qkv.q,
-        &qkv.k,
-        &qkv.v,
-        Some(scales.attention_output),
-    )?;
+    // Preserve the validated legacy path: only the production T10 shape has
+    // a fused F16-to-E4M3 FA2 epilogue. Other token lengths, including T21,
+    // use ordinary F16 attention followed by the direct quantization kernel.
+    let attention = if uses_direct_e4m3_attention(&qkv.q, &qkv.k, &qkv.v) {
+        dense_attention(
+            ctx,
+            policies,
+            &qkv.q,
+            &qkv.k,
+            &qkv.v,
+            Some(scales.attention_output),
+        )?
+    } else {
+        let attention = dense_attention(ctx, policies, &qkv.q, &qkv.k, &qkv.v, None)?;
+        fixed_quantize(ctx, policies, &attention, scales.attention_output)?
+    };
     let projected = fp8_gemm(
         ctx,
         policies,
