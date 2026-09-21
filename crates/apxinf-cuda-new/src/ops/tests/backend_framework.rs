@@ -315,15 +315,26 @@ fn gpu_e2e_candidate_alignment_is_selected_and_keyed_from_actual_bindings() {
     let execution = super::execution::prepare(&ctx, misaligned).unwrap();
     let summary = execution.summary().to_owned();
     eprintln!("GPU_ALIGNMENT_MISALIGNED {summary}");
-    assert!(summary.contains("cutlass-fp8=skip(alignment)"), "{summary}");
+    if matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
+        assert!(summary.contains("cutlass-fp8=skip(alignment)"), "{summary}");
+    } else {
+        assert!(!summary.contains("cutlass-fp8="), "{summary}");
+    }
     assert!(
         summary.contains("cublasLt+custom-epilogue=skip(alignment)"),
         "{summary}"
     );
-    assert!(
-        summary.contains("cublasLt-native-fp8+custom-epilogue=skip(alignment)"),
-        "{summary}"
-    );
+    if matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
+        assert!(
+            summary.contains("cublasLt-native-fp8+custom-epilogue=skip(alignment)"),
+            "{summary}"
+        );
+    } else {
+        assert!(
+            summary.contains("cublasLt-native-fp8+custom-epilogue=skip(device)"),
+            "{summary}"
+        );
+    }
     assert!(
         !summary.contains("source=memory"),
         "alignment key aliased: {summary}"
@@ -1297,7 +1308,17 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     // Provider 3, implementation 2, version 2 is the FP8 CUTLASS GeGLU
     // candidate. Seeding avoids an enormous CPU-reference autotune while
     // keeping execution construction and public enqueue/capture paths real.
-    super::execution::seed_recipe(&ctx, &normalized, 3, 2, 2, 0).unwrap();
+    let seeded = super::execution::seed_recipe(&ctx, &normalized, 3, 2, 2, 0);
+    if !matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
+        let error = seeded.expect_err("CUTLASS GeGLU must remain unavailable outside SM100");
+        assert!(
+            error.to_string().contains("test recipe candidate is unavailable"),
+            "{error}"
+        );
+        std::fs::remove_dir_all(cache_dir).unwrap();
+        return;
+    }
+    seeded.unwrap();
     drop(normalized);
 
     let session = ExecutionSession::with_capacity(1, 0).unwrap();
