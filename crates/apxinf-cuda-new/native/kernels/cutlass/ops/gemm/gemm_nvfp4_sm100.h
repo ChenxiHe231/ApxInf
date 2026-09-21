@@ -45,4 +45,20 @@ int nvfp4_scatter_block_scales(const void* src_row_major, void* dst_atom,
                                int rows, int k, int sf_vec,
                                cudaStream_t stream);
 
+// Quantize a BF16 activation to the NVFP4 operand pair the GEMM consumes.
+//
+//   src          BF16 [rows, k], row-major
+//   dst_packed   E2M1 pairs [rows, k/2], low nibble first
+//   dst_scales   unsigned-E4M3 block scales in the kernel atom layout
+//
+// Follows the ModelOpt convention: each block's scale is `amax/6` expressed
+// relative to the checkpoint's per-tensor `input_scale`, so the GEMM recovers
+// absolute values by folding `input_scale` into alpha. Passing the same
+// `input_scale` the checkpoint stores is therefore required, not optional --
+// it is what makes the activation's scale range match what the weights were
+// calibrated against.
+int nvfp4_quantize_activation(const void* src_bf16, void* dst_packed,
+                              void* dst_scales, int rows, int k, int sf_vec,
+                              float input_scale, cudaStream_t stream);
+
 }  // namespace apxinf::cuda::cutlass_ops

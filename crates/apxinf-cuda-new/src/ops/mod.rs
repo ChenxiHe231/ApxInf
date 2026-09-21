@@ -22,7 +22,7 @@ pub use attention::{
 };
 pub use gemm::{
     gemm, gemm_bias, gemm_bias_gelu, gemm_geglu, nvfp4_pack_block_scales,
-    nvfp4_scale_buffer_bytes, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs, GemmGegluArgs,
+    nvfp4_quantize_activation, nvfp4_scale_buffer_bytes, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs, GemmGegluArgs,
     GemmPolicy, GemmQuantization, WeightVersion,
 };
 

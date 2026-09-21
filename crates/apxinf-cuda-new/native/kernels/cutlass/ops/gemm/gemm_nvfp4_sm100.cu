@@ -161,6 +161,91 @@ __global__ void scatter_block_scales_kernel(const uint8_t* __restrict__ src,
   tensor(row, block * sf_vec, 0) = src[index];
 }
 
+// E2M1 magnitudes, indexed by the low three bits of the code.
+__device__ __forceinline__ uint8_t quantize_e2m1(float value) {
+  const uint8_t sign = value < 0.0f ? 0x8 : 0x0;
+  const float magnitude = fabsf(value);
+  // Round to nearest representable magnitude. The ladder is short enough that
+  // comparing against midpoints beats any arithmetic trick.
+  uint8_t code;
+  if (magnitude < 0.25f) code = 0;
+  else if (magnitude < 0.75f) code = 1;   // 0.5
+  else if (magnitude < 1.25f) code = 2;   // 1.0
+  else if (magnitude < 1.75f) code = 3;   // 1.5
+  else if (magnitude < 2.5f) code = 4;    // 2.0
+  else if (magnitude < 3.5f) code = 5;    // 3.0
+  else if (magnitude < 5.0f) code = 6;    // 4.0
+  else code = 7;                          // 6.0
+  return sign | code;
+}
+
+// Encode a non-negative float as E4M3 (bias 7). Scale values are never
+// negative, so this matches the unsigned encoding the kernel reads.
+__device__ __forceinline__ uint8_t quantize_e4m3_nonnegative(float value) {
+  if (!(value > 0.0f)) return 0;
+  int exponent;
+  float mantissa = frexpf(value, &exponent);  // value = mantissa * 2^exponent
+  mantissa *= 2.0f;
+  exponent -= 1;                              // mantissa now in [1, 2)
+  int biased = exponent + 7;
+  if (biased <= 0) return 0;                  // underflows to zero
+  int fraction = __float2int_rn((mantissa - 1.0f) * 8.0f);
+  if (fraction > 7) {
+    fraction = 0;
+    ++biased;
+  }
+  if (biased > 15) {                          // saturate at the E4M3 maximum
+    biased = 15;
+    fraction = 7;
+  }
+  return static_cast<uint8_t>((biased << 3) | fraction);
+}
+
+__device__ __forceinline__ float dequantize_e4m3_nonnegative(uint8_t code) {
+  const int exponent = (code >> 3) & 0x0F;
+  const float fraction = static_cast<float>(code & 0x07);
+  if (exponent == 0) return fraction / 8.0f * exp2f(-6.0f);
+  return (1.0f + fraction / 8.0f) * exp2f(static_cast<float>(exponent - 7));
+}
+
+// One thread per block of `sf_vec` activation elements.
+__global__ void quantize_activation_kernel(
+    const __nv_bfloat16* __restrict__ src, uint8_t* __restrict__ packed,
+    uint8_t* __restrict__ scales, int rows, int k, int sf_vec, int k_blocks,
+    float input_scale, CanonicalSfConfig::LayoutSF layout) {
+  const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  const long long total = (long long)rows * k_blocks;
+  if (index >= total) return;
+  const int row = static_cast<int>(index / k_blocks);
+  const int block = static_cast<int>(index % k_blocks);
+  const long long base = (long long)row * k + (long long)block * sf_vec;
+
+  float amax = 0.0f;
+  for (int offset = 0; offset < sf_vec; ++offset) {
+    amax = fmaxf(amax, fabsf(__bfloat162float(src[base + offset])));
+  }
+
+  // The block scale is stored relative to the per-tensor input_scale, so the
+  // GEMM recovers absolute magnitudes by folding input_scale into alpha.
+  const float block_scale = amax / 6.0f;
+  const uint8_t scale_code = quantize_e4m3_nonnegative(block_scale / input_scale);
+  auto scale_tensor = cute::make_tensor(scales, layout);
+  scale_tensor(row, block * sf_vec, 0) = scale_code;
+
+  // Quantize against the scale that was actually stored, not the ideal one:
+  // the E4M3 rounding is part of the encoding and must not be double-counted.
+  const float effective = dequantize_e4m3_nonnegative(scale_code) * input_scale;
+  const float inverse = effective > 0.0f ? 1.0f / effective : 0.0f;
+
+  uint8_t* out = packed + ((long long)row * k + (long long)block * sf_vec) / 2;
+  for (int offset = 0; offset < sf_vec; offset += 2) {
+    const float low = __bfloat162float(src[base + offset]) * inverse;
+    const float high = __bfloat162float(src[base + offset + 1]) * inverse;
+    out[offset / 2] =
+        static_cast<uint8_t>(quantize_e2m1(low) | (quantize_e2m1(high) << 4));
+  }
+}
+
 }  // namespace
 
 int nvfp4_gemm_tactic_count() { return kTacticCount; }
@@ -234,6 +319,28 @@ int nvfp4_scatter_block_scales(const void* src_row_major, void* dst_atom,
   scatter_block_scales_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const uint8_t*>(src_row_major),
       static_cast<uint8_t*>(dst_atom), rows, k, sf_vec, k_blocks, layout);
+  return cudaGetLastError() == cudaSuccess ? 0 : -21;
+}
+
+int nvfp4_quantize_activation(const void* src_bf16, void* dst_packed,
+                              void* dst_scales, int rows, int k, int sf_vec,
+                              float input_scale, cudaStream_t stream) {
+  if (sf_vec != 16) return -10;
+  if (k % sf_vec != 0) return -11;
+  if (!(input_scale > 0.0f)) return -12;
+  const int k_blocks = k / sf_vec;
+  auto layout = CanonicalSfConfig::tile_atom_to_shape_SFB(
+      cute::make_shape(1, rows, k, 1));
+  const size_t bytes = cute::cosize(layout);
+  // Padding entries must read as zero rather than as stale data.
+  if (cudaMemsetAsync(dst_scales, 0, bytes, stream) != cudaSuccess) return -20;
+  const long long total = (long long)rows * k_blocks;
+  const int threads = 256;
+  const long long blocks = (total + threads - 1) / threads;
+  quantize_activation_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(src_bf16),
+      static_cast<uint8_t*>(dst_packed), static_cast<uint8_t*>(dst_scales),
+      rows, k, sf_vec, k_blocks, input_scale, layout);
   return cudaGetLastError() == cudaSuccess ? 0 : -21;
 }
 

@@ -74,3 +74,60 @@ pub fn nvfp4_pack_block_scales(
         ))
     }
 }
+
+/// Quantize a BF16 activation into the operand pair an NVFP4 GEMM consumes.
+///
+/// `activation` is `[M, K]` BF16. `packed` must be `[M, K/2]` of
+/// [`DType::E2M1Pair`], and `scales` an E4M3 buffer of at least
+/// [`nvfp4_scale_buffer_bytes`] bytes.
+///
+/// `input_scale` must be the checkpoint's per-tensor activation scale for this
+/// projection. Block scales are stored relative to it, so the GEMM recovers
+/// absolute magnitudes by folding `input_scale * weight_scale_2` into `alpha`.
+/// Passing a different value silently rescales the layer rather than failing,
+/// which is why it is a required argument and not a default.
+pub fn nvfp4_quantize_activation(
+    ctx: &CudaContext,
+    activation: &Tensor,
+    packed: &Tensor,
+    scales: &Tensor,
+    input_scale: f32,
+    block_size: u32,
+) -> Result<()> {
+    let dims = activation.shape().dims().to_vec();
+    if dims.len() != 2 {
+        return Err(invalid("NVFP4 activation quantization requires a rank-2 tensor"));
+    }
+    let (rows, k) = (dims[0], dims[1]);
+    if block_size == 0 || k % block_size as usize != 0 {
+        return Err(invalid("NVFP4 K must be a multiple of the block size"));
+    }
+    if !(input_scale > 0.0) || !input_scale.is_finite() {
+        return Err(invalid("NVFP4 input_scale must be finite and positive"));
+    }
+    let required = nvfp4_scale_buffer_bytes(rows, k, block_size)?;
+
+    let source = tensor_storage(ctx, activation, DType::BF16, &dims)?;
+    let destination = tensor_storage(ctx, packed, DType::E2M1Pair, &[rows, k / 2])?;
+    let scale_dims = scales.shape().dims().to_vec();
+    let scale_buffer = tensor_storage(ctx, scales, DType::F8E4M3, &scale_dims)?;
+    if scale_buffer.len() < required {
+        return Err(invalid(format!(
+            "NVFP4 scale destination holds {} bytes, needs {required}",
+            scale_buffer.len()
+        )));
+    }
+
+    unsafe {
+        status::check(abi::apxinf_gemm_nvfp4_quantize_activation(
+            source.ptr(),
+            destination.ptr(),
+            scale_buffer.ptr(),
+            rows as i64,
+            k as i64,
+            block_size,
+            input_scale,
+            ctx.stream().handle(),
+        ))
+    }
+}

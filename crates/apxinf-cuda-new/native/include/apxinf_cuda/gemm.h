@@ -31,6 +31,15 @@ apxinf_status_t apxinf_gemm_nvfp4_pack_block_scales(
     const void* source_row_major, void* destination, int64_t rows, int64_t k,
     uint32_t sf_vec_size, apxinf_cuda_stream_t stream);
 
+/* Quantize a BF16 activation into the packed-FP4 operand and block scales the
+   NVFP4 GEMM consumes. `input_scale` is the checkpoint's per-tensor activation
+   scale; block scales are stored relative to it, and the GEMM recovers
+   absolute magnitudes by folding it into alpha. */
+apxinf_status_t apxinf_gemm_nvfp4_quantize_activation(
+    const void* source_bf16, void* destination_packed,
+    void* destination_scales, int64_t rows, int64_t k, uint32_t sf_vec_size,
+    float input_scale, apxinf_cuda_stream_t stream);
+
 uint64_t apxinf_gemm_execution_weight_prepack_count(
     apxinf_gemm_execution_t execution);
 apxinf_status_t apxinf_gemm_test_validate_candidates(

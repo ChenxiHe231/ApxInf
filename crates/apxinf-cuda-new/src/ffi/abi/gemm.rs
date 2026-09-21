@@ -75,6 +75,16 @@ unsafe extern "C" {
         sf_vec_size: u32,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_gemm_nvfp4_quantize_activation(
+        source_bf16: *const c_void,
+        destination_packed: *mut c_void,
+        destination_scales: *mut c_void,
+        rows: i64,
+        k: i64,
+        sf_vec_size: u32,
+        input_scale: f32,
+        stream: CudaStream,
+    ) -> i32;
     #[cfg(test)]
     pub(crate) fn apxinf_gemm_summary(execution: Execution) -> *const c_char;
     #[cfg(test)]
