@@ -1,6 +1,47 @@
 #include "vendor.h"
 #include "../../../kernels/custom/gemm.cuh"
 
+#include <cstdint>
+
+namespace {
+#include "../../../kernels/ported/math.cuh"
+#include "../../../kernels/ported/activation.cuh"
+
+int ported_blocks_for(int64_t count) {
+  return static_cast<int>((count + kThreads - 1) / kThreads);
+}
+
+cudaError_t launch_ported_bf16_geglu(
+    const void* projection, void* output, int rows, int inner,
+    cudaStream_t stream) {
+  const int64_t count = static_cast<int64_t>(rows) * inner;
+  const bool packed4 =
+      inner % 4 == 0 &&
+      reinterpret_cast<uintptr_t>(projection) % alignof(Bf16x4) == 0 &&
+      reinterpret_cast<uintptr_t>(output) % alignof(Bf16x4) == 0;
+  const bool packed2 =
+      inner % 2 == 0 &&
+      reinterpret_cast<uintptr_t>(projection) % alignof(__nv_bfloat162) == 0 &&
+      reinterpret_cast<uintptr_t>(output) % alignof(__nv_bfloat162) == 0;
+  if (packed4) {
+    geglu_bf16_packed4_kernel<<<ported_blocks_for(count / 4), kThreads, 0,
+                                stream>>>(
+        static_cast<const __nv_bfloat16*>(projection),
+        static_cast<__nv_bfloat16*>(output), rows, inner);
+  } else if (packed2) {
+    geglu_bf16_packed2_kernel<<<ported_blocks_for(count / 2), kThreads, 0,
+                                stream>>>(
+        static_cast<const __nv_bfloat16*>(projection),
+        static_cast<__nv_bfloat16*>(output), rows, inner);
+  } else {
+    geglu_bf16_kernel<<<ported_blocks_for(count), kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(projection),
+        static_cast<__nv_bfloat16*>(output), rows, inner);
+  }
+  return cudaGetLastError();
+}
+}  // namespace
+
 namespace apxinf::gemm::vendor {
 
 uint32_t common_projection_dtype(const Spec& spec) {
@@ -96,6 +137,16 @@ cudaError_t launch_postprocess(const Spec& spec,
                                void* projection) {
   if (resources.projection == nullptr) {
     return cudaSuccess;
+  }
+  if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU &&
+      spec.quantization == APXINF_GEMM_QUANT_NONE &&
+      resources.projection_dtype == APXINF_DTYPE_BF16 &&
+      spec.output_dtype == APXINF_DTYPE_BF16 && spec.alpha_is_unit != 0 &&
+      spec.output_scale_is_unit != 0 && bindings.bias == nullptr) {
+    return launch_ported_bf16_geglu(
+        projection, bindings.output, static_cast<int>(spec.m),
+        static_cast<int>(spec.n / 2),
+        static_cast<cudaStream_t>(bindings.stream));
   }
   const int64_t output_width =
       spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ? spec.n / 2 : spec.n;
