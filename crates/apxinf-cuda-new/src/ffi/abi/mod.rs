@@ -1,4 +1,5 @@
 pub(crate) mod attention;
+pub(crate) mod gdn;
 pub(crate) mod gemm;
 pub(crate) mod mlp;
 pub(crate) mod runtime;
