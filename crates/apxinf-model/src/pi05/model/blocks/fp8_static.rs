@@ -22,6 +22,20 @@ pub struct Fp8StaticActionLayerOutput {
     pub next_normalized: Tensor,
 }
 
+fn action_attention_args<'a>(
+    query: &'a Tensor,
+    key: &'a Tensor,
+    value: &'a Tensor,
+    output: &'a mut Tensor,
+    valid_key_tokens: usize,
+    policy: &ops::AttentionPolicy,
+) -> ops::KvCacheAttentionArgs<'a> {
+    let mut args = ops::KvCacheAttentionArgs::new(query, key, value, output).non_causal();
+    args.valid_key_tokens = valid_key_tokens;
+    args.policy = policy.clone();
+    args
+}
+
 #[derive(Clone, Default)]
 pub(in crate::pi05::model) struct Fp8L3Policies {
     gemm: ops::GemmPolicy,
@@ -626,10 +640,14 @@ fn action_layer_fp8_static_with_policies(
     let k4 = prefix_k.reshape(vec![1, cache_rows, config.num_kv_heads, config.head_dim])?;
     let v4 = prefix_v.reshape(vec![1, cache_rows, config.num_kv_heads, config.head_dim])?;
     let mut attention = output(ctx, q4.shape().dims().to_vec(), DType::F16)?;
-    let mut attention_args = ops::KvCacheAttentionArgs::new(&q4, &k4, &v4, &mut attention);
-    attention_args.valid_key_tokens = key_tokens;
-    attention_args.query_start = position_offset;
-    attention_args.policy = policies.attention.clone();
+    let attention_args = action_attention_args(
+        &q4,
+        &k4,
+        &v4,
+        &mut attention,
+        key_tokens,
+        &policies.attention,
+    );
     ops::kv_cache_attention(ctx, attention_args)?;
     let attention = attention.reshape(vec![q_dims[0], config.num_heads * config.head_dim])?;
     let attention = fixed_quantize(ctx, policies, &attention, scales.attention_output)?;
@@ -984,6 +1002,36 @@ mod tests {
         .unwrap();
         let output = backend.to_cpu(&output).unwrap();
         assert_eq!(output.as_f16().unwrap(), source.as_slice());
+    }
+
+    #[test]
+    fn action_attention_contract_is_non_causal_and_executes() {
+        let backend = Context::new(0).unwrap();
+        let query_shape = vec![1, 10, 8, 256];
+        let cache_shape = vec![1, 533, 1, 256];
+        let query = output(&backend, query_shape.clone(), DType::F16).unwrap();
+        let key = output(&backend, cache_shape.clone(), DType::F16).unwrap();
+        let value = output(&backend, cache_shape, DType::F16).unwrap();
+        let mut attention = output(&backend, query_shape, DType::F16).unwrap();
+        let mut policy = ops::AttentionPolicy::default();
+        policy.workspace_limit = 64 * 1024 * 1024;
+        policy.online_tune = false;
+        policy.allow_fallback = true;
+        policy.graph_safe = false;
+        policy.deterministic = true;
+        policy.cache_dir = Some("action-attention-test".into());
+        let args = action_attention_args(&query, &key, &value, &mut attention, 532, &policy);
+        assert_eq!(args.mask, ops::AttentionMask::None);
+        assert_eq!(args.query_start, 0);
+        assert_eq!(args.valid_key_tokens, 532);
+        assert_eq!(args.policy.workspace_limit, policy.workspace_limit);
+        assert_eq!(args.policy.online_tune, policy.online_tune);
+        assert_eq!(args.policy.allow_fallback, policy.allow_fallback);
+        assert_eq!(args.policy.graph_safe, policy.graph_safe);
+        assert_eq!(args.policy.deterministic, policy.deterministic);
+        assert_eq!(args.policy.cache_dir, policy.cache_dir);
+        ops::kv_cache_attention(&backend, args).unwrap();
+        backend::synchronize(&backend).unwrap();
     }
 }
 
