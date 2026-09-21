@@ -636,3 +636,53 @@ fn gemm_geglu_all_candidates_match_torch() {
     )
     .unwrap();
 }
+
+#[test]
+fn bf16_gemm_geglu_all_candidates_cover_packed_output_path() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, inner) = (2, 4, 4);
+    let a_values = [
+        0.25, -0.5, 0.75, 1.0, -1.0, 0.5, 0.25, -0.75,
+    ];
+    let b_values = [
+        0.5, -0.25, 0.75, 1.0, -0.5, 0.25, 1.0, -0.75,
+        -1.0, 0.5, 0.25, -0.5, 0.75, 1.0, -0.25, 0.5,
+        0.25, 0.75, -0.5, 1.0, 1.0, -0.5, 0.75, 0.25,
+        1.0, -0.75, 0.5, 0.25, -0.25, 0.5, -1.0, 0.75,
+    ];
+    let mut projection = vec![0.0f32; m * 2 * inner];
+    for row in 0..m {
+        for column in 0..2 * inner {
+            projection[row * 2 * inner + column] = (0..k)
+                .map(|depth| a_values[row * k + depth] * b_values[depth * 2 * inner + column])
+                .sum();
+        }
+    }
+    let gelu = |value: f32| {
+        0.5 * value
+            * (1.0 + (0.797_884_6 * (value + 0.044_715 * value * value * value)).tanh())
+    };
+    let expected = (0..m * inner)
+        .map(|index| {
+            let row = index / inner;
+            let column = index % inner;
+            gelu(projection[row * 2 * inner + column])
+                * projection[row * 2 * inner + inner + column]
+        })
+        .collect::<Vec<_>>();
+
+    let a = tensor(0, vec![m, k], &a_values);
+    let b = tensor(0, vec![k, 2 * inner], &b_values);
+    let mut out = zeros_tensor(0, vec![m, inner], DType::BF16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    validate_all_candidates(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmGeglu,
+        None,
+        &expected,
+    )
+    .unwrap();
+}
