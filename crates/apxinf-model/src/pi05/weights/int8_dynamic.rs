@@ -18,6 +18,16 @@ mod linear {
         pub output_dim: usize,
     }
 
+    fn w8a8_gemm_policy(policy: &ops::GemmPolicy) -> ops::GemmPolicy {
+        let mut policy = policy.clone();
+        // W8A8 is defined as I8 x I8 with I32 accumulation.  Keep the
+        // caller's tuning, workspace, graph-safety and cache choices, but do
+        // not let a generic floating-point policy weaken that semantic
+        // contract after `GemmArgs::w8a8` established it.
+        policy.accumulation_dtype = DType::I32;
+        policy
+    }
+
     impl Int8DynamicLinearWeights {
         pub fn from_host(linear: &LinearWeights, backend: &RuntimeBackend) -> Result<Self> {
             Self::from_host_parts(&[linear], backend)
@@ -120,7 +130,7 @@ mod linear {
                 &mut output,
             )
             .with_immutable_weight(ops::WeightVersion::new(0));
-            args.policy = gemm_policy.clone();
+            args.policy = w8a8_gemm_policy(gemm_policy);
             ops::gemm(ctx, args)?;
             Ok(output)
         }
@@ -203,6 +213,28 @@ mod linear {
             let (quantized, scales, _, _) = quantize_output_channels(&weight).unwrap();
             assert_eq!(quantized, vec![0, 0]);
             assert_eq!(scales, vec![1.0e-12]);
+        }
+
+        #[test]
+        fn w8a8_policy_preserves_tuning_choices_and_requires_i32_accumulation() {
+            let input = ops::GemmPolicy {
+                accumulation_dtype: DType::F32,
+                workspace_limit: 1234,
+                online_tune: false,
+                allow_fallback: false,
+                graph_safe: true,
+                deterministic: true,
+                cache_dir: Some("test-cache".into()),
+            };
+            let policy = w8a8_gemm_policy(&input);
+
+            assert_eq!(policy.accumulation_dtype, DType::I32);
+            assert_eq!(policy.workspace_limit, input.workspace_limit);
+            assert_eq!(policy.online_tune, input.online_tune);
+            assert_eq!(policy.allow_fallback, input.allow_fallback);
+            assert_eq!(policy.graph_safe, input.graph_safe);
+            assert_eq!(policy.deterministic, input.deterministic);
+            assert_eq!(policy.cache_dir, input.cache_dir);
         }
     }
 }
