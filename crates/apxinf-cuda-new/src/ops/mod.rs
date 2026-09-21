@@ -1,6 +1,7 @@
 //! Semantic CUDA APIs with selection and native state behind L1.
 
 mod attention;
+mod gdn;
 mod gemm;
 mod mlp;
 
@@ -20,6 +21,10 @@ pub use crate::workspace::{ExecutionSession, GraphWorkspace};
 pub use attention::{
     attention, kv_cache_attention, segmented_attention, AttentionArgs, AttentionMask,
     AttentionPolicy, KvCacheAttentionArgs, SegmentedAttentionArgs,
+};
+pub use gdn::{
+    gdn_causal_conv_step, gdn_decay_and_beta, gdn_gated_norm,
+    gdn_l2_normalize_heads, gdn_recurrent_step, gdn_state_elements,
 };
 pub use mlp::{add_into, quantize_fp8_per_tensor, rms_norm, swiglu};
 pub use gemm::{

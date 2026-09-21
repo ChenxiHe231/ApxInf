@@ -230,10 +230,12 @@ fn main() {
         "attention/execution.cpp",
         "attention/providers/custom.cu",
         "mlp.cpp",
+        "gdn.cpp",
     ]
     .map(|source| adapters.join(source))
     .to_vec();
     generic_sources.push(native.join("kernels/custom/mlp_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/gdn_ops.cu"));
     generic_sources.push(native.join("tests/framework_backend.cu"));
     let cutlass_root = native.join("kernels/cutlass");
     let fa2_root = native.join("kernels/fa2");
