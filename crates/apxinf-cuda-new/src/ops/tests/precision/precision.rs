@@ -494,7 +494,7 @@ fn attention_f16_mqa_522_uses_direct_e4m3_fa2() {
             .expect("direct E4M3 FA2 must not prepare outside SM100");
         assert!(prepare_error
             .to_string()
-            .contains("Recipe miss and fallback is disabled"));
+            .contains("no candidate satisfies the operator Spec and Policy"));
         return;
     }
 
