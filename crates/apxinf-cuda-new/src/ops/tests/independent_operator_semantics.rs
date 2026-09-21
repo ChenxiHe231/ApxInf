@@ -108,7 +108,12 @@ fn adaptive_rms(input: &[f32], style: &[f32], rows: usize, cols: usize, eps: f32
         .collect()
 }
 
-fn bias_residual(input: &[f32], bias: &[f32], residual: &[f32], cols: usize) -> Vec<f32> {
+fn bias_residual_reference(
+    input: &[f32],
+    bias: &[f32],
+    residual: &[f32],
+    cols: usize,
+) -> Vec<f32> {
     input
         .iter()
         .zip(residual)
@@ -153,11 +158,11 @@ fn norm_all_semantics_match_independent_cpu_references() {
         let gate_style = tensor_for(dtype, vec![3 * cols], &gate_style_values);
 
         let mut normalized = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
-        let mut args = NormArgs::new(NormSemantic::Rms, &input);
-        args.weight = Some(&weight);
-        args.normalized = Some(&mut normalized);
-        args.eps = EPS;
-        norm(&ctx, args).unwrap();
+        rms_norm(
+            &ctx,
+            RmsNormArgs::new(&input, &weight, &mut normalized, EPS),
+        )
+        .unwrap();
         assert_close(
             &normalized,
             &rms_weighted(&input_values, &weight_values, rows, cols, EPS),
@@ -165,12 +170,11 @@ fn norm_all_semantics_match_independent_cpu_references() {
         );
 
         let mut normalized = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
-        let mut args = NormArgs::new(NormSemantic::Layer, &input);
-        args.weight = Some(&weight);
-        args.norm_bias = Some(&norm_bias);
-        args.normalized = Some(&mut normalized);
-        args.eps = EPS;
-        norm(&ctx, args).unwrap();
+        layer_norm(
+            &ctx,
+            LayerNormArgs::new(&input, &weight, &norm_bias, &mut normalized, EPS),
+        )
+        .unwrap();
         assert_close(
             &normalized,
             &layer_rows(
@@ -185,36 +189,42 @@ fn norm_all_semantics_match_independent_cpu_references() {
         );
 
         let mut normalized = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
-        let mut args = NormArgs::new(NormSemantic::AdaptiveRms, &input);
-        args.norm_style = Some(&norm_style);
-        args.normalized = Some(&mut normalized);
-        args.eps = EPS;
-        norm(&ctx, args).unwrap();
+        adaptive_rms_norm(
+            &ctx,
+            AdaptiveRmsNormArgs::new(&input, &norm_style, &mut normalized, EPS),
+        )
+        .unwrap();
         assert_close(
             &normalized,
             &adaptive_rms(&input_values, &norm_style_values, rows, cols, EPS),
             0.035,
         );
 
-        let hidden_reference = bias_residual(&input_values, &bias_values, &residual_values, cols);
+        let hidden_reference =
+            bias_residual_reference(&input_values, &bias_values, &residual_values, cols);
         let mut hidden = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
-        let mut args = NormArgs::new(NormSemantic::BiasResidual, &input);
-        args.bias = Some(&bias);
-        args.residual = Some(&residual);
-        args.hidden = Some(&mut hidden);
-        norm(&ctx, args).unwrap();
+        bias_residual(
+            &ctx,
+            BiasResidualArgs::new(&input, Some(&bias), &residual, &mut hidden),
+        )
+        .unwrap();
         assert_close(&hidden, &hidden_reference, 0.02);
 
         let mut hidden = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
         let mut normalized = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
-        let mut args = NormArgs::new(NormSemantic::BiasResidualRms, &input);
-        args.bias = Some(&bias);
-        args.residual = Some(&residual);
-        args.weight = Some(&weight);
-        args.hidden = Some(&mut hidden);
-        args.normalized = Some(&mut normalized);
-        args.eps = EPS;
-        norm(&ctx, args).unwrap();
+        bias_residual_rms_norm(
+            &ctx,
+            BiasResidualRmsNormArgs::new(
+                &input,
+                Some(&bias),
+                &residual,
+                &weight,
+                &mut hidden,
+                &mut normalized,
+                EPS,
+            ),
+        )
+        .unwrap();
         assert_close(&hidden, &hidden_reference, 0.02);
         assert_close(
             &normalized,
@@ -224,15 +234,20 @@ fn norm_all_semantics_match_independent_cpu_references() {
 
         let mut hidden = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
         let mut normalized = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
-        let mut args = NormArgs::new(NormSemantic::BiasResidualLayer, &input);
-        args.bias = Some(&bias);
-        args.residual = Some(&residual);
-        args.weight = Some(&weight);
-        args.norm_bias = Some(&norm_bias);
-        args.hidden = Some(&mut hidden);
-        args.normalized = Some(&mut normalized);
-        args.eps = EPS;
-        norm(&ctx, args).unwrap();
+        bias_residual_layer_norm(
+            &ctx,
+            BiasResidualLayerNormArgs::new(
+                &input,
+                Some(&bias),
+                &residual,
+                &weight,
+                &norm_bias,
+                &mut hidden,
+                &mut normalized,
+                EPS,
+            ),
+        )
+        .unwrap();
         assert_close(&hidden, &hidden_reference, 0.02);
         assert_close(
             &normalized,
@@ -250,23 +265,28 @@ fn norm_all_semantics_match_independent_cpu_references() {
         let gated_reference =
             gated_residual(&input_values, &residual_values, &gate_style_values, cols);
         let mut hidden = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
-        let mut args = NormArgs::new(NormSemantic::AdaGateResidual, &input);
-        args.residual = Some(&residual);
-        args.gate_style = Some(&gate_style);
-        args.hidden = Some(&mut hidden);
-        norm(&ctx, args).unwrap();
+        ada_gate_residual(
+            &ctx,
+            AdaGateResidualArgs::new(&input, &residual, &gate_style, &mut hidden),
+        )
+        .unwrap();
         assert_close(&hidden, &gated_reference, 0.02);
 
         let mut hidden = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
         let mut normalized = tensor_for(dtype, vec![rows, cols], &[0.0; 8]);
-        let mut args = NormArgs::new(NormSemantic::AdaGateResidualRms, &input);
-        args.residual = Some(&residual);
-        args.norm_style = Some(&norm_style);
-        args.gate_style = Some(&gate_style);
-        args.hidden = Some(&mut hidden);
-        args.normalized = Some(&mut normalized);
-        args.eps = EPS;
-        norm(&ctx, args).unwrap();
+        ada_gate_residual_rms_norm(
+            &ctx,
+            AdaGateResidualRmsNormArgs::new(
+                &input,
+                &residual,
+                &norm_style,
+                &gate_style,
+                &mut hidden,
+                &mut normalized,
+                EPS,
+            ),
+        )
+        .unwrap();
         assert_close(&hidden, &gated_reference, 0.02);
         assert_close(
             &normalized,
@@ -277,23 +297,21 @@ fn norm_all_semantics_match_independent_cpu_references() {
 }
 
 #[test]
-fn norm_rejects_missing_and_unrelated_bindings() {
+fn typed_norm_rejects_invalid_tensor_shapes() {
     let ctx = CudaContext::new(0).unwrap();
     let input = tensor(0, vec![1, 4], &[1.0; 4]);
-    let bias = tensor(0, vec![4], &[0.0; 4]);
+    let weight = tensor(0, vec![4], &[1.0; 4]);
+    let wrong_style = tensor(0, vec![4], &[0.0; 4]);
     let mut output = tensor(0, vec![1, 4], &[0.0; 4]);
 
-    let mut missing = NormArgs::new(NormSemantic::Rms, &input);
-    missing.normalized = Some(&mut output);
-    assert!(norm(&ctx, missing).is_err(), "RMSNorm requires a weight");
-
-    let mut unrelated = NormArgs::new(NormSemantic::AdaptiveRms, &input);
-    unrelated.bias = Some(&bias);
-    unrelated.norm_style = Some(&bias);
-    unrelated.normalized = Some(&mut output);
+    assert!(rms_norm(&ctx, RmsNormArgs::new(&input, &weight, &mut output, -1.0)).is_err());
     assert!(
-        norm(&ctx, unrelated).is_err(),
-        "adaptive RMSNorm must reject an unrelated projection bias"
+        adaptive_rms_norm(
+            &ctx,
+            AdaptiveRmsNormArgs::new(&input, &wrong_style, &mut output, EPS),
+        )
+        .is_err(),
+        "adaptive RMSNorm must reject a style tensor with the wrong typed shape"
     );
 }
 
@@ -647,29 +665,16 @@ fn gather_rejects_missing_and_unrelated_bindings() {
 }
 
 #[test]
-fn pointwise_prepares_before_capture_and_replays_graph_safely() {
+fn stateless_pointwise_captures_without_a_prepare_cache() {
     let ctx = CudaContext::new(0).unwrap();
     let input = tensor(0, vec![1, 4], &[1.0, -2.0, 3.0, -4.0]);
     let velocity = tensor(0, vec![1, 4], &[2.0, 4.0, -1.0, -2.0]);
     let mut out = tensor(0, vec![1, 4], &[0.0; 4]);
-    let session = ExecutionSession::with_capacity(4096, 0).unwrap();
-
-    prepare_with_session(&session, || {
+    let graph = crate::capture(&ctx, || {
         let mut args = PointwiseArgs::new(PointwiseSemantic::EulerUpdate, &input, &mut out);
         args.secondary = Some(&velocity);
         args.dt = -0.25;
         pointwise(&ctx, args)
-    })
-    .unwrap();
-    let expected = tensor_values(&out);
-
-    let graph = crate::capture(&ctx, || {
-        with_session(&session, || {
-            let mut args = PointwiseArgs::new(PointwiseSemantic::EulerUpdate, &input, &mut out);
-            args.secondary = Some(&velocity);
-            args.dt = -0.25;
-            pointwise(&ctx, args)
-        })
     })
     .unwrap();
     let output = CudaBuffer::from_tensor(&out).unwrap();
@@ -679,5 +684,5 @@ fn pointwise_prepares_before_capture_and_replays_graph_safely() {
     output.copy_from_host(&sentinel).unwrap();
     graph.replay().unwrap();
     ctx.synchronize().unwrap();
-    assert_close(&out, &expected, 0.0);
+    assert_close(&out, &[0.5, -3.0, 3.25, -3.5], 0.0);
 }

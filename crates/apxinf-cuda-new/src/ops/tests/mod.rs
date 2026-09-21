@@ -8,6 +8,7 @@
 
 use super::*;
 
+mod architecture_lifecycle;
 #[path = "backend_framework.rs"]
 mod framework;
 mod framework_backend;

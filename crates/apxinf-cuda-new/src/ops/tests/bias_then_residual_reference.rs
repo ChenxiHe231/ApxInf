@@ -37,11 +37,11 @@ fn bias_then_residual_preserves_the_bf16_intermediate_rounding() {
     let residual = tensor(0, vec![1, 1], &[half_ulp]);
 
     let mut two_stage = tensor(0, vec![1, 1], &[0.0]);
-    let mut args = NormArgs::new(NormSemantic::BiasThenResidual, &projection);
-    args.bias = Some(&bias);
-    args.residual = Some(&residual);
-    args.hidden = Some(&mut two_stage);
-    norm(&ctx, args).unwrap();
+    bias_then_residual(
+        &ctx,
+        BiasThenResidualArgs::new(&projection, Some(&bias), &residual, &mut two_stage),
+    )
+    .unwrap();
 
     let expected = two_stage_reference(1.0, half_ulp, half_ulp);
     assert_eq!(bf16_bits(&two_stage), vec![expected.to_bits()]);
@@ -50,11 +50,11 @@ fn bias_then_residual_preserves_the_bf16_intermediate_rounding() {
     // Demonstrate that this is not merely an alias for the ordinary
     // bias-residual semantic, which rounds only after summing all operands.
     let mut one_stage = tensor(0, vec![1, 1], &[0.0]);
-    let mut args = NormArgs::new(NormSemantic::BiasResidual, &projection);
-    args.bias = Some(&bias);
-    args.residual = Some(&residual);
-    args.hidden = Some(&mut one_stage);
-    norm(&ctx, args).unwrap();
+    bias_residual(
+        &ctx,
+        BiasResidualArgs::new(&projection, Some(&bias), &residual, &mut one_stage),
+    )
+    .unwrap();
     assert_eq!(
         bf16_bits(&one_stage),
         vec![bf16::from_f32(1.0078125).to_bits()]
@@ -68,11 +68,11 @@ fn bias_then_residual_rejects_f16_instead_of_changing_its_contract() {
     let projection = f16_tensor(0, vec![1, 1], &[1.0]);
     let residual = f16_tensor(0, vec![1, 1], &[0.5]);
     let mut output = f16_tensor(0, vec![1, 1], &[0.0]);
-    let mut args = NormArgs::new(NormSemantic::BiasThenResidual, &projection);
-    args.residual = Some(&residual);
-    args.hidden = Some(&mut output);
-
-    let error = norm(&ctx, args).expect_err("F16 must not enter a BF16-only semantic");
+    let error = bias_then_residual(
+        &ctx,
+        BiasThenResidualArgs::new(&projection, None, &residual, &mut output),
+    )
+    .expect_err("F16 must not enter a BF16-only semantic");
     assert!(
         error.to_string().contains("BF16-only semantic"),
         "unexpected error: {error}"

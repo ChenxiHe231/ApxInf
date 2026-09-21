@@ -1,4 +1,4 @@
-use std::ffi::{c_char, c_void};
+use std::ffi::c_void;
 
 use super::types::Runtime;
 pub(crate) use super::types::{CudaStream, Policy};
@@ -36,20 +36,13 @@ pub(crate) struct Bindings {
     pub output_scale: f32,
 }
 
-pub(crate) type Execution = *mut c_void;
-
 unsafe extern "C" {
-    pub(crate) fn apxinf_pointwise_prepare(
+    pub(crate) fn apxinf_pointwise_launch(
         runtime: Runtime,
         spec: *const Spec,
         policy: *const Policy,
         bindings: *const Bindings,
-        execution: *mut Execution,
     ) -> i32;
-    pub(crate) fn apxinf_pointwise_enqueue(execution: Execution) -> i32;
-    pub(crate) fn apxinf_pointwise_destroy(execution: Execution);
-    #[cfg(test)]
-    pub(crate) fn apxinf_pointwise_summary(execution: Execution) -> *const c_char;
 
     #[cfg(test)]
     pub(crate) fn apxinf_pointwise_test_validate_candidates(

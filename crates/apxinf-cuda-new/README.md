@@ -1,6 +1,6 @@
 # `apxinf-cuda-new` Architecture Contract
 
-`apxinf-cuda-new` provides stable CUDA L3 semantic interfaces to the model layer and selects and prepares a provider kernel for the same semantic in the native layer. GEMM and Attention are the two operator families currently integrated, not the full set of types supported by the framework.
+`apxinf-cuda-new` provides stable CUDA L3 semantic interfaces to the model layer. Operator lifecycle follows the implementation's real needs: tunable or stateful GEMM/Attention candidates are prepared and cached, while single-implementation stateless Gather/Norm/Pointwise/Quantization/RoPE candidates launch directly.
 
 - Current public interfaces and mathematical semantics: [L3 operator catalog](cuda-operator.md)
 - Workflow for adding or extending a kernel: [Adding New Kernels](../../doc/adding-new-kernels.md)
@@ -12,8 +12,8 @@ L0-L3 here describe only the CUDA operators inside `apxinf-cuda-new`, not the mo
 | Layer | Responsibility | Input → Output | Main Interfaces and Directories |
 | --- | --- | --- | --- |
 | L3 Semantic (Rust) | Define the complete model-visible mathematical semantic and tensor contract | `CudaContext + Args` → `Result<()>` | `ops::<semantic>`; `src/ops/<operator>/` |
-| L2 Execution (Rust) | Validate and normalize L3 calls; manage the execution cache, session, storage, and graph lifecycle | L3 Args → `Spec + Policy + Bindings` → opaque native handle | `normalize`, `prepare/execute`, Rust FFI declaration; `src/ops/`, `src/workspace.rs`, `src/graph.rs` |
-| L1 Native operator (C++) | Implement the C ABI; perform recipe lookup, kernel selection, autotune, fallback, candidate/provider prepare, and enqueue | `Spec + Policy + Bindings` → native `Execution` | `*_prepare/*_enqueue/*_destroy`, registry and candidate callbacks; `native/adapters/`, `native/framework/` |
+| L2 Execution (Rust) | Validate and normalize L3 calls; direct-launch stateless operators; cache only genuinely prepared resources; manage session and graph lifecycle | L3 Args → `Spec + Policy + Bindings` → direct launch or opaque native handle | `normalize`, direct `execute` or prepared `prepare/execute`; `src/ops/`, `src/workspace.rs`, `src/graph.rs` |
+| L1 Native operator (C++) | Implement the C ABI; either validate and directly launch one stateless candidate, or perform recipe lookup, selection, autotune, prepare, and enqueue | `Spec + Policy + Bindings` → launch or native `Execution` | `*_launch` for stateless families; `*_prepare/*_enqueue/*_destroy` for prepared families; `native/adapters/`, `native/framework/` |
 | L0 Kernel | Perform the actual GPU computation | provider launch arguments → GPU work | custom CUDA, FA2, CUTLASS, cuBLAS/cuBLASLt; `native/kernels/` or vendor API |
 
 ```text
@@ -27,16 +27,18 @@ L1: owns selection    L0: no recipe/fallback/model logic
 
 ```text
 L3  Rust semantic API
-L2  normalize → ExecutionKey/session cache → Rust FFI call
+L2  normalize → direct FFI launch (stateless)
+              ↘ ExecutionKey/session cache → prepared FFI (stateful/tunable)
                      ───── C ABI boundary ─────
 L1  recipe/selection → candidate/provider prepare → native Execution
 L0  CUDA kernel or vendor API
 ```
 
 ```text
+direct:  L2 → L1 *_launch → validate/supports → L0 asynchronous launch
 prepare: L2 → L1 *_prepare → recipe/selection → native Execution
-run:     L2 → L1 *_enqueue ───────────────────→ L0 launch
-capture: prepare_with_session once → capture/with_session reuses Execution
+run:     L2 → L1 *_enqueue ───────────────────→ L0 asynchronous launch
+capture: direct operators are captured as launches; prepared operators reuse Execution
 ```
 
 ## Six Core Objects
@@ -48,7 +50,7 @@ capture: prepare_with_session once → capture/with_session reuses Execution
 | Candidate / Implementation | L1 | Provider ID + implementation ID/version + capability attributes + callbacks | Registered under one Semantic; can enumerate multiple Configurations |
 | Configuration | L1 | A stable configuration number defined by the Candidate | Has meaning only under its owning Candidate |
 | Recipe | L1 | The Candidate's stable identity + one Configuration | Value in the recipe cache; records the winner but does not store pointers, handles, or provider state |
-| Prepared Execution | L1; L2 holds an opaque handle | Current `Spec + Bindings + device + Candidate + Configuration + policy-derived limits + provider state/resources` | Prepared again from a Recipe or the current selection result; can be enqueued multiple times and is valid only in the current process |
+| Prepared Execution | L1; L2 holds an opaque handle | Current `Spec + Bindings + device + Candidate + Configuration + policy-derived limits + provider state/resources` | Exists only for an operator that owns prepared state or selection; stateless direct operators do not create one |
 
 Composition:
 
@@ -59,6 +61,7 @@ Candidate identity + Configuration → Recipe
 Recipe key → Recipe
 Current Spec + Policy + Bindings + resolved Recipe → Prepared Execution
 Prepared Execution → Candidate enqueue → Provider → L0 kernel
+Stateless Spec + Bindings → Candidate launch → L0 kernel
 ```
 
 ```text
@@ -81,7 +84,9 @@ Recipe hit → resolve Candidate → validate → prepare → Execution
 | --- | --- | --- |
 | `ops::<semantic>(ctx, args)` | L3 Rust | The only model entry point; expresses the complete mathematical semantic without exposing a provider |
 | `normalize(ctx, args)` | L2 Rust | Validate the L3 contract, produce `Spec + Policy + Bindings`, and keep storage alive |
-| Rust `prepare/execute` | L2 Rust | Look up the execution cache; create or enqueue an opaque native execution through FFI |
+| Rust direct `execute` | L2 Rust | Validate capture target/device and call `*_launch`; never cache, allocate a native execution, or synchronize |
+| Rust prepared `prepare/execute` | L2 Rust | For GEMM/Attention, look up the execution cache and create or enqueue an opaque native execution through FFI |
+| `*_launch(...)` | L1 C++ | For a fixed stateless family, validate the ABI/support/policy and submit the L0 kernel directly; capture-safe and allocation-free |
 | `*_prepare(..., &execution)` | L1 C++ | Perform recipe/selection and create all provider state/resources outside capture |
 | `*_enqueue(execution)` | L1 C++ | Submit only prepared work to the bound stream; must not select, allocate, or synchronize |
 | `*_destroy(execution)` | L1 C++ | Release provider state and resources |
@@ -96,6 +101,8 @@ Recipe hit → resolve Candidate → validate → prepare → Execution
 ```
 
 ## Keys and Caches
+
+Execution keys and recipes apply only to prepared/tunable families. Gather, Norm, Pointwise, Quantization, and RoPE have neither an execution cache entry nor a recipe.
 
 | Cache | Layer | Key → Value | Lifetime |
 | --- | --- | --- | --- |
@@ -148,21 +155,21 @@ Recipe hit → resolve Candidate → validate → prepare → Execution
 
 | Stage | Entry Point | Allowed | Forbidden/Failure Conditions | Result |
 | --- | --- | --- | --- | --- |
-| Prepare traversal | `prepare_with_session(&session, forward)` | recipe lookup, autotune, native prepare, provider resource creation, execute and record order | nested session | session typed execution cache + prepared sequence |
-| Capture traversal | `capture(&ctx, || with_session(&session, forward))` | Hit executions in the same order and enqueue | cache miss, order change, device/stream change, native prepare | `CapturedGraph` |
-| Eager reuse | `with_session(&session, forward)` | Reuse the same executions outside capture | cache miss or order change | asynchronous enqueue |
+| Prepare traversal | `prepare_with_session(&session, forward)` | recipe lookup, autotune, native prepare, provider resource creation for GEMM/Attention; direct launch for stateless families | nested session | cache/sequence contain only prepared resources |
+| Capture traversal | `capture(&ctx, || with_session(&session, forward))` | Reuse prepared executions; directly capture stateless kernel launches | prepared cache miss/order change, device/stream change, native prepare | `CapturedGraph` |
+| Eager reuse | `with_session(&session, forward)` | Reuse prepared executions and directly launch stateless operators | prepared cache miss or order change | asynchronous enqueue |
 | Replay | `CapturedGraph::replay()` | Launch the instantiated graph | changing the captured structure | GPU work |
 
-The graph retains the executions and storage used during capture. The recipe key does not contain raw pointers; fixed addresses and the stream belong to the Rust execution cache key.
+The graph retains prepared executions and session storage used during capture. Stateless launches rely on caller/session-owned tensor storage and create no per-operator retained object. The recipe key does not contain raw pointers; fixed addresses and the stream belong to prepared execution cache keys.
 
 ## Directory Responsibilities
 
 | Layer | Path | Sole Responsibility |
 | --- | --- | --- |
 | L3 Rust | `cuda-operator.md`, public APIs in `src/ops/<operator>/` | semantic, Args, and model-visible contract |
-| L2 Rust | normalize/execution in `src/ops/<operator>/`, `src/workspace.rs`, `src/graph.rs` | ABI lowering, execution cache, session and CUDA Graph lifecycle |
-| L2/L1 ABI | `src/ffi/abi/`, `native/include/apxinf_cuda/` | Stable Rust/C boundary and opaque execution handle |
-| L1 C++ | `native/adapters/<operator>/` | recipe key, registry, selection, fallback, candidate/provider state, and prepared execution |
+| L2 Rust | normalize/execution in `src/ops/<operator>/`, `src/workspace.rs`, `src/graph.rs` | ABI lowering, direct launch or prepared execution cache, session and CUDA Graph lifecycle |
+| L2/L1 ABI | `src/ffi/abi/`, `native/include/apxinf_cuda/` | Stable Rust/C boundary: `*_launch` or opaque prepared handle according to lifecycle |
+| L1 C++ | `native/adapters/<operator>/` | Direct stateless dispatch, or recipe/selection/provider state and prepared execution |
 | L1 Shared | `native/framework/` | Operator-independent registry, autotune, recipe I/O, and error boundary |
 | L0 | `native/kernels/` | Kernel source, template instances, and vendor tree |
 | Build | `build_support/`, `build.rs` | Build target, build fingerprint, and native compilation |

@@ -99,12 +99,6 @@ float read_element(const void* buffer, uint32_t dtype, size_t index) {
 
 namespace apxinf::pointwise {
 
-Execution::~Execution() {
-  if (implementation != nullptr && implementation->destroy != nullptr) {
-    implementation->destroy(*this);
-  }
-}
-
 bool supports_device(const Implementation& implementation, int,
                      std::string* reason) {
   if (implementation.required_device_features == 0) return true;
@@ -122,51 +116,35 @@ bool supports_alignment(const Implementation& implementation,
          spec.bias_alignment >= (spec.has_bias != 0 ? required.bias : 0);
 }
 
-std::unique_ptr<Execution> prepare(
-    const Implementation& implementation, int configuration, const Spec& spec,
-    const apxinf_pointwise_policy_t& policy,
-    const apxinf_pointwise_bindings_t& bindings, int device) {
-  auto execution = std::make_unique<Execution>();
-  execution->spec = spec;
-  execution->bindings = bindings;
-  execution->configuration = configuration;
-  execution->device = device;
-  execution->implementation = &implementation;
-  execution->resource_limit = policy.workspace_limit;
-  implementation.prepare(*execution);
-  if (execution->resource_bytes > execution->resource_limit &&
-      execution->resource_limit != 0) {
-    throw Failure(APXINF_STATUS_UNSUPPORTED,
-                  "Pointwise candidate exceeds the workspace limit");
-  }
-  return execution;
+void initialize(Execution& execution, const Implementation& implementation,
+                int configuration, const Spec& spec,
+                const apxinf_pointwise_policy_t& policy,
+                const apxinf_pointwise_bindings_t& bindings, int device) {
+  execution.spec = spec;
+  execution.bindings = bindings;
+  execution.configuration = configuration;
+  execution.device = device;
+  execution.implementation = &implementation;
+  (void)policy;
 }
 
 }  // namespace apxinf::pointwise
 
-extern "C" apxinf_status_t apxinf_pointwise_prepare(
+extern "C" apxinf_status_t apxinf_pointwise_launch(
     apxinf_runtime_t runtime, const apxinf_pointwise_spec_t* spec,
     const apxinf_pointwise_policy_t* policy,
-    const apxinf_pointwise_bindings_t* bindings,
-    apxinf_pointwise_execution_t* output) {
+    const apxinf_pointwise_bindings_t* bindings) {
   return apxinf::pointwise::abi_boundary([&] {
     if (runtime == nullptr || spec == nullptr || policy == nullptr ||
-        bindings == nullptr || output == nullptr) {
+        bindings == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "null Pointwise argument");
     }
     const apxinf::pointwise::Spec normalized{*spec};
     validate_spec(normalized);
     validate_bindings(normalized, *bindings);
 
-    cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
-    if (cudaStreamIsCapturing(static_cast<cudaStream_t>(bindings->stream),
-                              &capture) == cudaSuccess &&
-        capture != cudaStreamCaptureStatusNone) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "Pointwise preparation is not allowed during capture");
-    }
-
-    std::unique_ptr<apxinf::pointwise::Execution> execution;
+    apxinf::pointwise::Execution execution;
+    bool selected = false;
     for (const auto& implementation :
          apxinf::pointwise::registry(normalized.semantic)) {
       if (!implementation.supports(normalized) ||
@@ -181,50 +159,20 @@ extern "C" apxinf_status_t apxinf_pointwise_prepare(
       std::vector<int> configurations;
       implementation.enumerate_configs(normalized, configurations);
       if (configurations.empty()) continue;
-      execution = apxinf::pointwise::prepare(
-          implementation, configurations.front(), normalized, *policy,
-          *bindings, runtime->device);
+      apxinf::pointwise::initialize(execution, implementation,
+                                    configurations.front(), normalized,
+                                    *policy, *bindings, runtime->device);
+      selected = true;
       break;
     }
-    if (execution == nullptr) {
+    if (!selected) {
       throw Failure(APXINF_STATUS_UNSUPPORTED,
                     "no Pointwise candidate supports this Spec");
     }
-    execution->summary = std::string(execution->implementation->name) +
-                         " config=" +
-                         std::to_string(execution->configuration) +
-                         " workspace=" +
-                         std::to_string(execution->resource_bytes) +
-                         " source=direct";
-    auto wrapper = std::make_unique<apxinf_pointwise_execution>();
-    wrapper->state = std::move(execution);
-    *output = wrapper.release();
-  });
-}
-
-extern "C" apxinf_status_t apxinf_pointwise_enqueue(
-    apxinf_pointwise_execution_t execution) {
-  return apxinf::pointwise::abi_boundary([&] {
-    if (execution == nullptr || execution->state == nullptr) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "null Pointwise execution");
-    }
-    apxinf::pointwise::check_cuda(cudaSetDevice(execution->state->device));
+    apxinf::pointwise::check_cuda(cudaSetDevice(execution.device));
     apxinf::pointwise::check_cuda(
-        execution->state->implementation->enqueue(*execution->state));
+        execution.implementation->enqueue(execution));
   });
-}
-
-extern "C" void apxinf_pointwise_destroy(
-    apxinf_pointwise_execution_t execution) {
-  delete execution;
-}
-
-extern "C" const char* apxinf_pointwise_summary(
-    apxinf_pointwise_execution_t execution) {
-  return execution == nullptr || execution->state == nullptr
-             ? ""
-             : execution->state->summary.c_str();
 }
 
 extern "C" apxinf_status_t apxinf_pointwise_test_validate_candidates(
@@ -268,10 +216,11 @@ extern "C" apxinf_status_t apxinf_pointwise_test_validate_candidates(
       for (const int configuration : configurations) {
         apxinf::pointwise::check_cuda(
             cudaMemsetAsync(bindings->output, 0xff, bytes, stream));
-        auto execution = apxinf::pointwise::prepare(
-            implementation, configuration, normalized, *policy, *bindings,
-            runtime->device);
-        apxinf::pointwise::check_cuda(implementation.enqueue(*execution));
+        apxinf::pointwise::Execution execution;
+        apxinf::pointwise::initialize(execution, implementation, configuration,
+                                      normalized, *policy, *bindings,
+                                      runtime->device);
+        apxinf::pointwise::check_cuda(implementation.enqueue(execution));
         apxinf::pointwise::check_cuda(cudaStreamSynchronize(stream));
         apxinf::pointwise::check_cuda(cudaMemcpy(
             host.data(), bindings->output, bytes, cudaMemcpyDeviceToHost));

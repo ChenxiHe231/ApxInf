@@ -25,8 +25,7 @@ void one_configuration(const Spec&, std::vector<int>& configurations) {
 const ImplementationRegistry& registry(uint32_t semantic) {
   static const ImplementationRegistry entries = {
       {kProviderCustom, 1, 1, "custom-rope", 0, true, true, false,
-       supports_custom, natural_alignment, custom_resource_requirements,
-       one_configuration, prepare_custom, launch_custom, destroy_custom},
+       supports_custom, natural_alignment, one_configuration, launch_custom},
   };
   (void)semantic;
   return entries;
