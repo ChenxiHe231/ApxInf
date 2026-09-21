@@ -708,4 +708,67 @@ fn full_model_decodes_and_is_timed() {
         per_token * 1e3,
         1.0 / per_token
     );
+
+    // Where the time goes. Each phase synchronizes, so the sum exceeds the
+    // pipelined total above; the point is the ratio between phases.
+    macro_rules! phase {
+        ($label:expr, $iterations:expr, $body:block) => {{
+            $body
+            ctx.synchronize().unwrap();
+            let start = Instant::now();
+            for _ in 0..$iterations {
+                $body
+            }
+            ctx.synchronize().unwrap();
+            let each = start.elapsed().as_secs_f64() / $iterations as f64;
+            println!("  {:30} {:8.3} ms  x{:3} = {:7.2} ms",
+                     $label, each * 1e3, $iterations, each * 1e3);
+            each
+        }};
+    }
+
+    println!("\nper-phase (synchronized, so these over-count):");
+    let mut probe = Scratch::new(&ctx);
+    let gdn_layer = model.layers.iter().find_map(|l| match l {
+        Layer::Gdn(g) => Some(g),
+        _ => None,
+    }).unwrap();
+
+    let qkv_source = view(&probe.normalized, vec![1, HIDDEN], DType::BF16);
+    let qkv_quantized = view(&probe.fp8_activation, vec![1, HIDDEN], DType::F8E4M3);
+    let mut qkv_out = view(&probe.gdn_qkv, vec![1, QKV_WIDTH], DType::BF16);
+    let qkv_each = phase!("fp8 qkv projection", 50, {
+        fp8_projection(&ctx, &gdn_layer.qkv, &qkv_source, &qkv_quantized, &mut qkv_out);
+    });
+
+    let state = zeros(&ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM, GDN_HEAD_DIM], DType::F32);
+    let (gq, gk, gv) = split_gdn_qkv(&ctx, &probe.gdn_conv);
+    let recurrent_each = phase!("gdn recurrent step", 50, {
+        ops::gdn_recurrent_step(&ctx, &state, &gq, &gk, &gv, &probe.gdn_decay,
+                                &probe.gdn_beta, &probe.gdn_readout, GDN_K_HEADS).unwrap();
+    });
+
+    let mlp_each = phase!("nvfp4 mlp block", 50, {
+        nvfp4_mlp(&ctx, &gdn_layer.gate_up, &gdn_layer.down, &gdn_layer.post_norm, &mut probe);
+    });
+
+    let mut logits = zeros(&ctx, vec![1, VOCAB], DType::BF16);
+    let head_activation = zeros(&ctx, vec![1, HIDDEN / 2], DType::E2M1Pair);
+    let head_scales = zeros(&ctx, vec![ops::nvfp4_scale_buffer_bytes(1, HIDDEN, BLOCK).unwrap()], DType::F8E4M3);
+    let head_each = phase!("lm_head", 20, {
+        ops::gemm(&ctx, ops::GemmArgs::nvfp4(&head_activation, &head_scales,
+                  &model.lm_head.packed, &model.lm_head.scales, BLOCK,
+                  model.lm_head.alpha, &mut logits)).unwrap();
+    });
+
+    println!(
+        "\n  64 MLP blocks              {:7.2} ms\n  \
+         48 gdn recurrent steps     {:7.2} ms\n  \
+         48 qkv projections         {:7.2} ms\n  \
+         1 lm_head                  {:7.2} ms",
+        mlp_each * 64.0 * 1e3,
+        recurrent_each * 48.0 * 1e3,
+        qkv_each * 48.0 * 1e3,
+        head_each * 1e3
+    );
 }
