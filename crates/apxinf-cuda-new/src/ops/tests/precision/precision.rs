@@ -748,6 +748,10 @@ fn fp8_production_geglu_non_unit_scale_matches_independent_reference() {
     let mut out = zeros_tensor(0, vec![m, n / 2], DType::F8E4M3);
     let mut args = GemmArgs::new(&a, &b, &mut out);
     args.quantization = GemmQuantization::Fp8UnitScale;
+    // The generic cuBLAS candidates materialize unpacked FP8 operands plus a
+    // full projection.  Keep them in this all-candidate gate instead of
+    // silently filtering them through the production 256 MiB policy.
+    args.policy.workspace_limit = 512 * 1024 * 1024;
     let gelu_one = 0.5_f32
         * (1.0
             + (0.7978845608028654_f32 * (1.0 + 0.044715_f32)).tanh());
