@@ -86,8 +86,7 @@ bool supports_cutlass_fp8_geglu(const Spec& spec) {
          spec.b_dtype == APXINF_DTYPE_E4M3 &&
          spec.output_dtype == APXINF_DTYPE_E4M3 &&
          spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
-         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU &&
-         spec.output_scale_is_unit != 0;
+         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU;
 }
 
 bool supports_cutlass_bf16_geglu(const Spec& spec) {

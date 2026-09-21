@@ -663,6 +663,42 @@ fn gpu_e2e_scale_values_do_not_fragment_the_tuning_cache() {
 }
 
 #[test]
+fn gpu_e2e_output_scale_unit_predicate_partitions_the_recipe_key() {
+    let cache_dir = scratch_cache_dir("gemm-output-scale-key");
+    let cache = cache_dir.to_string_lossy().into_owned();
+    let (m, k, n) = (6, 9, 24);
+    let run = |ctx: &CudaContext, output_scale: f32| -> String {
+        let a = tensor(0, vec![m, k], &vec![0.5; m * k]);
+        let b = tensor(0, vec![k, n], &vec![0.25; k * n]);
+        let mut out = tensor(0, vec![m, n / 2], &vec![0.0; m * n / 2]);
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.output_scale = output_scale;
+        args.policy.cache_dir = Some(cache.clone());
+        args.policy.online_tune = true;
+        args.policy.allow_fallback = false;
+        prepare_test_geglu(ctx, GemmGegluArgs { gemm: args })
+            .unwrap()
+            .summary()
+            .to_owned()
+    };
+
+    let ctx = CudaContext::new(0).unwrap();
+    let unit = run(&ctx, 1.0);
+    assert!(unit.contains("source=tuned"), "unit scale did not tune: {unit}");
+    let first_non_unit = run(&ctx, 0.5);
+    assert!(
+        first_non_unit.contains("source=tuned"),
+        "unit and non-unit output scales incorrectly shared a Recipe: {first_non_unit}"
+    );
+    let reused_non_unit = run(&ctx, 0.25);
+    assert!(
+        reused_non_unit.contains("source=memory"),
+        "non-unit output scale values fragmented the Recipe cache: {reused_non_unit}"
+    );
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}
+
+#[test]
 fn gpu_e2e_persisted_recipe_restores_in_new_process() {
     const CHILD_CACHE: &str = "APXINF_RECIPE_RESTORE_CHILD";
     let run = |cache: String, online_tune: bool| {
