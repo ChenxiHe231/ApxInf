@@ -5,6 +5,7 @@ mod attn_ops;
 mod gdn;
 mod gemm;
 mod mlp;
+mod model;
 
 // Keep these crate-private aliases while graph/workspace and unit tests still
 // refer to the GEMM implementation through `crate::ops`.
@@ -30,6 +31,7 @@ pub use gdn::{
     gdn_causal_conv_step, gdn_decay_and_beta, gdn_gated_norm,
     gdn_l2_normalize_heads, gdn_recurrent_step, gdn_state_elements,
 };
+pub use model::{argmax, embedding_gather};
 pub use mlp::{add_into, quantize_fp8_per_tensor, rms_norm, swiglu};
 pub use gemm::{
     gemm, gemm_bias, gemm_bias_gelu, gemm_geglu, nvfp4_pack_block_scales,
