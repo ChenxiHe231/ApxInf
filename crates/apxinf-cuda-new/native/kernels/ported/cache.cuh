@@ -92,7 +92,3 @@ __global__ void kv_cache_append_decode_bf16_kernel(
     uint32_t dst_idx = h * max_seq_len * head_dim + pos * head_dim + d;
     cache[dst_idx] = new_data[src_idx];
 }
-
-
-
-

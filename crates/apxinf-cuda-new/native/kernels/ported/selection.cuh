@@ -48,7 +48,3 @@ __global__ void argmax_bf16_kernel(
         if (lane == 0) *out = (uint32_t)v;   // low 32 bits = index
     }
 }
-
-
-
-
