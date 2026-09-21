@@ -113,6 +113,21 @@ fn alignment_of(pointer: usize) -> u32 {
     (1usize << pointer.trailing_zeros().min(8)) as u32
 }
 
+fn storage_ranges_overlap(
+    left: usize,
+    left_bytes: usize,
+    right: usize,
+    right_bytes: usize,
+) -> Result<bool> {
+    let left_end = left
+        .checked_add(left_bytes)
+        .ok_or_else(|| invalid("Pointwise input storage address range overflow"))?;
+    let right_end = right
+        .checked_add(right_bytes)
+        .ok_or_else(|| invalid("Pointwise output storage address range overflow"))?;
+    Ok(left < right_end && right < left_end)
+}
+
 fn tensor_storage(
     ctx: &CudaContext,
     tensor: &Tensor,
@@ -162,6 +177,10 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
     let count = rows
         .checked_mul(cols)
         .ok_or_else(|| invalid("Pointwise size overflow"))?;
+    if quantized_geglu {
+        i32::try_from(count)
+            .map_err(|_| invalid("F16-to-E4M3 GeGLU element count exceeds kernel range"))?;
+    }
     // GeGLU consumes a gate and an up half per output element.
     let input_count = if matches!(semantic, PointwiseSemantic::Geglu) {
         count
@@ -244,6 +263,29 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
     let output_buffer = tensor_storage(ctx, args.out, output_dtype, count)?;
     let output = output_buffer.ptr() as *mut std::ffi::c_void;
     let output_alignment = alignment_of(output_buffer.ptr() as usize);
+    if quantized_geglu {
+        if input_alignment < 4 || output_alignment < 2 {
+            return Err(invalid(
+                "F16-to-E4M3 GeGLU requires 4-byte input and 2-byte output alignment",
+            ));
+        }
+        let input_bytes = input_count
+            .checked_mul(input_dtype.size_in_bytes())
+            .ok_or_else(|| invalid("Pointwise input storage size overflow"))?;
+        let output_bytes = count
+            .checked_mul(output_dtype.size_in_bytes())
+            .ok_or_else(|| invalid("Pointwise output storage size overflow"))?;
+        if storage_ranges_overlap(
+            input as usize,
+            input_bytes,
+            output_buffer.ptr() as usize,
+            output_bytes,
+        )? {
+            return Err(invalid(
+                "F16-to-E4M3 GeGLU input and output storage must not overlap",
+            ));
+        }
+    }
     storage.push(output_buffer);
 
     let spec = abi::Spec {
