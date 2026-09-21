@@ -1,5 +1,9 @@
 #include "internal.h"
 
+#ifdef APXINF_GEMM_CUTLASS
+#include "../../kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.h"
+#endif
+
 #include <cmath>
 #include <limits>
 
@@ -24,11 +28,12 @@ void validate_recorded_alignment(const void* pointer, uint32_t alignment,
 }
 
 void validate_spec(const apxinf::gemm::Spec& spec) {
-  if (spec.version != 4 || spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
-      spec.a_dtype > APXINF_DTYPE_I8 || spec.b_dtype > APXINF_DTYPE_I8 ||
+  if (spec.version != 5 || spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
+      spec.a_dtype > APXINF_DTYPE_E2M1_PAIR ||
+      spec.b_dtype > APXINF_DTYPE_E2M1_PAIR ||
       spec.accumulation_dtype > APXINF_DTYPE_I32 ||
       spec.output_dtype > APXINF_DTYPE_E4M3 ||
-      spec.quantization > APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL || spec.m <= 0 ||
+      spec.quantization > APXINF_GEMM_QUANT_NVFP4_BLOCK || spec.m <= 0 ||
       spec.n <= 0 || spec.k <= 0 || spec.m > INT32_MAX ||
       spec.n > INT32_MAX || spec.k > INT32_MAX ||
       spec.alpha_is_unit > 1 || spec.output_scale_is_unit > 1 ||
@@ -38,6 +43,7 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
   for (uint32_t alignment : {
            spec.a_alignment, spec.b_alignment, spec.bias_alignment,
            spec.a_scales_alignment, spec.b_scales_alignment,
+           spec.a_block_scales_alignment, spec.b_block_scales_alignment,
            spec.output_alignment}) {
     if (!valid_alignment_class(alignment)) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
@@ -76,9 +82,27 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
   if (spec.quantization == APXINF_GEMM_QUANT_NONE &&
       (spec.a_dtype == APXINF_DTYPE_E4M3 ||
        spec.a_dtype == APXINF_DTYPE_I8 ||
+       spec.a_dtype == APXINF_DTYPE_E2M1_PAIR ||
        spec.a_dtype != spec.b_dtype)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "plain GEMM requires matching non-quantized inputs");
+  }
+  if (spec.quantization == APXINF_GEMM_QUANT_NVFP4_BLOCK) {
+    if (spec.a_dtype != APXINF_DTYPE_E2M1_PAIR ||
+        spec.b_dtype != APXINF_DTYPE_E2M1_PAIR ||
+        spec.semantic != APXINF_GEMM_SEMANTIC_GEMM) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "NVFP4 quantization requires two packed E2M1 inputs");
+    }
+    if (spec.sf_vec_size == 0 || spec.k % spec.sf_vec_size != 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "NVFP4 K must be a multiple of the block size");
+    }
+  } else if (spec.a_dtype == APXINF_DTYPE_E2M1_PAIR ||
+             spec.b_dtype == APXINF_DTYPE_E2M1_PAIR ||
+             spec.sf_vec_size != 0) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "packed E2M1 operands require the NVFP4 contract");
   }
   if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU && spec.n % 2 != 0) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
@@ -112,13 +136,21 @@ void validate_bindings(const apxinf::gemm::Spec& spec,
       spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU;
   const bool needs_scales =
       apxinf::gemm::has_row_channel_scales(spec);
+  const bool needs_block_scales = apxinf::gemm::has_block_scales(spec);
   if (bindings.a == nullptr || bindings.b == nullptr ||
       (require_output && bindings.output == nullptr) ||
       (needs_bias && bindings.bias == nullptr) ||
       (needs_scales &&
-       (bindings.a_scales == nullptr || bindings.b_scales == nullptr))) {
+       (bindings.a_scales == nullptr || bindings.b_scales == nullptr)) ||
+      (needs_block_scales && (bindings.a_block_scales == nullptr ||
+                              bindings.b_block_scales == nullptr))) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "missing required GEMM bindings");
+  }
+  if (!needs_block_scales && (bindings.a_block_scales != nullptr ||
+                              bindings.b_block_scales != nullptr)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "unexpected GEMM block scales");
   }
   if (!needs_bias && bindings.bias != nullptr) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "unexpected GEMM bias");
@@ -150,6 +182,12 @@ void validate_bindings(const apxinf::gemm::Spec& spec,
                               "GEMM A scales binding");
   validate_recorded_alignment(bindings.b_scales, spec.b_scales_alignment,
                               "GEMM B scales binding");
+  validate_recorded_alignment(bindings.a_block_scales,
+                              spec.a_block_scales_alignment,
+                              "GEMM A block scales binding");
+  validate_recorded_alignment(bindings.b_block_scales,
+                              spec.b_block_scales_alignment,
+                              "GEMM B block scales binding");
   validate_recorded_alignment(bindings.output, spec.output_alignment,
                               "GEMM output binding");
 }
@@ -365,6 +403,53 @@ extern "C" const char* apxinf_gemm_summary(
   const auto* execution = reinterpret_cast<const Execution*>(handle);
   return execution != nullptr ? execution->summary.c_str()
                               : "null GEMM execution";
+}
+
+extern "C" uint64_t apxinf_gemm_nvfp4_scale_buffer_bytes(int64_t rows,
+                                                         int64_t k,
+                                                         uint32_t sf_vec_size) {
+#ifdef APXINF_GEMM_CUTLASS
+  if (rows <= 0 || k <= 0 || rows > INT32_MAX || k > INT32_MAX) return 0;
+  return apxinf::cuda::cutlass_ops::nvfp4_scale_buffer_bytes(
+      static_cast<int>(rows), static_cast<int>(k),
+      static_cast<int>(sf_vec_size));
+#else
+  (void)rows;
+  (void)k;
+  (void)sf_vec_size;
+  return 0;
+#endif
+}
+
+extern "C" apxinf_status_t apxinf_gemm_nvfp4_pack_block_scales(
+    const void* source_row_major, void* destination, int64_t rows, int64_t k,
+    uint32_t sf_vec_size, apxinf_cuda_stream_t stream) {
+#ifdef APXINF_GEMM_CUTLASS
+  return apxinf::framework::abi_boundary([&] {
+    if (source_row_major == nullptr || destination == nullptr || rows <= 0 ||
+        k <= 0 || rows > INT32_MAX || k > INT32_MAX) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid NVFP4 block-scale packing arguments");
+    }
+    const int status = apxinf::cuda::cutlass_ops::nvfp4_scatter_block_scales(
+        source_row_major, destination, static_cast<int>(rows),
+        static_cast<int>(k), static_cast<int>(sf_vec_size),
+        static_cast<cudaStream_t>(stream));
+    if (status != 0) {
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                    "NVFP4 block-scale packing failed with status " +
+                        std::to_string(status));
+    }
+  });
+#else
+  (void)source_row_major;
+  (void)destination;
+  (void)rows;
+  (void)k;
+  (void)sf_vec_size;
+  (void)stream;
+  return APXINF_STATUS_UNSUPPORTED;
+#endif
 }
 
 extern "C" uint64_t apxinf_gemm_execution_weight_prepack_count(

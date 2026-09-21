@@ -264,6 +264,10 @@ impl Tensor {
             )),
             #[cfg(feature = "quantized-dtypes")]
             DType::I32 => Ok(self.as_i32()?.iter().map(|&x| x as f32).collect()),
+            #[cfg(feature = "quantized-dtypes")]
+            DType::E2M1Pair => Err(Error::Other(
+                "raw FP4 conversion requires explicit block scales".into(),
+            )),
         }
     }
 
