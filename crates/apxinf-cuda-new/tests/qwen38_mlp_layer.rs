@@ -205,6 +205,10 @@ impl Scratch {
 }
 
 /// residual = residual + MLP(RMSNorm(residual))
+///
+/// `fused` selects whether the norm and activation feed their consumers
+/// through a BF16 intermediate or hand packed FP4 straight over. The two are
+/// numerically equivalent; only the bandwidth differs.
 #[allow(clippy::too_many_arguments)]
 fn mlp_block(
     ctx: &CudaContext,
@@ -214,17 +218,30 @@ fn mlp_block(
     down: &Projection,
     scratch: &mut Scratch,
     tokens: usize,
+    fused: bool,
 ) -> apxinf_core::Result<()> {
-    ops::rms_norm(ctx, residual, norm_weight, &scratch.normalized, 1e-6)?;
-
-    ops::nvfp4_quantize_activation(
-        ctx,
-        &scratch.normalized,
-        &scratch.quantized,
-        &scratch.quantized_scales,
-        gate_up.input_scale,
-        BLOCK,
-    )?;
+    if fused {
+        ops::nvfp4_quantize_rms_norm(
+            ctx,
+            residual,
+            norm_weight,
+            &scratch.quantized,
+            &scratch.quantized_scales,
+            1e-6,
+            gate_up.input_scale,
+            BLOCK,
+        )?;
+    } else {
+        ops::rms_norm(ctx, residual, norm_weight, &scratch.normalized, 1e-6)?;
+        ops::nvfp4_quantize_activation(
+            ctx,
+            &scratch.normalized,
+            &scratch.quantized,
+            &scratch.quantized_scales,
+            gate_up.input_scale,
+            BLOCK,
+        )?;
+    }
     ops::gemm(
         ctx,
         ops::GemmArgs::nvfp4(
@@ -238,16 +255,26 @@ fn mlp_block(
         ),
     )?;
 
-    ops::swiglu(ctx, &scratch.fused, &scratch.activated)?;
-
-    ops::nvfp4_quantize_activation(
-        ctx,
-        &scratch.activated,
-        &scratch.activated_quantized,
-        &scratch.activated_scales,
-        down.input_scale,
-        BLOCK,
-    )?;
+    if fused {
+        ops::nvfp4_quantize_swiglu(
+            ctx,
+            &scratch.fused,
+            &scratch.activated_quantized,
+            &scratch.activated_scales,
+            down.input_scale,
+            BLOCK,
+        )?;
+    } else {
+        ops::swiglu(ctx, &scratch.fused, &scratch.activated)?;
+        ops::nvfp4_quantize_activation(
+            ctx,
+            &scratch.activated,
+            &scratch.activated_quantized,
+            &scratch.activated_scales,
+            down.input_scale,
+            BLOCK,
+        )?;
+    }
     ops::gemm(
         ctx,
         ops::GemmArgs::nvfp4(
@@ -293,6 +320,45 @@ fn nvfp4_mlp_block_runs_and_is_timed() {
         down.in_features
     );
 
+    // Correctness before speed: the fused path must produce the same block
+    // output as the separate one, or the timing below is measuring the wrong
+    // computation.
+    {
+        let tokens = 256usize;
+        let mut scratch = Scratch::new(&ctx, tokens);
+        let seed: Vec<u8> = (0..tokens * HIDDEN * 2)
+            .map(|index| ((index * 37 + 11) % 251) as u8)
+            .collect();
+
+        let mut outputs = Vec::new();
+        for fused in [false, true] {
+            let residual = upload_bytes(&ctx, &seed, vec![tokens, HIDDEN], DType::BF16);
+            mlp_block(
+                &ctx, &residual, &norm_weight, &gate_up, &down, &mut scratch, tokens, fused,
+            )
+            .unwrap();
+            ctx.synchronize().unwrap();
+            let mut bytes = vec![0u8; tokens * HIDDEN * 2];
+            CudaBuffer::from_tensor(&residual)
+                .unwrap()
+                .copy_to_host(&mut bytes)
+                .unwrap();
+            outputs.push(bytes);
+        }
+        let mismatches = outputs[0]
+            .chunks_exact(2)
+            .zip(outputs[1].chunks_exact(2))
+            .filter(|(a, b)| a != b)
+            .count();
+        println!(
+            "fused vs separate: {mismatches} of {} outputs differ",
+            tokens * HIDDEN
+        );
+        // Both paths do identical arithmetic in identical order, so this is an
+        // exact-equality check, not a tolerance.
+        assert_eq!(mismatches, 0, "fused path changed the block output");
+    }
+
     for &tokens in &[1usize, 256, 512, 1024] {
         let mut scratch = Scratch::new(&ctx, tokens);
         let residual_values: Vec<u8> = (0..tokens * HIDDEN * 2)
@@ -300,32 +366,47 @@ fn nvfp4_mlp_block_runs_and_is_timed() {
             .collect();
         let residual = upload_bytes(&ctx, &residual_values, vec![tokens, HIDDEN], DType::BF16);
 
-        // Warm up: the first call tunes and prepares native executions.
-        mlp_block(&ctx, &residual, &norm_weight, &gate_up, &down, &mut scratch, tokens).unwrap();
-        ctx.synchronize().unwrap();
-
-        let iterations = if tokens == 1 { 50 } else { 20 };
-        let start = Instant::now();
-        for _ in 0..iterations {
-            mlp_block(&ctx, &residual, &norm_weight, &gate_up, &down, &mut scratch, tokens)
-                .unwrap();
-        }
-        ctx.synchronize().unwrap();
-        let per_call = start.elapsed().as_secs_f64() / iterations as f64;
-
         // Weight bytes this block reads: packed FP4 plus one scale per 16.
         let weight_bytes = (2.0 * INTERMEDIATE as f64 * HIDDEN as f64
             + HIDDEN as f64 * INTERMEDIATE as f64)
             * (0.5 + 1.0 / 16.0);
         let flops = 2.0 * tokens as f64
             * (2 * INTERMEDIATE * HIDDEN + HIDDEN * INTERMEDIATE) as f64;
+
+        let mut timings = [0.0f64; 2];
+        for (slot, fused) in [(0usize, false), (1usize, true)] {
+            // Warm up: the first call tunes and prepares native executions.
+            mlp_block(
+                &ctx, &residual, &norm_weight, &gate_up, &down, &mut scratch, tokens, fused,
+            )
+            .unwrap();
+            ctx.synchronize().unwrap();
+
+            let iterations = if tokens == 1 { 50 } else { 20 };
+            let start = Instant::now();
+            for _ in 0..iterations {
+                mlp_block(
+                    &ctx, &residual, &norm_weight, &gate_up, &down, &mut scratch, tokens, fused,
+                )
+                .unwrap();
+            }
+            ctx.synchronize().unwrap();
+            timings[slot] = start.elapsed().as_secs_f64() / iterations as f64;
+        }
+
+        for (label, per_call) in [("separate", timings[0]), ("fused   ", timings[1])] {
+            println!(
+                "tokens={tokens:5} {label}  {:8.3} ms/block  {:7.2} TF/s  {:6.1} GB/s  \
+                 -> 64 layers = {:7.2} ms",
+                per_call * 1e3,
+                flops / per_call / 1e12,
+                weight_bytes / per_call / 1e9,
+                per_call * 64.0 * 1e3
+            );
+        }
         println!(
-            "tokens={tokens:5}  {:8.3} ms/block  {:7.2} TF/s  {:6.1} GB/s  \
-             -> 64 layers = {:7.2} ms",
-            per_call * 1e3,
-            flops / per_call / 1e12,
-            weight_bytes / per_call / 1e9,
-            per_call * 64.0 * 1e3
+            "              fusing the norm and activation into the quantizer: {:+.1}%",
+            (timings[1] / timings[0] - 1.0) * 100.0
         );
     }
 }

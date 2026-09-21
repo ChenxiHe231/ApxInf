@@ -61,4 +61,23 @@ int nvfp4_quantize_activation(const void* src_bf16, void* dst_packed,
                               void* dst_scales, int rows, int k, int sf_vec,
                               float input_scale, cudaStream_t stream);
 
+// RMSNorm fused with NVFP4 quantization.
+//
+// Running them separately writes a [rows, k] BF16 tensor and reads it straight
+// back. At prefill widths that round trip costs more than either op's
+// arithmetic, so the fused form is the one worth having.
+int nvfp4_quantize_rms_norm(const void* src_bf16, const void* norm_weight,
+                            void* dst_packed, void* dst_scales, int rows,
+                            int k, int sf_vec, float epsilon,
+                            float input_scale, cudaStream_t stream);
+
+// SwiGLU fused with NVFP4 quantization.
+//
+// `src_bf16` is the [rows, 2*k] fused gate/up projection, gate first. The
+// unfused path materializes a [rows, k] BF16 intermediate -- ~36 MB per layer
+// at 1024 tokens, written and immediately re-read.
+int nvfp4_quantize_swiglu(const void* src_bf16, void* dst_packed,
+                          void* dst_scales, int rows, int k, int sf_vec,
+                          float input_scale, cudaStream_t stream);
+
 }  // namespace apxinf::cuda::cutlass_ops

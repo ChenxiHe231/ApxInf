@@ -131,3 +131,106 @@ pub fn nvfp4_quantize_activation(
         ))
     }
 }
+
+/// RMSNorm fused with NVFP4 quantization.
+///
+/// Equivalent to [`crate::ops::rms_norm`] followed by
+/// [`nvfp4_quantize_activation`], but never materializes the normalized BF16
+/// tensor. At prefill widths that round trip dominates both ops' arithmetic.
+pub fn nvfp4_quantize_rms_norm(
+    ctx: &CudaContext,
+    input: &Tensor,
+    norm_weight: &Tensor,
+    packed: &Tensor,
+    scales: &Tensor,
+    epsilon: f32,
+    input_scale: f32,
+    block_size: u32,
+) -> Result<()> {
+    let dims = input.shape().dims().to_vec();
+    if dims.len() != 2 {
+        return Err(invalid("fused RMSNorm quantization requires a rank-2 tensor"));
+    }
+    let (rows, k) = (dims[0], dims[1]);
+    if block_size == 0 || k % block_size as usize != 0 {
+        return Err(invalid("NVFP4 K must be a multiple of the block size"));
+    }
+    if !(input_scale > 0.0) || !input_scale.is_finite() {
+        return Err(invalid("NVFP4 input_scale must be finite and positive"));
+    }
+    let required = nvfp4_scale_buffer_bytes(rows, k, block_size)?;
+    let source = tensor_storage(ctx, input, DType::BF16, &dims)?;
+    let weight = tensor_storage(ctx, norm_weight, DType::BF16, &[k])?;
+    let destination = tensor_storage(ctx, packed, DType::E2M1Pair, &[rows, k / 2])?;
+    let scale_dims = scales.shape().dims().to_vec();
+    let scale_buffer = tensor_storage(ctx, scales, DType::F8E4M3, &scale_dims)?;
+    if scale_buffer.len() < required {
+        return Err(invalid(format!(
+            "NVFP4 scale destination holds {} bytes, needs {required}",
+            scale_buffer.len()
+        )));
+    }
+    unsafe {
+        status::check(abi::apxinf_gemm_nvfp4_quantize_rms_norm(
+            source.ptr(),
+            weight.ptr(),
+            destination.ptr(),
+            scale_buffer.ptr(),
+            rows as i64,
+            k as i64,
+            block_size,
+            epsilon,
+            input_scale,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+/// SwiGLU fused with NVFP4 quantization.
+///
+/// `fused` is the `[rows, 2*k]` gate/up projection, gate first. Equivalent to
+/// [`crate::ops::swiglu`] followed by [`nvfp4_quantize_activation`] without the
+/// `[rows, k]` BF16 intermediate.
+pub fn nvfp4_quantize_swiglu(
+    ctx: &CudaContext,
+    fused: &Tensor,
+    packed: &Tensor,
+    scales: &Tensor,
+    input_scale: f32,
+    block_size: u32,
+) -> Result<()> {
+    let dims = fused.shape().dims().to_vec();
+    if dims.len() != 2 || dims[1] % 2 != 0 {
+        return Err(invalid("fused SwiGLU input must be [rows, 2*k]"));
+    }
+    let (rows, k) = (dims[0], dims[1] / 2);
+    if block_size == 0 || k % block_size as usize != 0 {
+        return Err(invalid("NVFP4 K must be a multiple of the block size"));
+    }
+    if !(input_scale > 0.0) || !input_scale.is_finite() {
+        return Err(invalid("NVFP4 input_scale must be finite and positive"));
+    }
+    let required = nvfp4_scale_buffer_bytes(rows, k, block_size)?;
+    let source = tensor_storage(ctx, fused, DType::BF16, &dims)?;
+    let destination = tensor_storage(ctx, packed, DType::E2M1Pair, &[rows, k / 2])?;
+    let scale_dims = scales.shape().dims().to_vec();
+    let scale_buffer = tensor_storage(ctx, scales, DType::F8E4M3, &scale_dims)?;
+    if scale_buffer.len() < required {
+        return Err(invalid(format!(
+            "NVFP4 scale destination holds {} bytes, needs {required}",
+            scale_buffer.len()
+        )));
+    }
+    unsafe {
+        status::check(abi::apxinf_gemm_nvfp4_quantize_swiglu(
+            source.ptr(),
+            destination.ptr(),
+            scale_buffer.ptr(),
+            rows as i64,
+            k as i64,
+            block_size,
+            input_scale,
+            ctx.stream().handle(),
+        ))
+    }
+}

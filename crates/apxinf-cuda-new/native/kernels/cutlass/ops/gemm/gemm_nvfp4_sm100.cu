@@ -246,6 +246,106 @@ __global__ void quantize_activation_kernel(
   }
 }
 
+
+// Quantize one block of `sf_vec` already-computed activation values into the
+// packed operand and its block scale. Shared by every producer so the scale
+// convention cannot drift between them.
+__device__ __forceinline__ void emit_nvfp4_block(
+    const float* values, int sf_vec, float input_scale, uint8_t* out,
+    uint8_t& scale_code) {
+  float amax = 0.0f;
+  for (int offset = 0; offset < sf_vec; ++offset) {
+    amax = fmaxf(amax, fabsf(values[offset]));
+  }
+  scale_code = quantize_e4m3_nonnegative(amax / 6.0f / input_scale);
+  const float effective = dequantize_e4m3_nonnegative(scale_code) * input_scale;
+  const float inverse = effective > 0.0f ? 1.0f / effective : 0.0f;
+  for (int offset = 0; offset < sf_vec; offset += 2) {
+    out[offset / 2] = static_cast<uint8_t>(
+        quantize_e2m1(values[offset] * inverse) |
+        (quantize_e2m1(values[offset + 1] * inverse) << 4));
+  }
+}
+
+// One block per row: reduce for RMSNorm, then quantize that row in place
+// without ever materializing the normalized BF16 tensor.
+__global__ void quantize_rms_norm_kernel(
+    const __nv_bfloat16* __restrict__ src,
+    const __nv_bfloat16* __restrict__ norm_weight,
+    uint8_t* __restrict__ packed, uint8_t* __restrict__ scales, int rows,
+    int k, int sf_vec, int k_blocks, float epsilon, float input_scale,
+    CanonicalSfConfig::LayoutSF layout) {
+  extern __shared__ float shared[];
+  const int row = blockIdx.x;
+  if (row >= rows) return;
+  const long long base = (long long)row * k;
+
+  float sum = 0.0f;
+  for (int index = threadIdx.x; index < k; index += blockDim.x) {
+    const float value = __bfloat162float(src[base + index]);
+    sum += value * value;
+  }
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
+  }
+  if ((threadIdx.x & 31) == 0) shared[threadIdx.x >> 5] = sum;
+  __syncthreads();
+  if (threadIdx.x < 32) {
+    const int warps = (blockDim.x + 31) / 32;
+    float total = threadIdx.x < warps ? shared[threadIdx.x] : 0.0f;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      total += __shfl_down_sync(0xFFFFFFFFu, total, offset);
+    }
+    if (threadIdx.x == 0) shared[0] = total;
+  }
+  __syncthreads();
+  const float norm = rsqrtf(shared[0] / static_cast<float>(k) + epsilon);
+
+  auto scale_tensor = cute::make_tensor(scales, layout);
+  float values[32];
+  for (int block = threadIdx.x; block < k_blocks; block += blockDim.x) {
+    const long long offset = base + (long long)block * sf_vec;
+    for (int index = 0; index < sf_vec; ++index) {
+      values[index] = __bfloat162float(src[offset + index]) * norm *
+                      __bfloat162float(norm_weight[block * sf_vec + index]);
+    }
+    uint8_t code;
+    emit_nvfp4_block(values, sf_vec, input_scale,
+                     packed + offset / 2, code);
+    scale_tensor(row, block * sf_vec, 0) = code;
+  }
+}
+
+// One thread per block of `sf_vec` outputs: read gate and up, apply SwiGLU,
+// quantize. The BF16 intermediate never exists.
+__global__ void quantize_swiglu_kernel(const __nv_bfloat16* __restrict__ src,
+                                       uint8_t* __restrict__ packed,
+                                       uint8_t* __restrict__ scales, int rows,
+                                       int k, int sf_vec, int k_blocks,
+                                       float input_scale,
+                                       CanonicalSfConfig::LayoutSF layout) {
+  const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  const long long total = (long long)rows * k_blocks;
+  if (index >= total) return;
+  const int row = static_cast<int>(index / k_blocks);
+  const int block = static_cast<int>(index % k_blocks);
+  const long long gate_base = (long long)row * 2 * k + (long long)block * sf_vec;
+  const long long up_base = gate_base + k;
+
+  float values[32];
+  for (int offset = 0; offset < sf_vec; ++offset) {
+    const float gate = __bfloat162float(src[gate_base + offset]);
+    const float up = __bfloat162float(src[up_base + offset]);
+    values[offset] = gate / (1.0f + __expf(-gate)) * up;
+  }
+  uint8_t code;
+  emit_nvfp4_block(values, sf_vec, input_scale,
+                   packed + ((long long)row * k + (long long)block * sf_vec) / 2,
+                   code);
+  auto scale_tensor = cute::make_tensor(scales, layout);
+  scale_tensor(row, block * sf_vec, 0) = code;
+}
+
 }  // namespace
 
 int nvfp4_gemm_tactic_count() { return kTacticCount; }
@@ -338,6 +438,51 @@ int nvfp4_quantize_activation(const void* src_bf16, void* dst_packed,
   const int threads = 256;
   const long long blocks = (total + threads - 1) / threads;
   quantize_activation_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(src_bf16),
+      static_cast<uint8_t*>(dst_packed), static_cast<uint8_t*>(dst_scales),
+      rows, k, sf_vec, k_blocks, input_scale, layout);
+  return cudaGetLastError() == cudaSuccess ? 0 : -21;
+}
+
+int nvfp4_quantize_rms_norm(const void* src_bf16, const void* norm_weight,
+                            void* dst_packed, void* dst_scales, int rows,
+                            int k, int sf_vec, float epsilon,
+                            float input_scale, cudaStream_t stream) {
+  if (sf_vec != 16 || k % sf_vec != 0) return -10;
+  if (!(input_scale > 0.0f)) return -12;
+  const int k_blocks = k / sf_vec;
+  auto layout = CanonicalSfConfig::tile_atom_to_shape_SFB(
+      cute::make_shape(1, rows, k, 1));
+  if (cudaMemsetAsync(dst_scales, 0, cute::cosize(layout), stream) !=
+      cudaSuccess) {
+    return -20;
+  }
+  const int threads = k_blocks >= 256 ? 256 : ((k_blocks + 31) / 32) * 32;
+  const int warps = (threads + 31) / 32;
+  quantize_rms_norm_kernel<<<rows, threads, warps * sizeof(float), stream>>>(
+      static_cast<const __nv_bfloat16*>(src_bf16),
+      static_cast<const __nv_bfloat16*>(norm_weight),
+      static_cast<uint8_t*>(dst_packed), static_cast<uint8_t*>(dst_scales),
+      rows, k, sf_vec, k_blocks, epsilon, input_scale, layout);
+  return cudaGetLastError() == cudaSuccess ? 0 : -21;
+}
+
+int nvfp4_quantize_swiglu(const void* src_bf16, void* dst_packed,
+                          void* dst_scales, int rows, int k, int sf_vec,
+                          float input_scale, cudaStream_t stream) {
+  if (sf_vec != 16 || k % sf_vec != 0) return -10;
+  if (!(input_scale > 0.0f)) return -12;
+  const int k_blocks = k / sf_vec;
+  auto layout = CanonicalSfConfig::tile_atom_to_shape_SFB(
+      cute::make_shape(1, rows, k, 1));
+  if (cudaMemsetAsync(dst_scales, 0, cute::cosize(layout), stream) !=
+      cudaSuccess) {
+    return -20;
+  }
+  const long long total = (long long)rows * k_blocks;
+  const int threads = 256;
+  const long long blocks = (total + threads - 1) / threads;
+  quantize_swiglu_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(src_bf16),
       static_cast<uint8_t*>(dst_packed), static_cast<uint8_t*>(dst_scales),
       rows, k, sf_vec, k_blocks, input_scale, layout);
