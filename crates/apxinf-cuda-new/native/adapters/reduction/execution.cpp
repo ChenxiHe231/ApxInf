@@ -1,7 +1,13 @@
-#include "../include/apxinf_cuda/model.h"
+// Reduction / model-head kernels: embedding gather, argmax.
+//
+// These ops have a single fixed implementation and no persisted selection,
+// so per doc/adding-new-kernels.md §6 they carry no candidate registry,
+// tuning key, or autotuner; they are direct C-ABI forwarders.
 
-#include "../framework/runtime_internal.h"
-#include "../kernels/custom/model_ops.h"
+#include "../../include/apxinf_cuda/model.h"
+
+#include "../../framework/runtime_internal.h"
+#include "../../kernels/custom/model_ops.h"
 
 #include <cstdint>
 #include <string>

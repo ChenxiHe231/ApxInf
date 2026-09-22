@@ -1,7 +1,13 @@
-#include "../include/apxinf_cuda/gdn.h"
+// Linear-attention (GDN) kernels: recurrent step, causal conv, gated norm, L2 norm, decay/beta.
+//
+// These ops have a single fixed implementation and no persisted selection,
+// so per doc/adding-new-kernels.md §6 they carry no candidate registry,
+// tuning key, or autotuner; they are direct C-ABI forwarders.
 
-#include "../framework/runtime_internal.h"
-#include "../kernels/custom/gdn_ops.h"
+#include "../../include/apxinf_cuda/gdn.h"
+
+#include "../../framework/runtime_internal.h"
+#include "../../kernels/custom/gdn_ops.h"
 
 #include <cstdint>
 #include <string>

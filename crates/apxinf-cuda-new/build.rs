@@ -229,10 +229,10 @@ fn main() {
         "attention/autotune.cpp",
         "attention/execution.cpp",
         "attention/providers/custom.cu",
-        "mlp.cpp",
-        "gdn.cpp",
-        "attn.cpp",
-        "model.cpp",
+        "elementwise/execution.cpp",
+        "linear_attention/execution.cpp",
+        "rope/execution.cpp",
+        "reduction/execution.cpp",
     ]
     .map(|source| adapters.join(source))
     .to_vec();
