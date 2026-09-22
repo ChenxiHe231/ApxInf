@@ -1279,6 +1279,97 @@ fn nonblocking_output_initialization_is_ordered_before_operator_writes() {
 }
 
 #[test]
+fn gpu_e2e_cutlass_sm89_geglu_prepacks_once_before_graph_replay() {
+    let ctx = CudaContext::new(0).unwrap();
+    if ctx.caps().sm != 89 {
+        return;
+    }
+
+    let (m, k, n) = (10, 1024, 8192);
+    let a = zeros_tensor(0, vec![m, k], DType::BF16);
+    let b = zeros_tensor(0, vec![k, n], DType::BF16);
+    let mut out = zeros_tensor(0, vec![m, n / 2], DType::BF16);
+    let cache_dir = std::env::temp_dir().join(format!(
+        "apxinf-sm89-geglu-prepack-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cache_dir_string = cache_dir.to_string_lossy().into_owned();
+
+    let normalized = {
+        let mut args =
+            GemmArgs::new(&a, &b, &mut out).with_immutable_weight(WeightVersion::new(1));
+        args.policy.online_tune = false;
+        args.policy.allow_fallback = false;
+        args.policy.cache_dir = Some(cache_dir_string.clone());
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::GemmGeglu, None)
+            .unwrap()
+    };
+    super::execution::seed_recipe(&ctx, &normalized, 3, 4, 1, 0).unwrap();
+    drop(normalized);
+
+    let execution = {
+        let mut args =
+            GemmArgs::new(&a, &b, &mut out).with_immutable_weight(WeightVersion::new(1));
+        args.policy.online_tune = false;
+        args.policy.allow_fallback = false;
+        args.policy.cache_dir = Some(cache_dir_string.clone());
+        prepare_test_geglu(&ctx, GemmGegluArgs { gemm: args }).unwrap()
+    };
+    assert_eq!(execution.weight_prepack_count(), 1);
+
+    execution.enqueue().unwrap();
+    execution.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(execution.weight_prepack_count(), 1);
+
+    let graph = crate::capture(&ctx, || execution.enqueue()).unwrap();
+    graph.replay().unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(execution.weight_prepack_count(), 1);
+
+    drop((graph, execution));
+
+    let mutable_normalized = {
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.policy.online_tune = false;
+        args.policy.allow_fallback = false;
+        args.policy.cache_dir = Some(cache_dir_string.clone());
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::GemmGeglu, None)
+            .unwrap()
+    };
+    super::execution::seed_recipe(&ctx, &mutable_normalized, 3, 4, 1, 0).unwrap();
+    drop(mutable_normalized);
+
+    let mutable = {
+        let mut args = GemmArgs::new(&a, &b, &mut out);
+        args.policy.online_tune = false;
+        args.policy.allow_fallback = false;
+        args.policy.cache_dir = Some(cache_dir_string);
+        prepare_test_geglu(&ctx, GemmGegluArgs { gemm: args }).unwrap()
+    };
+    assert_eq!(mutable.weight_prepack_count(), 0);
+    mutable.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(mutable.weight_prepack_count(), 1);
+
+    let mutable_graph = crate::capture(&ctx, || mutable.enqueue()).unwrap();
+    assert_eq!(mutable.weight_prepack_count(), 2);
+    mutable_graph.replay().unwrap();
+    mutable_graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(mutable.weight_prepack_count(), 2);
+
+    drop((mutable_graph, mutable));
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}
+
+#[test]
 fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, n) = (522, 2048, 32768);

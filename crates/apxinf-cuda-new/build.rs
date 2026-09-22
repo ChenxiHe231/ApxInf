@@ -22,6 +22,7 @@ fn write_arch_header(out: &Path, selection: &ArchSelection) -> PathBuf {
          constexpr uint64_t kDeviceFeatureNativeFp8 = UINT64_C(1) << 0;\n\
          constexpr uint64_t kDeviceFeatureCutlassSm100 = UINT64_C(1) << 1;\n\
          constexpr uint64_t kDeviceFeatureFa2 = UINT64_C(1) << 2;\n\
+         constexpr uint64_t kDeviceFeatureCutlassSm89Bf16Geglu = UINT64_C(1) << 3;\n\
          struct CompiledTarget { int sm; uint64_t features; };\n\
          constexpr CompiledTarget kCompiledTargets[] = {\n",
     );
@@ -242,6 +243,18 @@ fn main() {
     let fa2_compat_root = native.join("kernels/fa2_compat");
     let attention_kernel_root = native.join("kernels/attention");
     let mut cutlass_sources = Vec::new();
+    let mut cutlass_sm89_sources = Vec::new();
+    if selection
+        .targets
+        .iter()
+        .any(|target| target.cutlass_arch == "sm_89")
+    {
+        cutlass_sm89_sources.push(
+            cutlass_root
+                .join("ops/gemm")
+                .join("gemm_bf16_geglu_sm89.cu"),
+        );
+    }
     if selection
         .targets
         .iter()
@@ -294,6 +307,7 @@ fn main() {
         generic_sources
             .iter()
             .chain(&cutlass_sources)
+            .chain(&cutlass_sm89_sources)
             .chain(&fa2_sources)
             .chain(&fa2_e4m3_sources)
             .all(|path| path.is_file()),
@@ -313,6 +327,7 @@ fn main() {
         cutlass_root.join("tools/util/include"),
     ];
     let has_cutlass = !cutlass_sources.is_empty();
+    let has_cutlass_sm89 = !cutlass_sm89_sources.is_empty();
     let generic_codegen = gencode_args(
         selection
             .targets
@@ -326,6 +341,13 @@ fn main() {
             .filter(|target| is_cutlass_sm100_family(&target.cutlass_arch))
             .map(|target| target.cutlass_arch.clone()),
     );
+    let cutlass_sm89_codegen = gencode_args(
+        selection
+            .targets
+            .iter()
+            .filter(|target| target.cutlass_arch == "sm_89")
+            .map(|target| target.cutlass_arch.clone()),
+    );
     let fa2_codegen = gencode_args(
         selection
             .targets
@@ -336,25 +358,30 @@ fn main() {
     let mut objects = Vec::new();
     for (index, source) in generic_sources
         .drain(..)
-        .map(|source| (source, false, false, false))
+        .map(|source| (source, false, false, false, false))
         .chain(
             cutlass_sources
                 .into_iter()
-                .map(|source| (source, true, false, false)),
+                .map(|source| (source, true, false, false, false)),
+        )
+        .chain(
+            cutlass_sm89_sources
+                .into_iter()
+                .map(|source| (source, false, true, false, false)),
         )
         .chain(
             fa2_sources
                 .into_iter()
-                .map(|source| (source, false, true, false)),
+                .map(|source| (source, false, false, true, false)),
         )
         .chain(
             fa2_e4m3_sources
                 .into_iter()
-                .map(|source| (source, false, false, true)),
+                .map(|source| (source, false, false, false, true)),
         )
         .enumerate()
     {
-        let (source, is_cutlass, is_fa2, is_fa2_e4m3) = source;
+        let (source, is_cutlass, is_cutlass_sm89, is_fa2, is_fa2_e4m3) = source;
         let object = out.join(format!(
             "gemm-{index}-{}.o",
             source.file_stem().unwrap().to_string_lossy()
@@ -372,6 +399,8 @@ fn main() {
             .arg(format!("-DAPXINF_ATTENTION_BUILD_ID=\"{attention_id}\""));
         command.args(if is_cutlass || is_fa2_e4m3 {
             &cutlass_codegen
+        } else if is_cutlass_sm89 {
+            &cutlass_sm89_codegen
         } else if is_fa2 {
             &fa2_codegen
         } else {
@@ -384,13 +413,16 @@ fn main() {
             command.arg("-DAPXINF_GEMM_CUTLASS=1");
             command.arg("-DAPXINF_ATTENTION_CUTLASS=1");
         }
+        if has_cutlass_sm89 {
+            command.arg("-DAPXINF_GEMM_CUTLASS_SM89=1");
+        }
         if has_fa2 {
             command.arg("-DAPXINF_ATTENTION_FA2=1");
         }
         if !cutlass_codegen.is_empty() {
             command.arg("-DAPXINF_ATTENTION_FA2_E4M3=1");
         }
-        if is_cutlass {
+        if is_cutlass || is_cutlass_sm89 {
             command.args(["--expt-relaxed-constexpr", "--expt-extended-lambda"]);
             for include in &cutlass_includes {
                 command.arg(format!("-I{}", include.display()));
