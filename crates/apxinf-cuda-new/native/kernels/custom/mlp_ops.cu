@@ -163,7 +163,82 @@ __global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
   if (lane == 0) output[row] = __float2bfloat16(alpha * sum);
 }
 
+// E2M1 magnitudes indexed by the low three bits; bit 3 is the sign.
+__constant__ float kE2M1Table[16] = {
+    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
+
+__device__ __forceinline__ float from_e4m3(uint8_t code) {
+  return __half2float(__nv_cvt_fp8_to_halfraw(code, __NV_E4M3));
+}
+
+// One warp per output row, four rows per block, 16-byte loads.
+//
+// Each uint4 carries 32 FP4 values, which is exactly two scale blocks, so the
+// scale lookup is two loads per vector rather than one per element.
+__global__ void nvfp4_gemv_kernel(const uint4* __restrict__ weight,
+                                  const uint8_t* __restrict__ weight_scales,
+                                  const uint4* __restrict__ activation,
+                                  const uint8_t* __restrict__ activation_scales,
+                                  __nv_bfloat16* __restrict__ output, int n,
+                                  int k_vectors, float alpha) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int row = blockIdx.x * (blockDim.x >> 5) + warp;
+  if (row >= n) return;
+
+  const uint4* weight_row = weight + (long long)row * k_vectors;
+  const uint8_t* weight_scale_row =
+      weight_scales + (long long)row * k_vectors * 2;
+
+  float sum = 0.0f;
+  for (int index = lane; index < k_vectors; index += 32) {
+    const uint4 w = weight_row[index];
+    const uint4 a = activation[index];
+    const uint8_t* wb = reinterpret_cast<const uint8_t*>(&w);
+    const uint8_t* ab = reinterpret_cast<const uint8_t*>(&a);
+
+#pragma unroll
+    for (int block = 0; block < 2; ++block) {
+      float accumulator = 0.0f;
+#pragma unroll
+      for (int byte = 0; byte < 8; ++byte) {
+        const int offset = block * 8 + byte;
+        const uint8_t wpair = wb[offset];
+        const uint8_t apair = ab[offset];
+        accumulator += kE2M1Table[wpair & 0x0F] * kE2M1Table[apair & 0x0F];
+        accumulator += kE2M1Table[wpair >> 4] * kE2M1Table[apair >> 4];
+      }
+      const int scale_index = index * 2 + block;
+      sum += accumulator * from_e4m3(weight_scale_row[scale_index]) *
+             from_e4m3(activation_scales[scale_index]);
+    }
+  }
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
+  }
+  if (lane == 0) output[row] = __float2bfloat16(alpha * sum);
+}
+
 }  // namespace
+
+int nvfp4_gemv(const void* weight, const void* weight_scales,
+               const void* activation, const void* activation_scales,
+               void* output, int n, int k, float alpha, cudaStream_t stream) {
+  if (n <= 0 || k <= 0) return -1;
+  // 16-byte loads cover 32 FP4 values, which is two whole scale blocks.
+  if (k % 32 != 0) return -2;
+  constexpr int kRowsPerBlock = 4;
+  const int threads = kRowsPerBlock * 32;
+  const int blocks = (n + kRowsPerBlock - 1) / kRowsPerBlock;
+  nvfp4_gemv_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const uint4*>(weight),
+      static_cast<const uint8_t*>(weight_scales),
+      static_cast<const uint4*>(activation),
+      static_cast<const uint8_t*>(activation_scales),
+      static_cast<__nv_bfloat16*>(output), n, k / 32, alpha);
+  return cudaGetLastError() == cudaSuccess ? 0 : -3;
+}
 
 int fp8_gemv(const void* weight, const void* activation, void* output, int n,
              int k, float alpha, cudaStream_t stream) {

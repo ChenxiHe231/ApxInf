@@ -455,7 +455,8 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_pack_block_scales(
 extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_activation(
     const void* source_bf16, void* destination_packed,
     void* destination_scales, int64_t rows, int64_t k, uint32_t sf_vec_size,
-    float input_scale, apxinf_cuda_stream_t stream) {
+    float input_scale, int32_t row_major_scales,
+    apxinf_cuda_stream_t stream) {
 #ifdef APXINF_GEMM_CUTLASS
   return apxinf::framework::abi_boundary([&] {
     if (source_bf16 == nullptr || destination_packed == nullptr ||
@@ -467,7 +468,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_activation(
     const int status = apxinf::cuda::cutlass_ops::nvfp4_quantize_activation(
         source_bf16, destination_packed, destination_scales,
         static_cast<int>(rows), static_cast<int>(k),
-        static_cast<int>(sf_vec_size), input_scale,
+        static_cast<int>(sf_vec_size), input_scale, row_major_scales,
         static_cast<cudaStream_t>(stream));
     if (status != 0) {
       throw Failure(APXINF_STATUS_PROVIDER_ERROR,
@@ -483,6 +484,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_activation(
   (void)k;
   (void)sf_vec_size;
   (void)input_scale;
+  (void)row_major_scales;
   (void)stream;
   return APXINF_STATUS_UNSUPPORTED;
 #endif
@@ -492,7 +494,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_rms_norm(
     const void* source_bf16, const void* norm_weight,
     void* destination_packed, void* destination_scales, int64_t rows,
     int64_t k, uint32_t sf_vec_size, float epsilon, float input_scale,
-    apxinf_cuda_stream_t stream) {
+    int32_t row_major_scales, apxinf_cuda_stream_t stream) {
 #ifdef APXINF_GEMM_CUTLASS
   return apxinf::framework::abi_boundary([&] {
     if (source_bf16 == nullptr || norm_weight == nullptr ||
@@ -504,7 +506,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_rms_norm(
     const int status = apxinf::cuda::cutlass_ops::nvfp4_quantize_rms_norm(
         source_bf16, norm_weight, destination_packed, destination_scales,
         static_cast<int>(rows), static_cast<int>(k),
-        static_cast<int>(sf_vec_size), epsilon, input_scale,
+        static_cast<int>(sf_vec_size), epsilon, input_scale, row_major_scales,
         static_cast<cudaStream_t>(stream));
     if (status != 0) {
       throw Failure(APXINF_STATUS_PROVIDER_ERROR,
@@ -515,7 +517,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_rms_norm(
 #else
   (void)source_bf16; (void)norm_weight; (void)destination_packed;
   (void)destination_scales; (void)rows; (void)k; (void)sf_vec_size;
-  (void)epsilon; (void)input_scale; (void)stream;
+  (void)epsilon; (void)input_scale; (void)row_major_scales; (void)stream;
   return APXINF_STATUS_UNSUPPORTED;
 #endif
 }
@@ -523,7 +525,8 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_rms_norm(
 extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_swiglu(
     const void* source_bf16, void* destination_packed,
     void* destination_scales, int64_t rows, int64_t k, uint32_t sf_vec_size,
-    float input_scale, apxinf_cuda_stream_t stream) {
+    float input_scale, int32_t row_major_scales,
+    apxinf_cuda_stream_t stream) {
 #ifdef APXINF_GEMM_CUTLASS
   return apxinf::framework::abi_boundary([&] {
     if (source_bf16 == nullptr || destination_packed == nullptr ||
@@ -535,7 +538,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_swiglu(
     const int status = apxinf::cuda::cutlass_ops::nvfp4_quantize_swiglu(
         source_bf16, destination_packed, destination_scales,
         static_cast<int>(rows), static_cast<int>(k),
-        static_cast<int>(sf_vec_size), input_scale,
+        static_cast<int>(sf_vec_size), input_scale, row_major_scales,
         static_cast<cudaStream_t>(stream));
     if (status != 0) {
       throw Failure(APXINF_STATUS_PROVIDER_ERROR,
@@ -545,7 +548,8 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_swiglu(
   });
 #else
   (void)source_bf16; (void)destination_packed; (void)destination_scales;
-  (void)rows; (void)k; (void)sf_vec_size; (void)input_scale; (void)stream;
+  (void)rows; (void)k; (void)sf_vec_size; (void)input_scale;
+  (void)row_major_scales; (void)stream;
   return APXINF_STATUS_UNSUPPORTED;
 #endif
 }

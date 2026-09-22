@@ -38,7 +38,8 @@ apxinf_status_t apxinf_gemm_nvfp4_pack_block_scales(
 apxinf_status_t apxinf_gemm_nvfp4_quantize_activation(
     const void* source_bf16, void* destination_packed,
     void* destination_scales, int64_t rows, int64_t k, uint32_t sf_vec_size,
-    float input_scale, apxinf_cuda_stream_t stream);
+    float input_scale, int32_t row_major_scales,
+    apxinf_cuda_stream_t stream);
 
 /* RMSNorm fused with NVFP4 quantization: avoids writing and re-reading the
    normalized BF16 tensor. */
@@ -46,14 +47,15 @@ apxinf_status_t apxinf_gemm_nvfp4_quantize_rms_norm(
     const void* source_bf16, const void* norm_weight,
     void* destination_packed, void* destination_scales, int64_t rows,
     int64_t k, uint32_t sf_vec_size, float epsilon, float input_scale,
-    apxinf_cuda_stream_t stream);
+    int32_t row_major_scales, apxinf_cuda_stream_t stream);
 
 /* SwiGLU over a fused [rows, 2*k] gate/up projection, fused with NVFP4
    quantization. */
 apxinf_status_t apxinf_gemm_nvfp4_quantize_swiglu(
     const void* source_bf16, void* destination_packed,
     void* destination_scales, int64_t rows, int64_t k, uint32_t sf_vec_size,
-    float input_scale, apxinf_cuda_stream_t stream);
+    float input_scale, int32_t row_major_scales,
+    apxinf_cuda_stream_t stream);
 
 uint64_t apxinf_gemm_execution_weight_prepack_count(
     apxinf_gemm_execution_t execution);

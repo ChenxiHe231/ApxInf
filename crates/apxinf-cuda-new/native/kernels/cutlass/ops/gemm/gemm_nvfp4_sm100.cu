@@ -145,6 +145,21 @@ size_t workspace_for(int m, int n, int k) {
 using CanonicalSfConfig =
     typename Tactic0::Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
 
+// Write one block scale in whichever layout the consumer needs. The GEMM
+// reads the tcgen05 atom layout; the GEMV indexes a plain row-major grid.
+__device__ __forceinline__ void store_block_scale(
+    uint8_t* __restrict__ scales, CanonicalSfConfig::LayoutSF layout,
+    bool row_major, int row, int block, int sf_vec, int k_blocks,
+    uint8_t code) {
+  if (row_major) {
+    scales[(long long)row * k_blocks + block] = code;
+  } else {
+    auto tensor = cute::make_tensor(scales, layout);
+    tensor(row, block * sf_vec, 0) = code;
+  }
+}
+
+
 __global__ void scatter_block_scales_kernel(const uint8_t* __restrict__ src,
                                             uint8_t* __restrict__ dst,
                                             int rows, int k, int sf_vec,
@@ -212,7 +227,7 @@ __device__ __forceinline__ float dequantize_e4m3_nonnegative(uint8_t code) {
 __global__ void quantize_activation_kernel(
     const __nv_bfloat16* __restrict__ src, uint8_t* __restrict__ packed,
     uint8_t* __restrict__ scales, int rows, int k, int sf_vec, int k_blocks,
-    float input_scale, CanonicalSfConfig::LayoutSF layout) {
+    float input_scale, CanonicalSfConfig::LayoutSF layout, bool row_major) {
   const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
   const long long total = (long long)rows * k_blocks;
   if (index >= total) return;
@@ -229,8 +244,8 @@ __global__ void quantize_activation_kernel(
   // GEMM recovers absolute magnitudes by folding input_scale into alpha.
   const float block_scale = amax / 6.0f;
   const uint8_t scale_code = quantize_e4m3_nonnegative(block_scale / input_scale);
-  auto scale_tensor = cute::make_tensor(scales, layout);
-  scale_tensor(row, block * sf_vec, 0) = scale_code;
+  store_block_scale(scales, layout, row_major, row, block, sf_vec, k_blocks,
+                    scale_code);
 
   // Quantize against the scale that was actually stored, not the ideal one:
   // the E4M3 rounding is part of the encoding and must not be double-counted.
@@ -274,7 +289,7 @@ __global__ void quantize_rms_norm_kernel(
     const __nv_bfloat16* __restrict__ norm_weight,
     uint8_t* __restrict__ packed, uint8_t* __restrict__ scales, int rows,
     int k, int sf_vec, int k_blocks, float epsilon, float input_scale,
-    CanonicalSfConfig::LayoutSF layout) {
+    CanonicalSfConfig::LayoutSF layout, bool row_major) {
   extern __shared__ float shared[];
   const int row = blockIdx.x;
   if (row >= rows) return;
@@ -301,7 +316,6 @@ __global__ void quantize_rms_norm_kernel(
   __syncthreads();
   const float norm = rsqrtf(shared[0] / static_cast<float>(k) + epsilon);
 
-  auto scale_tensor = cute::make_tensor(scales, layout);
   float values[32];
   for (int block = threadIdx.x; block < k_blocks; block += blockDim.x) {
     const long long offset = base + (long long)block * sf_vec;
@@ -310,9 +324,9 @@ __global__ void quantize_rms_norm_kernel(
                       __bfloat162float(norm_weight[block * sf_vec + index]);
     }
     uint8_t code;
-    emit_nvfp4_block(values, sf_vec, input_scale,
-                     packed + offset / 2, code);
-    scale_tensor(row, block * sf_vec, 0) = code;
+    emit_nvfp4_block(values, sf_vec, input_scale, packed + offset / 2, code);
+    store_block_scale(scales, layout, row_major, row, block, sf_vec, k_blocks,
+                      code);
   }
 }
 
@@ -323,7 +337,8 @@ __global__ void quantize_swiglu_kernel(const __nv_bfloat16* __restrict__ src,
                                        uint8_t* __restrict__ scales, int rows,
                                        int k, int sf_vec, int k_blocks,
                                        float input_scale,
-                                       CanonicalSfConfig::LayoutSF layout) {
+                                       CanonicalSfConfig::LayoutSF layout,
+                                       bool row_major) {
   const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
   const long long total = (long long)rows * k_blocks;
   if (index >= total) return;
@@ -342,8 +357,8 @@ __global__ void quantize_swiglu_kernel(const __nv_bfloat16* __restrict__ src,
   emit_nvfp4_block(values, sf_vec, input_scale,
                    packed + ((long long)row * k + (long long)block * sf_vec) / 2,
                    code);
-  auto scale_tensor = cute::make_tensor(scales, layout);
-  scale_tensor(row, block * sf_vec, 0) = code;
+  store_block_scale(scales, layout, row_major, row, block, sf_vec, k_blocks,
+                    code);
 }
 
 }  // namespace
@@ -424,14 +439,17 @@ int nvfp4_scatter_block_scales(const void* src_row_major, void* dst_atom,
 
 int nvfp4_quantize_activation(const void* src_bf16, void* dst_packed,
                               void* dst_scales, int rows, int k, int sf_vec,
-                              float input_scale, cudaStream_t stream) {
+                              float input_scale, int row_major_scales,
+                              cudaStream_t stream) {
   if (sf_vec != 16) return -10;
   if (k % sf_vec != 0) return -11;
   if (!(input_scale > 0.0f)) return -12;
   const int k_blocks = k / sf_vec;
   auto layout = CanonicalSfConfig::tile_atom_to_shape_SFB(
       cute::make_shape(1, rows, k, 1));
-  const size_t bytes = cute::cosize(layout);
+  const size_t bytes = row_major_scales
+                           ? (size_t)rows * k_blocks
+                           : cute::cosize(layout);
   // Padding entries must read as zero rather than as stale data.
   if (cudaMemsetAsync(dst_scales, 0, bytes, stream) != cudaSuccess) return -20;
   const long long total = (long long)rows * k_blocks;
@@ -440,21 +458,25 @@ int nvfp4_quantize_activation(const void* src_bf16, void* dst_packed,
   quantize_activation_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(src_bf16),
       static_cast<uint8_t*>(dst_packed), static_cast<uint8_t*>(dst_scales),
-      rows, k, sf_vec, k_blocks, input_scale, layout);
+      rows, k, sf_vec, k_blocks, input_scale, layout,
+      row_major_scales != 0);
   return cudaGetLastError() == cudaSuccess ? 0 : -21;
 }
 
 int nvfp4_quantize_rms_norm(const void* src_bf16, const void* norm_weight,
                             void* dst_packed, void* dst_scales, int rows,
                             int k, int sf_vec, float epsilon,
-                            float input_scale, cudaStream_t stream) {
+                            float input_scale, int row_major_scales,
+                            cudaStream_t stream) {
   if (sf_vec != 16 || k % sf_vec != 0) return -10;
   if (!(input_scale > 0.0f)) return -12;
   const int k_blocks = k / sf_vec;
   auto layout = CanonicalSfConfig::tile_atom_to_shape_SFB(
       cute::make_shape(1, rows, k, 1));
-  if (cudaMemsetAsync(dst_scales, 0, cute::cosize(layout), stream) !=
-      cudaSuccess) {
+  const size_t scale_bytes = row_major_scales
+                                 ? (size_t)rows * k_blocks
+                                 : cute::cosize(layout);
+  if (cudaMemsetAsync(dst_scales, 0, scale_bytes, stream) != cudaSuccess) {
     return -20;
   }
   const int threads = k_blocks >= 256 ? 256 : ((k_blocks + 31) / 32) * 32;
@@ -463,20 +485,24 @@ int nvfp4_quantize_rms_norm(const void* src_bf16, const void* norm_weight,
       static_cast<const __nv_bfloat16*>(src_bf16),
       static_cast<const __nv_bfloat16*>(norm_weight),
       static_cast<uint8_t*>(dst_packed), static_cast<uint8_t*>(dst_scales),
-      rows, k, sf_vec, k_blocks, epsilon, input_scale, layout);
+      rows, k, sf_vec, k_blocks, epsilon, input_scale, layout,
+      row_major_scales != 0);
   return cudaGetLastError() == cudaSuccess ? 0 : -21;
 }
 
 int nvfp4_quantize_swiglu(const void* src_bf16, void* dst_packed,
                           void* dst_scales, int rows, int k, int sf_vec,
-                          float input_scale, cudaStream_t stream) {
+                          float input_scale, int row_major_scales,
+                          cudaStream_t stream) {
   if (sf_vec != 16 || k % sf_vec != 0) return -10;
   if (!(input_scale > 0.0f)) return -12;
   const int k_blocks = k / sf_vec;
   auto layout = CanonicalSfConfig::tile_atom_to_shape_SFB(
       cute::make_shape(1, rows, k, 1));
-  if (cudaMemsetAsync(dst_scales, 0, cute::cosize(layout), stream) !=
-      cudaSuccess) {
+  const size_t scale_bytes = row_major_scales
+                                 ? (size_t)rows * k_blocks
+                                 : cute::cosize(layout);
+  if (cudaMemsetAsync(dst_scales, 0, scale_bytes, stream) != cudaSuccess) {
     return -20;
   }
   const long long total = (long long)rows * k_blocks;
@@ -485,7 +511,8 @@ int nvfp4_quantize_swiglu(const void* src_bf16, void* dst_packed,
   quantize_swiglu_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(src_bf16),
       static_cast<uint8_t*>(dst_packed), static_cast<uint8_t*>(dst_scales),
-      rows, k, sf_vec, k_blocks, input_scale, layout);
+      rows, k, sf_vec, k_blocks, input_scale, layout,
+      row_major_scales != 0);
   return cudaGetLastError() == cudaSuccess ? 0 : -21;
 }
 

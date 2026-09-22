@@ -75,6 +75,37 @@ pub fn nvfp4_pack_block_scales(
     }
 }
 
+/// Which layout a quantizer should write its block scales in.
+///
+/// The block-scaled GEMM reads a tcgen05 atom layout; the GEMV indexes a
+/// plain row-major grid. Producing the right one directly costs nothing and
+/// saves the decode path a relayout pass per projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaleLayout {
+    /// `[rows, k / block_size]`, the layout a checkpoint stores and the GEMV
+    /// reads.
+    RowMajor,
+    /// The kernel atom layout the block-scaled GEMM reads. Size it with
+    /// [`nvfp4_scale_buffer_bytes`].
+    GemmAtom,
+}
+
+impl ScaleLayout {
+    fn flag(self) -> i32 {
+        match self {
+            ScaleLayout::RowMajor => 1,
+            ScaleLayout::GemmAtom => 0,
+        }
+    }
+
+    fn required_bytes(self, rows: usize, k: usize, block_size: u32) -> Result<usize> {
+        match self {
+            ScaleLayout::RowMajor => Ok(rows * k.div_ceil(block_size as usize)),
+            ScaleLayout::GemmAtom => nvfp4_scale_buffer_bytes(rows, k, block_size),
+        }
+    }
+}
+
 /// Quantize a BF16 activation into the operand pair an NVFP4 GEMM consumes.
 ///
 /// `activation` is `[M, K]` BF16. `packed` must be `[M, K/2]` of
@@ -93,6 +124,7 @@ pub fn nvfp4_quantize_activation(
     scales: &Tensor,
     input_scale: f32,
     block_size: u32,
+    layout: ScaleLayout,
 ) -> Result<()> {
     let dims = activation.shape().dims().to_vec();
     if dims.len() != 2 {
@@ -105,7 +137,7 @@ pub fn nvfp4_quantize_activation(
     if !(input_scale > 0.0) || !input_scale.is_finite() {
         return Err(invalid("NVFP4 input_scale must be finite and positive"));
     }
-    let required = nvfp4_scale_buffer_bytes(rows, k, block_size)?;
+    let required = layout.required_bytes(rows, k, block_size)?;
 
     let source = tensor_storage(ctx, activation, DType::BF16, &dims)?;
     let destination = tensor_storage(ctx, packed, DType::E2M1Pair, &[rows, k / 2])?;
@@ -127,6 +159,7 @@ pub fn nvfp4_quantize_activation(
             k as i64,
             block_size,
             input_scale,
+            layout.flag(),
             ctx.stream().handle(),
         ))
     }
@@ -146,6 +179,7 @@ pub fn nvfp4_quantize_rms_norm(
     epsilon: f32,
     input_scale: f32,
     block_size: u32,
+    layout: ScaleLayout,
 ) -> Result<()> {
     let dims = input.shape().dims().to_vec();
     if dims.len() != 2 {
@@ -158,7 +192,7 @@ pub fn nvfp4_quantize_rms_norm(
     if !(input_scale > 0.0) || !input_scale.is_finite() {
         return Err(invalid("NVFP4 input_scale must be finite and positive"));
     }
-    let required = nvfp4_scale_buffer_bytes(rows, k, block_size)?;
+    let required = layout.required_bytes(rows, k, block_size)?;
     let source = tensor_storage(ctx, input, DType::BF16, &dims)?;
     let weight = tensor_storage(ctx, norm_weight, DType::BF16, &[k])?;
     let destination = tensor_storage(ctx, packed, DType::E2M1Pair, &[rows, k / 2])?;
@@ -181,6 +215,7 @@ pub fn nvfp4_quantize_rms_norm(
             block_size,
             epsilon,
             input_scale,
+            layout.flag(),
             ctx.stream().handle(),
         ))
     }
@@ -198,6 +233,7 @@ pub fn nvfp4_quantize_swiglu(
     scales: &Tensor,
     input_scale: f32,
     block_size: u32,
+    layout: ScaleLayout,
 ) -> Result<()> {
     let dims = fused.shape().dims().to_vec();
     if dims.len() != 2 || dims[1] % 2 != 0 {
@@ -210,7 +246,7 @@ pub fn nvfp4_quantize_swiglu(
     if !(input_scale > 0.0) || !input_scale.is_finite() {
         return Err(invalid("NVFP4 input_scale must be finite and positive"));
     }
-    let required = nvfp4_scale_buffer_bytes(rows, k, block_size)?;
+    let required = layout.required_bytes(rows, k, block_size)?;
     let source = tensor_storage(ctx, fused, DType::BF16, &dims)?;
     let destination = tensor_storage(ctx, packed, DType::E2M1Pair, &[rows, k / 2])?;
     let scale_dims = scales.shape().dims().to_vec();
@@ -230,6 +266,7 @@ pub fn nvfp4_quantize_swiglu(
             k as i64,
             block_size,
             input_scale,
+            layout.flag(),
             ctx.stream().handle(),
         ))
     }
