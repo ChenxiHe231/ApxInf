@@ -5,6 +5,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <cuda_fp8.h>
 
 namespace {
 
@@ -63,12 +64,17 @@ bool may_have_bias(uint32_t semantic) {
 }
 
 void validate_spec(const apxinf_norm_spec_t& spec) {
+  const bool quantized_output =
+      spec.dtype == APXINF_DTYPE_F16 &&
+      spec.output_dtype == APXINF_DTYPE_E4M3 &&
+      writes_normalized(spec.semantic);
   if (spec.version != APXINF_NORM_SPEC_VERSION ||
       spec.semantic > APXINF_NORM_SEMANTIC_BIAS_THEN_RESIDUAL ||
       (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
-      spec.output_dtype != spec.dtype || spec.rows <= 0 || spec.cols <= 0 ||
+      (spec.output_dtype != spec.dtype && !quantized_output) ||
+      spec.rows <= 0 || spec.cols <= 0 ||
       spec.rows > INT32_MAX || spec.cols > INT32_MAX || spec.has_bias > 1 ||
-      spec.output_scale_is_unit != 1 ||
+      spec.output_scale_is_unit > 1 ||
       !valid_alignment(spec.input_alignment) ||
       !valid_alignment(spec.weight_alignment) ||
       !valid_alignment(spec.bias_alignment) ||
@@ -109,7 +115,15 @@ void validate_bindings(const apxinf_norm_spec_t& spec,
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Norm bias binding disagrees with Spec.has_bias");
   }
-  if (bindings.output_scale != 1.0f || !(bindings.eps > 0.0f) ||
+  const bool scale_matches_spec =
+      (bindings.output_scale == 1.0f) ==
+      (spec.output_scale_is_unit != 0);
+  const bool valid_output_scale =
+      std::isfinite(bindings.output_scale) && bindings.output_scale > 0.0f &&
+      scale_matches_spec &&
+      (spec.output_dtype == APXINF_DTYPE_E4M3 ||
+       bindings.output_scale == 1.0f);
+  if (!valid_output_scale || !(bindings.eps > 0.0f) ||
       !std::isfinite(bindings.eps)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Norm scalar");
   }
@@ -121,6 +135,68 @@ int elementwise_blocks(int64_t count) {
   return static_cast<int>(blocks < kMaxElementwiseBlocks
                               ? blocks
                               : kMaxElementwiseBlocks);
+}
+
+cudaError_t launch_quantized_f16(const apxinf_norm_spec_t& spec,
+                                 const apxinf_norm_bindings_t& bindings) {
+  const auto* input = static_cast<const half*>(bindings.input);
+  const auto* bias = static_cast<const half*>(bindings.bias);
+  const auto* residual = static_cast<const half*>(bindings.residual);
+  const auto* weight = static_cast<const half*>(bindings.weight);
+  const auto* norm_bias = static_cast<const half*>(bindings.norm_bias);
+  const auto* norm_style = static_cast<const half*>(bindings.norm_style);
+  const auto* gate_style = static_cast<const half*>(bindings.gate_style);
+  auto* hidden = static_cast<half*>(bindings.hidden);
+  auto* normalized = static_cast<__nv_fp8_e4m3*>(bindings.normalized);
+  const int rows = static_cast<int>(spec.rows);
+  const int cols = static_cast<int>(spec.cols);
+  const float inverse_scale = 1.0f / bindings.output_scale;
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+
+  switch (spec.semantic) {
+    case APXINF_NORM_SEMANTIC_RMS:
+      kernels::rms_norm_quant_f16_e4m3<<<rows, kThreads, 0, stream>>>(
+          input, weight, normalized, rows, cols, bindings.eps, inverse_scale);
+      break;
+    case APXINF_NORM_SEMANTIC_LAYER:
+      kernels::layer_norm_quant_f16_e4m3<<<rows, kThreads, 0, stream>>>(
+          input, weight, norm_bias, normalized, rows, cols, bindings.eps,
+          inverse_scale);
+      break;
+    case APXINF_NORM_SEMANTIC_ADAPTIVE_RMS:
+      kernels::ada_rms_norm_quant_f16_e4m3<<<rows, kThreads, 0, stream>>>(
+          input, norm_style, normalized, rows, cols, bindings.eps,
+          inverse_scale);
+      break;
+    case APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_RMS:
+      kernels::bias_residual_rms_norm_quant_f16_e4m3
+          <<<rows, kThreads, 0, stream>>>(
+              input, bias, residual, weight, hidden, normalized, rows, cols,
+              bindings.eps, inverse_scale);
+      break;
+    case APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_LAYER:
+      kernels::bias_residual_layer_norm_quant_f16_e4m3
+          <<<rows, kThreads, 0, stream>>>(
+              input, bias, residual, weight, norm_bias, hidden, normalized,
+              rows, cols, bindings.eps, inverse_scale);
+      break;
+    case APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL_RMS:
+      if (rows == 10 && cols == 1024) {
+        kernels::ada_gate_residual_rms_norm_quant_f16_e4m3_10x1024
+            <<<rows, kThreads, 0, stream>>>(
+                input, residual, gate_style, norm_style, hidden, normalized,
+                bindings.eps, inverse_scale);
+      } else {
+        kernels::ada_gate_residual_rms_norm_quant_f16_e4m3
+            <<<rows, kThreads, 0, stream>>>(
+                input, residual, gate_style, norm_style, hidden, normalized,
+                rows, cols, bindings.eps, inverse_scale);
+      }
+      break;
+    default:
+      return cudaErrorInvalidValue;
+  }
+  return cudaGetLastError();
 }
 
 template <class T>
@@ -202,8 +278,10 @@ extern "C" apxinf_status_t apxinf_norm_launch(
     validate_bindings(*spec, *bindings);
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
     apxinf::framework::check_cuda(
-        spec->dtype == APXINF_DTYPE_BF16
-            ? launch<__nv_bfloat16>(*spec, *bindings)
-            : launch<__half>(*spec, *bindings));
+        spec->output_dtype == APXINF_DTYPE_E4M3
+            ? launch_quantized_f16(*spec, *bindings)
+            : (spec->dtype == APXINF_DTYPE_BF16
+                   ? launch<__nv_bfloat16>(*spec, *bindings)
+                   : launch<__half>(*spec, *bindings)));
   });
 }
