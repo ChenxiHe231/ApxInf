@@ -28,55 +28,79 @@
 namespace apxinf::cuda::gdn_ops {
 namespace {
 
-// One block per (batch, value head); one thread per v_dim row of the state.
-// Each thread owns row `v` of S for its head, so the rank-1 update is local
-// and only the S@k reduction needs sharing.
+// One warp per state row, four rows per block, float4 loads.
+//
+// The recurrence has a dependency that looks like it forces two passes over
+// each row: the delta needs `predicted = S @ k`, which needs the whole row,
+// and only then can the row be updated. Reading the row twice costs 2x the
+// state traffic, and at 151 MiB of state per token across 48 layers that is
+// the dominant cost of this kernel.
+//
+// A warp can hold one row in registers instead: 32 lanes x float4 = 128
+// elements. Decay and the S@k reduction happen on the registers, the warp
+// reduces to `predicted`, the delta is applied to the same registers, and the
+// row is written back once. One read, one write.
 __global__ void recurrent_step_kernel(
     float* __restrict__ state, const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
     const float* __restrict__ decay, const float* __restrict__ beta,
     __nv_bfloat16* __restrict__ output, int v_heads, int k_heads, int v_dim,
     int k_dim) {
-  extern __shared__ float shared[];
-  float* shared_k = shared;              // k_dim
-  float* shared_q = shared + k_dim;      // k_dim
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int global_row = blockIdx.x * (blockDim.x >> 5) + warp;
+  const int total_rows = v_heads * v_dim;
+  if (global_row >= total_rows) return;
 
-  const int head = blockIdx.x;
-  if (head >= v_heads) return;
+  const int head = global_row / v_dim;
+  const int v_index = global_row % v_dim;
   const int k_head = head / (v_heads / k_heads);
 
+  // Each lane owns four consecutive elements of the row.
+  const int chunk = lane * 4;
+  if (chunk >= k_dim) return;
+
+  float4* row = reinterpret_cast<float4*>(
+      state + (long long)global_row * k_dim);
+  float4 s = row[lane];
+
   const float head_decay = expf(decay[head]);
-  const float head_beta = beta[head];
+  const __nv_bfloat16* k_row = k + (long long)k_head * k_dim + chunk;
+  const __nv_bfloat16* q_row = q + (long long)k_head * k_dim + chunk;
 
-  // k and q belong to the k-head; v belongs to the value head.
-  for (int index = threadIdx.x; index < k_dim; index += blockDim.x) {
-    shared_k[index] = __bfloat162float(k[k_head * k_dim + index]);
-    shared_q[index] = __bfloat162float(q[k_head * k_dim + index]);
+  const float k0 = __bfloat162float(k_row[0]);
+  const float k1 = __bfloat162float(k_row[1]);
+  const float k2 = __bfloat162float(k_row[2]);
+  const float k3 = __bfloat162float(k_row[3]);
+
+  s.x *= head_decay;
+  s.y *= head_decay;
+  s.z *= head_decay;
+  s.w *= head_decay;
+
+  float predicted = s.x * k0 + s.y * k1 + s.z * k2 + s.w * k3;
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    predicted += __shfl_down_sync(0xFFFFFFFFu, predicted, offset);
   }
-  __syncthreads();
+  predicted = __shfl_sync(0xFFFFFFFFu, predicted, 0);
 
-  float* row = state + (long long)head * v_dim * k_dim;
-  for (int v_index = threadIdx.x; v_index < v_dim; v_index += blockDim.x) {
-    float* s_row = row + (long long)v_index * k_dim;
+  const float delta =
+      (__bfloat162float(v[head * v_dim + v_index]) - predicted) * beta[head];
 
-    // Decay and the S@k reduction share one pass over the row.
-    float predicted = 0.0f;
-    for (int index = 0; index < k_dim; ++index) {
-      const float decayed = s_row[index] * head_decay;
-      s_row[index] = decayed;
-      predicted += decayed * shared_k[index];
-    }
+  s.x += delta * k0;
+  s.y += delta * k1;
+  s.z += delta * k2;
+  s.w += delta * k3;
+  row[lane] = s;
 
-    const float delta =
-        (__bfloat162float(v[head * v_dim + v_index]) - predicted) * head_beta;
-
-    // Rank-1 update and the output projection also share one pass.
-    float out = 0.0f;
-    for (int index = 0; index < k_dim; ++index) {
-      const float updated = s_row[index] + delta * shared_k[index];
-      s_row[index] = updated;
-      out += updated * shared_q[index];
-    }
+  float out = s.x * __bfloat162float(q_row[0]) +
+              s.y * __bfloat162float(q_row[1]) +
+              s.z * __bfloat162float(q_row[2]) +
+              s.w * __bfloat162float(q_row[3]);
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    out += __shfl_down_sync(0xFFFFFFFFu, out, offset);
+  }
+  if (lane == 0) {
     output[head * v_dim + v_index] = __float2bfloat16(out);
   }
 }
@@ -198,9 +222,13 @@ int gdn_recurrent_step(void* state, const void* q, const void* k,
                        int k_dim, cudaStream_t stream) {
   if (v_heads <= 0 || k_heads <= 0 || v_dim <= 0 || k_dim <= 0) return -1;
   if (v_heads % k_heads != 0) return -2;
-  const int threads = v_dim >= 256 ? 256 : ((v_dim + 31) / 32) * 32;
-  const size_t shared = 2 * static_cast<size_t>(k_dim) * sizeof(float);
-  recurrent_step_kernel<<<v_heads, threads, shared, stream>>>(
+  // One warp holds a row as 32 lanes x float4, so k_dim must be exactly 128.
+  // Rejecting is better than silently taking a slower general path.
+  if (k_dim != 128) return -4;
+  constexpr int kRowsPerBlock = 4;
+  const int threads = kRowsPerBlock * 32;
+  const int blocks = (v_heads * v_dim + kRowsPerBlock - 1) / kRowsPerBlock;
+  recurrent_step_kernel<<<blocks, threads, 0, stream>>>(
       static_cast<float*>(state), static_cast<const __nv_bfloat16*>(q),
       static_cast<const __nv_bfloat16*>(k),
       static_cast<const __nv_bfloat16*>(v), static_cast<const float*>(decay),
