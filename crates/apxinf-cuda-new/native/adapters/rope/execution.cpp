@@ -1,7 +1,13 @@
-#include "../include/apxinf_cuda/attn.h"
+// RoPE and attention-helper kernels: partial RoPE, per-head RMSNorm, query/gate split, output gate.
+//
+// These ops have a single fixed implementation and no persisted selection,
+// so per doc/adding-new-kernels.md §6 they carry no candidate registry,
+// tuning key, or autotuner; they are direct C-ABI forwarders.
 
-#include "../framework/runtime_internal.h"
-#include "../kernels/custom/attn_ops.h"
+#include "../../include/apxinf_cuda/attn.h"
+
+#include "../../framework/runtime_internal.h"
+#include "../../kernels/custom/attn_ops.h"
 
 #include <cstdint>
 #include <string>
