@@ -23,8 +23,9 @@ pub(crate) use gemm::gemm_execution as execution;
 
 pub use crate::workspace::{ExecutionSession, GraphWorkspace};
 pub use attention::{
-    attention, kv_cache_attention, segmented_attention, AttentionArgs, AttentionMask,
-    AttentionPolicy, KvCacheAttentionArgs, SegmentedAttentionArgs,
+    attention, kv_cache_attention, packed_qkv_attention, segmented_attention, AttentionArgs,
+    AttentionMask, AttentionPolicy, KvCacheAttentionArgs, PackedQkvAttentionArgs,
+    SegmentedAttentionArgs,
 };
 pub use cache::{concat_rows, reserve_prefix};
 pub use gather::{

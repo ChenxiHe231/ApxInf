@@ -334,6 +334,40 @@ fn attention_f16_vision_uses_fa2_and_matches_reference() {
 }
 
 #[test]
+fn attention_f16_packed_vision_qkv_uses_strided_fa2_and_matches_reference() {
+    let ctx = CudaContext::new(0).unwrap();
+    if ctx.caps().arch_family != crate::CudaArchFamily::Sm100 {
+        return;
+    }
+    let (batch, tokens, heads, head_dim) = (1, 256, 16, 72);
+    let plane_elements = heads * head_dim;
+    let mut qkv_values = vec![0.0; batch * tokens * 3 * plane_elements];
+    for token in 0..batch * tokens {
+        let value_start = (token * 3 + 2) * plane_elements;
+        qkv_values[value_start..value_start + plane_elements]
+            .fill((token % 7) as f32 / 8.0);
+    }
+    let qkv = f16_tensor(0, vec![batch, tokens, 3, heads, head_dim], &qkv_values);
+    let mut out = zeros_tensor(0, vec![batch, tokens, heads, head_dim], DType::F16);
+    let mut args = PackedQkvAttentionArgs::new(&qkv, &mut out);
+    args.policy.allow_fallback = false;
+    args.policy.graph_safe = true;
+    let normalized = super::attention_contracts::normalize_packed_qkv(&ctx, args).unwrap();
+    let expected_value = (0..tokens).map(|token| (token % 7) as f32 / 8.0).sum::<f32>()
+        / tokens as f32;
+    let expected = vec![expected_value; batch * tokens * plane_elements];
+    super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
+    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
+    assert!(
+        execution
+            .summary()
+            .starts_with("flash-attention-2-packed-qkv "),
+        "unexpected packed vision provider: {}",
+        execution.summary()
+    );
+}
+
+#[test]
 fn attention_f16_language_mqa_uses_fa2() {
     let ctx = CudaContext::new(0).unwrap();
     let (batch, tokens, query_heads, kv_heads, head_dim) = (1, 522, 8, 1, 256);

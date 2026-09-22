@@ -57,6 +57,14 @@ bool supports_fa2(const Spec& spec) {
          spec.output_dtype == spec.dtype;
 }
 
+bool supports_fa2_packed_qkv(const Spec& spec) {
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_PACKED_QKV &&
+         spec.dtype == APXINF_DTYPE_F16 &&
+         spec.output_dtype == APXINF_DTYPE_F16 && spec.query_tokens == 256 &&
+         spec.query_heads == 16 && spec.kv_heads == 16 &&
+         spec.head_dim == 72;
+}
+
 bool supports_fa2_splitkv(const Spec& spec) {
   const int64_t key_tile = spec.head_dim == 128 ? 128 : 64;
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
@@ -166,6 +174,14 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        custom_resource_requirements, one_configuration, prepare_custom,
        launch_custom, destroy_custom},
   };
+  static const ImplementationRegistry packed_qkv_entries = {
+#if defined(APXINF_ATTENTION_FA2)
+      {kProviderFa2, 4, 1, "flash-attention-2-packed-qkv",
+       apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, false,
+       supports_fa2_packed_qkv, fa2_alignment, fa2_resource_requirements,
+       one_configuration, prepare_fa2, launch_fa2, destroy_fa2},
+#endif
+  };
   switch (semantic) {
     case APXINF_ATTENTION_SEMANTIC_DENSE:
       return dense_entries;
@@ -173,6 +189,8 @@ const ImplementationRegistry& registry(uint32_t semantic) {
       return kv_cache_entries;
     case APXINF_ATTENTION_SEMANTIC_SEGMENTED:
       return segmented_entries;
+    case APXINF_ATTENTION_SEMANTIC_PACKED_QKV:
+      return packed_qkv_entries;
   }
   throw Failure(APXINF_STATUS_INTERNAL_ERROR,
                 "unknown Attention semantic registry");
