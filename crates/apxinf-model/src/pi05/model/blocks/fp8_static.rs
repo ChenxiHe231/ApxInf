@@ -812,36 +812,59 @@ fn vision_layer_fp8_static_with_policies(
         layer_norm_eps,
         scales.attention_norm,
     )?;
-    let qkv = fp8_gemm(ctx, policies, &normalized, scales.attention_norm, &weights.qkv)?;
+    let use_packed_qkv = ctx.caps().arch_family == apxinf_cuda_new::CudaArchFamily::Sm100
+        && patches_per_view == 256
+        && heads == 16
+        && head_dim == 72
+        && weights.qkv.bias.is_some();
+    let qkv = if use_packed_qkv {
+        fp8_gemm_bias(ctx, policies, &normalized, scales.attention_norm, &weights.qkv)?
+    } else {
+        fp8_gemm(ctx, policies, &normalized, scales.attention_norm, &weights.qkv)?
+    };
     let tokens = input.shape().dims()[0];
-    let mut q = output(ctx, vec![tokens, heads, head_dim], DType::F16)?;
-    let mut k = output(ctx, vec![tokens, heads, head_dim], DType::F16)?;
-    let mut v = output(ctx, vec![tokens, heads, head_dim], DType::F16)?;
-    ops::rope(
-        ctx,
-        ops::RopeArgs {
-            semantic: ops::RopeSemantic::SplitQkvBias,
-            qkv: &qkv,
-            bias: weights.qkv.bias.as_ref(),
-            q: &mut q,
-            k: &mut k,
-            v: &mut v,
-            q_heads: heads,
-            kv_heads: heads,
-            head_dim,
-            theta: 1.0,
-            position_offset: 0,
-            kv_output_offset: 0,
-        },
-    )?;
     let views = tokens / patches_per_view;
-    let q4 = q.reshape(vec![views, patches_per_view, heads, head_dim])?;
-    let k4 = k.reshape(vec![views, patches_per_view, heads, head_dim])?;
-    let v4 = v.reshape(vec![views, patches_per_view, heads, head_dim])?;
-    let mut attention = output(ctx, q4.shape().dims().to_vec(), DType::F16)?;
-    let mut attention_args = ops::AttentionArgs::new(&q4, &k4, &v4, &mut attention);
-    attention_args.policy = policies.attention.clone();
-    ops::attention(ctx, attention_args)?;
+    let attention = if use_packed_qkv {
+        let qkv = qkv.reshape(vec![views, patches_per_view, 3, heads, head_dim])?;
+        let mut attention = output(
+            ctx,
+            vec![views, patches_per_view, heads, head_dim],
+            DType::F16,
+        )?;
+        let mut args = ops::PackedQkvAttentionArgs::new(&qkv, &mut attention);
+        args.policy = policies.attention.clone();
+        ops::packed_qkv_attention(ctx, args)?;
+        attention
+    } else {
+        let mut q = output(ctx, vec![tokens, heads, head_dim], DType::F16)?;
+        let mut k = output(ctx, vec![tokens, heads, head_dim], DType::F16)?;
+        let mut v = output(ctx, vec![tokens, heads, head_dim], DType::F16)?;
+        ops::rope(
+            ctx,
+            ops::RopeArgs {
+                semantic: ops::RopeSemantic::SplitQkvBias,
+                qkv: &qkv,
+                bias: weights.qkv.bias.as_ref(),
+                q: &mut q,
+                k: &mut k,
+                v: &mut v,
+                q_heads: heads,
+                kv_heads: heads,
+                head_dim,
+                theta: 1.0,
+                position_offset: 0,
+                kv_output_offset: 0,
+            },
+        )?;
+        let q = q.reshape(vec![views, patches_per_view, heads, head_dim])?;
+        let k = k.reshape(vec![views, patches_per_view, heads, head_dim])?;
+        let v = v.reshape(vec![views, patches_per_view, heads, head_dim])?;
+        let mut attention = output(ctx, q.shape().dims().to_vec(), DType::F16)?;
+        let mut args = ops::AttentionArgs::new(&q, &k, &v, &mut attention);
+        args.policy = policies.attention.clone();
+        ops::attention(ctx, args)?;
+        attention
+    };
     let attention = attention.reshape(vec![tokens, heads * head_dim])?;
     let attention = fixed_quantize(ctx, policies, &attention, scales.attention_output)?;
     let projection = fp8_gemm(

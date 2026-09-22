@@ -35,6 +35,10 @@ int fa2_f16(const void* q, const void* k, const void* v, void* output,
             void* softmax_lse, int batch, int query_tokens, int key_tokens,
             int query_heads, int kv_heads, int head_dim, float softmax_scale,
             cudaStream_t stream);
+int fa2_f16_packed_qkv(const void* q, const void* k, const void* v,
+                       void* output, void* softmax_lse, int batch,
+                       int tokens, int heads, int head_dim,
+                       float softmax_scale, cudaStream_t stream);
 #if defined(APXINF_ATTENTION_FA2_E4M3)
 int fa2_f16_direct_e4m3_522(
     const void* q, const void* k, const void* v, void* output,
@@ -218,6 +222,15 @@ cudaError_t launch_fa2(Execution& execution) {
         apxinf::cuda_new::cutlass_ops::fa2_bf16_decode_splitkv(
             bindings.query, bindings.key, bindings.value, bindings.output,
             state->softmax_lse, static_cast<int>(spec.key_tokens),
+            bindings.scale, stream));
+  }
+  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_PACKED_QKV) {
+    return static_cast<cudaError_t>(
+        apxinf::cuda_new::cutlass_ops::fa2_f16_packed_qkv(
+            bindings.query, bindings.key, bindings.value, bindings.output,
+            state->softmax_lse, static_cast<int>(spec.batch),
+            static_cast<int>(spec.query_tokens),
+            static_cast<int>(spec.query_heads), static_cast<int>(spec.head_dim),
             bindings.scale, stream));
   }
 #if defined(APXINF_ATTENTION_FA2_E4M3)

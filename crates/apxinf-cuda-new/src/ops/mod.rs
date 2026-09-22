@@ -27,8 +27,9 @@ pub(crate) use gemm::gemm_execution as execution;
 
 pub use crate::workspace::{ExecutionSession, GraphWorkspace};
 pub use attention::{
-    attention, kv_cache_attention, segmented_attention, AttentionArgs, AttentionMask,
-    AttentionPolicy, KvCacheAttentionArgs, KvCacheDecodeMeta, SegmentedAttentionArgs,
+    attention, kv_cache_attention, packed_qkv_attention, segmented_attention, AttentionArgs,
+    AttentionMask, AttentionPolicy, KvCacheAttentionArgs, KvCacheDecodeMeta,
+    PackedQkvAttentionArgs, SegmentedAttentionArgs,
 };
 pub use attn_ops::{
     apply_output_gate, head_rms_norm, partial_rope, rotary_dim, split_query_and_gate,
