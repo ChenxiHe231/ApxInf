@@ -30,7 +30,7 @@ unsafe extern "C" {
         head_dim: i64,
         stream: CudaStream,
     ) -> i32;
-    pub(crate) fn apxinf_attn_apply_swish_gate(
+    pub(crate) fn apxinf_attn_apply_output_gate(
         data: *mut c_void,
         gate: *const c_void,
         count: i64,

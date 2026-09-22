@@ -25,9 +25,10 @@ apxinf_status_t apxinf_attn_split_query_and_gate(
     const void* fused, void* query, void* gate, int64_t tokens, int64_t heads,
     int64_t head_dim, apxinf_cuda_stream_t stream);
 
-apxinf_status_t apxinf_attn_apply_swish_gate(void* data, const void* gate,
-                                             int64_t count,
-                                             apxinf_cuda_stream_t stream);
+/* data *= sigmoid(gate). Not silu: see native/kernels/custom/attn_ops.h. */
+apxinf_status_t apxinf_attn_apply_output_gate(void* data, const void* gate,
+                                              int64_t count,
+                                              apxinf_cuda_stream_t stream);
 
 #ifdef __cplusplus
 }

@@ -25,7 +25,7 @@ pub use attention::{
     AttentionPolicy, KvCacheAttentionArgs, SegmentedAttentionArgs,
 };
 pub use attn_ops::{
-    apply_swish_gate, head_rms_norm, partial_rope, rotary_dim, split_query_and_gate,
+    apply_output_gate, head_rms_norm, partial_rope, rotary_dim, split_query_and_gate,
 };
 pub use gdn::{
     gdn_causal_conv_step, gdn_decay_and_beta, gdn_gated_norm,

@@ -85,7 +85,10 @@ fn reference_step(
                 state[row + index] += delta * k[k_head * k_dim + index] as f64;
                 out += state[row + index] * q[k_head * k_dim + index] as f64;
             }
-            output[head * v_dim + v_index] = out as f32;
+            // The reference divides the query by sqrt(k_dim) before the
+            // recurrence. q only ever reaches the readout, so scaling the
+            // finished reduction is equivalent.
+            output[head * v_dim + v_index] = (out / (k_dim as f64).sqrt()) as f32;
         }
     }
     output

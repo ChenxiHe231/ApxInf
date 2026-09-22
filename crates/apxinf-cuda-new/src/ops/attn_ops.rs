@@ -1,5 +1,5 @@
 //! Full-attention primitives: partial RoPE, per-head q/k normalization, and
-//! the swish output gate.
+//! the sigmoid output gate.
 //!
 //! See `native/kernels/custom/attn_ops.h` for two scope limits that matter:
 //! the mRoPE collapse is only valid for text-only input, and the rotary
@@ -108,16 +108,22 @@ pub fn split_query_and_gate(
     }
 }
 
-/// `data *= silu(gate)`, elementwise and in place.
-pub fn apply_swish_gate(ctx: &CudaContext, data: &Tensor, gate: &Tensor) -> Result<()> {
+/// `data *= sigmoid(gate)`, elementwise and in place.
+///
+/// Sigmoid, not silu, even though `config.json` carries
+/// `output_gate_type: "swish"`. That key is never read by the reference
+/// implementation; `Qwen3_5Attention.forward` applies a bare
+/// `torch.sigmoid(gate)`. The silu-shaped gate in this model is the GDN one
+/// (`gdn_gated_norm`), which is separate and unaffected.
+pub fn apply_output_gate(ctx: &CudaContext, data: &Tensor, gate: &Tensor) -> Result<()> {
     let dims = data.shape().dims().to_vec();
     if dims != gate.shape().dims() {
-        return Err(invalid("swish gate requires matching shapes"));
+        return Err(invalid("output gate requires matching shapes"));
     }
     let data_buffer = tensor_storage(ctx, data, DType::BF16, &dims)?;
     let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
     unsafe {
-        status::check(abi::apxinf_attn_apply_swish_gate(
+        status::check(abi::apxinf_attn_apply_output_gate(
             data_buffer.ptr(),
             gate_buffer.ptr(),
             dims.iter().product::<usize>() as i64,

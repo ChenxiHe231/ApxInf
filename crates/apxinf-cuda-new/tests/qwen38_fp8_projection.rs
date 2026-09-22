@@ -85,7 +85,7 @@ fn per_tensor_fp8_projection_needs_no_new_contract() {
     let tensors = checkpoint();
 
     // Layer 3 is the first full-attention layer. q_proj is the widest of the
-    // attention projections and the one whose output feeds the swish gate.
+    // attention projections and the one whose output feeds the output gate.
     let prefix = "model.language_model.layers.3.self_attn.q_proj";
     let weight_host = &tensors[&format!("{prefix}.weight")];
     assert_eq!(weight_host.dtype(), DType::F8E4M3);

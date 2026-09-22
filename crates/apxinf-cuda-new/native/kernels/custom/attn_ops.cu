@@ -1,7 +1,7 @@
 // Copyright 2026 ApxInf contributors.
 //
 // Full-attention primitives for Qwen3.5: partial rotary embedding, per-head
-// query/key normalization, and the swish output gate.
+// query/key normalization, and the sigmoid output gate.
 //
 // Two scope notes.
 //
@@ -92,13 +92,13 @@ __global__ void head_rms_norm_kernel(__nv_bfloat16* __restrict__ data,
   for (int index = threadIdx.x; index < head_dim; index += blockDim.x) {
     data[base + index] = __float2bfloat16(
         __bfloat162float(data[base + index]) * scale *
-        __bfloat162float(weight[index]));
+        (1.0f + __bfloat162float(weight[index])));
   }
 }
 
 // q_proj emits [tokens, 2 * heads * head_dim]: the query in the first half of
-// each head's slot and its gate in the second. `attn_output_gate: true` with
-// `output_gate_type: swish`, so the gate is silu.
+// each head's slot and its gate in the second (`attn_output_gate: true`).
+// See apply_output_gate_kernel for what is done with that gate.
 __global__ void split_query_and_gate_kernel(
     const __nv_bfloat16* __restrict__ fused, __nv_bfloat16* __restrict__ query,
     __nv_bfloat16* __restrict__ gate, int tokens, int heads, int head_dim) {
@@ -116,14 +116,29 @@ __global__ void split_query_and_gate_kernel(
   gate[index] = fused[slot + head_dim];
 }
 
-__global__ void apply_swish_gate_kernel(__nv_bfloat16* __restrict__ data,
-                                        const __nv_bfloat16* __restrict__ gate,
-                                        long long count) {
+// data *= sigmoid(gate), elementwise.
+//
+// `config.json` says `output_gate_type: "swish"`, which reads as silu. It is
+// not what the model does. `grep -rn output_gate` over the reference
+// implementation finds nothing -- transformers never reads that key -- and
+// Qwen3_5Attention.forward (modeling_qwen3_5.py:818) is literally
+//
+//     attn_output = attn_output * torch.sigmoid(gate)
+//
+// with no extra factor of `gate`. Where the two official artifacts disagree,
+// the code that produced the checkpoint's behaviour wins. Do not "fix" this
+// back to silu on the strength of the config key.
+//
+// The GDN output gate *is* silu (Qwen3_5RMSNormGated sets activation="silu");
+// that one lives in gdn_ops.cu and is correct as written.
+__global__ void apply_output_gate_kernel(__nv_bfloat16* __restrict__ data,
+                                         const __nv_bfloat16* __restrict__ gate,
+                                         long long count) {
   const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
   if (index >= count) return;
   const float z = __bfloat162float(gate[index]);
-  data[index] = __float2bfloat16(__bfloat162float(data[index]) * z /
-                                 (1.0f + __expf(-z)));
+  data[index] =
+      __float2bfloat16(__bfloat162float(data[index]) / (1.0f + __expf(-z)));
 }
 
 }  // namespace
@@ -166,12 +181,12 @@ int split_query_and_gate(const void* fused, void* query, void* gate,
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
-int apply_swish_gate(void* data, const void* gate, long long count,
-                     cudaStream_t stream) {
+int apply_output_gate(void* data, const void* gate, long long count,
+                      cudaStream_t stream) {
   if (count <= 0) return -1;
   const int threads = 256;
   const long long blocks = (count + threads - 1) / threads;
-  apply_swish_gate_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
+  apply_output_gate_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<__nv_bfloat16*>(data),
       static_cast<const __nv_bfloat16*>(gate), count);
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
