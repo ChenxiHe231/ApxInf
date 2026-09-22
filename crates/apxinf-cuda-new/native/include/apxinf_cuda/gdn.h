@@ -41,6 +41,13 @@ apxinf_status_t apxinf_gdn_decay_and_beta(const void* a, const void* b,
                                           void* beta, int64_t heads,
                                           apxinf_cuda_stream_t stream);
 
+
+apxinf_status_t apxinf_gdn_chunk_scan(
+    const void* q, const void* k, const void* v, const void* g,
+    const void* beta, void* out, void* state, int64_t seq_padded,
+    int64_t v_heads, int64_t k_heads, int64_t chunk_size, int64_t k_dim,
+    int64_t num_chunks, apxinf_cuda_stream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

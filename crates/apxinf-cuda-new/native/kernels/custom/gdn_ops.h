@@ -44,4 +44,22 @@ int gdn_decay_and_beta(const void* a, const void* b, const void* a_log,
                        const void* dt_bias, void* decay, void* beta, int heads,
                        cudaStream_t stream);
 
+
+// Gated DeltaNet chunked scan (parallel prefill). Faithful port of
+// torch_chunk_gated_delta_rule (forward-substitution export path). One block
+// per value head; chunk loop sequential inside. q/k are L2-normalized in fp32
+// and q scaled by k_dim**-0.5 inside the kernel. State is carried in the PORT
+// layout [v_heads, v_dim, k_dim] f32 so prefill leaves exactly the state the
+// single-token recurrent step expects.
+//
+//   q,k  : [seq_padded, k_heads, k_dim]  bf16 (post-conv, pre-l2norm)
+//   v    : [seq_padded, v_heads, k_dim]  bf16
+//   g,beta: [seq_padded, v_heads]        f32  (log decay, delta gate)
+//   out  : [seq_padded, v_heads, k_dim]  bf16 (core_attn_out)
+//   state: [v_heads, v_dim, k_dim]       f32  in/out
+int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
+                   const void* beta, void* out, void* state, int seq_padded,
+                   int v_heads, int k_heads, int chunk_size, int k_dim,
+                   int num_chunks, cudaStream_t stream);
+
 }  // namespace apxinf::cuda::gdn_ops

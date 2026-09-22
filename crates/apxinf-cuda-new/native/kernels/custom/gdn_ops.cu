@@ -299,4 +299,321 @@ int gdn_decay_and_beta(const void* a, const void* b, const void* a_log,
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
+
+// ---------------------------------------------------------------------------
+// Gated DeltaNet chunked scan (parallel prefill).
+//
+// A faithful port of torch_chunk_gated_delta_rule (the forward-substitution
+// export path) from modeling_qwen3_5.py. One block per value head; the chunk
+// loop is sequential inside the block, but the intra-chunk work is a handful of
+// 64x64 / 64x128 matmuls over the whole chunk at once, so a prefill of N tokens
+// runs in N/chunk_size sequential steps instead of N.
+//
+// Conventions matched to the reference and to gdn_recurrent_step:
+//   - q and k are L2-normalized per head in fp32 (use_qk_l2norm_in_kernel), then
+//     q is scaled by k_dim**-0.5. Both are done here, in fp32.
+//   - g is the log decay (<=0); beta the delta-rule gate. Both per (token, head).
+//   - The recurrent state is carried in the PORT layout [v_heads, v_dim, k_dim]
+//     (== reference [v_heads, k_dim, v_dim] with the last two axes transposed),
+//     so prefill leaves exactly the state the single-token path expects.
+//   - value head h reads key head h / (v_heads / k_heads).
+//
+// chunk_size is fixed at 64 and k_dim == v_dim == 128 for this checkpoint.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kChunk = 64;   // chunk_size
+constexpr int kDim = 128;    // k_dim == v_dim for this model
+
+// Shared-memory scratch for one chunk of one head. ~209 KiB, so the launch opts
+// into the large dynamic shared-memory carveout.
+struct ChunkShared {
+  float q[kChunk][kDim];    // l2-normed q, scaled by k_dim**-0.5
+  float k[kChunk][kDim];    // l2-normed k
+  float v[kChunk][kDim];    // raw v (value)
+  float nv[kChunk][kDim];   // new_values / v_new
+  float kcd[kChunk][kDim];  // k_cumdecay
+  float pw[kChunk][kChunk]; // pairwise_decay (lower-tri incl diag), else 0
+  float T[kChunk][kChunk];  // forward-substitution inverse (unit lower-tri)
+  float M[kChunk][kChunk];  // ut_system, then intra_chunk_attn
+  float cum[kChunk];        // cumulative decay within the chunk
+  float g[kChunk];          // per-token log decay for this head
+  float beta[kChunk];       // per-token beta for this head
+};
+
+// gdn chunked scan. Grid = v_heads blocks, block = kDim (128) threads.
+//
+//   q_in, k_in : [seq_padded, k_heads, kDim]  bf16   (post-conv, pre-l2norm)
+//   v_in       : [seq_padded, v_heads, kDim]  bf16
+//   g_in, b_in : [seq_padded, v_heads]        f32    (log decay, beta)
+//   out        : [seq_padded, v_heads, kDim]  bf16   (core_attn_out)
+//   state      : [v_heads, kDim(v_dim), kDim(k_dim)] f32  port layout, in/out
+//
+// The block loads a whole chunk, builds the UT transform by forward
+// substitution, then folds the chunk into the recurrent state. State rows are
+// held in global memory (port layout state[v][k]) and read/written per chunk.
+__global__ void chunk_scan_kernel(
+    const __nv_bfloat16* __restrict__ q_in,
+    const __nv_bfloat16* __restrict__ k_in,
+    const __nv_bfloat16* __restrict__ v_in, const float* __restrict__ g_in,
+    const float* __restrict__ b_in, __nv_bfloat16* __restrict__ out,
+    float* __restrict__ state, int seq_padded, int v_heads, int k_heads,
+    int num_chunks) {
+  extern __shared__ float smem_raw[];
+  ChunkShared& s = *reinterpret_cast<ChunkShared*>(smem_raw);
+
+  const int head = blockIdx.x;
+  if (head >= v_heads) return;
+  const int k_head = head / (v_heads / k_heads);
+  const int tid = threadIdx.x;  // 0..kDim-1
+
+  // Recurrent state for this head, port layout state[v][k] laid out as
+  // state[head * v_dim * k_dim + v * k_dim + k]. Reference state is S_ref[k][v]
+  // = state_port[v][k]; we compute against S_ref and store back transposed.
+  float* head_state = state + (long long)head * kDim * kDim;
+
+  for (int c = 0; c < num_chunks; ++c) {
+    const int base = c * kChunk;  // first token of this chunk
+
+    // --- Load q, k, v for the chunk; L2-normalize q,k in fp32; scale q. ------
+    // Each thread owns column `tid` (a dimension index) across all 64 rows.
+    // L2 norm is over the dimension, so it needs a per-row reduction; do it the
+    // straightforward way with a per-row loop and a warp/block reduction using
+    // shared partials. To keep it simple and correct, every thread loads its
+    // column, then rows are normalized cooperatively.
+    for (int t = 0; t < kChunk; ++t) {
+      const int tok = base + t;
+      const __nv_bfloat16* qp =
+          q_in + ((long long)tok * k_heads + k_head) * kDim;
+      const __nv_bfloat16* kp =
+          k_in + ((long long)tok * k_heads + k_head) * kDim;
+      const __nv_bfloat16* vp =
+          v_in + ((long long)tok * v_heads + head) * kDim;
+      s.q[t][tid] = __bfloat162float(qp[tid]);
+      s.k[t][tid] = __bfloat162float(kp[tid]);
+      s.v[t][tid] = __bfloat162float(vp[tid]);
+    }
+    // g and beta for this head over the chunk (kChunk == kDim so tid covers it).
+    if (tid < kChunk) {
+      s.g[tid] = g_in[(long long)(base + tid) * v_heads + head];
+      s.beta[tid] = b_in[(long long)(base + tid) * v_heads + head];
+    }
+    __syncthreads();
+
+    // L2-normalize q and k over the dimension (in fp32), scale q by kDim**-0.5.
+    // Thread `tid` normalizes row `tid` (kChunk <= blockDim.x).
+    const float q_scaling = rsqrtf((float)kDim);
+    if (tid < kChunk) {
+      float qn = 0.0f, kn = 0.0f;
+      for (int d = 0; d < kDim; ++d) {
+        qn += s.q[tid][d] * s.q[tid][d];
+        kn += s.k[tid][d] * s.k[tid][d];
+      }
+      const float qinv = rsqrtf(qn + 1e-6f);
+      const float kinv = rsqrtf(kn + 1e-6f);
+      for (int d = 0; d < kDim; ++d) {
+        s.q[tid][d] = s.q[tid][d] * qinv * q_scaling;
+        s.k[tid][d] = s.k[tid][d] * kinv;
+      }
+    }
+    __syncthreads();
+
+    // --- Cumulative decay and pairwise decay --------------------------------
+    // cum[t] = sum_{j<=t} g[j] (inclusive). Single thread does the scan (64).
+    if (tid == 0) {
+      float acc = 0.0f;
+      for (int t = 0; t < kChunk; ++t) {
+        acc += s.g[t];
+        s.cum[t] = acc;
+      }
+    }
+    __syncthreads();
+
+    // pairwise_decay[i][j] = exp(cum[i] - cum[j]) for i >= j, else 0.
+    // Thread `tid` (a column j) fills column j for all rows i, when tid<kChunk.
+    if (tid < kChunk) {
+      const int j = tid;
+      for (int i = 0; i < kChunk; ++i) {
+        s.pw[i][j] = (i >= j) ? __expf(s.cum[i] - s.cum[j]) : 0.0f;
+      }
+    }
+    __syncthreads();
+
+    // --- ut_system and intra_chunk_attn -------------------------------------
+    // v_beta and k_beta are applied on the fly. k_beta[t] = beta[t]*k[t].
+    // ut_system[i][j] = (k_beta[i] . k[j]) * pw[i][j]
+    // intra[i][j]     = (q[i]     . k[j]) * pw[i][j]
+    // Both are 64x64. Thread `tid` computes column j=tid for all rows i.
+    if (tid < kChunk) {
+      const int j = tid;
+      for (int i = 0; i < kChunk; ++i) {
+        float ut = 0.0f, at = 0.0f;
+        const float bi = s.beta[i];
+        for (int d = 0; d < kDim; ++d) {
+          const float kjd = s.k[j][d];
+          ut += (bi * s.k[i][d]) * kjd;
+          at += s.q[i][d] * kjd;
+        }
+        s.M[i][j] = ut * s.pw[i][j];  // ut_system
+        // stash intra_chunk_attn in T temporarily (reused before T is needed)
+        s.T[i][j] = at * s.pw[i][j];  // intra_chunk_attn
+      }
+    }
+    __syncthreads();
+
+    // Forward substitution to build the unit-lower-triangular inverse.
+    //   ut = -ut_system.tril(-1)                (strictly lower)
+    //   for i in 1..n: row_i[:i] += sum_p row_i[p]*sub[p][:i]
+    //   ut += I
+    // This is inherently sequential over rows i, and each row's update reads the
+    // already-updated rows above it, so a single thread walks it (64x64x64,
+    // small). Then copy into s.T's own storage? s.T currently holds intra_attn,
+    // which we still need. Put the inverse in a fresh region: reuse s.pw (no
+    // longer needed after ut/intra) as the inverse buffer.
+    if (tid == 0) {
+      // Build strictly-lower L = -tril(ut_system, -1) into s.pw.
+      for (int i = 0; i < kChunk; ++i) {
+        for (int j = 0; j < kChunk; ++j) {
+          s.pw[i][j] = (i > j) ? -s.M[i][j] : 0.0f;
+        }
+      }
+      // Forward substitution accumulation (in place on s.pw).
+      for (int i = 1; i < kChunk; ++i) {
+        for (int j = 0; j < i; ++j) {
+          float acc = s.pw[i][j];  // row (== ut_system[..i, :i][row])
+          // + sum_{p} row_i[p] * sub[p][j], p over :i (0..i-1)
+          float extra = 0.0f;
+          for (int p = 0; p < i; ++p) {
+            extra += s.pw[i][p] * s.pw[p][j];
+          }
+          s.pw[i][j] = acc + extra;
+        }
+      }
+      // Add identity to get the unit-lower-triangular inverse T.
+      for (int i = 0; i < kChunk; ++i) {
+        s.pw[i][i] += 1.0f;
+      }
+    }
+    __syncthreads();
+    // s.pw now holds T (the inverse). s.T holds intra_chunk_attn. s.M free.
+
+    // new_values = T @ v_beta ;  k_cumdecay = T @ decayed_k_beta
+    //   v_beta[t]        = beta[t] * v[t]
+    //   decayed_k_beta[t]= beta[t] * k[t] * exp(cum[t])
+    // Thread `tid` owns dimension column d = tid; compute all 64 rows i.
+    {
+      const int d = tid;  // 0..kDim-1
+      for (int i = 0; i < kChunk; ++i) {
+        float nvv = 0.0f, kc = 0.0f;
+        for (int p = 0; p <= i; ++p) {  // T is lower-triangular
+          const float t = s.pw[i][p];
+          const float vbeta = s.beta[p] * s.v[p][d];
+          const float dkb = s.beta[p] * s.k[p][d] * __expf(s.cum[p]);
+          nvv += t * vbeta;
+          kc += t * dkb;
+        }
+        s.nv[i][d] = nvv;
+        s.kcd[i][d] = kc;
+      }
+    }
+    __syncthreads();
+
+    // --- Scan fold into the recurrent state ---------------------------------
+    // Reference (per chunk i):
+    //   q_scaled = q * exp(cum)                        [applied per token]
+    //   k_scaled = k * exp(cum[-1] - cum)
+    //   chunk_decay = exp(cum[-1])
+    //   v_new  = new_values - k_cumdecay @ S_ref       (S_ref[k][v])
+    //   inter  = q_scaled @ S_ref
+    //   out    = inter + intra_chunk_attn @ v_new
+    //   S_ref  = S_ref * chunk_decay + k_scaled^T @ v_new
+    //
+    // We hold S in the PORT layout state[v][k] = S_ref[k][v]. Thread `tid` owns
+    // v-column d = tid of the state (so it holds S_ref[*][d], i.e. state[d][*]).
+    // Every thread reads the full k-vector of q_scaled / k_cumdecay from shared.
+    const float cum_last = s.cum[kChunk - 1];
+    const float chunk_decay = __expf(cum_last);
+    const int d = tid;  // this thread owns v-dim index d
+
+    // Load this thread's column of S_ref: sref_col[k] = S_ref[k][d]
+    //   = state_port[d][k] = head_state[d*kDim + k]
+    float sref_col[kDim];
+    for (int kk = 0; kk < kDim; ++kk) {
+      sref_col[kk] = head_state[(long long)d * kDim + kk];
+    }
+
+    // v_new[i][d] = new_values[i][d] - sum_k k_cumdecay[i][k] * S_ref[k][d]
+    for (int i = 0; i < kChunk; ++i) {
+      float acc = 0.0f;
+      for (int kk = 0; kk < kDim; ++kk) {
+        acc += s.kcd[i][kk] * sref_col[kk];
+      }
+      s.nv[i][d] = s.nv[i][d] - acc;  // s.nv now holds v_new
+    }
+    __syncthreads();
+
+    // inter[i][d] = sum_k q_scaled[i][k] * S_ref[k][d]
+    //   q_scaled[i][k] = q[i][k] * exp(cum[i])
+    // out[i][d] = inter[i][d] + sum_j intra[i][j] * v_new[j][d]
+    for (int i = 0; i < kChunk; ++i) {
+      const float ecum_i = __expf(s.cum[i]);
+      float inter = 0.0f;
+      for (int kk = 0; kk < kDim; ++kk) {
+        inter += (s.q[i][kk] * ecum_i) * sref_col[kk];
+      }
+      float intra = 0.0f;
+      for (int j = 0; j <= i; ++j) {  // intra is lower-triangular (masked)
+        intra += s.T[i][j] * s.nv[j][d];
+      }
+      const int tok = base + i;
+      __nv_bfloat16* op = out + ((long long)tok * v_heads + head) * kDim;
+      op[d] = __float2bfloat16(inter + intra);
+    }
+    __syncthreads();
+
+    // S_ref[k][d] = S_ref[k][d] * chunk_decay + sum_i k_scaled[i][k]*v_new[i][d]
+    //   k_scaled[i][k] = k[i][k] * exp(cum_last - cum[i])
+    for (int kk = 0; kk < kDim; ++kk) {
+      float upd = 0.0f;
+      for (int i = 0; i < kChunk; ++i) {
+        const float kscaled = s.k[i][kk] * __expf(cum_last - s.cum[i]);
+        upd += kscaled * s.nv[i][d];
+      }
+      const float newval = sref_col[kk] * chunk_decay + upd;
+      // store back in port layout state[d][k]
+      head_state[(long long)d * kDim + kk] = newval;
+    }
+    __syncthreads();
+  }
+}
+
+}  // namespace
+
+int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
+                   const void* beta, void* out, void* state, int seq_padded,
+                   int v_heads, int k_heads, int chunk_size, int k_dim,
+                   int num_chunks, cudaStream_t stream) {
+  if (v_heads <= 0 || k_heads <= 0 || v_heads % k_heads != 0) return -1;
+  if (chunk_size != kChunk || k_dim != kDim) return -2;
+  if (num_chunks <= 0 || seq_padded != num_chunks * chunk_size) return -3;
+
+  const int threads = kDim;  // 128
+  const size_t shared = sizeof(ChunkShared);
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetAttribute(chunk_scan_kernel,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         (int)shared);
+    configured = true;
+  }
+  chunk_scan_kernel<<<v_heads, threads, shared, stream>>>(
+      static_cast<const __nv_bfloat16*>(q),
+      static_cast<const __nv_bfloat16*>(k),
+      static_cast<const __nv_bfloat16*>(v), static_cast<const float*>(g),
+      static_cast<const float*>(beta), static_cast<__nv_bfloat16*>(out),
+      static_cast<float*>(state), seq_padded, v_heads, k_heads, num_chunks);
+  return cudaGetLastError() == cudaSuccess ? 0 : -4;
+}
+
 }  // namespace apxinf::cuda::gdn_ops
