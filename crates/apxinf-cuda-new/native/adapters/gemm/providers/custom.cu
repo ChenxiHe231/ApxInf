@@ -166,14 +166,19 @@ cudaError_t launch_postprocess(const Spec& spec,
   const int64_t count = spec.m * output_width;
   const int blocks = static_cast<int>(
       std::min<int64_t>((count + 255) / 256, 4096));
+  const uint32_t bias_dtype =
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU &&
+              spec.a_dtype == APXINF_DTYPE_E4M3 &&
+              spec.output_dtype == APXINF_DTYPE_E4M3
+          ? APXINF_DTYPE_F16
+          : has_row_channel_scales(spec) ? spec.output_dtype
+                                         : resources.projection_dtype;
   apxinf::cuda_new::custom::finish<<<blocks, 256, 0,
                                  static_cast<cudaStream_t>(bindings.stream)>>>(
       projection, resources.projection_dtype, bindings.output,
       spec.output_dtype,
       bindings.bias,
-      has_row_channel_scales(spec)
-          ? spec.output_dtype
-          : resources.projection_dtype,
+      bias_dtype,
       bindings.residual, resources.projection_dtype,
       bindings.a_scales, bindings.b_scales, spec.m, spec.n,
       static_cast<int>(spec.semantic),

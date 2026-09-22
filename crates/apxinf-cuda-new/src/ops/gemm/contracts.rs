@@ -478,8 +478,19 @@ fn normalize_fused<'a>(
     } else {
         args.a.dtype()
     };
+    // Static-FP8 model weights deliberately keep bias in FP16. A fused
+    // FP8-output epilogue may use an F32 projection buffer internally, but
+    // that implementation detail must not change the public bias contract.
+    let bias_dtype = if semantic == Semantic::GemmBiasGelu
+        && args.a.dtype() == DType::F8E4M3
+        && args.out.dtype() == DType::F8E4M3
+    {
+        DType::F16
+    } else {
+        projection_dtype
+    };
     for (tensor, expected_dtype, expected_shape, slot, name) in [
-        (bias, projection_dtype, vec![n], 0, "bias"),
+        (bias, bias_dtype, vec![n], 0, "bias"),
         (residual, projection_dtype, vec![m, n], 1, "residual"),
         (row_scales, DType::F32, vec![m], 2, "row scale"),
         (channel_scales, DType::F32, vec![n], 3, "channel scale"),

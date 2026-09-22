@@ -35,6 +35,13 @@ bool supports_native_fp8_bias_residual(const Spec& spec) {
          spec.output_scale_is_unit != 0;
 }
 
+bool supports_native_fp8_bias_gelu(const Spec& spec) {
+  return supports_native_fp8(spec) &&
+         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU &&
+         spec.output_dtype == APXINF_DTYPE_E4M3 &&
+         spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE;
+}
+
 AlignmentRequirements vendor_alignment(const Spec&) {
   return {};
 }
@@ -177,7 +184,7 @@ bool supports_device(const Implementation& implementation,
 const ImplementationRegistry& registry(uint32_t semantic) {
   // Every L3 semantic has exactly one baseline fallback. cuBLAS owns that role;
   // faster or more specialized providers remain autotuning candidates only.
-  static const ImplementationRegistry vendor_entries = {
+  static const ImplementationRegistry gemm_bias_gelu_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
@@ -185,6 +192,12 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
+      {kProviderCublasLt, 3, 1, "cublasLt-native-fp8-gelu-bias",
+       kDeviceFeatureNativeFp8, true, false, false,
+       supports_native_fp8_bias_gelu, cublaslt_alignment,
+       cublaslt_native_fp8_gelu_resource_requirements,
+       cublaslt_configurations, prepare_cublaslt_native_fp8_gelu,
+       launch_cublaslt, destroy_cublaslt},
   };
   // Keep GEMM+bias as a separate L3 tuning domain even though its current L1
   // candidates happen to be the same vendor implementations.
@@ -272,7 +285,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
       selected = &gemm_entries;
       break;
     case APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU:
-      selected = &vendor_entries;
+      selected = &gemm_bias_gelu_entries;
       break;
     case APXINF_GEMM_SEMANTIC_GEMM_GEGLU:
       selected = &gemm_geglu_entries;
