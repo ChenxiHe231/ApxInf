@@ -783,6 +783,77 @@ fn fp8_production_geglu_non_unit_scale_matches_independent_reference() {
     .unwrap();
 }
 
+fn validate_bf16_sm89_geglu_shape(
+    ctx: &CudaContext,
+    m: usize,
+    k: usize,
+    n: usize,
+    immutable_weight: bool,
+) {
+    let one = 0x3f80_u16;
+    let mut a_values = vec![0; m * k];
+    for row in 0..m {
+        a_values[row * k] = one;
+    }
+    let inner = n / 2;
+    let mut b_values = vec![0; k * n];
+    let mut expected_row = Vec::with_capacity(inner);
+    for column in 0..inner {
+        let (gate, gate_bits) = if column % 2 == 0 {
+            (1.0_f32, 0x3f80_u16)
+        } else {
+            (2.0_f32, 0x4000_u16)
+        };
+        let (up, up_bits) = if column % 3 == 0 {
+            (-1.0_f32, 0xbf80_u16)
+        } else {
+            (0.5_f32, 0x3f00_u16)
+        };
+        b_values[column] = gate_bits;
+        b_values[inner + column] = up_bits;
+        let gelu = 0.5_f32
+            * gate
+            * (1.0
+                + (0.7978845608028654_f32 * (gate + 0.044715_f32 * gate.powi(3))).tanh());
+        expected_row.push(gelu * up);
+    }
+    let a = bf16_bits_tensor(0, vec![m, k], &a_values);
+    let b = bf16_bits_tensor(0, vec![k, n], &b_values);
+    let mut out = zeros_tensor(0, vec![m, n / 2], DType::BF16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    if immutable_weight {
+        args = args.with_immutable_weight(WeightVersion::new(1));
+    }
+    configure_torch_case(&mut args, 1.0, 1.0);
+    let expected = expected_row.repeat(m);
+    validate_all_candidates(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmGeglu,
+        None,
+        &expected,
+    )
+    .unwrap();
+}
+
+#[test]
+fn bf16_sm89_production_geglu_shapes_match_reference_and_graph() {
+    let ctx = CudaContext::new(0).unwrap();
+    if ctx.caps().sm != 89 {
+        return;
+    }
+    for (m, k, n) in [
+        (10, 1024, 8192),
+        (522, 2048, 32768),
+        (533, 2048, 32768),
+    ] {
+        validate_bf16_sm89_geglu_shape(&ctx, m, k, n, true);
+    }
+    // Mutable weights must take the enqueue-time adjacent-pair pack path, and
+    // graph capture must preserve that pack before the fused GEMM.
+    validate_bf16_sm89_geglu_shape(&ctx, 10, 1024, 8192, false);
+}
+
 #[test]
 fn bf16_gemm_geglu_all_candidates_cover_packed_output_path() {
     let ctx = CudaContext::new(0).unwrap();
