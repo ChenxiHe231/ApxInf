@@ -14,6 +14,7 @@ struct CublasLtState {
   cublasLtMatmulAlgo_t algorithm{};
   bool has_algorithm = false;
   void* workspace = nullptr;
+  void* zero_bias = nullptr;
   size_t workspace_bytes = 0;
 
   ~CublasLtState() {
@@ -27,7 +28,9 @@ struct CublasLtState {
 
   void release_resources() noexcept {
     if (workspace != nullptr) cudaFree(workspace);
+    if (zero_bias != nullptr) cudaFree(zero_bias);
     workspace = nullptr;
+    zero_bias = nullptr;
     common.release();
   }
 };
@@ -48,7 +51,14 @@ cudaDataType_t projection_cuda_dtype(const vendor::CommonResources& common) {
 }
 
 size_t common_requirement(const Spec& spec, bool native_fp8) {
-  return vendor::common_resource_requirements(spec, native_fp8);
+  const bool needs_zero_bias =
+      native_fp8 &&
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL &&
+      spec.bias_alignment == 0;
+  return vendor::common_resource_requirements(spec, native_fp8) +
+         (needs_zero_bias
+              ? static_cast<size_t>(spec.n) * dtype_bytes(APXINF_DTYPE_F16)
+              : 0);
 }
 
 void prepare_cublaslt_impl(Execution& state, bool native_fp8) {
@@ -77,9 +87,25 @@ void prepare_cublaslt_impl(Execution& state, bool native_fp8) {
   check_cublas(cublasLtMatmulDescSetAttribute(
       resources->operation, CUBLASLT_MATMUL_DESC_TRANSA, &transpose,
       sizeof(transpose)));
-  if (native_fp8 && spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+  const bool native_bias_residual =
+      native_fp8 &&
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL &&
       spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
-      spec.output_scale_is_unit != 0) {
+      spec.output_scale_is_unit != 0;
+  const bool native_bias =
+      native_fp8 &&
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+      spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
+      spec.output_scale_is_unit != 0;
+  if (native_bias_residual && state.bindings.bias == nullptr) {
+    check_cuda(cudaMalloc(&resources->zero_bias,
+                          static_cast<size_t>(spec.n) *
+                              dtype_bytes(APXINF_DTYPE_F16)));
+    check_cuda(cudaMemset(resources->zero_bias, 0,
+                          static_cast<size_t>(spec.n) *
+                              dtype_bytes(APXINF_DTYPE_F16)));
+  }
+  if (native_bias || native_bias_residual) {
     const cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
     check_cublas(cublasLtMatmulDescSetAttribute(
         resources->operation, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue,
@@ -88,9 +114,12 @@ void prepare_cublaslt_impl(Execution& state, bool native_fp8) {
     check_cublas(cublasLtMatmulDescSetAttribute(
         resources->operation, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
         &bias_type, sizeof(bias_type)));
+    const void* bias = state.bindings.bias != nullptr
+                           ? state.bindings.bias
+                           : resources->zero_bias;
     check_cublas(cublasLtMatmulDescSetAttribute(
         resources->operation, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-        &state.bindings.bias, sizeof(state.bindings.bias)));
+        &bias, sizeof(bias)));
   }
   check_cublas(cublasLtMatrixLayoutCreate(
       &resources->a_layout, input_type,
@@ -143,7 +172,10 @@ void prepare_cublaslt_impl(Execution& state, bool native_fp8) {
     check_cuda(cudaMalloc(&resources->workspace, resources->workspace_bytes));
   }
   state.resource_bytes =
-      resources->common.resource_bytes + resources->workspace_bytes;
+      resources->common.resource_bytes + resources->workspace_bytes +
+      (resources->zero_bias != nullptr
+           ? static_cast<size_t>(spec.n) * dtype_bytes(APXINF_DTYPE_F16)
+           : 0);
   state.provider_state = resources.release();
 }
 
@@ -194,7 +226,10 @@ cudaError_t launch_cublaslt(Execution& state) {
                          : bindings.output;
   const float alpha =
       has_row_channel_scales(spec) ? 1.0F : bindings.alpha;
-  const float beta = 0.0F;
+  const bool native_bias_residual =
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL &&
+      resources.common.projection == nullptr;
+  const float beta = native_bias_residual ? 1.0F : 0.0F;
   const int32_t integer_alpha = 1;
   const int32_t integer_beta = 0;
   const void* alpha_pointer = spec.a_dtype == APXINF_DTYPE_I8
@@ -206,7 +241,8 @@ cudaError_t launch_cublaslt(Execution& state) {
   check_cublas(cublasLtMatmul(
       resources.handle, resources.operation, alpha_pointer, weight,
       resources.a_layout, activation, resources.b_layout, beta_pointer,
-      projection, resources.output_layout, projection,
+      native_bias_residual ? bindings.residual : projection,
+      resources.output_layout, projection,
       resources.output_layout, &resources.algorithm, resources.workspace,
       resources.workspace_bytes, stream));
   return vendor::launch_postprocess(spec, resources.common, bindings,

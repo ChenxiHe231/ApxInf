@@ -79,6 +79,18 @@ Quantization occurs before the API call; the current L3 contract does not includ
 | Constraints | bias dtype matches the projection dtype; GELU uses the Torch reference's tanh approximation; W8A8 is unsupported |
 | Reference test | `gemm_bias_gelu_all_candidates_match_torch` |
 
+<!-- l3-operator:gemm_bias_residual -->
+### `gemm_bias_residual`
+
+| Item | Contract |
+| --- | --- |
+| Rust API | `ops::gemm_bias_residual(ctx, GemmBiasResidualArgs { gemm, bias, residual })` |
+| Inputs | `A=[M,K]`, `B=[K,N]`, optional `bias=[N]`, `residual=[M,N]`; supports `Fp8UnitScale` |
+| Output | `Y=[M,N]` in F16 |
+| Mathematical semantic | `Y = (alpha * projection(A,B) + optional_bias + residual) / output_scale`, with bias broadcast across M |
+| Constraints | bias and residual are F16; the native FP8 cuBLASLt candidate requires `output_scale=1`, while the baseline candidate preserves the semantic for other positive output scales |
+| Reference test | `gemm_bias_residual_all_candidates_match_torch` |
+
 <!-- l3-operator:gemm_geglu -->
 ### `gemm_geglu`
 

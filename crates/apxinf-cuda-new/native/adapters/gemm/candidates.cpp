@@ -27,6 +27,14 @@ bool supports_native_fp8_bias(const Spec& spec) {
          spec.output_scale_is_unit != 0;
 }
 
+bool supports_native_fp8_bias_residual(const Spec& spec) {
+  return supports_native_fp8(spec) &&
+         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL &&
+         spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
+         spec.output_dtype == APXINF_DTYPE_F16 &&
+         spec.output_scale_is_unit != 0;
+}
+
 AlignmentRequirements vendor_alignment(const Spec&) {
   return {};
 }
@@ -39,6 +47,7 @@ AlignmentRequirements cublaslt_alignment(const Spec&) {
   requirements.a = 16;
   requirements.b = 16;
   requirements.output = 16;
+  requirements.residual = 16;
   return requirements;
 }
 
@@ -193,6 +202,20 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        cublaslt_configurations, prepare_cublaslt_native_fp8, launch_cublaslt,
        destroy_cublaslt},
   };
+  static const ImplementationRegistry gemm_bias_residual_entries = {
+      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
+       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
+      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
+       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
+       destroy_cublaslt},
+      {kProviderCublasLt, 3, 1, "cublasLt-native-fp8-bias-residual",
+       kDeviceFeatureNativeFp8, true, false, false,
+       supports_native_fp8_bias_residual, cublaslt_alignment,
+       cublaslt_native_fp8_resource_requirements, cublaslt_configurations,
+       prepare_cublaslt_native_fp8, launch_cublaslt, destroy_cublaslt},
+  };
   static const ImplementationRegistry gemm_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
@@ -256,6 +279,9 @@ const ImplementationRegistry& registry(uint32_t semantic) {
       break;
     case APXINF_GEMM_SEMANTIC_GEMM_BIAS:
       selected = &gemm_bias_entries;
+      break;
+    case APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL:
+      selected = &gemm_bias_residual_entries;
       break;
     default:
       throw Failure(APXINF_STATUS_INTERNAL_ERROR,

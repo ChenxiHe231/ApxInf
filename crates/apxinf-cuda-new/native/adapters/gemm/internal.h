@@ -52,6 +52,7 @@ struct AlignmentRequirements {
   uint32_t a = 1;
   uint32_t b = 1;
   uint32_t bias = 1;
+  uint32_t residual = 1;
   uint32_t a_scales = 1;
   uint32_t b_scales = 1;
   uint32_t output = 1;
@@ -85,13 +86,18 @@ bool supports_device(const Implementation& implementation,
 inline bool supports_alignment(const Implementation& implementation,
                                const Spec& spec) {
   const auto required = implementation.alignment_requirements(spec);
+  const bool has_bias =
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU ||
+      (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL &&
+       spec.bias_alignment != 0);
+  const bool has_residual =
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL;
   return spec.a_alignment >= required.a &&
          spec.b_alignment >= required.b &&
-         spec.bias_alignment >=
-             (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
-                      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU
-                                     ? required.bias
-                                     : 0) &&
+         spec.bias_alignment >= (has_bias ? required.bias : 0) &&
+         spec.residual_alignment >=
+             (has_residual ? required.residual : 0) &&
          spec.a_scales_alignment >=
              (has_row_channel_scales(spec) ? required.a_scales : 0) &&
          spec.b_scales_alignment >=

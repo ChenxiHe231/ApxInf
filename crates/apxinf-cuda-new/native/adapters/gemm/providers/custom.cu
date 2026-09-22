@@ -94,7 +94,9 @@ void allocate_common_resources(const Spec& spec,
   }
 
   const bool native_bias =
-      native_fp8 && spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+      native_fp8 &&
+      (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
+       spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL) &&
       spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
       spec.output_scale_is_unit != 0;
   const bool needs_postprocess =
@@ -126,7 +128,9 @@ size_t common_resource_requirements(const Spec& spec, bool native_fp8) {
              dtype_bytes(projection_dtype);
   }
   const bool native_bias =
-      native_fp8 && spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+      native_fp8 &&
+      (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS ||
+       spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL) &&
       spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
       spec.output_scale_is_unit != 0;
   const bool needs_postprocess =
@@ -170,6 +174,7 @@ cudaError_t launch_postprocess(const Spec& spec,
       has_row_channel_scales(spec)
           ? spec.output_dtype
           : resources.projection_dtype,
+      bindings.residual, resources.projection_dtype,
       bindings.a_scales, bindings.b_scales, spec.m, spec.n,
       static_cast<int>(spec.semantic),
       has_row_channel_scales(spec) ? 1 : 0,

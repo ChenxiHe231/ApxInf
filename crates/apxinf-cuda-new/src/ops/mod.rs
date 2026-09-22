@@ -31,8 +31,9 @@ pub use gather::{
     gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry,
 };
 pub use gemm::{
-    gemm, gemm_bias, gemm_bias_gelu, gemm_geglu, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs,
-    GemmGegluArgs, GemmPolicy, GemmQuantization, WeightVersion,
+    gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu, GemmArgs, GemmBiasArgs,
+    GemmBiasGeluArgs, GemmBiasResidualArgs, GemmGegluArgs, GemmPolicy, GemmQuantization,
+    WeightVersion,
 };
 pub use norm::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,

@@ -180,6 +180,14 @@ pub(super) fn bf16_bits_tensor(device: usize, shape: Vec<usize>, values: &[u16])
     bytes_tensor(device, shape, DType::BF16, &bytes)
 }
 
+pub(super) fn f16_bits_tensor(device: usize, shape: Vec<usize>, values: &[u16]) -> Tensor {
+    let bytes: Vec<_> = values
+        .iter()
+        .flat_map(|value| value.to_ne_bytes())
+        .collect();
+    bytes_tensor(device, shape, DType::F16, &bytes)
+}
+
 pub(super) fn f32_tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
     let bytes: Vec<_> = values
         .iter()
@@ -357,7 +365,7 @@ pub(super) fn values(tensor: &Tensor) -> Vec<f32> {
         .collect()
 }
 
-fn f16_values(tensor: &Tensor) -> Vec<f32> {
+pub(super) fn f16_values(tensor: &Tensor) -> Vec<f32> {
     assert_eq!(tensor.dtype(), DType::F16);
     let buffer = CudaBuffer::from_tensor(tensor).unwrap();
     let mut bytes = vec![0; buffer.len()];

@@ -6,12 +6,14 @@
 //! depend on or prescribe a candidate's internal implementation.
 
 use super::framework::{
-    bf16_bits_tensor, bytes_tensor, f16_tensor, f32_tensor, scales, tensor, zeros_tensor,
+    bf16_bits_tensor, bytes_tensor, f16_bits_tensor, f16_tensor, f32_tensor, scales, tensor,
+    zeros_tensor,
 };
 use super::l3_behavior::{attention_reference, kv_cache_attention_reference};
 use super::*;
 use crate::CudaContext;
 use apxinf_core::{DType, Tensor};
+use half::f16;
 use std::time::Instant;
 
 #[path = "torch_l3_fixtures.rs"]
@@ -665,6 +667,53 @@ fn gemm_bias_all_candidates_match_torch() {
         f::W8A8_GEMM_BIAS,
     )
     .unwrap();
+}
+
+#[test]
+fn gemm_bias_residual_all_candidates_match_torch() {
+    use torch_fixture as f;
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![f::M, f::K], DType::F8E4M3, f::FP8_A);
+    let b = bytes_tensor(0, vec![f::K, f::N], DType::F8E4M3, f::FP8_B);
+    let bias = f16_bits_tensor(0, vec![f::N], f::FP8_UNIT_BIAS);
+    let residual = f16_bits_tensor(0, vec![f::M, f::N], f::FP8_RESIDUAL);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    configure_torch_case(&mut args, f::FP8_UNIT_ALPHA, f::FP8_UNIT_OUTPUT_SCALE);
+    let normalized = super::contracts::normalize_bias_residual(
+        &ctx,
+        args,
+        Some(&bias),
+        &residual,
+    )
+    .unwrap();
+    super::execution::validate_candidates(
+        &ctx,
+        &normalized,
+        f::FP8_UNIT_GEMM_BIAS_RESIDUAL,
+    )
+    .unwrap();
+
+    // Bias is optional for PI0.5 checkpoints which omit a linear bias. The
+    // residual must still be consumed as cuBLASLt C with beta=1.
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![f::M, f::K], DType::F8E4M3, f::FP8_A);
+    let b = bytes_tensor(0, vec![f::K, f::N], DType::F8E4M3, f::FP8_B);
+    let residual = f16_bits_tensor(0, vec![f::M, f::N], f::FP8_RESIDUAL);
+    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    configure_torch_case(&mut args, f::FP8_UNIT_ALPHA, f::FP8_UNIT_OUTPUT_SCALE);
+    let normalized =
+        super::contracts::normalize_bias_residual(&ctx, args, None, &residual).unwrap();
+    let expected: Vec<_> = f::FP8_UNIT_GEMM
+        .iter()
+        .zip(f::FP8_RESIDUAL)
+        .map(|(projection, residual)| projection + f16::from_bits(*residual).to_f32())
+        .collect();
+    super::execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
 }
 
 #[test]
