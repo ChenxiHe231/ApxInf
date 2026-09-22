@@ -163,6 +163,7 @@ void destroy_cublaslt(Execution& execution) noexcept;
 cudaError_t launch_cublaslt(Execution& execution);
 void prepare_cutlass_fp8_gemm(Execution& execution);
 void prepare_cutlass_geglu(Execution& execution);
+void prepare_cutlass_geglu_sm89(Execution& execution);
 size_t cutlass_fp8_resource_requirements(const Spec& spec);
 size_t cutlass_geglu_resource_requirements(const Spec& spec);
 void destroy_cutlass(Execution& execution) noexcept;
@@ -172,6 +173,7 @@ cudaError_t launch_cutlass_bf16_geglu(Execution& execution);
 void prepare_cutlass_nvfp4(Execution& execution);
 size_t cutlass_nvfp4_resource_requirements(const Spec& spec);
 cudaError_t launch_cutlass_nvfp4(Execution& execution);
+cudaError_t launch_cutlass_bf16_geglu_sm89(Execution& execution);
 uint64_t cutlass_weight_prepack_count(const Execution& execution);
 
 TuningKeys tuning_keys(const Spec& spec,

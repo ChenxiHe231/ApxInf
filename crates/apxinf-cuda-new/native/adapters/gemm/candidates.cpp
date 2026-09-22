@@ -76,7 +76,7 @@ AlignmentRequirements cublaslt_alignment(const Spec&) {
   return requirements;
 }
 
-#ifdef APXINF_GEMM_CUTLASS
+#if defined(APXINF_GEMM_CUTLASS) || defined(APXINF_GEMM_CUTLASS_SM89)
 AlignmentRequirements cutlass_fp8_alignment(const Spec&) {
   AlignmentRequirements requirements{};
   requirements.a = 16;
@@ -204,6 +204,20 @@ void cutlass_nvfp4_configurations(const Spec& spec, std::vector<int>& configs) {
 }
 #endif
 
+#ifdef APXINF_GEMM_CUTLASS_SM89
+bool supports_cutlass_bf16_geglu_sm89(const Spec& spec) {
+  const bool exact_shape =
+      (spec.m == 10 && spec.n == 8192 && spec.k == 1024) ||
+      ((spec.m == 522 || spec.m == 533) && spec.n == 32768 && spec.k == 2048);
+  return exact_shape && spec.a_dtype == APXINF_DTYPE_BF16 &&
+         spec.b_dtype == APXINF_DTYPE_BF16 &&
+         spec.output_dtype == APXINF_DTYPE_BF16 &&
+         spec.alpha_is_unit != 0 && spec.output_scale_is_unit != 0 &&
+         spec.quantization == APXINF_GEMM_QUANT_NONE &&
+         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU;
+}
+#endif
+
 }  // namespace
 
 bool supports_device(const Implementation& implementation,
@@ -311,6 +325,14 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        cutlass_geglu_alignment, cutlass_geglu_resource_requirements,
        one_configuration, prepare_cutlass_geglu,
        launch_cutlass_bf16_geglu, destroy_cutlass},
+#endif
+#ifdef APXINF_GEMM_CUTLASS_SM89
+      {kProviderCutlass, 4, 1, "cutlass-bf16-sm89-geglu",
+       kDeviceFeatureCutlassSm89Bf16Geglu, true, true, false,
+       supports_cutlass_bf16_geglu_sm89, cutlass_geglu_alignment,
+       cutlass_geglu_resource_requirements, one_configuration,
+       prepare_cutlass_geglu_sm89, launch_cutlass_bf16_geglu_sm89,
+       destroy_cutlass},
 #endif
   };
   const ImplementationRegistry* selected = nullptr;

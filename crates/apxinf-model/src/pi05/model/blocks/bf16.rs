@@ -12,7 +12,7 @@ use crate::pi05::backend::{
         AdaptiveRmsNormArgs, BiasResidualArgs, BiasResidualLayerNormArgs,
         BiasResidualRmsNormArgs, GatherPatchGeometry, GatherSemantic, GemmArgs, GemmGegluArgs,
         LayerNormArgs, PointwiseActivation, PointwiseArgs, PointwiseSemantic, RmsNormArgs,
-        RopeArgs, RopeSemantic,
+        RopeArgs, RopeSemantic, WeightVersion,
     },
     Context, DeviceBuffer as CudaBuffer,
 };
@@ -186,7 +186,8 @@ fn gemm_geglu_bf16(
         canonical_weight,
     )?;
     let mut output = ctx.allocate_output(Shape::new(vec![a[0], b[1] / 2]), DType::BF16)?;
-    let mut gemm = GemmArgs::new(activation, canonical_weight, &mut output);
+    let mut gemm = GemmArgs::new(activation, canonical_weight, &mut output)
+        .with_immutable_weight(WeightVersion::new(1));
     gemm.policy = policies.gemm.clone();
     l3_gemm_geglu(ctx, GemmGegluArgs { gemm })?;
     Ok(output)
