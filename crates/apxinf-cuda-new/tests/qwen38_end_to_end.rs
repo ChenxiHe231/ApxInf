@@ -359,6 +359,15 @@ struct Scratch {
 }
 
 impl Scratch {
+    fn next_token_host(&self) -> i32 {
+        let mut id = [0u8; 4];
+        CudaBuffer::from_tensor(&self.next_token)
+            .unwrap()
+            .copy_to_host(&mut id)
+            .unwrap();
+        i32::from_le_bytes(id)
+    }
+
     fn new(ctx: &CudaContext) -> Scratch {
         let scale_bytes = |rows: usize, k: usize| {
             vec![ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap()]
@@ -699,6 +708,78 @@ fn full_model_decodes_and_is_timed() {
     // Warm up: the first step tunes every distinct GEMM shape.
     decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, 0);
     ctx.synchronize().unwrap();
+
+    // Sanity before timing. A forward pass that finishes is not the same as a
+    // forward pass that computed anything: NaNs propagate silently, a dead
+    // layer yields constant logits, and a broken recurrence still returns a
+    // number. None of that shows up in a latency measurement.
+    {
+        let mut bytes = vec![0u8; VOCAB * 2];
+        CudaBuffer::from_tensor(&scratch.logits)
+            .unwrap()
+            .copy_to_host(&mut bytes)
+            .unwrap();
+        let logits: Vec<f32> = bytes
+            .chunks_exact(2)
+            .map(|v| half::bf16::from_bits(u16::from_le_bytes([v[0], v[1]])).to_f32())
+            .collect();
+
+        let non_finite = logits.iter().filter(|v| !v.is_finite()).count();
+        let finite: Vec<f32> = logits.iter().copied().filter(|v| v.is_finite()).collect();
+        let max = finite.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let min = finite.iter().copied().fold(f32::INFINITY, f32::min);
+        let mean = finite.iter().sum::<f32>() / finite.len().max(1) as f32;
+        let variance = finite.iter().map(|v| (v - mean).powi(2)).sum::<f32>()
+            / finite.len().max(1) as f32;
+        let distinct = {
+            let mut sorted = finite.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.dedup();
+            sorted.len()
+        };
+        println!(
+            "\nlogits: min={min:.3} max={max:.3} mean={mean:.3} sd={:.3}\n        \
+             non-finite={non_finite}  distinct values={distinct} of {VOCAB}",
+            variance.sqrt()
+        );
+
+        assert_eq!(non_finite, 0, "logits contain NaN or Inf");
+        assert!(distinct > 1000, "logits are nearly constant -- a layer is dead");
+        assert!(
+            max.abs() < 1.0e4 && variance.sqrt() > 1.0e-3,
+            "logit scale is implausible: sd={}, max={max}",
+            variance.sqrt()
+        );
+    }
+
+    // Greedy-decode a short run and look at what comes out. Repeating a single
+    // token forever is the classic signature of a model that runs but does not
+    // compute -- worth catching here rather than in a latency table.
+    let mut produced = Vec::new();
+    for position in 1..=8usize {
+        // Autoregressive: feed the previous step's token and advance the
+        // position, since decode_step reads scratch.token and scratch.positions.
+        CudaBuffer::from_tensor(&scratch.token)
+            .unwrap()
+            .copy_from_host(&scratch.next_token_host().to_le_bytes())
+            .unwrap();
+        CudaBuffer::from_tensor(&scratch.positions)
+            .unwrap()
+            .copy_from_host(&(position as i32).to_le_bytes())
+            .unwrap();
+        decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, position);
+        ctx.synchronize().unwrap();
+        produced.push(scratch.next_token_host());
+    }
+    println!("greedy token ids: {produced:?}");
+    let unique: std::collections::HashSet<_> = produced.iter().collect();
+    println!("  {} distinct of {}", unique.len(), produced.len());
+    for id in &produced {
+        assert!(
+            *id >= 0 && (*id as usize) < VOCAB,
+            "token id {id} is outside the vocabulary"
+        );
+    }
 
     let steps = 16usize;
     let start = Instant::now();
