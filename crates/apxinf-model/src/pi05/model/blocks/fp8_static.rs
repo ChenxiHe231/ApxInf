@@ -163,35 +163,33 @@ fn bias_activation(
 
 fn rms_normalized_fp8(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     input: &Tensor,
     weight: &Tensor,
     eps: f32,
     scale: f32,
 ) -> Result<Tensor> {
-    let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
-    ops::rms_norm(
-        ctx,
-        ops::RmsNormArgs::new(input, weight, &mut normalized, eps),
-    )?;
-    fixed_quantize(ctx, policies, &normalized, scale)
+    let mut normalized = output(ctx, input.shape().dims().to_vec(), DType::F8E4M3)?;
+    let mut args = ops::RmsNormArgs::new(input, weight, &mut normalized, eps);
+    args.output_scale = scale;
+    ops::rms_norm(ctx, args)?;
+    Ok(normalized)
 }
 
 fn layer_normalized_fp8(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     input: &Tensor,
     weight: &Tensor,
     bias: &Tensor,
     eps: f32,
     scale: f32,
 ) -> Result<Tensor> {
-    let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
-    ops::layer_norm(
-        ctx,
-        ops::LayerNormArgs::new(input, weight, bias, &mut normalized, eps),
-    )?;
-    fixed_quantize(ctx, policies, &normalized, scale)
+    let mut normalized = output(ctx, input.shape().dims().to_vec(), DType::F8E4M3)?;
+    let mut args = ops::LayerNormArgs::new(input, weight, bias, &mut normalized, eps);
+    args.output_scale = scale;
+    ops::layer_norm(ctx, args)?;
+    Ok(normalized)
 }
 
 fn f16_vector_prefix(tensor: &Tensor, elements: usize) -> Result<Tensor> {
@@ -212,7 +210,7 @@ fn f16_vector_prefix(tensor: &Tensor, elements: usize) -> Result<Tensor> {
 
 fn adaptive_rms_normalized_fp8(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     input: &Tensor,
     norm_style: &Tensor,
     eps: f32,
@@ -225,12 +223,11 @@ fn adaptive_rms_normalized_fp8(
         .copied()
         .ok_or_else(|| Error::Other("PI0.5 adaptive RMS input has no columns".into()))?;
     let norm_style = f16_vector_prefix(norm_style, 2 * cols)?;
-    let mut normalized = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
-    ops::adaptive_rms_norm(
-        ctx,
-        ops::AdaptiveRmsNormArgs::new(input, &norm_style, &mut normalized, eps),
-    )?;
-    fixed_quantize(ctx, policies, &normalized, scale)
+    let mut normalized = output(ctx, input.shape().dims().to_vec(), DType::F8E4M3)?;
+    let mut args = ops::AdaptiveRmsNormArgs::new(input, &norm_style, &mut normalized, eps);
+    args.output_scale = scale;
+    ops::adaptive_rms_norm(ctx, args)?;
+    Ok(normalized)
 }
 
 fn bias_residual(
@@ -251,7 +248,7 @@ fn bias_residual(
 #[allow(clippy::too_many_arguments)]
 fn bias_residual_rms_normalized_fp8(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     input: &Tensor,
     bias: Option<&Tensor>,
     residual: &Tensor,
@@ -261,20 +258,19 @@ fn bias_residual_rms_normalized_fp8(
 ) -> Result<(Tensor, Tensor)> {
     let shape = input.shape().dims().to_vec();
     let mut hidden = output(ctx, shape.clone(), input.dtype())?;
-    let mut normalized = output(ctx, shape, input.dtype())?;
-    ops::bias_residual_rms_norm(
-        ctx,
-        ops::BiasResidualRmsNormArgs::new(
-            input, bias, residual, weight, &mut hidden, &mut normalized, eps,
-        ),
-    )?;
-    Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
+    let mut normalized = output(ctx, shape, DType::F8E4M3)?;
+    let mut args = ops::BiasResidualRmsNormArgs::new(
+        input, bias, residual, weight, &mut hidden, &mut normalized, eps,
+    );
+    args.output_scale = scale;
+    ops::bias_residual_rms_norm(ctx, args)?;
+    Ok((hidden, normalized))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn bias_residual_layer_normalized_fp8(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     input: &Tensor,
     bias: Option<&Tensor>,
     residual: &Tensor,
@@ -285,20 +281,19 @@ fn bias_residual_layer_normalized_fp8(
 ) -> Result<(Tensor, Tensor)> {
     let shape = input.shape().dims().to_vec();
     let mut hidden = output(ctx, shape.clone(), input.dtype())?;
-    let mut normalized = output(ctx, shape, input.dtype())?;
-    ops::bias_residual_layer_norm(
-        ctx,
-        ops::BiasResidualLayerNormArgs::new(
-            input, bias, residual, weight, norm_bias, &mut hidden, &mut normalized, eps,
-        ),
-    )?;
-    Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
+    let mut normalized = output(ctx, shape, DType::F8E4M3)?;
+    let mut args = ops::BiasResidualLayerNormArgs::new(
+        input, bias, residual, weight, norm_bias, &mut hidden, &mut normalized, eps,
+    );
+    args.output_scale = scale;
+    ops::bias_residual_layer_norm(ctx, args)?;
+    Ok((hidden, normalized))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn ada_gate_residual_rms_normalized_fp8(
     ctx: &Context,
-    policies: &Fp8L3Policies,
+    _policies: &Fp8L3Policies,
     input: &Tensor,
     residual: &Tensor,
     norm_style: &Tensor,
@@ -315,14 +310,13 @@ fn ada_gate_residual_rms_normalized_fp8(
     let norm_style = f16_vector_prefix(norm_style, 2 * cols)?;
     let shape = input.shape().dims().to_vec();
     let mut hidden = output(ctx, shape.clone(), input.dtype())?;
-    let mut normalized = output(ctx, shape, input.dtype())?;
-    ops::ada_gate_residual_rms_norm(
-        ctx,
-        ops::AdaGateResidualRmsNormArgs::new(
-            input, residual, &norm_style, gate_style, &mut hidden, &mut normalized, eps,
-        ),
-    )?;
-    Ok((hidden, fixed_quantize(ctx, policies, &normalized, scale)?))
+    let mut normalized = output(ctx, shape, DType::F8E4M3)?;
+    let mut args = ops::AdaGateResidualRmsNormArgs::new(
+        input, residual, &norm_style, gate_style, &mut hidden, &mut normalized, eps,
+    );
+    args.output_scale = scale;
+    ops::ada_gate_residual_rms_norm(ctx, args)?;
+    Ok((hidden, normalized))
 }
 
 #[allow(clippy::too_many_arguments)]

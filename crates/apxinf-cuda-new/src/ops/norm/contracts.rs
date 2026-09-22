@@ -97,6 +97,7 @@ pub(crate) struct RawArgs<'a> {
     pub(crate) hidden: Option<&'a mut Tensor>,
     pub(crate) normalized: Option<&'a mut Tensor>,
     pub(crate) eps: f32,
+    pub(crate) output_scale: f32,
 }
 
 pub(crate) struct Normalized {
@@ -114,6 +115,15 @@ fn dtype_code(dtype: DType) -> Result<u32> {
         DType::F16 => Ok(1),
         DType::BF16 => Ok(2),
         _ => Err(invalid("Norm currently supports F16 and BF16")),
+    }
+}
+
+fn output_dtype_code(dtype: DType) -> Result<u32> {
+    match dtype {
+        DType::F16 => Ok(1),
+        DType::BF16 => Ok(2),
+        DType::F8E4M3 => Ok(3),
+        _ => Err(invalid("Norm output supports F16, BF16 and E4M3")),
     }
 }
 
@@ -175,6 +185,9 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
 
     if !(args.eps.is_finite() && args.eps > 0.0) {
         return Err(invalid("Norm eps must be finite and positive"));
+    }
+    if !(args.output_scale.is_finite() && args.output_scale > 0.0) {
+        return Err(invalid("Norm output_scale must be finite and positive"));
     }
     if args.bias.is_some() && !semantic.may_have_bias() {
         return Err(invalid("Norm semantic does not take a bias"));
@@ -271,12 +284,13 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
 
     let bind_output = |tensor: Option<&mut Tensor>,
                        required: bool,
+                       output_dtype: DType,
                        label: &str,
                        storage: &mut Vec<CudaBuffer>|
      -> Result<(*mut std::ffi::c_void, u32)> {
         match tensor {
             Some(tensor) => {
-                let buffer = tensor_storage(ctx, tensor, dtype, count)?;
+                let buffer = tensor_storage(ctx, tensor, output_dtype, count)?;
                 let pointer = buffer.ptr() as *mut std::ffi::c_void;
                 let alignment = alignment_of(buffer.ptr() as usize);
                 storage.push(buffer);
@@ -290,12 +304,29 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
     let (hidden, hidden_alignment) = bind_output(
         args.hidden,
         semantic.writes_hidden(),
+        dtype,
         "hidden",
         &mut storage,
     )?;
+    let output_dtype = args
+        .normalized
+        .as_ref()
+        .map_or(dtype, |tensor| tensor.dtype());
+    if output_dtype == DType::F8E4M3 {
+        if dtype != DType::F16 || !semantic.writes_normalized() {
+            return Err(invalid(
+                "Quantized Norm output requires an F16 normalization semantic",
+            ));
+        }
+    } else if output_dtype != dtype || args.output_scale != 1.0 {
+        return Err(invalid(
+            "Non-quantized Norm output must preserve dtype and use unit output_scale",
+        ));
+    }
     let (normalized, normalized_alignment) = bind_output(
         args.normalized,
         semantic.writes_normalized(),
+        output_dtype,
         "normalized",
         &mut storage,
     )?;
@@ -305,7 +336,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
         version: abi::SPEC_VERSION,
         semantic: semantic.code(),
         dtype: dtype_value,
-        output_dtype: dtype_value,
+        output_dtype: output_dtype_code(output_dtype)?,
         has_bias: u32::from(!bias.is_null()),
         input_alignment,
         weight_alignment,
@@ -316,7 +347,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
         normalized_alignment,
         rows: i64::from(rows_abi),
         cols: i64::from(cols_abi),
-        output_scale_is_unit: 1,
+        output_scale_is_unit: u32::from(args.output_scale == 1.0),
     };
 
     let bindings = abi::Bindings {
@@ -331,7 +362,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
         normalized,
         stream: ctx.stream().handle() as abi::CudaStream,
         eps: args.eps,
-        output_scale: 1.0,
+        output_scale: args.output_scale,
     };
 
     Ok(Normalized {
