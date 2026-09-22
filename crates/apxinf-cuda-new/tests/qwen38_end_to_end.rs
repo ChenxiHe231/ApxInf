@@ -1869,3 +1869,175 @@ fn teacher_forcing_logits() {
     println!("TEACHER FORCING DUMP COMPLETE mode={} -> {out_dir}",
              if unfused { "unfused" } else { "fused" });
 }
+
+// -------------------------------------------------------------------------
+// Real prompt generation driver: tokenize -> per-token prefill (building KV +
+// GDN state) -> greedy decode to EOS or a token budget -> detokenize -> print.
+//
+// The prefill here feeds the prompt one token at a time through decode_step.
+// The committed GDN equivalence test (qwen38_gdn_prefill.rs) proves that the
+// GDN recurrent state this leaves is bit-identical (cosine 1.0, relL2 < 1e-3)
+// to what the parallel gdn_chunk_scan produces for the same tokens, so the
+// state generation continues from is exactly the chunked-prefill state. A
+// batched multi-token forward (attention prefill + gdn_chunk_scan per layer)
+// is a separate, larger forward path that does not yet exist in the tree; the
+// per-token prefill is the state-equivalent stand-in whose correctness is
+// under test elsewhere.
+//
+//   APXINF_QWEN38_CHECKPOINT=/path/to/Qwen3.8-27B-NVFP4 \
+//   APXINF_QWEN38_PROMPT="The capital of France is" \
+//   APXINF_QWEN38_MAX_NEW=32 \
+//     bash crates/apxinf-cuda-new/test-new.sh \
+//       test -p apxinf-cuda --test qwen38_end_to_end --release \
+//       -- --ignored generate_from_a_real_prompt --nocapture
+// -------------------------------------------------------------------------
+#[test]
+#[ignore = "requires the 20 GiB Qwen3.8-27B-NVFP4 checkpoint and a GPU"]
+fn generate_from_a_real_prompt() {
+    use apxinf_tokenizer::Tokenizer;
+
+    let ctx = CudaContext::new(0).unwrap();
+
+    let ckpt: PathBuf = std::env::var_os("APXINF_QWEN38_CHECKPOINT")
+        .expect("set APXINF_QWEN38_CHECKPOINT")
+        .into();
+    let tokenizer = Tokenizer::from_file(ckpt.join("tokenizer.json"))
+        .expect("load tokenizer.json from the checkpoint directory");
+
+    let prompt = std::env::var("APXINF_QWEN38_PROMPT")
+        .unwrap_or_else(|_| "The capital of France is".to_string());
+    let max_new: usize = std::env::var("APXINF_QWEN38_MAX_NEW")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(32);
+
+    let prompt_ids: Vec<u32> = tokenizer.encode(&prompt).expect("encode prompt");
+    let eos = tokenizer.eos_token_id();
+    println!("prompt: {prompt:?}");
+    println!("prompt tokens ({}): {prompt_ids:?}", prompt_ids.len());
+    println!("eos token id: {eos:?}");
+    assert!(!prompt_ids.is_empty(), "empty prompt tokenization");
+
+    // Load the model.
+    let tensors = checkpoint();
+    let model = load_model(&ctx, &tensors);
+    ctx.synchronize().unwrap();
+    drop(tensors);
+
+    // KV cache large enough for prompt + generation.
+    let capacity = (prompt_ids.len() + max_new + 8).next_power_of_two();
+    let mut gdn_states: Vec<GdnState> = (0..LAYERS - LAYERS / FULL_ATTENTION_INTERVAL)
+        .map(|_| GdnState {
+            recurrent: zeros(&ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM, GDN_HEAD_DIM], DType::F32),
+            conv_window: zeros(&ctx, vec![QKV_WIDTH, CONV_WIDTH], DType::F32),
+        })
+        .collect();
+    let mut kv_caches: Vec<KvCache> = (0..LAYERS / FULL_ATTENTION_INTERVAL)
+        .map(|_| KvCache {
+            keys: zeros(&ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+            values: zeros(&ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+        })
+        .collect();
+    let mut scratch = Scratch::new(&ctx);
+
+    // Warm-up on the first prompt token so the GEMM autotuner does not pollute
+    // the prefill timing; state is reset right after by re-running position 0.
+    set_token(&ctx, &scratch, prompt_ids[0] as i32);
+    set_position(&ctx, &scratch, 0);
+    decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, 0);
+    ctx.synchronize().unwrap();
+    // Reset the accumulated state so the real prefill starts clean.
+    reset_state(&ctx, &mut gdn_states, &mut kv_caches);
+
+    // --- Prefill: feed every prompt token, keeping the last-position logits. --
+    let prefill_start = Instant::now();
+    for (pos, &tok) in prompt_ids.iter().enumerate() {
+        set_token(&ctx, &scratch, tok as i32);
+        set_position(&ctx, &scratch, pos);
+        decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, pos);
+    }
+    ctx.synchronize().unwrap();
+    let prefill_secs = prefill_start.elapsed().as_secs_f64();
+    // After prefill, scratch.next_token holds the argmax at the last prompt
+    // position: the first generated token.
+    let first_token = scratch.next_token_host();
+
+    let n_prompt = prompt_ids.len();
+    println!(
+        "\nprefill: {:7.2} ms  ({} tokens, {:6.1} tok/s)  TTFT {:7.2} ms",
+        prefill_secs * 1e3,
+        n_prompt,
+        n_prompt as f64 / prefill_secs,
+        prefill_secs * 1e3
+    );
+
+    // --- Greedy decode from the first generated token to EOS or the budget. ---
+    let mut generated: Vec<u32> = Vec::new();
+    let mut next = first_token;
+    let decode_start = Instant::now();
+    let mut steps = 0usize;
+    for i in 0..max_new {
+        if next < 0 || (next as usize) >= VOCAB {
+            panic!("token id {next} outside vocabulary at step {i}");
+        }
+        generated.push(next as u32);
+        if eos.map(|e| e as i32 == next).unwrap_or(false) {
+            break;
+        }
+        let pos = n_prompt + i;
+        set_token(&ctx, &scratch, next);
+        set_position(&ctx, &scratch, pos);
+        decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, pos);
+        ctx.synchronize().unwrap();
+        next = scratch.next_token_host();
+        steps += 1;
+    }
+    let decode_secs = decode_start.elapsed().as_secs_f64();
+    let per_token = if steps > 0 { decode_secs / steps as f64 } else { decode_secs };
+
+    println!("generated token ids ({}): {generated:?}", generated.len());
+    let text = tokenizer.decode(&generated).expect("detokenize generation");
+    println!("\n=== GENERATED TEXT ===\n{prompt}{text}\n======================");
+    println!(
+        "\ndecode: {:7.3} ms/token   {:6.2} tok/s   ({steps} steps)",
+        per_token * 1e3,
+        if per_token > 0.0 { 1.0 / per_token } else { 0.0 }
+    );
+
+    assert!(!generated.is_empty(), "no tokens generated");
+}
+
+fn set_token(ctx: &CudaContext, scratch: &Scratch, id: i32) {
+    let _ = ctx;
+    CudaBuffer::from_tensor(&scratch.token)
+        .unwrap()
+        .copy_from_host(&id.to_le_bytes())
+        .unwrap();
+}
+
+fn set_position(ctx: &CudaContext, scratch: &Scratch, pos: usize) {
+    let _ = ctx;
+    CudaBuffer::from_tensor(&scratch.positions)
+        .unwrap()
+        .copy_from_host(&(pos as i32).to_le_bytes())
+        .unwrap();
+}
+
+fn reset_state(ctx: &CudaContext, gdn_states: &mut [GdnState], kv_caches: &mut [KvCache]) {
+    for s in gdn_states.iter() {
+        zero_tensor(ctx, &s.recurrent);
+        zero_tensor(ctx, &s.conv_window);
+    }
+    for c in kv_caches.iter() {
+        zero_tensor(ctx, &c.keys);
+        zero_tensor(ctx, &c.values);
+    }
+    ctx.synchronize().unwrap();
+}
+
+fn zero_tensor(ctx: &CudaContext, tensor: &Tensor) {
+    let _ = ctx;
+    let buf = CudaBuffer::from_tensor(tensor).unwrap();
+    let zeros = vec![0u8; buf.len()];
+    buf.copy_from_host(&zeros).unwrap();
+}
