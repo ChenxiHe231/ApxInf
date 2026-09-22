@@ -77,6 +77,21 @@ void prepare_cublaslt_impl(Execution& state, bool native_fp8) {
   check_cublas(cublasLtMatmulDescSetAttribute(
       resources->operation, CUBLASLT_MATMUL_DESC_TRANSA, &transpose,
       sizeof(transpose)));
+  if (native_fp8 && spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+      spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
+      spec.output_scale_is_unit != 0) {
+    const cublasLtEpilogue_t epilogue = CUBLASLT_EPILOGUE_BIAS;
+    check_cublas(cublasLtMatmulDescSetAttribute(
+        resources->operation, CUBLASLT_MATMUL_DESC_EPILOGUE, &epilogue,
+        sizeof(epilogue)));
+    const cudaDataType_t bias_type = projection_type;
+    check_cublas(cublasLtMatmulDescSetAttribute(
+        resources->operation, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE,
+        &bias_type, sizeof(bias_type)));
+    check_cublas(cublasLtMatmulDescSetAttribute(
+        resources->operation, CUBLASLT_MATMUL_DESC_BIAS_POINTER,
+        &state.bindings.bias, sizeof(state.bindings.bias)));
+  }
   check_cublas(cublasLtMatrixLayoutCreate(
       &resources->a_layout, input_type,
       transpose == CUBLAS_OP_T ? spec.k : spec.n,

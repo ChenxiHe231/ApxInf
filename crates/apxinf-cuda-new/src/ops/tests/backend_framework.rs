@@ -459,6 +459,61 @@ fn gpu_e2e_autotune_times_candidates_and_checks_winner_capture() {
 }
 
 #[test]
+fn gpu_e2e_native_fp8_bias_recipe_captures_and_restores() {
+    let cache_dir = scratch_cache_dir("native-fp8-bias-recipe");
+    let cache = cache_dir.to_string_lossy().into_owned();
+    let run = |ctx: &CudaContext, seed: bool| {
+        let (m, k, n) = (64, 64, 64);
+        let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
+        let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
+        let bias = f16_tensor(0, vec![n], &vec![0.5; n]);
+        let mut out = zeros_tensor(0, vec![m, n], DType::F16);
+        let normalized = {
+            let mut args = GemmArgs::new(&a, &b, &mut out)
+                .with_immutable_weight(WeightVersion::new(1));
+            args.quantization = GemmQuantization::Fp8UnitScale;
+            args.policy.online_tune = false;
+            args.policy.allow_fallback = false;
+            args.policy.cache_dir = Some(cache.clone());
+            super::contracts::normalize(
+                ctx,
+                args,
+                super::contracts::Semantic::GemmBias,
+                Some(&bias),
+            )
+            .unwrap()
+        };
+        if seed {
+            super::execution::seed_recipe(ctx, &normalized, 2, 2, 1, 0).unwrap();
+        }
+        let execution = super::execution::prepare(ctx, normalized).unwrap();
+        assert!(
+            execution
+                .summary()
+                .starts_with("cublasLt-native-fp8-bias config=0 "),
+            "{}",
+            execution.summary()
+        );
+        assert!(execution.summary().contains("source=recipe"));
+        let graph = crate::capture(ctx, || execution.enqueue()).unwrap();
+        graph.replay().unwrap();
+        ctx.synchronize().unwrap();
+        assert!(f16_values(&out).iter().all(|&value| value == 64.5));
+        drop((graph, execution));
+    };
+
+    let ctx = CudaContext::new(0).unwrap();
+    if !matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
+        std::fs::remove_dir_all(cache_dir).unwrap();
+        return;
+    }
+    run(&ctx, true);
+    drop(ctx);
+    run(&CudaContext::new(0).unwrap(), false);
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}
+
+#[test]
 fn gpu_e2e_graph_replay_overwrites_sentinel_and_matches_numeric_result() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, n) = (7, 19, 22);

@@ -93,8 +93,12 @@ void allocate_common_resources(const Spec& spec,
     resources.resource_bytes += a_bytes + b_bytes;
   }
 
+  const bool native_bias =
+      native_fp8 && spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+      spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
+      spec.output_scale_is_unit != 0;
   const bool needs_postprocess =
-      spec.semantic != APXINF_GEMM_SEMANTIC_GEMM ||
+      (spec.semantic != APXINF_GEMM_SEMANTIC_GEMM && !native_bias) ||
       has_row_channel_scales(spec) ||
       spec.output_dtype != resources.projection_dtype ||
       spec.output_scale_is_unit == 0;
@@ -121,8 +125,12 @@ size_t common_resource_requirements(const Spec& spec, bool native_fp8) {
     bytes += static_cast<size_t>(spec.k * spec.n) *
              dtype_bytes(projection_dtype);
   }
+  const bool native_bias =
+      native_fp8 && spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+      spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
+      spec.output_scale_is_unit != 0;
   const bool needs_postprocess =
-      spec.semantic != APXINF_GEMM_SEMANTIC_GEMM ||
+      (spec.semantic != APXINF_GEMM_SEMANTIC_GEMM && !native_bias) ||
       has_row_channel_scales(spec) || spec.output_dtype != projection_dtype ||
       spec.output_scale_is_unit == 0;
   if (needs_postprocess) {
