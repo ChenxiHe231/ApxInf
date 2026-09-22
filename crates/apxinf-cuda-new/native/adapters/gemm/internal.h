@@ -165,6 +165,8 @@ void prepare_cublaslt_native_fp4(Execution& execution);
 size_t cublaslt_resource_requirements(const Spec& spec);
 size_t cublaslt_native_fp8_resource_requirements(const Spec& spec);
 size_t cublaslt_native_fp4_resource_requirements(const Spec& spec);
+void prepare_cublaslt_native_fp8_gelu(Execution& execution);
+size_t cublaslt_native_fp8_gelu_resource_requirements(const Spec& spec);
 void destroy_cublaslt(Execution& execution) noexcept;
 cudaError_t launch_cublaslt(Execution& execution);
 void prepare_cutlass_fp8_gemm(Execution& execution);

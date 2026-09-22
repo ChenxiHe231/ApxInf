@@ -790,6 +790,93 @@ fn gemm_bias_gelu_all_candidates_match_torch() {
 }
 
 #[test]
+fn fp8_gemm_bias_gelu_can_quantize_directly_with_f16_bias() {
+    const M: usize = 512;
+    const K: usize = 1152;
+    const N: usize = 4304;
+
+    let ctx = CudaContext::new(0).unwrap();
+    // E4M3 encodings: 0x38 = 1.0 and 0x30 = 0.5.
+    let a = bytes_tensor(0, vec![M, K], DType::F8E4M3, &vec![0x38; M * K]);
+    let b = bytes_tensor(0, vec![K, N], DType::F8E4M3, &vec![0x30; K * N]);
+    let bias = f16_tensor(0, vec![N], &vec![0.5; N]);
+    let mut out = zeros_tensor(0, vec![M, N], DType::F8E4M3);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.alpha = 4.0 / K as f32;
+    args.output_scale = 2.0;
+    validate_all_candidates(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmBiasGelu,
+        Some(&bias),
+        &vec![1.25; M * N],
+    )
+    .unwrap();
+}
+
+#[test]
+fn fp8_gemm_bias_gelu_quant_matches_three_stage_path() {
+    const M: usize = 512;
+    const K: usize = 1152;
+    const N: usize = 4304;
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = bytes_tensor(0, vec![M, K], DType::F8E4M3, &vec![0x38; M * K]);
+    let b = bytes_tensor(0, vec![K, N], DType::F8E4M3, &vec![0x30; K * N]);
+    let bias = f16_tensor(0, vec![N], &vec![0.5; N]);
+
+    let mut projection = zeros_tensor(0, vec![M, N], DType::F16);
+    let mut legacy_gemm = GemmArgs::new(&a, &b, &mut projection);
+    legacy_gemm.quantization = GemmQuantization::Fp8UnitScale;
+    legacy_gemm.alpha = 4.0 / K as f32;
+    legacy_gemm.policy.online_tune = false;
+    gemm_bias(
+        &ctx,
+        GemmBiasArgs {
+            gemm: legacy_gemm,
+            bias: &bias,
+        },
+    )
+    .unwrap();
+    let mut gelu = zeros_tensor(0, vec![M, N], DType::F16);
+    let mut pointwise_args =
+        PointwiseArgs::new(PointwiseSemantic::BiasActivation, &projection, &mut gelu);
+    pointwise_args.activation = PointwiseActivation::Gelu;
+    pointwise(&ctx, pointwise_args).unwrap();
+    let mut expected = zeros_tensor(0, vec![M, N], DType::F8E4M3);
+    let mut quantize = QuantizationArgs::new(
+        QuantizationSemantic::FixedScaleE4m3,
+        &gelu,
+        &mut expected,
+    );
+    quantize.scale = 2.0;
+    quantization(&ctx, quantize).unwrap();
+
+    let mut actual = zeros_tensor(0, vec![M, N], DType::F8E4M3);
+    let mut fused_gemm = GemmArgs::new(&a, &b, &mut actual);
+    fused_gemm.quantization = GemmQuantization::Fp8UnitScale;
+    fused_gemm.alpha = 4.0 / K as f32;
+    fused_gemm.output_scale = 2.0;
+    gemm_bias_gelu(
+        &ctx,
+        GemmBiasGeluArgs {
+            gemm: fused_gemm,
+            bias: &bias,
+        },
+    )
+    .unwrap();
+
+    let bytes = |tensor: &Tensor| {
+        let buffer = crate::CudaBuffer::from_tensor(tensor).unwrap();
+        let mut host = vec![0; buffer.len()];
+        buffer.copy_to_host(&mut host).unwrap();
+        host
+    };
+    assert_eq!(bytes(&actual), bytes(&expected));
+}
+
+#[test]
 fn gemm_geglu_all_candidates_match_torch() {
     use torch_fixture as f;
 
