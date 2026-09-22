@@ -61,6 +61,13 @@ AlignmentRequirements cublaslt_nvfp4_alignment(const Spec&) {
   return requirements;
 }
 
+bool supports_native_fp8_bias(const Spec& spec) {
+  return supports_native_fp8(spec) &&
+         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+         spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
+         spec.output_scale_is_unit != 0;
+}
+
 AlignmentRequirements vendor_alignment(const Spec&) {
   return {};
 }
@@ -273,6 +280,11 @@ const ImplementationRegistry& registry(uint32_t semantic) {
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
+       destroy_cublaslt},
+      {kProviderCublasLt, 2, 1, "cublasLt-native-fp8-bias",
+       kDeviceFeatureNativeFp8, true, false, false, supports_native_fp8_bias,
+       cublaslt_alignment, cublaslt_native_fp8_resource_requirements,
+       cublaslt_configurations, prepare_cublaslt_native_fp8, launch_cublaslt,
        destroy_cublaslt},
   };
   static const ImplementationRegistry gemm_entries = {
