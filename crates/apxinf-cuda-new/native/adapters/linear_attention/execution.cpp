@@ -178,12 +178,15 @@ extern "C" apxinf_status_t apxinf_gdn_chunk_scan(
     const void* q, const void* k, const void* v, const void* g,
     const void* beta, void* out, void* state, int64_t seq_padded,
     int64_t v_heads, int64_t k_heads, int64_t chunk_size, int64_t k_dim,
-    int64_t num_chunks, apxinf_cuda_stream_t stream) {
+    int64_t num_chunks, int64_t q_row_stride, int64_t k_row_stride,
+    int64_t v_row_stride, apxinf_cuda_stream_t stream) {
   return abi_boundary([&] {
     if (q == nullptr || k == nullptr || v == nullptr || g == nullptr ||
         beta == nullptr || out == nullptr || state == nullptr ||
         !extent(seq_padded) || !extent(v_heads) || !extent(k_heads) ||
-        !extent(chunk_size) || !extent(k_dim) || !extent(num_chunks)) {
+        !extent(chunk_size) || !extent(k_dim) || !extent(num_chunks) ||
+        !extent(q_row_stride) || !extent(k_row_stride) ||
+        !extent(v_row_stride)) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN chunk scan arguments");
     }
@@ -191,7 +194,9 @@ extern "C" apxinf_status_t apxinf_gdn_chunk_scan(
               q, k, v, g, beta, out, state, static_cast<int>(seq_padded),
               static_cast<int>(v_heads), static_cast<int>(k_heads),
               static_cast<int>(chunk_size), static_cast<int>(k_dim),
-              static_cast<int>(num_chunks), static_cast<cudaStream_t>(stream)),
+              static_cast<int>(num_chunks), static_cast<int>(q_row_stride),
+              static_cast<int>(k_row_stride), static_cast<int>(v_row_stride),
+              static_cast<cudaStream_t>(stream)),
           "GDN chunk scan");
   });
 }

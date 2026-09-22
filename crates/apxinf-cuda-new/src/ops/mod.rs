@@ -30,7 +30,8 @@ pub use attn_ops::{
 pub use gdn::{
     gdn_causal_conv_forward, gdn_causal_conv_step, gdn_decay_and_beta,
     gdn_decay_and_beta_seq, gdn_gated_norm, gdn_gated_norm_seq,
-    gdn_chunk_scan, gdn_l2_normalize_heads, gdn_recurrent_step, gdn_state_elements,
+    gdn_chunk_scan, gdn_chunk_scan_interleaved, gdn_l2_normalize_heads,
+    gdn_recurrent_step, gdn_state_elements,
 };
 pub use model::{argmax, embedding_gather};
 pub use mlp::{
