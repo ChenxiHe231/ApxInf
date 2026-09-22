@@ -1567,3 +1567,305 @@ fn compare_against_reference_tensors() {
     dump.write();
     println!("REFERENCE DUMP COMPLETE seq_len={seq_len}");
 }
+
+// ===========================================================================
+// Whole-model teacher-forcing (ACCEPTANCE.md §5)
+//
+// Drives the full 64-layer decode over fixed token sequences, feeding the
+// *given* token at every position (teacher forcing -- NOT the port's own
+// argmax), and dumps the full FP32 logits vector at every position for
+// compare_teacher_forcing.py. Two modes:
+//   fused   -- the production path (nvfp4_quantize_rms_norm / _swiglu), and the
+//              fused rms_norm+quantize lm_head as in decode_step.
+//   unfused -- rms_norm then nvfp4_quantize_activation, swiglu then
+//              nvfp4_quantize_activation, matching what the reference computes
+//              (a BF16 rounding between norm/activation and quantize).
+//
+// APXINF_TF_TOKENS   path to a "name id id id..." per-line token file
+// APXINF_TF_OUT      output directory for <name>.logits.f32 + argmax
+// APXINF_TF_FUSED    "1" => fused path, anything else => unfused (default)
+// ===========================================================================
+
+/// MLP with fusion off but no tapping: RMSNorm and SwiGLU each land in BF16
+/// before quantization, matching the reference.
+fn unfused_mlp_quiet(
+    ctx: &CudaContext,
+    gate_up: &Nvfp4Weight,
+    down: &Nvfp4Weight,
+    norm_weight: &Tensor,
+    scratch: &mut Scratch,
+    swiglu_out: &Tensor,
+) {
+    ops::rms_norm(ctx, &scratch.hidden, norm_weight, &scratch.normalized, EPSILON).unwrap();
+    ops::nvfp4_quantize_activation(
+        ctx, &scratch.normalized, &scratch.nvfp4_activation, &scratch.nvfp4_scales,
+        gate_up.input_scale, BLOCK, ops::ScaleLayout::GemmAtom,
+    ).unwrap();
+    ops::gemm(ctx, ops::GemmArgs::nvfp4(
+        &scratch.nvfp4_activation, &scratch.nvfp4_scales, &gate_up.packed, &gate_up.scales,
+        BLOCK, gate_up.alpha, &mut scratch.mlp_fused,
+    )).unwrap();
+    ops::swiglu(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
+    ops::nvfp4_quantize_activation(
+        ctx, swiglu_out, &scratch.mlp_activation, &scratch.mlp_scales,
+        down.input_scale, BLOCK, ops::ScaleLayout::GemmAtom,
+    ).unwrap();
+    ops::gemm(ctx, ops::GemmArgs::nvfp4(
+        &scratch.mlp_activation, &scratch.mlp_scales, &down.packed, &down.scales,
+        BLOCK, down.alpha, &mut scratch.mlp_out,
+    )).unwrap();
+    ops::add_into(ctx, &scratch.mlp_out, &scratch.hidden).unwrap();
+}
+
+/// One decoder layer for teacher forcing, with a fused/unfused MLP switch. The
+/// mixer (attention / GDN) is identical to decode_step; only the MLP quantizer
+/// fusion differs.
+#[allow(clippy::too_many_arguments)]
+fn tf_run_layer(
+    ctx: &CudaContext,
+    layer: &Layer,
+    scratch: &mut Scratch,
+    gdn_states: &mut [GdnState],
+    kv_caches: &mut [KvCache],
+    gdn_index: &mut usize,
+    attention_index: &mut usize,
+    rotary: usize,
+    position: usize,
+    unfused: bool,
+    swiglu_out: &Tensor,
+) {
+    match layer {
+        Layer::Attention(attention) => {
+            let cache = &mut kv_caches[*attention_index];
+            *attention_index += 1;
+            ops::rms_norm(ctx, &scratch.hidden, &attention.input_norm, &scratch.normalized, EPSILON).unwrap();
+            fp8_projection(ctx, &attention.q, &scratch.normalized, &scratch.fp8_activation, &mut scratch.qkv_fused);
+            let fused_heads = view(&scratch.qkv_fused, vec![1, HEADS, 2 * HEAD_DIM], DType::BF16);
+            ops::split_query_and_gate(ctx, &fused_heads, &scratch.query, &scratch.query_gate).unwrap();
+            let mut key_slot = cache_slot(&cache.keys, position, vec![1, KV_HEADS * HEAD_DIM]);
+            let mut value_slot = cache_slot(&cache.values, position, vec![1, KV_HEADS * HEAD_DIM]);
+            fp8_projection(ctx, &attention.k, &scratch.normalized, &scratch.fp8_activation, &mut key_slot);
+            fp8_projection(ctx, &attention.v, &scratch.normalized, &scratch.fp8_activation, &mut value_slot);
+            let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
+            let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
+            ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
+            ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+            let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
+            let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
+            ops::partial_rope(ctx, &query_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
+            ops::partial_rope(ctx, &key_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
+            let valid = position + 1;
+            let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
+            let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
+            let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
+            let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
+            let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
+            args.valid_key_tokens = valid;
+            args.query_start = position;
+            ops::kv_cache_attention(ctx, args).unwrap();
+            let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
+            ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+            fp8_projection(ctx, &attention.o, &scratch.attention_out, &scratch.attention_fp8, &mut scratch.projected);
+            ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
+            if unfused {
+                unfused_mlp_quiet(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch, swiglu_out);
+            } else {
+                nvfp4_mlp(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch);
+            }
+        }
+        Layer::Gdn(gdn) => {
+            let state = &mut gdn_states[*gdn_index];
+            *gdn_index += 1;
+            ops::rms_norm(ctx, &scratch.hidden, &gdn.input_norm, &scratch.normalized, EPSILON).unwrap();
+            fp8_projection(ctx, &gdn.qkv, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_qkv);
+            fp8_projection(ctx, &gdn.z, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_z);
+            let qkv_flat = view(&scratch.gdn_qkv, vec![QKV_WIDTH], DType::BF16);
+            ops::gdn_causal_conv_step(ctx, &state.conv_window, &qkv_flat, &gdn.conv_weight, &scratch.gdn_conv).unwrap();
+            let (q, k, v) = split_gdn_qkv(ctx, &scratch.gdn_conv);
+            ops::gdn_l2_normalize_heads(ctx, &q, EPSILON).unwrap();
+            ops::gdn_l2_normalize_heads(ctx, &k, EPSILON).unwrap();
+            bf16_matvec(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a);
+            bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
+            ops::gdn_decay_and_beta(ctx, &scratch.gdn_a, &scratch.gdn_b, &gdn.a_log, &gdn.dt_bias, &scratch.gdn_decay, &scratch.gdn_beta).unwrap();
+            ops::gdn_recurrent_step(ctx, &state.recurrent, &q, &k, &v, &scratch.gdn_decay, &scratch.gdn_beta, &scratch.gdn_readout, GDN_K_HEADS).unwrap();
+            ops::gdn_gated_norm(ctx, &scratch.gdn_readout, &gdn_z_heads(ctx, &scratch.gdn_z), &gdn.norm_weight, &scratch.gdn_gated, EPSILON).unwrap();
+            let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
+            fp8_projection(ctx, &gdn.out, &flat, &scratch.gdn_fp8, &mut scratch.projected);
+            ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
+            if unfused {
+                unfused_mlp_quiet(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch, swiglu_out);
+            } else {
+                nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
+            }
+        }
+    }
+}
+
+/// Embedding -> 64 layers -> final norm -> lm_head, producing logits into
+/// scratch.logits. `unfused` selects the MLP and lm_head quantizer fusion.
+/// When `hidden_taps` is Some, the BF16 hidden after each layer is appended to
+/// taps[layer] (used to localize inter-layer drift).
+#[allow(clippy::too_many_arguments)]
+fn tf_decode_step(
+    ctx: &CudaContext,
+    model: &Model,
+    scratch: &mut Scratch,
+    gdn_states: &mut [GdnState],
+    kv_caches: &mut [KvCache],
+    position: usize,
+    unfused: bool,
+    swiglu_out: &Tensor,
+    mut hidden_taps: Option<&mut Vec<Vec<f32>>>,
+) {
+    ops::embedding_gather(ctx, &model.embedding, &scratch.token, &scratch.hidden).unwrap();
+    let rotary = ops::rotary_dim(HEAD_DIM, PARTIAL_ROTARY);
+    let mut gdn_index = 0usize;
+    let mut attention_index = 0usize;
+    for (layer_index, layer) in model.layers.iter().enumerate() {
+        tf_run_layer(ctx, layer, scratch, gdn_states, kv_caches,
+                     &mut gdn_index, &mut attention_index, rotary, position, unfused, swiglu_out);
+        if let Some(taps) = hidden_taps.as_deref_mut() {
+            ctx.synchronize().unwrap();
+            let mut bytes = vec![0u8; HIDDEN * 2];
+            CudaBuffer::from_tensor(&scratch.hidden).unwrap().copy_to_host(&mut bytes).unwrap();
+            let f: Vec<f32> = bytes.chunks_exact(2)
+                .map(|p| half::bf16::from_bits(u16::from_le_bytes([p[0], p[1]])).to_f32())
+                .collect();
+            taps[layer_index].extend(f);
+        }
+    }
+    ops::rms_norm(ctx, &scratch.hidden, &model.final_norm, &scratch.normalized, EPSILON).unwrap();
+    // Fused vs unfused only differs in whether the normalized BF16 is
+    // materialized; the lm_head GEMM is identical. decode_step uses the fused
+    // rms_norm+quantize; here rms_norm already ran, so both modes quantize the
+    // materialized normalized tensor -- which is exactly the unfused lm_head.
+    // For the fused mode we reproduce decode_step's fused quantize instead.
+    if unfused {
+        ops::nvfp4_quantize_activation(
+            ctx, &scratch.normalized, &scratch.nvfp4_activation, &scratch.nvfp4_scales,
+            model.lm_head.input_scale, BLOCK, ops::ScaleLayout::GemmAtom,
+        ).unwrap();
+    } else {
+        ops::nvfp4_quantize_rms_norm(
+            ctx, &scratch.hidden, &model.final_norm, &scratch.nvfp4_activation,
+            &scratch.nvfp4_scales, EPSILON, model.lm_head.input_scale, BLOCK,
+            ops::ScaleLayout::GemmAtom,
+        ).unwrap();
+    }
+    ops::gemm(ctx, ops::GemmArgs::nvfp4(
+        &scratch.nvfp4_activation, &scratch.nvfp4_scales, &model.lm_head.packed,
+        &model.lm_head.scales, BLOCK, model.lm_head.alpha, &mut scratch.logits,
+    )).unwrap();
+    ops::argmax(ctx, &scratch.logits, &scratch.next_token).unwrap();
+}
+
+fn tf_read_tokens(path: &str) -> Vec<(String, Vec<i32>)> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let mut it = line.split_whitespace();
+        let name = it.next().unwrap().to_string();
+        let ids: Vec<i32> = it.map(|t| t.parse().unwrap()).collect();
+        out.push((name, ids));
+    }
+    out
+}
+
+fn tf_logits_f32(ctx: &CudaContext, scratch: &Scratch) -> Vec<f32> {
+    ctx.synchronize().unwrap();
+    let mut bytes = vec![0u8; VOCAB * 2];
+    CudaBuffer::from_tensor(&scratch.logits).unwrap().copy_to_host(&mut bytes).unwrap();
+    bytes.chunks_exact(2)
+        .map(|p| half::bf16::from_bits(u16::from_le_bytes([p[0], p[1]])).to_f32())
+        .collect()
+}
+
+#[test]
+#[ignore = "requires the checkpoint and a GPU; pairs with make_reference_fullmodel.py"]
+fn teacher_forcing_logits() {
+    let ctx = CudaContext::new(0).unwrap();
+    let tokens_path = std::env::var("APXINF_TF_TOKENS").expect("set APXINF_TF_TOKENS");
+    let out_dir = std::env::var("APXINF_TF_OUT").expect("set APXINF_TF_OUT");
+    let unfused = std::env::var("APXINF_TF_FUSED").map(|v| v != "1").unwrap_or(true);
+    let prompts = tf_read_tokens(&tokens_path);
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let hidden_dump = std::env::var("APXINF_TF_HIDDEN").ok();
+    println!("teacher forcing: {} prompts, mode={}, out={out_dir}",
+             prompts.len(), if unfused { "UNFUSED" } else { "FUSED" });
+
+    let tensors = checkpoint();
+    let model = load_model(&ctx, &tensors);
+    ctx.synchronize().unwrap();
+    drop(tensors);
+
+    let max_seq = prompts.iter().map(|(_, ids)| ids.len()).max().unwrap();
+    let capacity = max_seq.max(1);
+    let swiglu_out = zeros(&ctx, vec![1, INTERMEDIATE], DType::BF16);
+
+    for (name, ids) in &prompts {
+        // Fresh state per prompt: independent sequences, no carry-over.
+        let mut gdn_states: Vec<GdnState> = (0..LAYERS - LAYERS / FULL_ATTENTION_INTERVAL)
+            .map(|_| GdnState {
+                recurrent: zeros(&ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM, GDN_HEAD_DIM], DType::F32),
+                conv_window: zeros(&ctx, vec![QKV_WIDTH, CONV_WIDTH], DType::F32),
+            })
+            .collect();
+        let mut kv_caches: Vec<KvCache> = (0..LAYERS / FULL_ATTENTION_INTERVAL)
+            .map(|_| KvCache {
+                keys: zeros(&ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+                values: zeros(&ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+            })
+            .collect();
+        let mut scratch = Scratch::new(&ctx);
+
+        let mut all_logits: Vec<f32> = Vec::with_capacity(ids.len() * VOCAB);
+        let mut argmax: Vec<i32> = Vec::with_capacity(ids.len());
+        let want_hidden = hidden_dump.as_deref() == Some(name.as_str());
+        let mut taps: Vec<Vec<f32>> = if want_hidden {
+            (0..LAYERS).map(|_| Vec::new()).collect()
+        } else {
+            Vec::new()
+        };
+        for (position, &token) in ids.iter().enumerate() {
+            // Teacher forcing: feed the prompt's own token, never the argmax.
+            CudaBuffer::from_tensor(&scratch.token).unwrap()
+                .copy_from_host(&token.to_le_bytes()).unwrap();
+            CudaBuffer::from_tensor(&scratch.positions).unwrap()
+                .copy_from_host(&(position as i32).to_le_bytes()).unwrap();
+            let taps_ref = if want_hidden { Some(&mut taps) } else { None };
+            tf_decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches,
+                           position, unfused, &swiglu_out, taps_ref);
+            all_logits.extend(tf_logits_f32(&ctx, &scratch));
+            argmax.push(scratch.next_token_host());
+        }
+
+        if want_hidden {
+            for (li, tap) in taps.iter().enumerate() {
+                let mut raw = Vec::with_capacity(tap.len() * 4);
+                for v in tap { raw.extend_from_slice(&v.to_le_bytes()); }
+                std::fs::write(
+                    std::path::Path::new(&out_dir).join(format!("hidden_{name}_L{li}.f32")),
+                    raw,
+                ).unwrap();
+            }
+            println!("  wrote per-layer hidden taps for {name}");
+        }
+
+        let mut raw = Vec::with_capacity(all_logits.len() * 4);
+        for v in &all_logits { raw.extend_from_slice(&v.to_le_bytes()); }
+        let logits_path = std::path::Path::new(&out_dir).join(format!("{name}.logits.f32"));
+        std::fs::write(&logits_path, raw).unwrap();
+        let argmax_str: Vec<String> = argmax.iter().map(|v| v.to_string()).collect();
+        std::fs::write(
+            std::path::Path::new(&out_dir).join(format!("{name}.argmax.txt")),
+            argmax_str.join(" "),
+        ).unwrap();
+        let nonfinite = all_logits.iter().filter(|v| !v.is_finite()).count();
+        println!("  {name:10} seq={:3} nonfinite={nonfinite} argmax[:8]={:?}",
+                 ids.len(), &argmax[..argmax.len().min(8)]);
+    }
+    println!("TEACHER FORCING DUMP COMPLETE mode={} -> {out_dir}",
+             if unfused { "unfused" } else { "fused" });
+}
