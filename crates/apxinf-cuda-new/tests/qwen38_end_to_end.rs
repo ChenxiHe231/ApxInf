@@ -185,6 +185,15 @@ fn load_fused_gate_up(
 /// scales folded into alpha.
 struct Fp8Weight {
     weight: Tensor,
+    /// The same weight as `[K, N]`, built only when prefill needs it.
+    ///
+    /// Decode's GEMV reads the checkpoint's own `[N, K]`; `GemmArgs` is
+    /// contractually `b = [K, N]` and exposes no transpose, so the batched
+    /// path needs its own copy. Re-`view`ing would silently feed the GEMM a
+    /// permutation -- the same trap `load_bf16_transposed` documents. Holding
+    /// both costs 6.719 GiB across the checkpoint's 208 FP8 tensors, which is
+    /// why it is optional rather than always built.
+    transposed: Option<Tensor>,
     input_scale: f32,
     alpha: f32,
 }
@@ -195,19 +204,29 @@ fn load_fp8(
     prefix: &str,
     n: usize,
     k: usize,
+    for_prefill: bool,
 ) -> Fp8Weight {
-    // Kept as [N, K], the checkpoint's own orientation and the one the GEMV
-    // reads. No transpose: the [K, N] form exists for the GEMM contract, and
-    // decode does not use it.
+    // [N, K] is the checkpoint's own orientation and the one the GEMV reads.
+    // `for_prefill` additionally builds the [K, N] copy the GEMM contract
+    // requires; see the comment on `Fp8Weight::transposed`.
     let weight_scale = scalar(tensors, &format!("{prefix}.weight_scale"));
     let input_scale = scalar(tensors, &format!("{prefix}.input_scale"));
+    let source = cpu_bytes(&tensors[&format!("{prefix}.weight")]);
+    assert_eq!(source.len(), n * k, "{prefix}.weight is not [{n}, {k}] E4M3");
+
+    let transposed = for_prefill.then(|| {
+        let mut flipped = vec![0u8; source.len()];
+        for row in 0..n {
+            for column in 0..k {
+                flipped[column * n + row] = source[row * k + column];
+            }
+        }
+        upload(ctx, &flipped, vec![k, n], DType::F8E4M3)
+    });
+
     Fp8Weight {
-        weight: upload(
-            ctx,
-            cpu_bytes(&tensors[&format!("{prefix}.weight")]),
-            vec![n, k],
-            DType::F8E4M3,
-        ),
+        weight: upload(ctx, source, vec![n, k], DType::F8E4M3),
+        transposed,
         input_scale,
         alpha: weight_scale * input_scale,
     }
@@ -300,7 +319,13 @@ struct Model {
     lm_head: Nvfp4Weight,
 }
 
-fn load_model(ctx: &CudaContext, tensors: &HashMap<String, Tensor>) -> Model {
+/// `for_prefill` additionally builds the [K, N] FP8 copies the batched GEMM
+/// needs. It costs 6.719 GiB, so decode-only callers leave it off.
+fn load_model(
+    ctx: &CudaContext,
+    tensors: &HashMap<String, Tensor>,
+    for_prefill: bool,
+) -> Model {
     let mut layers = Vec::with_capacity(LAYERS);
     for layer in 0..LAYERS {
         let prefix = format!("model.language_model.layers.{layer}");
@@ -324,10 +349,10 @@ fn load_model(ctx: &CudaContext, tensors: &HashMap<String, Tensor>) -> Model {
             layers.push(Layer::Attention(Box::new(AttentionLayer {
                 input_norm,
                 post_norm,
-                q: load_fp8(ctx, tensors, &format!("{prefix}.self_attn.q_proj"), 2 * HEADS * HEAD_DIM, HIDDEN),
-                k: load_fp8(ctx, tensors, &format!("{prefix}.self_attn.k_proj"), KV_HEADS * HEAD_DIM, HIDDEN),
-                v: load_fp8(ctx, tensors, &format!("{prefix}.self_attn.v_proj"), KV_HEADS * HEAD_DIM, HIDDEN),
-                o: load_fp8(ctx, tensors, &format!("{prefix}.self_attn.o_proj"), HIDDEN, HEADS * HEAD_DIM),
+                q: load_fp8(ctx, tensors, &format!("{prefix}.self_attn.q_proj"), 2 * HEADS * HEAD_DIM, HIDDEN, for_prefill),
+                k: load_fp8(ctx, tensors, &format!("{prefix}.self_attn.k_proj"), KV_HEADS * HEAD_DIM, HIDDEN, for_prefill),
+                v: load_fp8(ctx, tensors, &format!("{prefix}.self_attn.v_proj"), KV_HEADS * HEAD_DIM, HIDDEN, for_prefill),
+                o: load_fp8(ctx, tensors, &format!("{prefix}.self_attn.o_proj"), HIDDEN, HEADS * HEAD_DIM, for_prefill),
                 q_norm: load_bf16(ctx, tensors, &format!("{prefix}.self_attn.q_norm.weight"), vec![HEAD_DIM]),
                 k_norm: load_bf16(ctx, tensors, &format!("{prefix}.self_attn.k_norm.weight"), vec![HEAD_DIM]),
                 gate_up,
@@ -337,9 +362,9 @@ fn load_model(ctx: &CudaContext, tensors: &HashMap<String, Tensor>) -> Model {
             layers.push(Layer::Gdn(Box::new(GdnLayer {
                 input_norm,
                 post_norm,
-                qkv: load_fp8(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_qkv"), QKV_WIDTH, HIDDEN),
-                z: load_fp8(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_z"), Z_WIDTH, HIDDEN),
-                out: load_fp8(ctx, tensors, &format!("{prefix}.linear_attn.out_proj"), HIDDEN, Z_WIDTH),
+                qkv: load_fp8(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_qkv"), QKV_WIDTH, HIDDEN, for_prefill),
+                z: load_fp8(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_z"), Z_WIDTH, HIDDEN, for_prefill),
+                out: load_fp8(ctx, tensors, &format!("{prefix}.linear_attn.out_proj"), HIDDEN, Z_WIDTH, for_prefill),
                 // Transposed at load to [HIDDEN, GDN_V_HEADS]: these two are
                 // the only weights that reach a GEMM through `GemmArgs::new`,
                 // which requires b = [K, N].
@@ -473,6 +498,40 @@ fn fp8_projection(
 ) {
     ops::quantize_fp8_per_tensor(ctx, source, quantized, weight.input_scale).unwrap();
     ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha).unwrap();
+}
+
+/// Many-token FP8 projection: the same contract as `fp8_projection`, run as
+/// a GEMM because the GEMV is built for one row.
+///
+/// `quantize_fp8_per_tensor` is elementwise, so it needs no change for
+/// `rows > 1`; only the matmul does. Unit-scale FP8 with
+/// `alpha = weight_scale * input_scale` is the contract
+/// `qwen38_fp8_projection.rs` already accepts at relative L2 2.70%.
+fn fp8_projection_rows(
+    ctx: &CudaContext,
+    weight: &Fp8Weight,
+    source: &Tensor,
+    quantized: &Tensor,
+    output: &mut Tensor,
+    rows: usize,
+) {
+    let transposed = weight
+        .transposed
+        .as_ref()
+        .expect("prefill needs the [K, N] FP8 copy; load the model with prefill enabled");
+    let k = weight.weight.shape().dims()[1];
+    let n = weight.weight.shape().dims()[0];
+
+    let source_rows = view(source, vec![rows, k], DType::BF16);
+    let quantized_rows = view(quantized, vec![rows, k], DType::F8E4M3);
+    ops::quantize_fp8_per_tensor(ctx, &source_rows, &quantized_rows, weight.input_scale)
+        .unwrap();
+
+    let mut out_rows = view(output, vec![rows, n], DType::BF16);
+    let mut args = ops::GemmArgs::new(&quantized_rows, transposed, &mut out_rows);
+    args.quantization = ops::GemmQuantization::Fp8UnitScale;
+    args.alpha = weight.alpha;
+    ops::gemm(ctx, args).unwrap();
 }
 
 /// residual = residual + MLP(RMSNorm(residual)), with the residual being the
@@ -656,7 +715,7 @@ fn decode_step(
 fn dump_layer_outputs() {
     let ctx = CudaContext::new(0).unwrap();
     let tensors = checkpoint();
-    let model = load_model(&ctx, &tensors);
+    let model = load_model(&ctx, &tensors, false);
     ctx.synchronize().unwrap();
     drop(tensors);
 
@@ -899,7 +958,7 @@ fn full_model_decodes_and_is_timed() {
     println!("checkpoint read:     {:6.2} s", start.elapsed().as_secs_f64());
 
     let start = Instant::now();
-    let model = load_model(&ctx, &tensors);
+    let model = load_model(&ctx, &tensors, false);
     ctx.synchronize().unwrap();
     println!("weights on device:   {:6.2} s", start.elapsed().as_secs_f64());
     drop(tensors);
@@ -1497,7 +1556,7 @@ fn compare_against_reference_tensors() {
     let ctx = CudaContext::new(0).unwrap();
     let seq_len = reference_sequence_length();
     let tensors = checkpoint();
-    let model = load_model(&ctx, &tensors);
+    let model = load_model(&ctx, &tensors, false);
     ctx.synchronize().unwrap();
     drop(tensors);
 
@@ -1796,7 +1855,7 @@ fn teacher_forcing_logits() {
              prompts.len(), if unfused { "UNFUSED" } else { "FUSED" });
 
     let tensors = checkpoint();
-    let model = load_model(&ctx, &tensors);
+    let model = load_model(&ctx, &tensors, false);
     ctx.synchronize().unwrap();
     drop(tensors);
 
@@ -1920,7 +1979,7 @@ fn generate_from_a_real_prompt() {
 
     // Load the model.
     let tensors = checkpoint();
-    let model = load_model(&ctx, &tensors);
+    let model = load_model(&ctx, &tensors, false);
     ctx.synchronize().unwrap();
     drop(tensors);
 

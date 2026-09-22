@@ -99,6 +99,9 @@ unsafe extern "C" {
         chunk_size: i64,
         k_dim: i64,
         num_chunks: i64,
+        q_row_stride: i64,
+        k_row_stride: i64,
+        v_row_stride: i64,
         stream: CudaStream,
     ) -> i32;
 }

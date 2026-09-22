@@ -385,6 +385,81 @@ pub fn gdn_chunk_scan(
             chunk_size as i64,
             k_dim as i64,
             num_chunks as i64,
+            // Contiguous [seq, heads, dim] inputs: one token is heads*dim apart.
+            (k_heads * k_dim) as i64,
+            (k_heads * k_dim) as i64,
+            (v_heads * k_dim) as i64,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+/// `gdn_chunk_scan` over q, k and v interleaved in one projection row.
+///
+/// The GDN input projection produces `[seq, q | k | v]` in a single row, and
+/// the causal conv keeps that packing. Splitting it into three contiguous
+/// tensors would cost a full read and write of the conv output per layer, so
+/// instead each operand points at its own offset inside the fused buffer and
+/// carries the full row width as its stride.
+///
+/// `fused` is `[seq_padded, row_width]` BF16 with q first, then k, then v.
+/// `q_offset`, `k_offset` and `v_offset` are element offsets into a row.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_chunk_scan_interleaved(
+    ctx: &CudaContext,
+    fused: &Tensor,
+    g: &Tensor,
+    beta: &Tensor,
+    out: &Tensor,
+    state: &Tensor,
+    seq_padded: usize,
+    row_width: usize,
+    offsets: [usize; 3],
+    v_heads: usize,
+    k_heads: usize,
+    chunk_size: usize,
+    k_dim: usize,
+) -> Result<()> {
+    if seq_padded % chunk_size != 0 {
+        return Err(invalid("GDN chunk scan needs a multiple of chunk_size"));
+    }
+    let [q_offset, k_offset, v_offset] = offsets;
+    if q_offset + k_heads * k_dim > row_width
+        || k_offset + k_heads * k_dim > row_width
+        || v_offset + v_heads * k_dim > row_width
+    {
+        return Err(invalid("GDN chunk scan offsets run past the fused row"));
+    }
+    let num_chunks = seq_padded / chunk_size;
+    let element = DType::BF16.size_in_bytes();
+
+    let fused_buffer = tensor_storage(ctx, fused, DType::BF16, &[seq_padded, row_width])?;
+    let g_buffer = tensor_storage(ctx, g, DType::F32, &[seq_padded, v_heads])?;
+    let beta_buffer = tensor_storage(ctx, beta, DType::F32, &[seq_padded, v_heads])?;
+    let out_buffer =
+        tensor_storage(ctx, out, DType::BF16, &[seq_padded, v_heads, k_dim])?;
+    let state_buffer = tensor_storage(ctx, state, DType::F32, &[v_heads, k_dim, k_dim])?;
+
+    // Byte offsets into the one fused allocation; the kernel walks rows itself.
+    let base = fused_buffer.ptr() as *const u8;
+    unsafe {
+        status::check(abi::apxinf_gdn_chunk_scan(
+            base.add(q_offset * element) as *const std::ffi::c_void,
+            base.add(k_offset * element) as *const std::ffi::c_void,
+            base.add(v_offset * element) as *const std::ffi::c_void,
+            g_buffer.ptr(),
+            beta_buffer.ptr(),
+            out_buffer.ptr(),
+            state_buffer.ptr(),
+            seq_padded as i64,
+            v_heads as i64,
+            k_heads as i64,
+            chunk_size as i64,
+            k_dim as i64,
+            num_chunks as i64,
+            row_width as i64,
+            row_width as i64,
+            row_width as i64,
             ctx.stream().handle(),
         ))
     }

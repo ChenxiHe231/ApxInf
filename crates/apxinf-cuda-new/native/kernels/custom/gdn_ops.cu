@@ -529,6 +529,7 @@ __global__ void chunk_scan_kernel(
     const __nv_bfloat16* __restrict__ k_in,
     const __nv_bfloat16* __restrict__ v_in, const float* __restrict__ g_in,
     const float* __restrict__ b_in, __nv_bfloat16* __restrict__ out,
+    int q_row_stride, int k_row_stride, int v_row_stride,
     float* __restrict__ state, int seq_padded, int v_heads, int k_heads,
     int num_chunks) {
   extern __shared__ float smem_raw[];
@@ -556,11 +557,11 @@ __global__ void chunk_scan_kernel(
     for (int t = 0; t < kChunk; ++t) {
       const int tok = base + t;
       const __nv_bfloat16* qp =
-          q_in + ((long long)tok * k_heads + k_head) * kDim;
+          q_in + (long long)tok * q_row_stride + (long long)k_head * kDim;
       const __nv_bfloat16* kp =
-          k_in + ((long long)tok * k_heads + k_head) * kDim;
+          k_in + (long long)tok * k_row_stride + (long long)k_head * kDim;
       const __nv_bfloat16* vp =
-          v_in + ((long long)tok * v_heads + head) * kDim;
+          v_in + (long long)tok * v_row_stride + (long long)head * kDim;
       s.q[t][tid] = __bfloat162float(qp[tid]);
       s.k[t][tid] = __bfloat162float(kp[tid]);
       s.v[t][tid] = __bfloat162float(vp[tid]);
@@ -764,7 +765,8 @@ __global__ void chunk_scan_kernel(
 int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
                    const void* beta, void* out, void* state, int seq_padded,
                    int v_heads, int k_heads, int chunk_size, int k_dim,
-                   int num_chunks, cudaStream_t stream) {
+                   int num_chunks, int q_row_stride, int k_row_stride,
+                   int v_row_stride, cudaStream_t stream) {
   if (v_heads <= 0 || k_heads <= 0 || v_heads % k_heads != 0) return -1;
   if (chunk_size != kChunk || k_dim != kDim) return -2;
   if (num_chunks <= 0 || seq_padded != num_chunks * chunk_size) return -3;
@@ -783,6 +785,7 @@ int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
       static_cast<const __nv_bfloat16*>(k),
       static_cast<const __nv_bfloat16*>(v), static_cast<const float*>(g),
       static_cast<const float*>(beta), static_cast<__nv_bfloat16*>(out),
+      q_row_stride, k_row_stride, v_row_stride,
       static_cast<float*>(state), seq_padded, v_heads, k_heads, num_chunks);
   return cudaGetLastError() == cudaSuccess ? 0 : -4;
 }

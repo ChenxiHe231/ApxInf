@@ -83,10 +83,16 @@ int gdn_gated_norm_seq(const void* input, const void* gate, const void* weight,
 //   v    : [seq_padded, v_heads, k_dim]  bf16
 //   g,beta: [seq_padded, v_heads]        f32  (log decay, delta gate)
 //   out  : [seq_padded, v_heads, k_dim]  bf16 (core_attn_out)
-//   state: [v_heads, v_dim, k_dim]       f32  in/out
+//   state: [v_heads, v_dim, k_dim]       f32  in/out//
+// The three row strides give the distance in elements between consecutive
+// tokens of q, k and v. Contiguous [seq, heads, dim] inputs pass
+// heads*dim; a caller holding q, k and v interleaved in one projection row
+// passes the full row width instead and points each at its own offset, which
+// is how prefill feeds the fused conv output without copying it apart.
 int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
                    const void* beta, void* out, void* state, int seq_padded,
                    int v_heads, int k_heads, int chunk_size, int k_dim,
-                   int num_chunks, cudaStream_t stream);
+                   int num_chunks, int q_row_stride, int k_row_stride,
+                   int v_row_stride, cudaStream_t stream);
 
 }  // namespace apxinf::cuda::gdn_ops
