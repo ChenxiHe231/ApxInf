@@ -55,6 +55,7 @@ pub use cache::{concat_rows, reserve_prefix};
 pub use gather::{
     gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry,
 };
+pub use gemm::{gemm_bias_residual, GemmBiasResidualArgs};
 pub use norm::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,
     bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, layer_norm, rms_norm,
