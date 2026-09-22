@@ -110,6 +110,34 @@ fn fp8_gemm_bias(
     Ok(out)
 }
 
+fn fp8_gemm_bias_gelu_quant(
+    ctx: &Context,
+    policies: &Fp8L3Policies,
+    input: &Tensor,
+    input_scale: f32,
+    weights: &crate::pi05::Fp8StaticLinearWeights,
+    output_scale: f32,
+) -> Result<Tensor> {
+    let bias = weights
+        .bias
+        .as_ref()
+        .ok_or_else(|| Error::Other("π0.5 FP8 fused GEMM+GELU requires a bias".into()))?;
+    let dims = input.shape().dims();
+    let weight_dims = weights.weight.shape().dims();
+    if dims.len() != 2 || weight_dims.len() != 2 || dims[1] != weight_dims[0] {
+        return Err(Error::Other("π0.5 FP8 GEMM+GELU shape mismatch".into()));
+    }
+    let mut out = output(ctx, vec![dims[0], weight_dims[1]], DType::F8E4M3)?;
+    let mut gemm = ops::GemmArgs::new(input, &weights.weight, &mut out)
+        .with_immutable_weight(ops::WeightVersion::new(1));
+    gemm.quantization = ops::GemmQuantization::Fp8UnitScale;
+    gemm.alpha = input_scale * weights.weight_scale;
+    gemm.output_scale = output_scale;
+    gemm.policy = policies.gemm.clone();
+    ops::gemm_bias_gelu(ctx, ops::GemmBiasGeluArgs { gemm, bias })?;
+    Ok(out)
+}
+
 fn fp8_gemm_bias_residual(
     ctx: &Context,
     policies: &Fp8L3Policies,
@@ -885,15 +913,14 @@ fn vision_layer_fp8_static_with_policies(
         layer_norm_eps,
         scales.mlp_norm,
     )?;
-    let activation = fp8_gemm_bias(ctx, policies, &normalized, scales.mlp_norm, &weights.fc1)?;
-    let activation = bias_activation(
+    let activation = fp8_gemm_bias_gelu_quant(
         ctx,
         policies,
-        &activation,
-        None,
-        ops::PointwiseActivation::Gelu,
+        &normalized,
+        scales.mlp_norm,
+        &weights.fc1,
+        scales.mlp_activation,
     )?;
-    let activation = fixed_quantize(ctx, policies, &activation, scales.mlp_activation)?;
     fp8_gemm_bias_residual(
         ctx,
         policies,
