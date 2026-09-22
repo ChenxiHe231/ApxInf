@@ -177,7 +177,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
   static const ImplementationRegistry packed_qkv_entries = {
 #if defined(APXINF_ATTENTION_FA2)
       {kProviderFa2, 4, 1, "flash-attention-2-packed-qkv",
-       apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, false,
+       apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, true,
        supports_fa2_packed_qkv, fa2_alignment, fa2_resource_requirements,
        one_configuration, prepare_fa2, launch_fa2, destroy_fa2},
 #endif

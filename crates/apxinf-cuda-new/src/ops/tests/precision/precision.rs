@@ -350,7 +350,11 @@ fn attention_f16_packed_vision_qkv_uses_strided_fa2_and_matches_reference() {
     let qkv = f16_tensor(0, vec![batch, tokens, 3, heads, head_dim], &qkv_values);
     let mut out = zeros_tensor(0, vec![batch, tokens, heads, head_dim], DType::F16);
     let mut args = PackedQkvAttentionArgs::new(&qkv, &mut out);
-    args.policy.allow_fallback = false;
+    // Production Python callers disable online tuning by default. The single
+    // fixed packed-QKV implementation must therefore also serve as the cold
+    // fallback when no recipe has been cached yet.
+    args.policy.online_tune = false;
+    args.policy.allow_fallback = true;
     args.policy.graph_safe = true;
     let normalized = super::attention_contracts::normalize_packed_qkv(&ctx, args).unwrap();
     let expected_value = (0..tokens).map(|token| (token % 7) as f32 / 8.0).sum::<f32>()
