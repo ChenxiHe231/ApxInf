@@ -226,7 +226,178 @@ __global__ void decay_and_beta_kernel(const __nv_bfloat16* __restrict__ a,
   beta[head] = 1.0f / (1.0f + __expf(-raw));
 }
 
+
+// Batched causal depthwise conv1d over a whole prompt, then SiLU.
+//
+// Structurally this follows Dao-AILab/causal-conv1d's forward kernel, but its
+// parallelization does NOT transfer, because the layouts are transposed.
+// That reference stores x as [batch, channel, seqlen] -- one channel's
+// timesteps are contiguous -- so it vectorizes along time and passes the
+// kernel_width-1 boundary values between threads through shared memory.
+//
+// Here x is [tokens, channels]: time-major. One channel's timesteps are
+// strided by `channels`, so vectorizing along time would scatter. Assigning
+// one thread per channel instead makes adjacent threads read adjacent
+// channels -- fully coalesced -- and, because each thread owns its channel for
+// the whole sequence, the cross-thread history exchange disappears entirely.
+// The window lives in registers and never reaches shared memory.
+//
+// What is taken from the reference is the arithmetic: the causal window
+// indexing, the zero left boundary, and folding SiLU into the same pass.
+__global__ void causal_conv_forward_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    const __nv_bfloat16* __restrict__ weight,
+    __nv_bfloat16* __restrict__ output, float* __restrict__ window,
+    int tokens, int channels, int kernel_width) {
+  const int channel = blockIdx.x * blockDim.x + threadIdx.x;
+  if (channel >= channels) return;
+
+  // kernel_width is 4 for this checkpoint; a fixed-size register window beats
+  // indexing through memory. history[kernel_width-1] is the newest sample.
+  constexpr int kMaxWidth = 8;
+  float history[kMaxWidth];
+#pragma unroll
+  for (int index = 0; index < kMaxWidth; ++index) history[index] = 0.0f;
+
+  float weights[kMaxWidth];
+  for (int index = 0; index < kernel_width; ++index) {
+    weights[index] =
+        __bfloat162float(weight[(long long)channel * kernel_width + index]);
+  }
+
+  // Prefill starts from a zero window: token 0 sees only itself, which is what
+  // a left-padded causal conv means. The single-token path carries its window
+  // across calls instead, and this kernel reseeds it at the end.
+  for (int token = 0; token < tokens; ++token) {
+    const float sample =
+        __bfloat162float(input[(long long)token * channels + channel]);
+    for (int index = 0; index < kernel_width - 1; ++index) {
+      history[index] = history[index + 1];
+    }
+    history[kernel_width - 1] = sample;
+
+    float accumulator = 0.0f;
+    for (int index = 0; index < kernel_width; ++index) {
+      accumulator += history[index] * weights[index];
+    }
+    output[(long long)token * channels + channel] =
+        __float2bfloat16(accumulator / (1.0f + __expf(-accumulator)));
+  }
+
+  // Hand the tail to the single-token path. Without this, the first decode
+  // step after a prompt convolves against an empty window and is wrong --
+  // silently, because the shapes still line up.
+  if (window != nullptr) {
+    float* slot = window + (long long)channel * kernel_width;
+    for (int index = 0; index < kernel_width; ++index) {
+      slot[index] = history[index];
+    }
+  }
+}
+
+// Sequence-axis decay and beta: the single-token kernel with a token axis.
+// Same arithmetic, one element per (token, head).
+__global__ void decay_and_beta_seq_kernel(
+    const __nv_bfloat16* __restrict__ a, const __nv_bfloat16* __restrict__ b,
+    const __nv_bfloat16* __restrict__ a_log,
+    const __nv_bfloat16* __restrict__ dt_bias, float* __restrict__ decay,
+    float* __restrict__ beta, int tokens, int heads) {
+  const long long index = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  const long long total = (long long)tokens * heads;
+  if (index >= total) return;
+  // a_log and dt_bias are per-head parameters, shared across tokens.
+  const int head = (int)(index % heads);
+
+  const float shifted =
+      __bfloat162float(a[index]) + __bfloat162float(dt_bias[head]);
+  const float softplus = shifted > 20.0f ? shifted : log1pf(__expf(shifted));
+  decay[index] = -__expf(__bfloat162float(a_log[head])) * softplus;
+  const float raw = __bfloat162float(b[index]);
+  beta[index] = 1.0f / (1.0f + __expf(-raw));
+}
+
+// Sequence-axis gated norm: one block per (token, head).
+__global__ void gated_norm_seq_kernel(const __nv_bfloat16* __restrict__ input,
+                                      const __nv_bfloat16* __restrict__ gate,
+                                      const __nv_bfloat16* __restrict__ weight,
+                                      __nv_bfloat16* __restrict__ output,
+                                      int tokens, int heads, int head_dim,
+                                      float epsilon) {
+  const long long row = blockIdx.x;
+  if (row >= (long long)tokens * heads) return;
+  const long long base = row * head_dim;
+
+  float sum = 0.0f;
+  for (int index = threadIdx.x; index < head_dim; index += blockDim.x) {
+    const float value = __bfloat162float(input[base + index]);
+    sum += value * value;
+  }
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
+  }
+  __shared__ float total;
+  if (threadIdx.x == 0) total = sum;
+  __syncthreads();
+
+  const float scale = rsqrtf(total / static_cast<float>(head_dim) + epsilon);
+  for (int index = threadIdx.x; index < head_dim; index += blockDim.x) {
+    const float normalized = __bfloat162float(input[base + index]) * scale *
+                             __bfloat162float(weight[index]);
+    const float z = __bfloat162float(gate[base + index]);
+    output[base + index] =
+        __float2bfloat16(normalized * z / (1.0f + __expf(-z)));
+  }
+}
+
 }  // namespace
+
+int gdn_causal_conv_forward(const void* input, const void* weight,
+                            void* output, void* window, int tokens,
+                            int channels, int kernel_width,
+                            cudaStream_t stream) {
+  if (tokens <= 0 || channels <= 0 || kernel_width <= 0) return -1;
+  // The register window is fixed at 8; a wider kernel would silently truncate.
+  if (kernel_width > 8) return -4;
+  const int threads = 256;
+  const int blocks = (channels + threads - 1) / threads;
+  causal_conv_forward_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(output), static_cast<float*>(window), tokens,
+      channels, kernel_width);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int gdn_decay_and_beta_seq(const void* a, const void* b, const void* a_log,
+                           const void* dt_bias, void* decay, void* beta,
+                           int tokens, int heads, cudaStream_t stream) {
+  if (tokens <= 0 || heads <= 0) return -1;
+  const int threads = 128;
+  const long long total = (long long)tokens * heads;
+  const long long blocks = (total + threads - 1) / threads;
+  decay_and_beta_seq_kernel<<<(int)blocks, threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(a),
+      static_cast<const __nv_bfloat16*>(b),
+      static_cast<const __nv_bfloat16*>(a_log),
+      static_cast<const __nv_bfloat16*>(dt_bias), static_cast<float*>(decay),
+      static_cast<float*>(beta), tokens, heads);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int gdn_gated_norm_seq(const void* input, const void* gate, const void* weight,
+                       void* output, int tokens, int heads, int head_dim,
+                       float epsilon, cudaStream_t stream) {
+  if (tokens <= 0 || heads <= 0 || head_dim <= 0) return -1;
+  const int threads = head_dim >= 32 ? 32 : head_dim;
+  const long long blocks = (long long)tokens * heads;
+  gated_norm_seq_kernel<<<(int)blocks, threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(gate),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(output), tokens, heads, head_dim, epsilon);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
 
 int gdn_recurrent_step(void* state, const void* q, const void* k,
                        const void* v, const void* decay, const void* beta,
