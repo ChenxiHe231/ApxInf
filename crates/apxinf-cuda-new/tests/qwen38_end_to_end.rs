@@ -445,6 +445,7 @@ fn nvfp4_mlp(
         EPSILON,
         gate_up.input_scale,
         BLOCK,
+        ops::ScaleLayout::GemmAtom,
     )
     .unwrap();
     ops::gemm(
@@ -467,6 +468,7 @@ fn nvfp4_mlp(
         &scratch.mlp_scales,
         down.input_scale,
         BLOCK,
+        ops::ScaleLayout::GemmAtom,
     )
     .unwrap();
     ops::gemm(
@@ -579,7 +581,7 @@ fn decode_step(
     }
 
     ops::rms_norm(ctx, &scratch.hidden, &model.final_norm, &scratch.normalized, EPSILON).unwrap();
-    ops::nvfp4_quantize_activation(ctx, &scratch.normalized, &scratch.nvfp4_activation, &scratch.nvfp4_scales, model.lm_head.input_scale, BLOCK).unwrap();
+    ops::nvfp4_quantize_activation(ctx, &scratch.normalized, &scratch.nvfp4_activation, &scratch.nvfp4_scales, model.lm_head.input_scale, BLOCK, ops::ScaleLayout::GemmAtom).unwrap();
     ops::gemm(
         ctx,
         ops::GemmArgs::nvfp4(

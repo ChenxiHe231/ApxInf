@@ -230,6 +230,7 @@ fn mlp_block(
             1e-6,
             gate_up.input_scale,
             BLOCK,
+            ops::ScaleLayout::GemmAtom,
         )?;
     } else {
         ops::rms_norm(ctx, residual, norm_weight, &scratch.normalized, 1e-6)?;
@@ -240,6 +241,7 @@ fn mlp_block(
             &scratch.quantized_scales,
             gate_up.input_scale,
             BLOCK,
+            ops::ScaleLayout::GemmAtom,
         )?;
     }
     ops::gemm(
@@ -263,6 +265,7 @@ fn mlp_block(
             &scratch.activated_scales,
             down.input_scale,
             BLOCK,
+            ops::ScaleLayout::GemmAtom,
         )?;
     } else {
         ops::swiglu(ctx, &scratch.fused, &scratch.activated)?;
@@ -273,6 +276,7 @@ fn mlp_block(
             &scratch.activated_scales,
             down.input_scale,
             BLOCK,
+            ops::ScaleLayout::GemmAtom,
         )?;
     }
     ops::gemm(

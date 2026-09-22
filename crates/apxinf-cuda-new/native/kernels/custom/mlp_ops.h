@@ -46,4 +46,28 @@ int quantize_fp8_per_tensor(const void* input, void* output, long long count,
 int fp8_gemv(const void* weight, const void* activation, void* output, int n,
              int k, float alpha, cudaStream_t stream);
 
+// y[n] = alpha * sum_k dequant(weight[n,k]) * dequant(activation[k]), NVFP4
+// operands with one E4M3 scale per 16 elements, BF16 out.
+//
+// MEASURED 13x SLOWER than the block-scaled GEMM at M=1 (37.0 ms against
+// 2.85 ms on the 248320x5120 lm_head). Unlike the FP8 GEMV, which won, this
+// one is ALU-bound rather than memory-bound: each 16-byte load unpacks 32
+// nibbles through a __constant__ lookup table, and non-uniform indexing into
+// constant memory serializes within a warp. A viable version would use the
+// hardware FP4 conversion intrinsics instead of a table. Kept for that work;
+// do not use it as-is.
+//
+// Unlike the block-scaled GEMM this reads scales in plain row-major
+// [rows, K/16] -- the layout a checkpoint stores. The CUTLASS atom layout
+// exists for the tcgen05 MMA; a GEMV indexes scales directly, so the decode
+// path needs no relayout at all.
+//
+//   weight  packed E2M1, [N, K/2] bytes
+//   w_scale E4M3, [N, K/16]
+//   act     packed E2M1, [K/2] bytes
+//   a_scale E4M3, [K/16]
+int nvfp4_gemv(const void* weight, const void* weight_scales,
+               const void* activation, const void* activation_scales,
+               void* output, int n, int k, float alpha, cudaStream_t stream);
+
 }  // namespace apxinf::cuda::mlp_ops

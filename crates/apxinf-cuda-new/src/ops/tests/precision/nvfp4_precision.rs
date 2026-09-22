@@ -237,6 +237,7 @@ fn quantized_activation_reproduces_the_bf16_projection() {
         &a_scales,
         input_scale,
         block_size,
+        crate::ops::ScaleLayout::GemmAtom,
     )
     .unwrap();
 
@@ -303,4 +304,56 @@ fn quantized_activation_reproduces_the_bf16_projection() {
         relative_l2 < 0.12,
         "quantized projection drifted by relative L2 {relative_l2}"
     );
+}
+
+#[test]
+fn nvfp4_gemv_matches_the_block_scaled_gemm() {
+    // The decode path uses a GEMV; prefill uses the block-scaled GEMM. They
+    // must agree, or decode and prefill would disagree on the same weights.
+    //
+    // The GEMV also reads scales in the checkpoint's own row-major layout
+    // rather than the kernel's atom layout, so this covers that difference
+    // too: both sides are fed from the same checkpoint-order bytes.
+    let ctx = CudaContext::new(0).unwrap();
+    let device = ctx.device_id();
+    let (n, k, block_size) = (512usize, 512usize, 16u32);
+    let blocks = k / block_size as usize;
+
+    let (a_packed, _) = pack_operand(1, k, 7);
+    let (b_packed, _) = pack_operand(n, k, 5);
+    let (a_scale_codes, _) = block_scales(1, blocks, 3);
+    let (b_scale_codes, _) = block_scales(n, blocks, 2);
+    let alpha = 0.375_f32;
+
+    let a = bytes_tensor(device, vec![1, k / 2], DType::E2M1Pair, &a_packed);
+    let b = bytes_tensor(device, vec![n, k / 2], DType::E2M1Pair, &b_packed);
+
+    // GEMM: scales go through the atom relayout.
+    let a_atom = packed_scale_tensor(&ctx, &a_scale_codes, 1, k, block_size).unwrap();
+    let b_atom = packed_scale_tensor(&ctx, &b_scale_codes, n, k, block_size).unwrap();
+    let mut gemm_out = zeros_tensor(device, vec![1, n], DType::BF16);
+    crate::ops::gemm(
+        &ctx,
+        GemmArgs::nvfp4(&a, &a_atom, &b, &b_atom, block_size, alpha, &mut gemm_out),
+    )
+    .unwrap();
+
+    // GEMV: scales stay in checkpoint order.
+    let a_rows = bytes_tensor(device, vec![1, blocks], DType::F8E4M3, &a_scale_codes);
+    let b_rows = bytes_tensor(device, vec![n, blocks], DType::F8E4M3, &b_scale_codes);
+    let gemv_out = zeros_tensor(device, vec![n], DType::BF16);
+    crate::ops::nvfp4_gemv(&ctx, &b, &b_rows, &a, &a_rows, &gemv_out, alpha).unwrap();
+    ctx.synchronize().map_err(apxinf_core::Error::Cuda).unwrap();
+
+    let from_gemm = values(&gemm_out);
+    let from_gemv = values(&gemv_out);
+    let mut worst = 0.0f64;
+    for (gemm, gemv) in from_gemm.iter().zip(from_gemv.iter()) {
+        let denominator = (gemm.abs() as f64).max(1e-2);
+        worst = worst.max((*gemm as f64 - *gemv as f64).abs() / denominator);
+    }
+    println!("gemv vs block-scaled gemm: worst relative {worst:.5}");
+    // Both accumulate in f32 and write BF16 but sum in different orders, so
+    // this is a rounding bound, not an exactness claim.
+    assert!(worst < 2e-2, "GEMV and GEMM disagree by {worst}");
 }

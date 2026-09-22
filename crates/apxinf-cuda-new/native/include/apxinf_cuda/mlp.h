@@ -37,6 +37,14 @@ apxinf_status_t apxinf_fp8_gemv(const void* weight, const void* activation,
                                 void* output, int64_t n, int64_t k,
                                 float alpha, apxinf_cuda_stream_t stream);
 
+/* Single-token NVFP4 projection. Scales are plain row-major [rows, K/16] --
+   the checkpoint's own layout, no atom relayout needed. */
+apxinf_status_t apxinf_nvfp4_gemv(const void* weight, const void* weight_scales,
+                                  const void* activation,
+                                  const void* activation_scales, void* output,
+                                  int64_t n, int64_t k, float alpha,
+                                  apxinf_cuda_stream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

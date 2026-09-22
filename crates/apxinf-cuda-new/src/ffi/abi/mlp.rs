@@ -35,6 +35,17 @@ unsafe extern "C" {
         alpha: f32,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_nvfp4_gemv(
+        weight: *const c_void,
+        weight_scales: *const c_void,
+        activation: *const c_void,
+        activation_scales: *const c_void,
+        output: *mut c_void,
+        n: i64,
+        k: i64,
+        alpha: f32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_add_bf16(
         addend: *const c_void,
         accumulator: *mut c_void,

@@ -57,9 +57,14 @@ int nvfp4_scatter_block_scales(const void* src_row_major, void* dst_atom,
 // `input_scale` the checkpoint stores is therefore required, not optional --
 // it is what makes the activation's scale range match what the weights were
 // calibrated against.
+//
+// `row_major_scales` selects the scale layout: 0 writes the tcgen05 atom
+// layout the block-scaled GEMM reads, 1 writes the plain [rows, k/sf_vec]
+// grid the GEMV indexes.
 int nvfp4_quantize_activation(const void* src_bf16, void* dst_packed,
                               void* dst_scales, int rows, int k, int sf_vec,
-                              float input_scale, cudaStream_t stream);
+                              float input_scale, int row_major_scales,
+                              cudaStream_t stream);
 
 // RMSNorm fused with NVFP4 quantization.
 //
@@ -69,7 +74,8 @@ int nvfp4_quantize_activation(const void* src_bf16, void* dst_packed,
 int nvfp4_quantize_rms_norm(const void* src_bf16, const void* norm_weight,
                             void* dst_packed, void* dst_scales, int rows,
                             int k, int sf_vec, float epsilon,
-                            float input_scale, cudaStream_t stream);
+                            float input_scale, int row_major_scales,
+                            cudaStream_t stream);
 
 // SwiGLU fused with NVFP4 quantization.
 //
@@ -78,6 +84,7 @@ int nvfp4_quantize_rms_norm(const void* src_bf16, const void* norm_weight,
 // at 1024 tokens, written and immediately re-read.
 int nvfp4_quantize_swiglu(const void* src_bf16, void* dst_packed,
                           void* dst_scales, int rows, int k, int sf_vec,
-                          float input_scale, cudaStream_t stream);
+                          float input_scale, int row_major_scales,
+                          cudaStream_t stream);
 
 }  // namespace apxinf::cuda::cutlass_ops

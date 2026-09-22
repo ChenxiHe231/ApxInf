@@ -85,6 +85,7 @@ unsafe extern "C" {
         sf_vec_size: u32,
         epsilon: f32,
         input_scale: f32,
+        row_major_scales: i32,
         stream: CudaStream,
     ) -> i32;
     pub(crate) fn apxinf_gemm_nvfp4_quantize_swiglu(
@@ -95,6 +96,7 @@ unsafe extern "C" {
         k: i64,
         sf_vec_size: u32,
         input_scale: f32,
+        row_major_scales: i32,
         stream: CudaStream,
     ) -> i32;
     pub(crate) fn apxinf_gemm_nvfp4_quantize_activation(
@@ -105,6 +107,7 @@ unsafe extern "C" {
         k: i64,
         sf_vec_size: u32,
         input_scale: f32,
+        row_major_scales: i32,
         stream: CudaStream,
     ) -> i32;
     #[cfg(test)]
