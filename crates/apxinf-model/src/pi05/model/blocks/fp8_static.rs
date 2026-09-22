@@ -110,6 +110,38 @@ fn fp8_gemm_bias(
     Ok(out)
 }
 
+fn fp8_gemm_bias_residual(
+    ctx: &Context,
+    policies: &Fp8L3Policies,
+    input: &Tensor,
+    input_scale: f32,
+    weights: &crate::pi05::Fp8StaticLinearWeights,
+    residual: &Tensor,
+) -> Result<Tensor> {
+    let dims = input.shape().dims();
+    let weight_dims = weights.weight.shape().dims();
+    if dims.len() != 2 || weight_dims.len() != 2 || dims[1] != weight_dims[0] {
+        return Err(Error::Other(
+            "π0.5 FP8 GEMM+bias+residual shape mismatch".into(),
+        ));
+    }
+    let mut out = output(ctx, vec![dims[0], weight_dims[1]], DType::F16)?;
+    let mut gemm = ops::GemmArgs::new(input, &weights.weight, &mut out)
+        .with_immutable_weight(ops::WeightVersion::new(1));
+    gemm.quantization = ops::GemmQuantization::Fp8UnitScale;
+    gemm.alpha = input_scale * weights.weight_scale;
+    gemm.policy = policies.gemm.clone();
+    ops::gemm_bias_residual(
+        ctx,
+        ops::GemmBiasResidualArgs {
+            gemm,
+            bias: weights.bias.as_ref(),
+            residual,
+        },
+    )?;
+    Ok(out)
+}
+
 fn fp8_gemm_geglu(
     ctx: &Context,
     policies: &Fp8L3Policies,
@@ -228,21 +260,6 @@ fn adaptive_rms_normalized_fp8(
     args.output_scale = scale;
     ops::adaptive_rms_norm(ctx, args)?;
     Ok(normalized)
-}
-
-fn bias_residual(
-    ctx: &Context,
-    _policies: &Fp8L3Policies,
-    input: &Tensor,
-    bias: Option<&Tensor>,
-    residual: &Tensor,
-) -> Result<Tensor> {
-    let mut hidden = output(ctx, input.shape().dims().to_vec(), input.dtype())?;
-    ops::bias_residual(
-        ctx,
-        ops::BiasResidualArgs::new(input, bias, residual, &mut hidden),
-    )?;
-    Ok(hidden)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -526,14 +543,14 @@ fn language_layer_fp8_static_with_policies(
         &weights.gate_up,
         scales.mlp_activation,
     )?;
-    let projected = fp8_gemm(
+    let hidden = fp8_gemm_bias_residual(
         ctx,
         policies,
         &activated,
         scales.mlp_activation,
         &weights.down,
+        &hidden,
     )?;
-    let hidden = bias_residual(ctx, policies, &projected, weights.down.bias.as_ref(), &hidden)?;
     Ok(Fp8StaticLanguageLayerOutput {
         hidden,
         key: qkv.k.reshape(vec![tokens, config.head_dim])?,
@@ -854,8 +871,14 @@ fn vision_layer_fp8_static_with_policies(
         ops::PointwiseActivation::Gelu,
     )?;
     let activation = fixed_quantize(ctx, policies, &activation, scales.mlp_activation)?;
-    let projection = fp8_gemm(ctx, policies, &activation, scales.mlp_activation, &weights.fc2)?;
-    bias_residual(ctx, policies, &projection, weights.fc2.bias.as_ref(), &hidden)
+    fp8_gemm_bias_residual(
+        ctx,
+        policies,
+        &activation,
+        scales.mlp_activation,
+        &weights.fc2,
+        &hidden,
+    )
 }
 
 #[cfg(test)]

@@ -49,13 +49,16 @@ def rust_array(name: str, ty: str, values: list[int], width: int) -> str:
 
 
 def finish(projection: torch.Tensor, semantic: str, bias: torch.Tensor | None,
-           alpha: float, output_scale: float) -> torch.Tensor:
+           alpha: float, output_scale: float,
+           residual: torch.Tensor | None = None) -> torch.Tensor:
     if semantic == "gemm":
         result = alpha * projection
     elif semantic == "gemm_bias":
         result = alpha * projection + bias
     elif semantic == "gemm_bias_gelu":
         result = torch.nn.functional.gelu(alpha * projection + bias, approximate="tanh")
+    elif semantic == "gemm_bias_residual":
+        result = alpha * projection + bias + residual
     else:
         raise ValueError(f"unsupported L3 semantic: {semantic}")
     return (result / output_scale).to(torch.float32)
@@ -91,6 +94,13 @@ def main() -> None:
     fp8_b = raw_b.to(torch.float8_e4m3fn)
     fp8_geglu_b = raw_geglu_b.to(torch.float8_e4m3fn)
     fp8_bias = raw_bias.to(torch.float32)
+    fp8_unit_bias = torch.tensor(
+        [((index % 5) - 2) / 32 for index in range(N)], dtype=torch.float16,
+    )
+    fp8_residual = torch.tensor(
+        [((index % 9) - 4) / 16 for index in range(M * N)],
+        dtype=torch.float16,
+    ).reshape(M, N)
     row_scales = torch.linspace(0.25, 1.125, M, dtype=torch.float32)
     channel_scales = torch.linspace(0.50, 1.4375, N, dtype=torch.float32)
 
@@ -116,6 +126,8 @@ def main() -> None:
     arrays.append(rust_array("W8A8_A", "u8", bytes_(w8a8_a), K))
     arrays.append(rust_array("W8A8_B", "u8", bytes_(w8a8_b), N))
     arrays.append(rust_array("FP8_BIAS", "f32", f32_bits(fp8_bias), 4))
+    arrays.append(rust_array("FP8_UNIT_BIAS", "u16", words(fp8_unit_bias), N))
+    arrays.append(rust_array("FP8_RESIDUAL", "u16", words(fp8_residual), N))
     arrays.append(rust_array("ROW_SCALES", "f32", f32_bits(row_scales), 4))
     arrays.append(rust_array("CHANNEL_SCALES", "f32", f32_bits(channel_scales), 4))
 
@@ -130,6 +142,15 @@ def main() -> None:
         for semantic in semantics:
             expected = finish(projection, semantic, bias, alpha, output_scale)
             arrays.append(rust_array(f"{prefix}_{semantic.upper()}", "f32", f32_bits(expected), 4))
+        if prefix == "FP8_UNIT":
+            fp8_bias_residual = finish(
+                fp8_projection, "gemm_bias_residual", fp8_unit_bias.float(),
+                FP8_UNIT_ALPHA, FP8_UNIT_OUTPUT_SCALE, fp8_residual.float(),
+            )
+            arrays.append(rust_array(
+                "FP8_UNIT_GEMM_BIAS_RESIDUAL", "f32",
+                f32_bits(fp8_bias_residual), 4,
+            ))
 
     for prefix, a, b, alpha, output_scale in [
         ("BF16", bf16_a.float(), bf16_geglu_b.float(), BF16_ALPHA, BF16_OUTPUT_SCALE),
