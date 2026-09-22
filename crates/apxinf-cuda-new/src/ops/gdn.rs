@@ -138,6 +138,125 @@ pub fn gdn_causal_conv_step(
     }
 }
 
+/// Causal depthwise conv1d over a whole prompt, then SiLU.
+///
+/// `input`/`output` are `[tokens, channels]` BF16 and `weight` is
+/// `[channels, kernel_width]` BF16. When `window` is `Some`, the last
+/// `kernel_width` inputs are written back in the `[channels, kernel_width]`
+/// f32 layout `gdn_causal_conv_step` expects, so decode continues from a
+/// prompt without re-running it. Passing `None` skips that and is only
+/// correct when nothing will decode afterwards.
+pub fn gdn_causal_conv_forward(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    output: &Tensor,
+    window: Option<&Tensor>,
+    tokens: usize,
+    channels: usize,
+    kernel_width: usize,
+) -> Result<()> {
+    let flat = [tokens, channels];
+    let input_buffer = tensor_storage(ctx, input, DType::BF16, &flat)?;
+    let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[channels, kernel_width])?;
+    let output_buffer = tensor_storage(ctx, output, DType::BF16, &flat)?;
+    let window_buffer = match window {
+        Some(tensor) => Some(tensor_storage(
+            ctx,
+            tensor,
+            DType::F32,
+            &[channels, kernel_width],
+        )?),
+        None => None,
+    };
+    unsafe {
+        status::check(abi::apxinf_gdn_causal_conv_forward(
+            input_buffer.ptr(),
+            weight_buffer.ptr(),
+            output_buffer.ptr(),
+            window_buffer
+                .as_ref()
+                .map(|buffer| buffer.ptr())
+                .unwrap_or(std::ptr::null_mut()),
+            tokens as i64,
+            channels as i64,
+            kernel_width as i64,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+/// Sequence-axis `gdn_decay_and_beta`.
+///
+/// `a`/`b` are `[tokens, heads]` BF16 and `decay`/`beta` `[tokens, heads]`
+/// f32. `a_log` and `dt_bias` stay per-head `[heads]`.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_decay_and_beta_seq(
+    ctx: &CudaContext,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    decay: &Tensor,
+    beta: &Tensor,
+    tokens: usize,
+    heads: usize,
+) -> Result<()> {
+    let rows = [tokens, heads];
+    let a_buffer = tensor_storage(ctx, a, DType::BF16, &rows)?;
+    let b_buffer = tensor_storage(ctx, b, DType::BF16, &rows)?;
+    let a_log_buffer = tensor_storage(ctx, a_log, DType::BF16, &[heads])?;
+    let dt_bias_buffer = tensor_storage(ctx, dt_bias, DType::BF16, &[heads])?;
+    let decay_buffer = tensor_storage(ctx, decay, DType::F32, &rows)?;
+    let beta_buffer = tensor_storage(ctx, beta, DType::F32, &rows)?;
+    unsafe {
+        status::check(abi::apxinf_gdn_decay_and_beta_seq(
+            a_buffer.ptr(),
+            b_buffer.ptr(),
+            a_log_buffer.ptr(),
+            dt_bias_buffer.ptr(),
+            decay_buffer.ptr(),
+            beta_buffer.ptr(),
+            tokens as i64,
+            heads as i64,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+/// Sequence-axis `gdn_gated_norm`. Tensors are `[tokens, heads, head_dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_gated_norm_seq(
+    ctx: &CudaContext,
+    input: &Tensor,
+    gate: &Tensor,
+    weight: &Tensor,
+    output: &Tensor,
+    tokens: usize,
+    heads: usize,
+    head_dim: usize,
+    epsilon: f32,
+) -> Result<()> {
+    let dims = [tokens, heads, head_dim];
+    let input_buffer = tensor_storage(ctx, input, DType::BF16, &dims)?;
+    let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
+    let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[head_dim])?;
+    let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
+    unsafe {
+        status::check(abi::apxinf_gdn_gated_norm_seq(
+            input_buffer.ptr(),
+            gate_buffer.ptr(),
+            weight_buffer.ptr(),
+            output_buffer.ptr(),
+            tokens as i64,
+            heads as i64,
+            head_dim as i64,
+            epsilon,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
 /// L2-normalize each head in place.
 pub fn gdn_l2_normalize_heads(ctx: &CudaContext, data: &Tensor, epsilon: f32) -> Result<()> {
     let dims = data.shape().dims().to_vec();

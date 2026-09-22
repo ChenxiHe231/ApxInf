@@ -31,6 +31,21 @@ apxinf_status_t apxinf_gdn_causal_conv_step(void* window, const void* input,
                                             int64_t kernel_width,
                                             apxinf_cuda_stream_t stream);
 
+apxinf_status_t apxinf_gdn_causal_conv_forward(
+    const void* input, const void* weight, void* output, void* window,
+    int64_t tokens, int64_t channels, int64_t kernel_width,
+    apxinf_cuda_stream_t stream);
+
+apxinf_status_t apxinf_gdn_decay_and_beta_seq(
+    const void* a, const void* b, const void* a_log, const void* dt_bias,
+    void* decay, void* beta, int64_t tokens, int64_t heads,
+    apxinf_cuda_stream_t stream);
+
+apxinf_status_t apxinf_gdn_gated_norm_seq(
+    const void* input, const void* gate, const void* weight, void* output,
+    int64_t tokens, int64_t heads, int64_t head_dim, float epsilon,
+    apxinf_cuda_stream_t stream);
+
 apxinf_status_t apxinf_gdn_l2_normalize_heads(void* data, int64_t heads,
                                               int64_t head_dim, float epsilon,
                                               apxinf_cuda_stream_t stream);

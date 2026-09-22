@@ -36,6 +36,38 @@ unsafe extern "C" {
         kernel_width: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_gdn_causal_conv_forward(
+        input: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        window: *mut c_void,
+        tokens: i64,
+        channels: i64,
+        kernel_width: i64,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_gdn_decay_and_beta_seq(
+        a: *const c_void,
+        b: *const c_void,
+        a_log: *const c_void,
+        dt_bias: *const c_void,
+        decay: *mut c_void,
+        beta: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_gdn_gated_norm_seq(
+        input: *const c_void,
+        gate: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        head_dim: i64,
+        epsilon: f32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_gdn_l2_normalize_heads(
         data: *mut c_void,
         heads: i64,

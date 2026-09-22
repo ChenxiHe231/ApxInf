@@ -85,6 +85,62 @@ extern "C" apxinf_status_t apxinf_gdn_causal_conv_step(
   });
 }
 
+extern "C" apxinf_status_t apxinf_gdn_causal_conv_forward(
+    const void* input, const void* weight, void* output, void* window,
+    int64_t tokens, int64_t channels, int64_t kernel_width,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    // window is optional: a caller that will not decode afterwards passes null.
+    if (input == nullptr || weight == nullptr || output == nullptr ||
+        !extent(tokens) || !extent(channels) || !extent(kernel_width)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid GDN conv forward arguments");
+    }
+    check(apxinf::cuda::gdn_ops::gdn_causal_conv_forward(
+              input, weight, output, window, static_cast<int>(tokens),
+              static_cast<int>(channels), static_cast<int>(kernel_width),
+              static_cast<cudaStream_t>(stream)),
+          "GDN conv forward");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_gdn_decay_and_beta_seq(
+    const void* a, const void* b, const void* a_log, const void* dt_bias,
+    void* decay, void* beta, int64_t tokens, int64_t heads,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (a == nullptr || b == nullptr || a_log == nullptr ||
+        dt_bias == nullptr || decay == nullptr || beta == nullptr ||
+        !extent(tokens) || !extent(heads)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid GDN sequence gate arguments");
+    }
+    check(apxinf::cuda::gdn_ops::gdn_decay_and_beta_seq(
+              a, b, a_log, dt_bias, decay, beta, static_cast<int>(tokens),
+              static_cast<int>(heads), static_cast<cudaStream_t>(stream)),
+          "GDN sequence gates");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_gdn_gated_norm_seq(
+    const void* input, const void* gate, const void* weight, void* output,
+    int64_t tokens, int64_t heads, int64_t head_dim, float epsilon,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || gate == nullptr || weight == nullptr ||
+        output == nullptr || !extent(tokens) || !extent(heads) ||
+        !extent(head_dim)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid GDN sequence gated norm arguments");
+    }
+    check(apxinf::cuda::gdn_ops::gdn_gated_norm_seq(
+              input, gate, weight, output, static_cast<int>(tokens),
+              static_cast<int>(heads), static_cast<int>(head_dim), epsilon,
+              static_cast<cudaStream_t>(stream)),
+          "GDN sequence gated norm");
+  });
+}
+
 extern "C" apxinf_status_t apxinf_gdn_l2_normalize_heads(
     void* data, int64_t heads, int64_t head_dim, float epsilon,
     apxinf_cuda_stream_t stream) {

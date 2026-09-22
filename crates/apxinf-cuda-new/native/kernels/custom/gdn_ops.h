@@ -35,6 +35,20 @@ int gdn_causal_conv_step(void* window, const void* input, const void* weight,
                          void* output, int channels, int kernel_width,
                          cudaStream_t stream);
 
+// Causal depthwise conv1d over a whole prompt, then SiLU.
+//
+// `input` and `output` are [tokens, channels] BF16 (time-major, which is why
+// this cannot reuse Dao-AILab/causal-conv1d's time-vectorized parallelization
+// -- see the kernel comment). `weight` is [channels, kernel_width] BF16.
+//
+// `window` may be null. When it is not, the last `kernel_width` inputs are
+// written back in the [channels, kernel_width] f32 layout the single-token
+// step expects, so decode can continue straight after a prompt.
+int gdn_causal_conv_forward(const void* input, const void* weight,
+                            void* output, void* window, int tokens,
+                            int channels, int kernel_width,
+                            cudaStream_t stream);
+
 // L2-normalize each head in place; the delta rule needs unit-norm q and k.
 int gdn_l2_normalize_heads(void* data, int heads, int head_dim, float epsilon,
                            cudaStream_t stream);
@@ -43,6 +57,19 @@ int gdn_l2_normalize_heads(void* data, int heads, int head_dim, float epsilon,
 int gdn_decay_and_beta(const void* a, const void* b, const void* a_log,
                        const void* dt_bias, void* decay, void* beta, int heads,
                        cudaStream_t stream);
+
+// Sequence-axis decay and beta. `a` and `b` are [tokens, heads] BF16; `a_log`
+// and `dt_bias` stay per-head [heads]; `decay` and `beta` are [tokens, heads]
+// f32.
+int gdn_decay_and_beta_seq(const void* a, const void* b, const void* a_log,
+                           const void* dt_bias, void* decay, void* beta,
+                           int tokens, int heads, cudaStream_t stream);
+
+// Sequence-axis gated norm. Tensors are [tokens, heads, head_dim] BF16;
+// `weight` stays [head_dim].
+int gdn_gated_norm_seq(const void* input, const void* gate, const void* weight,
+                       void* output, int tokens, int heads, int head_dim,
+                       float epsilon, cudaStream_t stream);
 
 
 // Gated DeltaNet chunked scan (parallel prefill). Faithful port of
