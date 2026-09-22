@@ -41,6 +41,16 @@ fn tensor_values(value: &Tensor) -> Vec<f32> {
     }
 }
 
+fn tensor_bytes(value: &Tensor) -> Vec<u8> {
+    unsafe {
+        crate::ffi::check_cuda(crate::ffi::cudaDeviceSynchronize()).unwrap();
+    }
+    let buffer = CudaBuffer::from_tensor(value).unwrap();
+    let mut bytes = vec![0; buffer.len()];
+    buffer.copy_to_host(&mut bytes).unwrap();
+    bytes
+}
+
 fn assert_close(actual: &Tensor, expected: &[f32], tolerance: f32) {
     let actual = tensor_values(actual);
     assert_eq!(actual.len(), expected.len());
@@ -319,6 +329,41 @@ fn typed_norm_rejects_invalid_tensor_shapes() {
         .is_err(),
         "adaptive RMSNorm must reject a style tensor with the wrong typed shape"
     );
+}
+
+#[test]
+fn norm_f16_can_quantize_directly_to_e4m3() {
+    let ctx = CudaContext::new(0).unwrap();
+    let input = f16_tensor(0, vec![2, 4], &[1.0, -1.0, 2.0, -2.0, 4.0, 2.0, -2.0, -4.0]);
+    let weight = f16_tensor(0, vec![4], &[1.0, 0.5, 1.5, -1.0]);
+
+    let mut f16_normalized = f16_tensor(0, vec![2, 4], &[0.0; 8]);
+    rms_norm(
+        &ctx,
+        RmsNormArgs::new(&input, &weight, &mut f16_normalized, EPS),
+    )
+    .unwrap();
+    let mut expected = zeros_tensor(0, vec![2, 4], DType::F8E4M3);
+    let mut quantize = QuantizationArgs::new(
+        QuantizationSemantic::FixedScaleE4m3,
+        &f16_normalized,
+        &mut expected,
+    );
+    quantize.scale = 0.5;
+    quantization(&ctx, quantize).unwrap();
+
+    let mut actual = zeros_tensor(0, vec![2, 4], DType::F8E4M3);
+    let mut args = RmsNormArgs::new(&input, &weight, &mut actual, EPS);
+    args.output_scale = 0.5;
+    rms_norm(&ctx, args).unwrap();
+    assert_eq!(tensor_bytes(&actual), tensor_bytes(&expected));
+
+    let bf16_input = tensor(0, vec![2, 4], &[1.0; 8]);
+    let bf16_weight = tensor(0, vec![4], &[1.0; 4]);
+    let mut invalid = zeros_tensor(0, vec![2, 4], DType::F8E4M3);
+    let mut args = RmsNormArgs::new(&bf16_input, &bf16_weight, &mut invalid, EPS);
+    args.output_scale = 0.5;
+    assert!(rms_norm(&ctx, args).is_err());
 }
 
 fn gelu_tanh(x: f32) -> f32 {

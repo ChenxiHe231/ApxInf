@@ -60,8 +60,8 @@ typedef struct {
   uint32_t version;
   uint32_t semantic;
   uint32_t dtype;
-  /* E4M3 output is the fused-quantization form; it requires a non-unit
-     output_scale binding.  BF16/F16 output leaves the scale at one. */
+  /* E4M3 output is the fused-quantization form and consumes output_scale.
+     BF16/F16 output leaves the scale at one. */
   uint32_t output_dtype;
   /* A null bias is a different kernel path, so it belongs to the identity. */
   uint32_t has_bias;
