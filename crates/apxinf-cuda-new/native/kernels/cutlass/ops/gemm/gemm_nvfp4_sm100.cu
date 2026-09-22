@@ -321,7 +321,7 @@ __global__ void quantize_rms_norm_kernel(
     const long long offset = base + (long long)block * sf_vec;
     for (int index = 0; index < sf_vec; ++index) {
       values[index] = __bfloat162float(src[offset + index]) * norm *
-                      __bfloat162float(norm_weight[block * sf_vec + index]);
+                      (1.0f + __bfloat162float(norm_weight[block * sf_vec + index]));
     }
     uint8_t code;
     emit_nvfp4_block(values, sf_vec, input_scale, packed + offset / 2, code);

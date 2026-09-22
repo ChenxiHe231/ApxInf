@@ -30,9 +30,12 @@ int split_query_and_gate(const void* fused, void* query, void* gate,
                          int tokens, int heads, int head_dim,
                          cudaStream_t stream);
 
-// data *= silu(gate), elementwise. `output_gate_type: swish`, so this is silu
-// and not the sigmoid some gated-attention variants use.
-int apply_swish_gate(void* data, const void* gate, long long count,
-                     cudaStream_t stream);
+// data *= sigmoid(gate), elementwise -- not silu, despite `config.json`
+// saying `output_gate_type: "swish"`. Nothing in the reference implementation
+// reads that key; Qwen3_5Attention.forward does
+// `attn_output * torch.sigmoid(gate)` (modeling_qwen3_5.py:818). The GDN
+// output gate is the silu one; it lives in gdn_ops.h.
+int apply_output_gate(void* data, const void* gate, long long count,
+                      cudaStream_t stream);
 
 }  // namespace apxinf::cuda::attn_ops

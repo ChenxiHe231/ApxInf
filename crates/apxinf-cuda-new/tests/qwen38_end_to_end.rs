@@ -222,6 +222,43 @@ fn load_bf16(
     upload(ctx, cpu_bytes(&tensors[name]), dims, DType::BF16)
 }
 
+/// Load a row-major `[rows, cols]` BF16 weight and store it transposed as
+/// `[cols, rows]`.
+///
+/// `GemmArgs::new` is contractually `b = [K, N]` row-major, and the checkpoint
+/// stores these as `[N, K]`. Re-`view`ing `[N, K]` storage as `[K, N]` does not
+/// transpose it -- no bytes move, so the GEMM reads a *permutation* of the
+/// weight. The shape check passes and the result is finite, so the error is
+/// silent. The transpose has to happen to the data, and this is the cheap place
+/// to do it: 48 x 5120 BF16 per projection, once per layer at load.
+///
+/// The FP8 and NVFP4 weights keep their `[N, K]` orientation deliberately --
+/// their GEMV reads that layout directly and never goes through `GemmArgs`.
+fn load_bf16_transposed(
+    ctx: &CudaContext,
+    tensors: &HashMap<String, Tensor>,
+    name: &str,
+    rows: usize,
+    cols: usize,
+) -> Tensor {
+    let element = DType::BF16.size_in_bytes();
+    let source = cpu_bytes(&tensors[name]);
+    assert_eq!(
+        source.len(),
+        rows * cols * element,
+        "{name} is not a [{rows}, {cols}] BF16 tensor"
+    );
+    let mut transposed = vec![0u8; source.len()];
+    for row in 0..rows {
+        for column in 0..cols {
+            let from = (row * cols + column) * element;
+            let to = (column * rows + row) * element;
+            transposed[to..to + element].copy_from_slice(&source[from..from + element]);
+        }
+    }
+    upload(ctx, &transposed, vec![cols, rows], DType::BF16)
+}
+
 struct AttentionLayer {
     input_norm: Tensor,
     post_norm: Tensor,
@@ -303,8 +340,11 @@ fn load_model(ctx: &CudaContext, tensors: &HashMap<String, Tensor>) -> Model {
                 qkv: load_fp8(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_qkv"), QKV_WIDTH, HIDDEN),
                 z: load_fp8(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_z"), Z_WIDTH, HIDDEN),
                 out: load_fp8(ctx, tensors, &format!("{prefix}.linear_attn.out_proj"), HIDDEN, Z_WIDTH),
-                in_proj_a: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_a.weight"), vec![GDN_V_HEADS, HIDDEN]),
-                in_proj_b: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_b.weight"), vec![GDN_V_HEADS, HIDDEN]),
+                // Transposed at load to [HIDDEN, GDN_V_HEADS]: these two are
+                // the only weights that reach a GEMM through `GemmArgs::new`,
+                // which requires b = [K, N].
+                in_proj_a: load_bf16_transposed(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_a.weight"), GDN_V_HEADS, HIDDEN),
+                in_proj_b: load_bf16_transposed(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_b.weight"), GDN_V_HEADS, HIDDEN),
                 a_log: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.A_log"), vec![GDN_V_HEADS]),
                 dt_bias: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.dt_bias"), vec![GDN_V_HEADS]),
                 conv_weight: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.conv1d.weight"), vec![QKV_WIDTH, CONV_WIDTH]),
@@ -551,7 +591,7 @@ fn decode_step(
                 ops::kv_cache_attention(ctx, args).unwrap();
 
                 let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
-                ops::apply_swish_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+                ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
                 fp8_projection(ctx, &attention.o, &scratch.attention_out, &scratch.attention_fp8, &mut scratch.projected);
                 ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
 
@@ -607,6 +647,177 @@ fn decode_step(
     ops::argmax(ctx, &scratch.logits, &scratch.next_token).unwrap();
 }
 
+
+/// Dump per-layer hidden states for a single-token decode (token id 100,
+/// position 0, empty state) so a PyTorch reference can be compared tensor by
+/// tensor. Writes raw little-endian f32 files under devlocal/qwen38-nvfp4/apxdump.
+#[test]
+#[ignore = "requires the checkpoint and a GPU; pairs with ref_dump.py"]
+fn dump_layer_outputs() {
+    let ctx = CudaContext::new(0).unwrap();
+    let tensors = checkpoint();
+    let model = load_model(&ctx, &tensors);
+    ctx.synchronize().unwrap();
+    drop(tensors);
+
+    let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../devlocal/qwen38-nvfp4/apxdump");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let dump = |name: &str, t: &Tensor, n: usize| {
+        ctx.synchronize().unwrap();
+        let mut bytes = vec![0u8; n * 2];
+        CudaBuffer::from_tensor(t).unwrap().copy_to_host(&mut bytes).unwrap();
+        let f: Vec<f32> = bytes
+            .chunks_exact(2)
+            .map(|v| half::bf16::from_bits(u16::from_le_bytes([v[0], v[1]])).to_f32())
+            .collect();
+        let mut raw = Vec::with_capacity(f.len() * 4);
+        for x in &f { raw.extend_from_slice(&x.to_le_bytes()); }
+        std::fs::write(out_dir.join(format!("{name}.f32")), raw).unwrap();
+        println!("apxdump {name} n={n}");
+    };
+
+    let capacity = 64usize;
+    let mut gdn_states: Vec<GdnState> = (0..LAYERS - LAYERS / FULL_ATTENTION_INTERVAL)
+        .map(|_| GdnState {
+            recurrent: zeros(&ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM, GDN_HEAD_DIM], DType::F32),
+            conv_window: zeros(&ctx, vec![QKV_WIDTH, CONV_WIDTH], DType::F32),
+        })
+        .collect();
+    let mut kv_caches: Vec<KvCache> = (0..LAYERS / FULL_ATTENTION_INTERVAL)
+        .map(|_| KvCache {
+            keys: zeros(&ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+            values: zeros(&ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+        })
+        .collect();
+    let mut scratch = Scratch::new(&ctx);
+
+    // token id 100, position 0
+    CudaBuffer::from_tensor(&scratch.token).unwrap()
+        .copy_from_host(&100i32.to_le_bytes()).unwrap();
+    CudaBuffer::from_tensor(&scratch.positions).unwrap()
+        .copy_from_host(&0i32.to_le_bytes()).unwrap();
+
+    ops::embedding_gather(&ctx, &model.embedding, &scratch.token, &scratch.hidden).unwrap();
+    ctx.synchronize().unwrap();
+    dump("input_hidden", &scratch.hidden, HIDDEN);
+
+    let rotary = ops::rotary_dim(HEAD_DIM, PARTIAL_ROTARY);
+    let mut gdn_index = 0usize;
+    let mut attention_index = 0usize;
+    for (layer_index, layer) in model.layers.iter().enumerate() {
+        let owned = format!("L{layer_index}");
+        let label = Some(owned.as_str());
+        run_one_layer(&ctx, layer, &mut scratch, &mut gdn_states, &mut kv_caches,
+                      &mut gdn_index, &mut attention_index, rotary, 0, label);
+        ctx.synchronize().unwrap();
+        dump(&format!("hidden_after_layer{layer_index}"), &scratch.hidden, HIDDEN);
+        if layer_index == 0 { dump("layer0_out", &scratch.hidden, HIDDEN); }
+        if layer_index == 3 { dump("layer3_out", &scratch.hidden, HIDDEN); break; }
+    }
+    println!("APXDUMP COMPLETE -> {}", out_dir.display());
+}
+
+
+fn apxdump_tensor(ctx: &CudaContext, name: &str, t: &Tensor, n: usize) {
+    let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../devlocal/qwen38-nvfp4/apxdump");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    // Order the copy against the stream the ops actually ran on.
+    ctx.synchronize().unwrap();
+    let mut bytes = vec![0u8; n * 2];
+    CudaBuffer::from_tensor(t).unwrap().copy_to_host(&mut bytes).unwrap();
+    let f: Vec<f32> = bytes
+        .chunks_exact(2)
+        .map(|v| half::bf16::from_bits(u16::from_le_bytes([v[0], v[1]])).to_f32())
+        .collect();
+    let mut raw = Vec::with_capacity(f.len() * 4);
+    for x in &f { raw.extend_from_slice(&x.to_le_bytes()); }
+    std::fs::write(out_dir.join(format!("{name}.f32")), raw).unwrap();
+}
+
+/// One decoder layer, extracted from decode_step so the dump test can stop
+/// after a chosen layer. Mutates scratch.hidden in place.
+#[allow(clippy::too_many_arguments)]
+fn run_one_layer(
+    ctx: &CudaContext,
+    layer: &Layer,
+    scratch: &mut Scratch,
+    gdn_states: &mut [GdnState],
+    kv_caches: &mut [KvCache],
+    gdn_index: &mut usize,
+    attention_index: &mut usize,
+    rotary: usize,
+    position: usize,
+    dump_label: Option<&str>,
+) {
+    match layer {
+        Layer::Attention(attention) => {
+            let cache = &mut kv_caches[*attention_index];
+            *attention_index += 1;
+            ops::rms_norm(ctx, &scratch.hidden, &attention.input_norm, &scratch.normalized, EPSILON).unwrap();
+            fp8_projection(ctx, &attention.q, &scratch.normalized, &scratch.fp8_activation, &mut scratch.qkv_fused);
+            let fused_heads = view(&scratch.qkv_fused, vec![1, HEADS, 2 * HEAD_DIM], DType::BF16);
+            ops::split_query_and_gate(ctx, &fused_heads, &scratch.query, &scratch.query_gate).unwrap();
+            let mut key_slot = cache_slot(&cache.keys, position, vec![1, KV_HEADS * HEAD_DIM]);
+            let mut value_slot = cache_slot(&cache.values, position, vec![1, KV_HEADS * HEAD_DIM]);
+            fp8_projection(ctx, &attention.k, &scratch.normalized, &scratch.fp8_activation, &mut key_slot);
+            fp8_projection(ctx, &attention.v, &scratch.normalized, &scratch.fp8_activation, &mut value_slot);
+            let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
+            let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
+            ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
+            ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+            let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
+            let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
+            ops::partial_rope(ctx, &query_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
+            ops::partial_rope(ctx, &key_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
+            let valid = position + 1;
+            let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
+            let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
+            let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
+            let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
+            let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
+            args.valid_key_tokens = valid;
+            args.query_start = position;
+            ops::kv_cache_attention(ctx, args).unwrap();
+            let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
+            ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+            fp8_projection(ctx, &attention.o, &scratch.attention_out, &scratch.attention_fp8, &mut scratch.projected);
+            if let Some(l) = dump_label {
+                apxdump_tensor(ctx, &format!("{l}_input_norm"), &scratch.normalized, HIDDEN);
+                apxdump_tensor(ctx, &format!("{l}_mixer_out"), &scratch.projected, HIDDEN);
+            }
+            ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
+            nvfp4_mlp(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch);
+        }
+        Layer::Gdn(gdn) => {
+            let state = &mut gdn_states[*gdn_index];
+            *gdn_index += 1;
+            ops::rms_norm(ctx, &scratch.hidden, &gdn.input_norm, &scratch.normalized, EPSILON).unwrap();
+            fp8_projection(ctx, &gdn.qkv, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_qkv);
+            fp8_projection(ctx, &gdn.z, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_z);
+            let qkv_flat = view(&scratch.gdn_qkv, vec![QKV_WIDTH], DType::BF16);
+            ops::gdn_causal_conv_step(ctx, &state.conv_window, &qkv_flat, &gdn.conv_weight, &scratch.gdn_conv).unwrap();
+            let (q, k, v) = split_gdn_qkv(ctx, &scratch.gdn_conv);
+            ops::gdn_l2_normalize_heads(ctx, &q, EPSILON).unwrap();
+            ops::gdn_l2_normalize_heads(ctx, &k, EPSILON).unwrap();
+            bf16_matvec(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a);
+            bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
+            ops::gdn_decay_and_beta(ctx, &scratch.gdn_a, &scratch.gdn_b, &gdn.a_log, &gdn.dt_bias, &scratch.gdn_decay, &scratch.gdn_beta).unwrap();
+            ops::gdn_recurrent_step(ctx, &state.recurrent, &q, &k, &v, &scratch.gdn_decay, &scratch.gdn_beta, &scratch.gdn_readout, GDN_K_HEADS).unwrap();
+            ops::gdn_gated_norm(ctx, &scratch.gdn_readout, &gdn_z_heads(ctx, &scratch.gdn_z), &gdn.norm_weight, &scratch.gdn_gated, EPSILON).unwrap();
+            let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
+            fp8_projection(ctx, &gdn.out, &flat, &scratch.gdn_fp8, &mut scratch.projected);
+            if let Some(l) = dump_label {
+                apxdump_tensor(ctx, &format!("{l}_input_norm"), &scratch.normalized, HIDDEN);
+                apxdump_tensor(ctx, &format!("{l}_mixer_out"), &scratch.projected, HIDDEN);
+            }
+            ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
+            nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
+        }
+    }
+}
+
 // --- small helpers that reinterpret existing device storage -----------------
 
 fn capacity_of(cache: &Tensor) -> usize {
@@ -653,12 +864,15 @@ fn split_gdn_qkv(_ctx: &CudaContext, qkv: &Tensor) -> (Tensor, Tensor, Tensor) {
     (q, k, v)
 }
 
-/// [heads, hidden] x [1, hidden] -> [1, heads], in BF16.
+/// `[1, hidden] x [hidden, heads] -> [1, heads]`, in BF16.
+///
+/// `weight` must already be `[K, N]`, which is what `GemmArgs::new` requires
+/// and what `load_bf16_transposed` produces. Transposing here with a `view`
+/// would only relabel the shape, leaving the GEMM reading permuted elements.
 fn bf16_matvec(ctx: &CudaContext, weight: &Tensor, input: &Tensor, output: &Tensor) {
     let dims = weight.shape().dims().to_vec();
-    let transposed = view(weight, vec![dims[1], dims[0]], DType::BF16);
-    let mut out = view(output, vec![1, dims[0]], DType::BF16);
-    ops::gemm(ctx, ops::GemmArgs::new(input, &transposed, &mut out)).unwrap();
+    let mut out = view(output, vec![1, dims[1]], DType::BF16);
+    ops::gemm(ctx, ops::GemmArgs::new(input, weight, &mut out)).unwrap();
 }
 
 /// A view of one token's slot in a KV cache, shaped for the projection that
@@ -879,4 +1093,477 @@ fn full_model_decodes_and_is_timed() {
         qkv_each * 48.0 * 1e3,
         head_each * 1e3
     );
+}
+
+// ===========================================================================
+// Reference-tensor comparison
+//
+// Replays layer 0 (GDN) and layer 3 (full attention) against the verified
+// PyTorch reference under devlocal/qwen38-nvfp4/reference-tensors, and writes
+// every major intermediate as raw little-endian f32 for compare_reference.py.
+//
+// Three things make this different from `dump_layer_outputs`:
+//
+//   1. Each layer is fed the *reference's own* input hidden state, not the
+//      previous layer's output. Layer 3 does not consume layer 0's output --
+//      layers 1 and 2 sit between them in the real model and the reference
+//      never built them -- and feeding one into the other would let an early
+//      error hide where divergence actually starts.
+//   2. Fusion is off. `nvfp4_quantize_rms_norm` and `nvfp4_quantize_swiglu`
+//      skip a BF16 rounding that the reference performs, which is a change of
+//      computational semantics and has to be measured on its own rather than
+//      assumed equivalent. This test establishes the unfused baseline.
+//   3. The default sequence length is 8, not 1. At position 0 mRoPE is the
+//      identity and softmax over a single key is 1.0, so a seq_len=1 run
+//      passes with a broken RoPE, a broken 1/sqrt(head_dim) scale or a broken
+//      GQA repeat. Set APXINF_REF_SEQ=1 to get the degenerate case anyway.
+// ===========================================================================
+
+/// Tokens to drive. 8 is the primary case; see the module note above.
+fn reference_sequence_length() -> usize {
+    std::env::var("APXINF_REF_SEQ")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(8)
+}
+
+/// `hidden[0, t, i] = bf16(sin((t * HIDDEN + i) * 0.01))`.
+///
+/// The sine is evaluated in f64 and rounded to BF16 in one step. Evaluating it
+/// in f32 changes 196 of 40960 elements, and going f64 -> f32 -> BF16 rounds
+/// twice, so neither reproduces the reference input exactly.
+fn reference_hidden(seq_len: usize) -> Vec<half::bf16> {
+    (0..seq_len * HIDDEN)
+        .map(|index| half::bf16::from_f64((index as f64 * 0.01).sin()))
+        .collect()
+}
+
+/// Collects host copies of device intermediates, one entry per reference
+/// tensor name, and writes them once at the end.
+///
+/// Most tensors are accumulated across tokens: the harness is a decode loop,
+/// so a `[1, seq, width]` reference tensor is built one row at a time in token
+/// order. Recurrent state is not -- only its final value is meaningful -- so it
+/// uses `set_f32`, which replaces instead of appending.
+///
+/// Every read synchronizes first. `CudaBuffer::copy_to_host` is a plain
+/// `cudaMemcpy`, which orders against the null stream only, while the ops run
+/// on the session's stream -- so without this a tap reads whatever happens to
+/// be in the buffer when the copy is issued, not the kernel's result. The
+/// symptom is distinctive and worth recognising: a tap taken right after a
+/// kernel comes back as zeros or stale data while the *same buffer* read two
+/// taps later looks correct, because the intervening launches gave the first
+/// kernel time to land. `dump_layer_outputs`'s `apxdump_tensor` has this bug.
+struct RefDump {
+    dir: std::path::PathBuf,
+    tensors: std::collections::BTreeMap<String, Vec<f32>>,
+}
+
+impl RefDump {
+    fn new(subdir: &str) -> RefDump {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../devlocal/qwen38-nvfp4")
+            .join(subdir);
+        std::fs::create_dir_all(&dir).unwrap();
+        RefDump { dir, tensors: std::collections::BTreeMap::new() }
+    }
+
+    fn read_bf16(ctx: &CudaContext, tensor: &Tensor, count: usize) -> Vec<f32> {
+        ctx.synchronize().unwrap();
+        let mut bytes = vec![0u8; count * 2];
+        CudaBuffer::from_tensor(tensor).unwrap().copy_to_host(&mut bytes).unwrap();
+        bytes
+            .chunks_exact(2)
+            .map(|pair| half::bf16::from_bits(u16::from_le_bytes([pair[0], pair[1]])).to_f32())
+            .collect()
+    }
+
+    fn read_f32(ctx: &CudaContext, tensor: &Tensor, count: usize) -> Vec<f32> {
+        ctx.synchronize().unwrap();
+        let mut bytes = vec![0u8; count * 4];
+        CudaBuffer::from_tensor(tensor).unwrap().copy_to_host(&mut bytes).unwrap();
+        bytes
+            .chunks_exact(4)
+            .map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect()
+    }
+
+    fn push_bf16(&mut self, ctx: &CudaContext, name: &str, tensor: &Tensor, count: usize) {
+        let values = Self::read_bf16(ctx, tensor, count);
+        self.tensors.entry(name.to_string()).or_default().extend(values);
+    }
+
+    fn push_f32(&mut self, ctx: &CudaContext, name: &str, tensor: &Tensor, count: usize) {
+        let values = Self::read_f32(ctx, tensor, count);
+        self.tensors.entry(name.to_string()).or_default().extend(values);
+    }
+
+    fn set_f32(&mut self, ctx: &CudaContext, name: &str, tensor: &Tensor, count: usize) {
+        let values = Self::read_f32(ctx, tensor, count);
+        self.tensors.insert(name.to_string(), values);
+    }
+
+    fn write(&self) {
+        for (name, values) in &self.tensors {
+            let mut raw = Vec::with_capacity(values.len() * 4);
+            for value in values {
+                raw.extend_from_slice(&value.to_le_bytes());
+            }
+            std::fs::write(self.dir.join(format!("{name}.f32")), raw).unwrap();
+        }
+        println!("wrote {} tensors -> {}", self.tensors.len(), self.dir.display());
+    }
+}
+
+/// MLP with fusion off: RMSNorm and SwiGLU each land in BF16 before being
+/// quantized, which is the rounding the reference performs and the fused
+/// quantizers skip.
+///
+/// `names` is (post_norm, gate_up, swiglu, down_proj, layer_out) so the same
+/// body can carry layer 0's numbering and layer 3's.
+#[allow(clippy::too_many_arguments)]
+fn unfused_mlp(
+    ctx: &CudaContext,
+    gate_up: &Nvfp4Weight,
+    down: &Nvfp4Weight,
+    norm_weight: &Tensor,
+    scratch: &mut Scratch,
+    swiglu_out: &Tensor,
+    dump: &mut RefDump,
+    names: (&str, &str, &str, &str, &str),
+) {
+    ops::rms_norm(ctx, &scratch.hidden, norm_weight, &scratch.normalized, EPSILON).unwrap();
+    dump.push_bf16(ctx, names.0, &scratch.normalized, HIDDEN);
+    ops::nvfp4_quantize_activation(
+        ctx,
+        &scratch.normalized,
+        &scratch.nvfp4_activation,
+        &scratch.nvfp4_scales,
+        gate_up.input_scale,
+        BLOCK,
+        ops::ScaleLayout::GemmAtom,
+    )
+    .unwrap();
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::nvfp4(
+            &scratch.nvfp4_activation,
+            &scratch.nvfp4_scales,
+            &gate_up.packed,
+            &gate_up.scales,
+            BLOCK,
+            gate_up.alpha,
+            &mut scratch.mlp_fused,
+        ),
+    )
+    .unwrap();
+    // Gate first, then up -- the order load_fused_gate_up concatenates them in
+    // and the order swiglu_kernel reads them back. Dumped as one block and
+    // split on the comparison side.
+    dump.push_bf16(ctx, names.1, &scratch.mlp_fused, 2 * INTERMEDIATE);
+
+    ops::swiglu(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
+    dump.push_bf16(ctx, names.2, swiglu_out, INTERMEDIATE);
+    ops::nvfp4_quantize_activation(
+        ctx,
+        swiglu_out,
+        &scratch.mlp_activation,
+        &scratch.mlp_scales,
+        down.input_scale,
+        BLOCK,
+        ops::ScaleLayout::GemmAtom,
+    )
+    .unwrap();
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::nvfp4(
+            &scratch.mlp_activation,
+            &scratch.mlp_scales,
+            &down.packed,
+            &down.scales,
+            BLOCK,
+            down.alpha,
+            &mut scratch.mlp_out,
+        ),
+    )
+    .unwrap();
+    dump.push_bf16(ctx, names.3, &scratch.mlp_out, HIDDEN);
+    ops::add_into(ctx, &scratch.mlp_out, &scratch.hidden).unwrap();
+    dump.push_bf16(ctx, names.4, &scratch.hidden, HIDDEN);
+}
+
+/// One GDN token, with a tap after every stage the reference records.
+fn gdn_reference_step(
+    ctx: &CudaContext,
+    gdn: &GdnLayer,
+    scratch: &mut Scratch,
+    state: &mut GdnState,
+    swiglu_out: &Tensor,
+    dump: &mut RefDump,
+) {
+    dump.push_bf16(ctx, "l0_00_hidden_in", &scratch.hidden, HIDDEN);
+    ops::rms_norm(ctx, &scratch.hidden, &gdn.input_norm, &scratch.normalized, EPSILON).unwrap();
+    dump.push_bf16(ctx, "l0_01_input_layernorm", &scratch.normalized, HIDDEN);
+
+    fp8_projection(ctx, &gdn.qkv, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_qkv);
+    dump.push_bf16(ctx, "l0_02_in_proj_qkv", &scratch.gdn_qkv, QKV_WIDTH);
+    fp8_projection(ctx, &gdn.z, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_z);
+    dump.push_bf16(ctx, "l0_03_in_proj_z", &scratch.gdn_z, Z_WIDTH);
+
+    bf16_matvec(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a);
+    bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
+    dump.push_bf16(ctx, "l0_05_in_proj_a", &scratch.gdn_a, GDN_V_HEADS);
+    dump.push_bf16(ctx, "l0_04_in_proj_b", &scratch.gdn_b, GDN_V_HEADS);
+
+    let qkv_flat = view(&scratch.gdn_qkv, vec![QKV_WIDTH], DType::BF16);
+    ops::gdn_causal_conv_step(ctx, &state.conv_window, &qkv_flat, &gdn.conv_weight, &scratch.gdn_conv)
+        .unwrap();
+    // The conv kernel folds SiLU in, so only the post-activation tap exists.
+    dump.push_bf16(ctx, "l0_07_conv1d_silu", &scratch.gdn_conv, QKV_WIDTH);
+
+    let (q, k, v) = split_gdn_qkv(ctx, &scratch.gdn_conv);
+    dump.push_bf16(ctx, "l0_08_q_split", &q, GDN_K_HEADS * GDN_HEAD_DIM);
+    dump.push_bf16(ctx, "l0_08_k_split", &k, GDN_K_HEADS * GDN_HEAD_DIM);
+    dump.push_bf16(ctx, "l0_08_v_split", &v, GDN_V_HEADS * GDN_HEAD_DIM);
+
+    // q and k are views into gdn_conv and the normalization is in place, so
+    // the split tap above has to come first.
+    ops::gdn_l2_normalize_heads(ctx, &q, EPSILON).unwrap();
+    ops::gdn_l2_normalize_heads(ctx, &k, EPSILON).unwrap();
+    dump.push_bf16(ctx, "l0_12_q_l2norm", &q, GDN_K_HEADS * GDN_HEAD_DIM);
+    dump.push_bf16(ctx, "l0_12_k_l2norm", &k, GDN_K_HEADS * GDN_HEAD_DIM);
+
+    ops::gdn_decay_and_beta(
+        ctx,
+        &scratch.gdn_a,
+        &scratch.gdn_b,
+        &gdn.a_log,
+        &gdn.dt_bias,
+        &scratch.gdn_decay,
+        &scratch.gdn_beta,
+    )
+    .unwrap();
+    // gdn_decay holds g, the log decay, which is what l0_10_g_log_decay is.
+    dump.push_f32(ctx, "l0_10_g_log_decay", &scratch.gdn_decay, GDN_V_HEADS);
+    dump.push_f32(ctx, "l0_09_beta", &scratch.gdn_beta, GDN_V_HEADS);
+
+    ops::gdn_recurrent_step(
+        ctx,
+        &state.recurrent,
+        &q,
+        &k,
+        &v,
+        &scratch.gdn_decay,
+        &scratch.gdn_beta,
+        &scratch.gdn_readout,
+        GDN_K_HEADS,
+    )
+    .unwrap();
+    dump.push_bf16(ctx, "l0_16_core_attn_out", &scratch.gdn_readout, GDN_V_HEADS * GDN_HEAD_DIM);
+    // State is [v_heads, v_dim, k_dim] here against the reference's
+    // [v_heads, k_dim, v_dim]; the comparison transposes the last two axes.
+    dump.set_f32(ctx, "l0_15_recurrent_state_final",
+        &state.recurrent,
+        GDN_V_HEADS * GDN_HEAD_DIM * GDN_HEAD_DIM,
+    );
+
+    ops::gdn_gated_norm(
+        ctx,
+        &scratch.gdn_readout,
+        &gdn_z_heads(ctx, &scratch.gdn_z),
+        &gdn.norm_weight,
+        &scratch.gdn_gated,
+        EPSILON,
+    )
+    .unwrap();
+    dump.push_bf16(ctx, "l0_17_gated_rmsnorm", &scratch.gdn_gated, Z_WIDTH);
+
+    let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
+    fp8_projection(ctx, &gdn.out, &flat, &scratch.gdn_fp8, &mut scratch.projected);
+    dump.push_bf16(ctx, "l0_18_out_proj", &scratch.projected, HIDDEN);
+    ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
+    dump.push_bf16(ctx, "l0_19_residual_1", &scratch.hidden, HIDDEN);
+
+    unfused_mlp(
+        ctx,
+        &gdn.gate_up,
+        &gdn.down,
+        &gdn.post_norm,
+        scratch,
+        swiglu_out,
+        dump,
+        (
+            "l0_20_post_attention_layernorm",
+            "l0_21_gate_up",
+            "l0_22_swiglu",
+            "l0_23_down_proj",
+            "l0_24_layer_out",
+        ),
+    );
+}
+
+/// One full-attention token, with a tap after every stage the reference records.
+#[allow(clippy::too_many_arguments)]
+fn attention_reference_step(
+    ctx: &CudaContext,
+    attention: &AttentionLayer,
+    scratch: &mut Scratch,
+    cache: &mut KvCache,
+    swiglu_out: &Tensor,
+    rotary: usize,
+    position: usize,
+    dump: &mut RefDump,
+) {
+    dump.push_bf16(ctx, "l3_00_hidden_in", &scratch.hidden, HIDDEN);
+    ops::rms_norm(ctx, &scratch.hidden, &attention.input_norm, &scratch.normalized, EPSILON).unwrap();
+    dump.push_bf16(ctx, "l3_01_input_layernorm", &scratch.normalized, HIDDEN);
+
+    fp8_projection(ctx, &attention.q, &scratch.normalized, &scratch.fp8_activation, &mut scratch.qkv_fused);
+    dump.push_bf16(ctx, "l3_03_q_proj_full", &scratch.qkv_fused, 2 * HEADS * HEAD_DIM);
+    let fused_heads = view(&scratch.qkv_fused, vec![1, HEADS, 2 * HEAD_DIM], DType::BF16);
+    ops::split_query_and_gate(ctx, &fused_heads, &scratch.query, &scratch.query_gate).unwrap();
+    dump.push_bf16(ctx, "l3_04_query_split", &scratch.query, HEADS * HEAD_DIM);
+    dump.push_bf16(ctx, "l3_04_gate_split", &scratch.query_gate, HEADS * HEAD_DIM);
+
+    let mut key_slot = cache_slot(&cache.keys, position, vec![1, KV_HEADS * HEAD_DIM]);
+    let mut value_slot = cache_slot(&cache.values, position, vec![1, KV_HEADS * HEAD_DIM]);
+    fp8_projection(ctx, &attention.k, &scratch.normalized, &scratch.fp8_activation, &mut key_slot);
+    fp8_projection(ctx, &attention.v, &scratch.normalized, &scratch.fp8_activation, &mut value_slot);
+    dump.push_bf16(ctx, "l3_05_k_proj", &key_slot, KV_HEADS * HEAD_DIM);
+    dump.push_bf16(ctx, "l3_05_v_proj", &value_slot, KV_HEADS * HEAD_DIM);
+
+    let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
+    let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
+    ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
+    ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+    dump.push_bf16(ctx, "l3_06_q_norm", &scratch.query, HEADS * HEAD_DIM);
+    dump.push_bf16(ctx, "l3_06_k_norm", &key_slot, KV_HEADS * HEAD_DIM);
+    // v is never normalized; the reference records it here for alignment.
+    dump.push_bf16(ctx, "l3_06_v_states", &value_slot, KV_HEADS * HEAD_DIM);
+
+    let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
+    let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
+    ops::partial_rope(ctx, &query_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
+    ops::partial_rope(ctx, &key_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
+    dump.push_bf16(ctx, "l3_07_q_rope", &scratch.query, HEADS * HEAD_DIM);
+    dump.push_bf16(ctx, "l3_07_k_rope", &key_slot, KV_HEADS * HEAD_DIM);
+
+    let valid = position + 1;
+    let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
+    let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
+    let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
+    let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
+    let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
+    args.valid_key_tokens = valid;
+    args.query_start = position;
+    ops::kv_cache_attention(ctx, args).unwrap();
+    dump.push_bf16(ctx, "l3_09_attn_out", &scratch.attention_out, HEADS * HEAD_DIM);
+
+    let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
+    ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+    dump.push_bf16(ctx, "l3_10_attn_gated", &scratch.attention_out, HEADS * HEAD_DIM);
+
+    fp8_projection(ctx, &attention.o, &scratch.attention_out, &scratch.attention_fp8, &mut scratch.projected);
+    dump.push_bf16(ctx, "l3_11_o_proj", &scratch.projected, HIDDEN);
+    ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
+    dump.push_bf16(ctx, "l3_12_residual_1", &scratch.hidden, HIDDEN);
+
+    unfused_mlp(
+        ctx,
+        &attention.gate_up,
+        &attention.down,
+        &attention.post_norm,
+        scratch,
+        swiglu_out,
+        dump,
+        (
+            "l3_13_post_attention_layernorm",
+            "l3_14_gate_up",
+            "l3_15_swiglu",
+            "l3_16_down_proj",
+            "l3_17_layer_out",
+        ),
+    );
+}
+
+/// Replay layers 0 and 3 on the reference's input and dump every tap.
+///
+/// Pairs with devlocal/qwen38-nvfp4/scripts/compare_reference.py, which reads
+/// the .f32 files this writes and reports cosine and relative L2 against
+/// reference-tensors/ in the acceptance order.
+#[test]
+#[ignore = "requires the 20 GiB Qwen3.8-27B-NVFP4 checkpoint and a GPU"]
+fn compare_against_reference_tensors() {
+    let ctx = CudaContext::new(0).unwrap();
+    let seq_len = reference_sequence_length();
+    let tensors = checkpoint();
+    let model = load_model(&ctx, &tensors);
+    ctx.synchronize().unwrap();
+    drop(tensors);
+
+    let mut dump = RefDump::new(&format!("apxdump-ref-seq{seq_len}"));
+    let hidden_input = reference_hidden(seq_len);
+    let mut scratch = Scratch::new(&ctx);
+    let swiglu_out = zeros(&ctx, vec![1, INTERMEDIATE], DType::BF16);
+    let rotary = ops::rotary_dim(HEAD_DIM, PARTIAL_ROTARY);
+
+    // A fresh state per layer: the reference starts both layers from an empty
+    // cache and an empty recurrent state.
+    let mut gdn_state = GdnState {
+        recurrent: zeros(&ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM, GDN_HEAD_DIM], DType::F32),
+        conv_window: zeros(&ctx, vec![QKV_WIDTH, CONV_WIDTH], DType::F32),
+    };
+    let capacity = seq_len.max(1);
+    let mut cache = KvCache {
+        keys: zeros(&ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+        values: zeros(&ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+    };
+
+    let gdn = match &model.layers[0] {
+        Layer::Gdn(gdn) => gdn.as_ref(),
+        Layer::Attention(_) => panic!("layer 0 should be a GDN layer"),
+    };
+    let attention = match &model.layers[3] {
+        Layer::Attention(attention) => attention.as_ref(),
+        Layer::Gdn(_) => panic!("layer 3 should be a full-attention layer"),
+    };
+
+    // Each token is loaded straight from the reference input, so no step
+    // inherits the previous step's residual stream.
+    let load_token = |scratch: &Scratch, token: usize| {
+        let row = &hidden_input[token * HIDDEN..(token + 1) * HIDDEN];
+        let mut bytes = Vec::with_capacity(HIDDEN * 2);
+        for value in row {
+            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        CudaBuffer::from_tensor(&scratch.hidden).unwrap().copy_from_host(&bytes).unwrap();
+    };
+
+    for token in 0..seq_len {
+        load_token(&scratch, token);
+        gdn_reference_step(&ctx, gdn, &mut scratch, &mut gdn_state, &swiglu_out, &mut dump);
+        ctx.synchronize().unwrap();
+    }
+
+    for token in 0..seq_len {
+        load_token(&scratch, token);
+        CudaBuffer::from_tensor(&scratch.positions)
+            .unwrap()
+            .copy_from_host(&(token as i32).to_le_bytes())
+            .unwrap();
+        attention_reference_step(
+            &ctx,
+            attention,
+            &mut scratch,
+            &mut cache,
+            &swiglu_out,
+            rotary,
+            token,
+            &mut dump,
+        );
+        ctx.synchronize().unwrap();
+    }
+
+    dump.write();
+    println!("REFERENCE DUMP COMPLETE seq_len={seq_len}");
 }

@@ -57,7 +57,7 @@ __global__ void rms_norm_kernel(const __nv_bfloat16* __restrict__ input,
   const float scale = rsqrtf(partials[0] / static_cast<float>(width) + epsilon);
   for (int index = threadIdx.x; index < width; index += blockDim.x) {
     const float value = __bfloat162float(input[base + index]) * scale *
-                        __bfloat162float(weight[index]);
+                        (1.0f + __bfloat162float(weight[index]));
     output[base + index] = __float2bfloat16(value);
   }
 }

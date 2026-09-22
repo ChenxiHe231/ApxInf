@@ -74,16 +74,16 @@ extern "C" apxinf_status_t apxinf_attn_split_query_and_gate(
   });
 }
 
-extern "C" apxinf_status_t apxinf_attn_apply_swish_gate(
+extern "C" apxinf_status_t apxinf_attn_apply_output_gate(
     void* data, const void* gate, int64_t count,
     apxinf_cuda_stream_t stream) {
   return abi_boundary([&] {
     if (data == nullptr || gate == nullptr || count <= 0) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid swish gate arguments");
+                    "invalid output gate arguments");
     }
-    check(apxinf::cuda::attn_ops::apply_swish_gate(
+    check(apxinf::cuda::attn_ops::apply_output_gate(
               data, gate, count, static_cast<cudaStream_t>(stream)),
-          "swish gate");
+          "attention output gate");
   });
 }

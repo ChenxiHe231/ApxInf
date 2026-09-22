@@ -149,8 +149,20 @@ fn query_and_gate_split_follows_the_projection_layout() {
     }
 }
 
+/// The full-attention output gate is `x * sigmoid(z)`.
+///
+/// `config.json` advertises `output_gate_type: "swish"`, which would make it
+/// `x * silu(z) = x * z * sigmoid(z)`. Nothing reads that key: the reference
+/// `Qwen3_5Attention.forward` does `attn_output * torch.sigmoid(gate)`
+/// (modeling_qwen3_5.py:818), and the code is the artifact that defines the
+/// model. This test pins the sigmoid form and, to keep a future swap from
+/// passing quietly, checks that the silu alternative is far enough away that
+/// the first assertion could not have accepted it.
+///
+/// The GDN output gate really is silu -- see `gdn_gated_norm`, which this does
+/// not cover.
 #[test]
-fn swish_gate_is_silu_not_sigmoid() {
+fn attention_gate_is_sigmoid_not_silu() {
     let ctx = CudaContext::new(0).unwrap();
     let count = 4096usize;
     let data_values: Vec<f32> = (0..count).map(|i| ((i % 17) as f32 - 8.0) / 5.0).collect();
@@ -158,29 +170,33 @@ fn swish_gate_is_silu_not_sigmoid() {
     let data = upload_bf16(&ctx, &data_values, vec![count]);
     let gate = upload_bf16(&ctx, &gate_values, vec![count]);
 
-    ops::apply_swish_gate(&ctx, &data, &gate).unwrap();
+    ops::apply_output_gate(&ctx, &data, &gate).unwrap();
     ctx.synchronize().unwrap();
     let produced = read_bf16(&data);
 
     let mut worst = 0.0f64;
-    let mut worst_against_sigmoid = f64::INFINITY;
+    let mut worst_against_silu = 0.0f64;
     for index in 0..count {
         let x = half::bf16::from_f32(data_values[index]).to_f32() as f64;
         let z = half::bf16::from_f32(gate_values[index]).to_f32() as f64;
-        let silu = z / (1.0 + (-z).exp());
-        let expected = x * silu;
+        let sigmoid = 1.0 / (1.0 + (-z).exp());
+        let expected = x * sigmoid;
         let got = produced[index] as f64;
         worst = worst.max((got - expected).abs() / expected.abs().max(1e-2));
-        // Track how far the result is from the sigmoid-gated alternative, so
-        // this test would fail rather than pass if the gate were swapped.
-        let sigmoid_variant = x / (1.0 + (-z).exp());
-        worst_against_sigmoid = worst_against_sigmoid
-            .min((got - sigmoid_variant).abs() / sigmoid_variant.abs().max(1e-2));
+        // How far the silu-gated alternative sits from what we got. If the two
+        // were ever swapped, `worst` above would catch it only because this
+        // margin is large -- so assert the margin too, and the pair of checks
+        // stays a real discriminator rather than a tautology.
+        let silu_variant = x * z * sigmoid;
+        worst_against_silu =
+            worst_against_silu.max((got - silu_variant).abs() / got.abs().max(1e-2));
     }
-    println!("swish gate worst relative: {worst:.5}");
-    assert!(worst < 2e-2, "swish gate drifted by {worst}");
+    println!("attention gate worst relative: {worst:.5}");
+    println!("  margin against the silu form: {worst_against_silu:.5}");
+    assert!(worst < 2e-2, "sigmoid gate drifted by {worst}");
     assert!(
-        worst_against_sigmoid < 1.0,
-        "sanity: the two gate forms should differ somewhere"
+        worst_against_silu > 0.5,
+        "sanity: silu and sigmoid gates must differ enough for the check above \
+         to discriminate, but the worst gap was only {worst_against_silu}"
     );
 }

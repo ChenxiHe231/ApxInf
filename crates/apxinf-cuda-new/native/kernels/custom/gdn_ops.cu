@@ -101,7 +101,19 @@ __global__ void recurrent_step_kernel(
     out += __shfl_down_sync(0xFFFFFFFFu, out, offset);
   }
   if (lane == 0) {
-    output[head * v_dim + v_index] = __float2bfloat16(out);
+    // The reference scales the query by 1/sqrt(k_dim) before the recurrence
+    // (torch_recurrent_gated_delta_rule: `query = query / query.shape[-1]**0.5`,
+    // applied after the optional q/k L2 norm and unconditionally). q enters
+    // only here, in the readout, so scaling the reduction is the same thing
+    // and costs one multiply per row instead of one per element.
+    //
+    // This is not cosmetic even though a uniform factor would normally wash
+    // out in the gated RMSNorm that follows. At this model's magnitudes
+    // mean(core^2) is ~7e-10, far below `epsilon` = 1e-6, so that norm is
+    // epsilon-dominated and very nearly linear -- it passes an input scale
+    // error through instead of cancelling it.
+    output[head * v_dim + v_index] =
+        __float2bfloat16(out * rsqrtf(static_cast<float>(k_dim)));
   }
 }
 
