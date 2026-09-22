@@ -53,4 +53,20 @@ unsafe extern "C" {
         heads: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_gdn_chunk_scan(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        g: *const c_void,
+        beta: *const c_void,
+        out: *mut c_void,
+        state: *mut c_void,
+        seq_padded: i64,
+        v_heads: i64,
+        k_heads: i64,
+        chunk_size: i64,
+        k_dim: i64,
+        num_chunks: i64,
+        stream: CudaStream,
+    ) -> i32;
 }
