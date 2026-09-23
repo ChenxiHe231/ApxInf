@@ -611,7 +611,15 @@ fn decode_step(
     let mut gdn_index = 0usize;
     let mut attention_index = 0usize;
 
+    // APXINF_QWEN38_LAYER_TIMING=1 splits a step across the two layer kinds.
+    // It synchronizes per layer, which inflates the total -- read the ratio,
+    // not the absolute.
+    let timing = std::env::var("APXINF_QWEN38_LAYER_TIMING").is_ok();
+    let mut attention_time = 0.0f64;
+    let mut gdn_time = 0.0f64;
+
     for (layer_index, layer) in model.layers.iter().enumerate() {
+        let layer_start = timing.then(Instant::now);
         match layer {
             Layer::Attention(attention) => {
                 let cache = &mut kv_caches[attention_index];
@@ -641,13 +649,19 @@ fn decode_step(
                 // The cache is allocated at full capacity; attention reads only
                 // the tokens written so far.
                 let valid = position + 1;
-                let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
-                let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
+                // Viewed at `valid`, not at the full allocation: the FA2
+                // candidate requires key_capacity == key_tokens, and a
+                // capacity-shaped view fails that for every step but the last,
+                // dropping decode onto the naive kernel whose cost grows with
+                // KV length.
+                let keys = cache_rows(&cache.keys, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
+                let values = cache_rows(&cache.values, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
                 let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
                 let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
                 let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
                 args.valid_key_tokens = valid;
                 args.query_start = position;
+            args.policy.cache_dir = attention_cache_dir();
                 ops::kv_cache_attention(ctx, args).unwrap();
 
                 let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
@@ -686,7 +700,25 @@ fn decode_step(
                 nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
             }
         }
+        if let Some(start) = layer_start {
+            ctx.synchronize().unwrap();
+            let elapsed = start.elapsed().as_secs_f64();
+            match layer {
+                Layer::Attention(_) => attention_time += elapsed,
+                Layer::Gdn(_) => gdn_time += elapsed,
+            }
+        }
         let _ = layer_index;
+    }
+
+    if timing {
+        println!(
+            "  layer split: attention {:7.2} ms ({} layers)   gdn {:7.2} ms ({} layers)",
+            attention_time * 1e3,
+            attention_index,
+            gdn_time * 1e3,
+            gdn_index
+        );
     }
 
     ops::rms_norm(ctx, &scratch.hidden, &model.final_norm, &scratch.normalized, EPSILON).unwrap();
@@ -832,13 +864,18 @@ fn run_one_layer(
             ops::partial_rope(ctx, &query_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
             ops::partial_rope(ctx, &key_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
             let valid = position + 1;
-            let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
-            let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
+            // Viewed at `valid`, not at the full allocation: the FA2 candidate
+            // requires key_capacity == key_tokens, and a capacity-shaped view
+            // fails that for every step but the last, dropping decode onto the
+            // naive kernel whose cost grows with KV length.
+            let keys = cache_rows(&cache.keys, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
+            let values = cache_rows(&cache.values, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
             let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
             let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
             let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
             args.valid_key_tokens = valid;
             args.query_start = position;
+            args.policy.cache_dir = attention_cache_dir();
             ops::kv_cache_attention(ctx, args).unwrap();
             let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
             ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
@@ -882,6 +919,21 @@ fn run_one_layer(
 
 fn capacity_of(cache: &Tensor) -> usize {
     cache.shape().dims()[1]
+}
+
+/// The tuning-recipe cache directory for attention.
+///
+/// Decode advances the KV length one token at a time and the attention tuning
+/// key includes `key_tokens`, `key_capacity` and `query_start`, so every step
+/// is a fresh key. Without a cache that means a full autotune per step -- 3
+/// warm-up plus 10 timed launches per candidate -- which measured as 22 ms per
+/// attention layer at 2048 KV, against ~42 us of actual KV traffic. Persisting
+/// recipes lets a repeated KV length skip tuning entirely.
+fn attention_cache_dir() -> Option<String> {
+    Some(
+        std::env::var("APXINF_QWEN38_TUNE_CACHE")
+            .unwrap_or_else(|_| "/tmp/apxinf-qwen38-attention-recipes".to_string()),
+    )
 }
 
 /// A view of the leading `dims` elements of a larger allocation.
@@ -1190,13 +1242,16 @@ fn prefill_step(
                 // One call for all queries: the causal mask already places
                 // query i at query_start + i, so the prompt needs no masking
                 // work of its own.
-                let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
-                let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
+                // FA2 multi-query prefill requires key_capacity == key_tokens, so the
+                // cache is viewed at exactly the tokens written, not its full alloc.
+                let keys = cache_rows(&cache.keys, tokens, vec![1, tokens, KV_HEADS, HEAD_DIM]);
+                let values = cache_rows(&cache.values, tokens, vec![1, tokens, KV_HEADS, HEAD_DIM]);
                 let query_4d = prefix(&scratch.query, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
                 let mut out_4d = prefix(&scratch.attention_out, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
                 let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
                 args.valid_key_tokens = tokens;
                 args.query_start = 0;
+                args.policy.cache_dir = attention_cache_dir();
                 ops::kv_cache_attention(ctx, args).unwrap();
 
                 let gate_flat = prefix(&scratch.query_gate, vec![tokens, HEADS * HEAD_DIM], DType::BF16);
@@ -1968,13 +2023,15 @@ fn attention_reference_step(
     dump.push_bf16(ctx, "l3_07_k_rope", &key_slot, KV_HEADS * HEAD_DIM);
 
     let valid = position + 1;
-    let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
-    let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
+    // Viewed at `valid`: FA2 requires key_capacity == key_tokens.
+    let keys = cache_rows(&cache.keys, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
+    let values = cache_rows(&cache.values, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
     let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
     let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
     let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
     args.valid_key_tokens = valid;
     args.query_start = position;
+    args.policy.cache_dir = attention_cache_dir();
     ops::kv_cache_attention(ctx, args).unwrap();
     dump.push_bf16(ctx, "l3_09_attn_out", &scratch.attention_out, HEADS * HEAD_DIM);
 
@@ -2174,13 +2231,18 @@ fn tf_run_layer(
             ops::partial_rope(ctx, &query_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
             ops::partial_rope(ctx, &key_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
             let valid = position + 1;
-            let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
-            let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
+            // Viewed at `valid`, not at the full allocation: the FA2 candidate
+            // requires key_capacity == key_tokens, and a capacity-shaped view
+            // fails that for every step but the last, dropping decode onto the
+            // naive kernel whose cost grows with KV length.
+            let keys = cache_rows(&cache.keys, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
+            let values = cache_rows(&cache.values, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
             let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
             let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
             let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
             args.valid_key_tokens = valid;
             args.query_start = position;
+            args.policy.cache_dir = attention_cache_dir();
             ops::kv_cache_attention(ctx, args).unwrap();
             let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
             ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
