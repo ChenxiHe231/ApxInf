@@ -47,6 +47,7 @@ const GDN_K_HEADS: usize = 16;
 const GDN_V_HEADS: usize = 48;
 const GDN_HEAD_DIM: usize = 128;
 const CONV_WIDTH: usize = 4;
+const CHUNK: usize = 64; // gdn_chunk_scan works a chunk at a time
 const QKV_WIDTH: usize = 10240; // 16*128 q + 16*128 k + 48*128 v
 const Z_WIDTH: usize = 6144;
 
@@ -921,6 +922,447 @@ fn split_gdn_qkv(_ctx: &CudaContext, qkv: &Tensor) -> (Tensor, Tensor, Tensor) {
         .as_tensor(Shape::new(vec![GDN_V_HEADS, GDN_HEAD_DIM]), DType::BF16)
         .unwrap();
     (q, k, v)
+}
+
+/// Working buffers for a whole prompt, sized to `seq_padded` rows.
+///
+/// Every buffer is allocated zeroed and the operators only ever write the
+/// first `tokens` rows, so the padding rows stay zero for the life of the
+/// run. That is what makes the chunk scan safe to call on a padded sequence:
+/// `g = 0` and `beta = 0` make the gated delta rule
+/// `state <- state * exp(g) + beta * (...)` the identity, so padding cannot
+/// move the recurrent state. Note this cannot be arranged by zeroing `a`
+/// instead -- `decay = -exp(a_log) * softplus(a + dt_bias)` is nonzero at
+/// `a = 0` -- which is exactly the kind of mistake that would corrupt the
+/// state silently.
+struct PrefillScratch {
+    capacity: usize,
+    hidden: Tensor,
+    normalized: Tensor,
+    fp8_activation: Tensor,
+    nvfp4_activation: Tensor,
+    nvfp4_scales: Tensor,
+    mlp_fused: Tensor,
+    mlp_activation: Tensor,
+    mlp_scales: Tensor,
+    mlp_out: Tensor,
+    qkv_fused: Tensor,
+    query: Tensor,
+    query_gate: Tensor,
+    attention_out: Tensor,
+    attention_fp8: Tensor,
+    projected: Tensor,
+    positions: Tensor,
+    gdn_qkv: Tensor,
+    gdn_conv: Tensor,
+    gdn_z: Tensor,
+    gdn_a: Tensor,
+    gdn_b: Tensor,
+    gdn_decay: Tensor,
+    gdn_beta: Tensor,
+    gdn_readout: Tensor,
+    gdn_gated: Tensor,
+    gdn_fp8: Tensor,
+    tokens: Tensor,
+}
+
+impl PrefillScratch {
+    fn new(ctx: &CudaContext, capacity: usize) -> PrefillScratch {
+        assert_eq!(capacity % CHUNK, 0, "prefill capacity must be a multiple of {CHUNK}");
+        let scale_bytes =
+            |rows: usize, k: usize| vec![ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
+        let t = capacity;
+        PrefillScratch {
+            capacity,
+            hidden: zeros(ctx, vec![t, HIDDEN], DType::BF16),
+            normalized: zeros(ctx, vec![t, HIDDEN], DType::BF16),
+            fp8_activation: zeros(ctx, vec![t, HIDDEN], DType::F8E4M3),
+            nvfp4_activation: zeros(ctx, vec![t, HIDDEN / 2], DType::E2M1Pair),
+            nvfp4_scales: zeros(ctx, scale_bytes(t, HIDDEN), DType::F8E4M3),
+            mlp_fused: zeros(ctx, vec![t, 2 * INTERMEDIATE], DType::BF16),
+            mlp_activation: zeros(ctx, vec![t, INTERMEDIATE / 2], DType::E2M1Pair),
+            mlp_scales: zeros(ctx, scale_bytes(t, INTERMEDIATE), DType::F8E4M3),
+            mlp_out: zeros(ctx, vec![t, HIDDEN], DType::BF16),
+            qkv_fused: zeros(ctx, vec![t, 2 * HEADS * HEAD_DIM], DType::BF16),
+            query: zeros(ctx, vec![t, HEADS, HEAD_DIM], DType::BF16),
+            query_gate: zeros(ctx, vec![t, HEADS, HEAD_DIM], DType::BF16),
+            attention_out: zeros(ctx, vec![t, HEADS * HEAD_DIM], DType::BF16),
+            attention_fp8: zeros(ctx, vec![t, HEADS * HEAD_DIM], DType::F8E4M3),
+            projected: zeros(ctx, vec![t, HIDDEN], DType::BF16),
+            positions: zeros(ctx, vec![t], DType::I32),
+            gdn_qkv: zeros(ctx, vec![t, QKV_WIDTH], DType::BF16),
+            gdn_conv: zeros(ctx, vec![t, QKV_WIDTH], DType::BF16),
+            gdn_z: zeros(ctx, vec![t, Z_WIDTH], DType::BF16),
+            gdn_a: zeros(ctx, vec![t, GDN_V_HEADS], DType::BF16),
+            gdn_b: zeros(ctx, vec![t, GDN_V_HEADS], DType::BF16),
+            gdn_decay: zeros(ctx, vec![t, GDN_V_HEADS], DType::F32),
+            gdn_beta: zeros(ctx, vec![t, GDN_V_HEADS], DType::F32),
+            gdn_readout: zeros(ctx, vec![t, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
+            gdn_gated: zeros(ctx, vec![t, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
+            gdn_fp8: zeros(ctx, vec![t, Z_WIDTH], DType::F8E4M3),
+            tokens: zeros(ctx, vec![t], DType::I32),
+        }
+    }
+}
+
+/// `[rows, hidden] x [hidden, cols] -> [rows, cols]`, in BF16.
+///
+/// The row-count generalization of `bf16_matvec`; `weight` is `[K, N]` for the
+/// same reason.
+fn bf16_matmul_rows(
+    ctx: &CudaContext,
+    weight: &Tensor,
+    input: &Tensor,
+    output: &Tensor,
+    rows: usize,
+) {
+    let dims = weight.shape().dims().to_vec();
+    let source = view(input, vec![rows, dims[0]], DType::BF16);
+    let mut out = view(output, vec![rows, dims[1]], DType::BF16);
+    ops::gemm(ctx, ops::GemmArgs::new(&source, weight, &mut out)).unwrap();
+}
+
+/// The MLP over `rows` tokens: `nvfp4_mlp` with a row count.
+fn nvfp4_mlp_rows(
+    ctx: &CudaContext,
+    gate_up: &Nvfp4Weight,
+    down: &Nvfp4Weight,
+    norm_weight: &Tensor,
+    scratch: &mut PrefillScratch,
+    rows: usize,
+) {
+    let hidden_rows = view(&scratch.hidden, vec![rows, HIDDEN], DType::BF16);
+    let activation = view(&scratch.nvfp4_activation, vec![rows, HIDDEN / 2], DType::E2M1Pair);
+    ops::nvfp4_quantize_rms_norm(
+        ctx,
+        &hidden_rows,
+        norm_weight,
+        &activation,
+        &scratch.nvfp4_scales,
+        EPSILON,
+        gate_up.input_scale,
+        BLOCK,
+        ops::ScaleLayout::GemmAtom,
+    )
+    .unwrap();
+
+    let mut fused = view(&scratch.mlp_fused, vec![rows, 2 * INTERMEDIATE], DType::BF16);
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::nvfp4(
+            &activation,
+            &scratch.nvfp4_scales,
+            &gate_up.packed,
+            &gate_up.scales,
+            BLOCK,
+            gate_up.alpha,
+            &mut fused,
+        ),
+    )
+    .unwrap();
+
+    let mlp_activation =
+        view(&scratch.mlp_activation, vec![rows, INTERMEDIATE / 2], DType::E2M1Pair);
+    ops::nvfp4_quantize_swiglu(
+        ctx,
+        &fused,
+        &mlp_activation,
+        &scratch.mlp_scales,
+        down.input_scale,
+        BLOCK,
+        ops::ScaleLayout::GemmAtom,
+    )
+    .unwrap();
+
+    let mut mlp_out = view(&scratch.mlp_out, vec![rows, HIDDEN], DType::BF16);
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::nvfp4(
+            &mlp_activation,
+            &scratch.mlp_scales,
+            &down.packed,
+            &down.scales,
+            BLOCK,
+            down.alpha,
+            &mut mlp_out,
+        ),
+    )
+    .unwrap();
+
+    let residual = view(&scratch.hidden, vec![rows, HIDDEN], DType::BF16);
+    ops::add_into(ctx, &mlp_out, &residual).unwrap();
+}
+
+/// Run a whole prompt through the model in one pass per layer.
+///
+/// This is the batched counterpart of `decode_step`. Attention takes all
+/// `tokens` queries at once against the cache it just filled; GDN replaces the
+/// per-token recurrence with the chunked scan. Both leave exactly the state
+/// the single-token path would have left, so decode continues from `tokens`
+/// without re-running anything.
+///
+/// The scan needs a multiple of `CHUNK` rows, so it reads `seq_padded`; every
+/// other operator is given the true `tokens`. The padding rows are never
+/// written and stay zero -- see `PrefillScratch`.
+fn prefill_step(
+    ctx: &CudaContext,
+    model: &Model,
+    scratch: &mut PrefillScratch,
+    gdn_states: &mut [GdnState],
+    kv_caches: &mut [KvCache],
+    tokens: usize,
+) {
+    assert!(tokens > 0 && tokens <= scratch.capacity, "prompt exceeds prefill capacity");
+    let seq_padded = tokens.div_ceil(CHUNK) * CHUNK;
+
+    let token_ids = view(&scratch.tokens, vec![tokens], DType::I32);
+    let hidden_rows = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+    ops::embedding_gather(ctx, &model.embedding, &token_ids, &hidden_rows).unwrap();
+
+    let rotary = ops::rotary_dim(HEAD_DIM, PARTIAL_ROTARY);
+    let mut gdn_index = 0usize;
+    let mut attention_index = 0usize;
+
+    for layer in model.layers.iter() {
+        match layer {
+            Layer::Attention(attention) => {
+                let cache = &mut kv_caches[attention_index];
+                attention_index += 1;
+
+                let hidden = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+                let normalized = view(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
+                ops::rms_norm(ctx, &hidden, &attention.input_norm, &normalized, EPSILON).unwrap();
+
+                fp8_projection_rows(
+                    ctx,
+                    &attention.q,
+                    &normalized,
+                    &scratch.fp8_activation,
+                    &mut scratch.qkv_fused,
+                    tokens,
+                );
+                let fused_heads =
+                    view(&scratch.qkv_fused, vec![tokens, HEADS, 2 * HEAD_DIM], DType::BF16);
+                let query = view(&scratch.query, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
+                let query_gate =
+                    view(&scratch.query_gate, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
+                ops::split_query_and_gate(ctx, &fused_heads, &query, &query_gate).unwrap();
+
+                // Rows 0..tokens of the cache are a contiguous prefix, so k and
+                // v project straight into it exactly as decode does per token.
+                let mut key_rows = cache_rows(&cache.keys, tokens, vec![tokens, KV_HEADS * HEAD_DIM]);
+                let mut value_rows =
+                    cache_rows(&cache.values, tokens, vec![tokens, KV_HEADS * HEAD_DIM]);
+                fp8_projection_rows(ctx, &attention.k, &normalized, &scratch.fp8_activation, &mut key_rows, tokens);
+                fp8_projection_rows(ctx, &attention.v, &normalized, &scratch.fp8_activation, &mut value_rows, tokens);
+
+                // Per-head RMSNorm is independent per row, so the token axis
+                // folds into the head axis.
+                let query_heads = view(&scratch.query, vec![tokens * HEADS, HEAD_DIM], DType::BF16);
+                let key_heads = cache_rows(&cache.keys, tokens, vec![tokens * KV_HEADS, HEAD_DIM]);
+                ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
+                ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+
+                let positions = view(&scratch.positions, vec![tokens], DType::I32);
+                let query_tokens = view(&scratch.query, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
+                let key_tokens = cache_rows(&cache.keys, tokens, vec![1, tokens, KV_HEADS, HEAD_DIM]);
+                ops::partial_rope(ctx, &query_tokens, &positions, rotary, ROPE_THETA).unwrap();
+                ops::partial_rope(ctx, &key_tokens, &positions, rotary, ROPE_THETA).unwrap();
+
+                // One call for all queries: the causal mask already places
+                // query i at query_start + i, so the prompt needs no masking
+                // work of its own.
+                let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
+                let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
+                let query_4d = view(&scratch.query, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
+                let mut out_4d = view(&scratch.attention_out, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
+                let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
+                args.valid_key_tokens = tokens;
+                args.query_start = 0;
+                ops::kv_cache_attention(ctx, args).unwrap();
+
+                let gate_flat = view(&scratch.query_gate, vec![tokens, HEADS * HEAD_DIM], DType::BF16);
+                let attention_out = view(&scratch.attention_out, vec![tokens, HEADS * HEAD_DIM], DType::BF16);
+                ops::apply_output_gate(ctx, &attention_out, &gate_flat).unwrap();
+                fp8_projection_rows(ctx, &attention.o, &attention_out, &scratch.attention_fp8, &mut scratch.projected, tokens);
+
+                let projected = view(&scratch.projected, vec![tokens, HIDDEN], DType::BF16);
+                let residual = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+                ops::add_into(ctx, &projected, &residual).unwrap();
+
+                nvfp4_mlp_rows(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch, tokens);
+            }
+            Layer::Gdn(gdn) => {
+                let state = &mut gdn_states[gdn_index];
+                gdn_index += 1;
+
+                let hidden = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+                let normalized = view(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
+                ops::rms_norm(ctx, &hidden, &gdn.input_norm, &normalized, EPSILON).unwrap();
+
+                fp8_projection_rows(ctx, &gdn.qkv, &normalized, &scratch.fp8_activation, &mut scratch.gdn_qkv, tokens);
+                fp8_projection_rows(ctx, &gdn.z, &normalized, &scratch.fp8_activation, &mut scratch.gdn_z, tokens);
+
+                // One launch over the prompt, and it reseeds the window so the
+                // first decode step continues correctly.
+                let qkv_rows = view(&scratch.gdn_qkv, vec![tokens, QKV_WIDTH], DType::BF16);
+                let conv_rows = view(&scratch.gdn_conv, vec![tokens, QKV_WIDTH], DType::BF16);
+                ops::gdn_causal_conv_forward(
+                    ctx,
+                    &qkv_rows,
+                    &gdn.conv_weight,
+                    &conv_rows,
+                    Some(&state.conv_window),
+                    tokens,
+                    QKV_WIDTH,
+                    CONV_WIDTH,
+                )
+                .unwrap();
+
+                bf16_matmul_rows(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a, tokens);
+                bf16_matmul_rows(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b, tokens);
+                // Only the real rows are written; the padding keeps g = 0 and
+                // beta = 0, which the scan treats as the identity.
+                let a_rows = view(&scratch.gdn_a, vec![tokens, GDN_V_HEADS], DType::BF16);
+                let b_rows = view(&scratch.gdn_b, vec![tokens, GDN_V_HEADS], DType::BF16);
+                let decay_rows = view(&scratch.gdn_decay, vec![tokens, GDN_V_HEADS], DType::F32);
+                let beta_rows = view(&scratch.gdn_beta, vec![tokens, GDN_V_HEADS], DType::F32);
+                ops::gdn_decay_and_beta_seq(
+                    ctx, &a_rows, &b_rows, &gdn.a_log, &gdn.dt_bias, &decay_rows, &beta_rows,
+                    tokens, GDN_V_HEADS,
+                )
+                .unwrap();
+
+                // q, k and v stay interleaved in the conv output; the scan
+                // reads them in place through its row strides.
+                let fused = view(&scratch.gdn_conv, vec![seq_padded, QKV_WIDTH], DType::BF16);
+                let g_padded = view(&scratch.gdn_decay, vec![seq_padded, GDN_V_HEADS], DType::F32);
+                let beta_padded = view(&scratch.gdn_beta, vec![seq_padded, GDN_V_HEADS], DType::F32);
+                let readout = view(&scratch.gdn_readout, vec![seq_padded, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                let q_width = GDN_K_HEADS * GDN_HEAD_DIM;
+                ops::gdn_chunk_scan_interleaved(
+                    ctx,
+                    &fused,
+                    &g_padded,
+                    &beta_padded,
+                    &readout,
+                    &state.recurrent,
+                    seq_padded,
+                    QKV_WIDTH,
+                    [0, q_width, 2 * q_width],
+                    GDN_V_HEADS,
+                    GDN_K_HEADS,
+                    CHUNK,
+                    GDN_HEAD_DIM,
+                )
+                .unwrap();
+
+                let readout_rows = view(&scratch.gdn_readout, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                let z_heads = view(&scratch.gdn_z, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                let gated = view(&scratch.gdn_gated, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                ops::gdn_gated_norm_seq(
+                    ctx, &readout_rows, &z_heads, &gdn.norm_weight, &gated, tokens,
+                    GDN_V_HEADS, GDN_HEAD_DIM, EPSILON,
+                )
+                .unwrap();
+
+                let flat = view(&scratch.gdn_gated, vec![tokens, Z_WIDTH], DType::BF16);
+                fp8_projection_rows(ctx, &gdn.out, &flat, &scratch.gdn_fp8, &mut scratch.projected, tokens);
+
+                let projected = view(&scratch.projected, vec![tokens, HIDDEN], DType::BF16);
+                let residual = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+                ops::add_into(ctx, &projected, &residual).unwrap();
+
+                nvfp4_mlp_rows(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch, tokens);
+            }
+        }
+    }
+}
+
+/// Upload the prompt into the prefill token buffer.
+fn write_tokens(ctx: &CudaContext, prefill: &PrefillScratch, ids: &[u32]) {
+    let _ = ctx;
+    let mut raw = Vec::with_capacity(ids.len() * 4);
+    for &id in ids {
+        raw.extend_from_slice(&(id as i32).to_le_bytes());
+    }
+    CudaBuffer::from_tensor(&prefill.tokens)
+        .unwrap()
+        .copy_from_host(&raw)
+        .unwrap();
+    // Positions are simply 0..tokens for a fresh prompt.
+    let mut positions = Vec::with_capacity(ids.len() * 4);
+    for index in 0..ids.len() {
+        positions.extend_from_slice(&(index as i32).to_le_bytes());
+    }
+    CudaBuffer::from_tensor(&prefill.positions)
+        .unwrap()
+        .copy_from_host(&positions)
+        .unwrap();
+}
+
+/// Logits and greedy argmax for the last row of a finished prefill.
+///
+/// Only one row is needed, so the lm_head runs at M=1 over a view of that row
+/// rather than over the whole prompt: the other rows would cost a
+/// 248320-wide projection each and are never read.
+fn prefill_logits(
+    ctx: &CudaContext,
+    model: &Model,
+    prefill: &PrefillScratch,
+    decode: &Scratch,
+    tokens: usize,
+) {
+    let last = view_row(&prefill.hidden, tokens - 1, HIDDEN, DType::BF16);
+    ops::rms_norm(ctx, &last, &model.final_norm, &decode.normalized, EPSILON).unwrap();
+    ops::nvfp4_quantize_activation(
+        ctx,
+        &decode.normalized,
+        &decode.nvfp4_activation,
+        &decode.nvfp4_scales,
+        model.lm_head.input_scale,
+        BLOCK,
+        ops::ScaleLayout::GemmAtom,
+    )
+    .unwrap();
+    let mut logits = view(&decode.logits, vec![1, VOCAB], DType::BF16);
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::nvfp4(
+            &decode.nvfp4_activation,
+            &decode.nvfp4_scales,
+            &model.lm_head.packed,
+            &model.lm_head.scales,
+            BLOCK,
+            model.lm_head.alpha,
+            &mut logits,
+        ),
+    )
+    .unwrap();
+    ops::argmax(ctx, &decode.logits, &decode.next_token).unwrap();
+}
+
+/// A view of one row of a `[rows, width]` tensor.
+fn view_row(tensor: &Tensor, row: usize, width: usize, dtype: DType) -> Tensor {
+    let element = dtype.size_in_bytes();
+    CudaBuffer::from_tensor(tensor)
+        .unwrap()
+        .view(row * width * element, width * element)
+        .unwrap()
+        .as_tensor(Shape::new(vec![1, width]), dtype)
+        .unwrap()
+}
+
+/// A view of the first `tokens` rows of a KV cache.
+fn cache_rows(cache_tensor: &Tensor, tokens: usize, dims: Vec<usize>) -> Tensor {
+    let element = DType::BF16.size_in_bytes();
+    let span = tokens * KV_HEADS * HEAD_DIM * element;
+    CudaBuffer::from_tensor(cache_tensor)
+        .unwrap()
+        .view(0, span)
+        .unwrap()
+        .as_tensor(Shape::new(dims), DType::BF16)
+        .unwrap()
 }
 
 /// `[1, hidden] x [hidden, heads] -> [1, heads]`, in BF16.
@@ -1933,15 +2375,13 @@ fn teacher_forcing_logits() {
 // Real prompt generation driver: tokenize -> per-token prefill (building KV +
 // GDN state) -> greedy decode to EOS or a token budget -> detokenize -> print.
 //
-// The prefill here feeds the prompt one token at a time through decode_step.
-// The committed GDN equivalence test (qwen38_gdn_prefill.rs) proves that the
-// GDN recurrent state this leaves is bit-identical (cosine 1.0, relL2 < 1e-3)
-// to what the parallel gdn_chunk_scan produces for the same tokens, so the
-// state generation continues from is exactly the chunked-prefill state. A
-// batched multi-token forward (attention prefill + gdn_chunk_scan per layer)
-// is a separate, larger forward path that does not yet exist in the tree; the
-// per-token prefill is the state-equivalent stand-in whose correctness is
-// under test elsewhere.
+// Prefill runs the whole prompt through prefill_step: attention takes all
+// queries at once against the cache it just filled, and each GDN layer runs
+// the chunked scan instead of the per-token recurrence. Set
+// APXINF_QWEN38_PER_TOKEN_PREFILL=1 to fall back to the one-token-at-a-time
+// path, which is the reference the batched path is checked against
+// (qwen38_gdn_prefill.rs proves the two leave the same GDN state at cosine
+// 1.0, relL2 < 1e-3).
 //
 //   APXINF_QWEN38_CHECKPOINT=/path/to/Qwen3.8-27B-NVFP4 \
 //   APXINF_QWEN38_PROMPT="The capital of France is" \
@@ -1979,7 +2419,13 @@ fn generate_from_a_real_prompt() {
 
     // Load the model.
     let tensors = checkpoint();
-    let model = load_model(&ctx, &tensors, false);
+    // The batched prefill projections run as GEMMs, which need the [K, N]
+    // FP8 copies; see `Fp8Weight::transposed`.
+    let model = load_model(
+        &ctx,
+        &tensors,
+        std::env::var("APXINF_QWEN38_PER_TOKEN_PREFILL").is_err(),
+    );
     ctx.synchronize().unwrap();
     drop(tensors);
 
@@ -1998,22 +2444,40 @@ fn generate_from_a_real_prompt() {
         })
         .collect();
     let mut scratch = Scratch::new(&ctx);
+    let n_prompt = prompt_ids.len();
 
-    // Warm-up on the first prompt token so the GEMM autotuner does not pollute
-    // the prefill timing; state is reset right after by re-running position 0.
-    set_token(&ctx, &scratch, prompt_ids[0] as i32);
-    set_position(&ctx, &scratch, 0);
-    decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, 0);
+    // APXINF_QWEN38_PER_TOKEN_PREFILL=1 keeps the original one-token-at-a-time
+    // prefill. It is the reference the batched path is checked against, and
+    // the fallback if the [K, N] FP8 copies do not fit.
+    let batched_prefill = std::env::var("APXINF_QWEN38_PER_TOKEN_PREFILL").is_err();
+    let mut prefill_scratch = batched_prefill
+        .then(|| PrefillScratch::new(&ctx, n_prompt.div_ceil(CHUNK) * CHUNK));
+
+    // Warm-up so the GEMM autotuner does not pollute the prefill timing; state
+    // is reset right after.
+    if let Some(prefill) = prefill_scratch.as_mut() {
+        write_tokens(&ctx, prefill, &prompt_ids);
+        prefill_step(&ctx, &model, prefill, &mut gdn_states, &mut kv_caches, n_prompt);
+    } else {
+        set_token(&ctx, &scratch, prompt_ids[0] as i32);
+        set_position(&ctx, &scratch, 0);
+        decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, 0);
+    }
     ctx.synchronize().unwrap();
-    // Reset the accumulated state so the real prefill starts clean.
     reset_state(&ctx, &mut gdn_states, &mut kv_caches);
 
-    // --- Prefill: feed every prompt token, keeping the last-position logits. --
+    // --- Prefill: the whole prompt, keeping the last-position logits. --------
     let prefill_start = Instant::now();
-    for (pos, &tok) in prompt_ids.iter().enumerate() {
-        set_token(&ctx, &scratch, tok as i32);
-        set_position(&ctx, &scratch, pos);
-        decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, pos);
+    if let Some(prefill) = prefill_scratch.as_mut() {
+        write_tokens(&ctx, prefill, &prompt_ids);
+        prefill_step(&ctx, &model, prefill, &mut gdn_states, &mut kv_caches, n_prompt);
+        prefill_logits(&ctx, &model, prefill, &scratch, n_prompt);
+    } else {
+        for (pos, &tok) in prompt_ids.iter().enumerate() {
+            set_token(&ctx, &scratch, tok as i32);
+            set_position(&ctx, &scratch, pos);
+            decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, pos);
+        }
     }
     ctx.synchronize().unwrap();
     let prefill_secs = prefill_start.elapsed().as_secs_f64();
@@ -2021,9 +2485,9 @@ fn generate_from_a_real_prompt() {
     // position: the first generated token.
     let first_token = scratch.next_token_host();
 
-    let n_prompt = prompt_ids.len();
     println!(
-        "\nprefill: {:7.2} ms  ({} tokens, {:6.1} tok/s)  TTFT {:7.2} ms",
+        "\nprefill[{}]: {:7.2} ms  ({} tokens, {:6.1} tok/s)  TTFT {:7.2} ms",
+        if batched_prefill { "batched" } else { "per-token" },
         prefill_secs * 1e3,
         n_prompt,
         n_prompt as f64 / prefill_secs,
