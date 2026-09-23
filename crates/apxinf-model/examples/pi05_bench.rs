@@ -2,8 +2,7 @@
 //!
 //! This single example replaces the former `pi05_{bf16,thor,int8}_bench.rs`. It
 //! bypasses the unified `AutoModel`/`infer` frontend and drives the variant-specific
-//! `Pi05{Bf16,,Int8Dynamic}CudaRuntime` directly, because it needs `apxinf_cuda_new`
-//! profiler hooks and raw device inputs that the model
+//! `Pi05{Bf16,,Int8Dynamic}CudaRuntime` directly, because it needs raw device inputs that the model
 //! abstraction does not (and should not) expose. For an abstraction-level entry
 //! point see `pi05_auto_smoke`.
 //!
@@ -30,10 +29,8 @@
 
 use apxinf_model::pi05::{build_bf16_model, build_fp8_static_model, build_int8_dynamic_model};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use apxinf_core::{DType, Tensor};
 use apxinf_cuda_new::{transfers, CudaBuffer, CudaContext};
@@ -124,7 +121,6 @@ struct Thresholds {
 }
 
 const EAGER_GRAPH_MIN_COSINE: f64 = 0.999_999;
-const DEVICE_MEMORY_SAMPLE_INTERVAL: Duration = Duration::from_millis(1);
 
 fn to_device(context: &CudaContext, tensor: &Tensor) -> apxinf_core::Result<Tensor> {
     transfers::to_cuda(tensor, context.device_id())
@@ -132,70 +128,6 @@ fn to_device(context: &CudaContext, tensor: &Tensor) -> apxinf_core::Result<Tens
 
 fn to_cpu(tensor: &Tensor) -> apxinf_core::Result<Tensor> {
     transfers::to_cpu(tensor)
-}
-
-#[derive(Clone, Copy, Debug)]
-struct DeviceMemoryObservation {
-    baseline_used_bytes: usize,
-    min_free_bytes: usize,
-    observed_peak_used_bytes: usize,
-    sample_count: usize,
-}
-
-struct DeviceMemoryMonitor {
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<Result<DeviceMemoryObservation, String>>>,
-}
-
-impl DeviceMemoryMonitor {
-    fn start(device_id: usize) -> Result<Self, String> {
-        let baseline = apxinf_cuda_new::device_memory_info(device_id)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
-        let handle = thread::Builder::new()
-            .name("pi05-device-memory-monitor".into())
-            .spawn(move || {
-                let mut min_free_bytes = baseline.free_bytes;
-                let mut observed_peak_used_bytes = baseline.used_bytes();
-                let mut sample_count = 1usize;
-                while !thread_stop.load(Ordering::Acquire) {
-                    thread::sleep(DEVICE_MEMORY_SAMPLE_INTERVAL);
-                    let memory = apxinf_cuda_new::device_memory_info(device_id)?;
-                    min_free_bytes = min_free_bytes.min(memory.free_bytes);
-                    observed_peak_used_bytes = observed_peak_used_bytes.max(memory.used_bytes());
-                    sample_count += 1;
-                }
-                Ok(DeviceMemoryObservation {
-                    baseline_used_bytes: baseline.used_bytes(),
-                    min_free_bytes,
-                    observed_peak_used_bytes,
-                    sample_count,
-                })
-            })
-            .map_err(|error| format!("start CUDA memory monitor: {error}"))?;
-        Ok(Self {
-            stop,
-            handle: Some(handle),
-        })
-    }
-
-    fn finish(mut self) -> Result<DeviceMemoryObservation, String> {
-        self.stop.store(true, Ordering::Release);
-        self.handle
-            .take()
-            .expect("memory monitor thread must exist")
-            .join()
-            .map_err(|_| "CUDA memory monitor thread panicked".to_string())?
-    }
-}
-
-impl Drop for DeviceMemoryMonitor {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
 }
 
 /// Benchmark-only dispatch over statically typed Networks. Capture uses the
@@ -892,8 +824,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if model_variant == BenchVariant::Fp8Static {
         ModelVariantChoice::Fp8Static.ensure_supported(context.caps().sm)?;
     }
-    let memory_monitor = DeviceMemoryMonitor::start(context.device_id())?;
-
     // cuda-new selects and prepares exact L3 executions before graph capture.
     // That one-time work is outside both timed steady-state boundaries below.
 
@@ -1084,10 +1014,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         graph.replay()?;
     }
     context.synchronize().map_err(std::io::Error::other)?;
-    // Stop the polling thread before profiling or latency measurement so the
-    // monitor cannot perturb the formal timing loops.
-    let device_memory = memory_monitor.finish()?;
-
     // Nsight Systems can use the CUDA profiler API as a robust one-shot capture
     // boundary and retain the NVTX name as a human-readable label:
     //
@@ -1100,47 +1026,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profile_replay = std::env::var_os("APXINF_PI05_PROFILE_REPLAY").is_some();
     if profile_replay {
         eprintln!("profiling one steady-state CUDA graph replay...");
-        apxinf_cuda_new::profiler::start().map_err(std::io::Error::other)?;
+        apxinf_cuda::profiler::start().map_err(std::io::Error::other)?;
         let replay_result = {
-            let _range = apxinf_cuda_new::nvtx::range("pi05.graph_replay");
+            let _range = apxinf_cuda::nvtx::range("pi05.graph_replay");
             graph.replay_and_synchronize()
         };
-        let stop_result = apxinf_cuda_new::profiler::stop().map_err(std::io::Error::other);
+        let stop_result = apxinf_cuda::profiler::stop().map_err(std::io::Error::other);
         replay_result?;
         stop_result?;
     }
 
-    let timer = apxinf_cuda_new::CudaEventTimer::new(&context)?;
     let mut milliseconds = Vec::with_capacity(iterations);
-    for _ in 0..iterations {
-        let (_, elapsed_ms) = timer.measure(|| graph.replay())?;
-        milliseconds.push(elapsed_ms);
-    }
-    let graph_latency = latency_json(milliseconds);
-    let update_plus_graph_latency = if let Some(images) = raw_images.as_ref() {
-        let mut samples = Vec::with_capacity(iterations);
-        for _ in 0..iterations {
-            let (_, elapsed_ms) = timer.measure(|| {
-                graph.update_raw_image_inputs(images, &host_token_ids, &noise_host)?;
-                graph.replay()
-            })?;
-            samples.push(elapsed_ms);
-        }
-        Some(latency_json(samples))
-    } else {
-        None
-    };
-    // Preserve the pre-migration host wall-time boundary for paired A/B with
-    // the 296f861 runner. CUDA-event latency above remains the canonical device
-    // measurement; these samples are deliberately reported under separate keys.
-    let mut host_milliseconds = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let start = Instant::now();
         graph.replay_and_synchronize()?;
-        host_milliseconds.push(start.elapsed().as_secs_f64() * 1e3);
+        milliseconds.push(start.elapsed().as_secs_f64() * 1e3);
     }
-    let host_graph_latency = latency_json(host_milliseconds);
-    let host_update_plus_graph_latency = if let Some(images) = raw_images.as_ref() {
+    let graph_latency = latency_json(milliseconds);
+    let update_plus_graph_latency = if let Some(images) = raw_images.as_ref() {
         let mut samples = Vec::with_capacity(iterations);
         for _ in 0..iterations {
             let start = Instant::now();
@@ -1170,7 +1073,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "graph_includes_cuda_preprocess": matches!(image_input, ImageInput::Rgb(_)),
                 "graph_latency_includes_h2d": false,
                 "input_update_plus_graph_latency_ms": update_plus_graph_latency,
-                "host_input_update_plus_graph_latency_ms": host_update_plus_graph_latency,
             },
             "token_count": token_count,
             "fixture_inputs": {
@@ -1179,29 +1081,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "noise_bf16_u16le": args.noise_bf16_u16le,
             },
             "iterations": iterations,
-            "timing_source": "cuda_event",
             "profile_replay": profile_replay,
             "latency_ms": graph_latency,
-            "host_latency_ms": host_graph_latency,
-            "observed_peak_device_memory_bytes": device_memory.observed_peak_used_bytes,
-            "device_memory": {
-                "scope": "device_wide",
-                "measurement": "cuda_mem_get_info_polling",
-                "sampling_interval_us": DEVICE_MEMORY_SAMPLE_INTERVAL.as_micros(),
-                "sample_count": device_memory.sample_count,
-                "baseline_used_bytes": device_memory.baseline_used_bytes,
-                "min_free_bytes": device_memory.min_free_bytes,
-                "observed_peak_used_bytes": device_memory.observed_peak_used_bytes,
-                "observed_peak_delta_bytes": device_memory
-                    .observed_peak_used_bytes
-                    .saturating_sub(device_memory.baseline_used_bytes),
-            },
             "workspace": {
                 "capacity_bytes": graph.workspace_bytes(),
                 "used_bytes": graph.workspace_used_bytes()
             },
             "output_abs_checksum": checksum,
-            "output_f32": output,
             "integrity": {
                 "passed": eager_graph_passed && reference_passed,
                 "eager_vs_graph": eager_graph.as_json(),

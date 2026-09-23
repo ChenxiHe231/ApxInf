@@ -99,10 +99,7 @@ through the manifest or directory interface instead.
 `AutoPolicy` automatically uses `<model-dir>/calibration.json`:
 
 ```python
-policy = AutoPolicy.from_pretrained(
-    "<path-to-model>",
-    model_variant="fp8_static",
-)
+policy = AutoPolicy.from_pretrained("<path-to-model>", precision="fp8")
 ```
 
 Pass `calibration=` only when the calibration file is stored elsewhere:
@@ -110,7 +107,7 @@ Pass `calibration=` only when the calibration file is stored elsewhere:
 ```python
 policy = AutoPolicy.from_pretrained(
     "<path-to-model>",
-    model_variant="fp8_static",
+    precision="fp8",
     calibration="/path/to/calibration.json",
 )
 ```

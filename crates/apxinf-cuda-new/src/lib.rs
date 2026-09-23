@@ -3,16 +3,13 @@ pub mod context;
 pub mod device_caps;
 mod ffi;
 mod graph;
-pub mod nvtx;
-pub mod profiler;
 pub mod sampling;
 pub mod stream;
-pub mod timing;
 pub mod transfers;
 mod workspace;
 
 pub use buffer::{CudaBuffer, CudaDeviceAddress, HostMappedBuffer};
-pub use context::{device_memory_info, CudaContext, CudaMemoryInfo};
+pub use context::CudaContext;
 pub use device_caps::{CudaArchFamily, CudaDeviceCaps};
 pub use graph::{capture, CapturedGraph};
 pub use ops::{
@@ -40,6 +37,5 @@ pub use ops::{
 >>>>>>> 7051409 (perf(pi05): fuse Thor vision QKV attention path)
 };
 pub use stream::CudaStream;
-pub use timing::CudaEventTimer;
 
 pub mod ops;

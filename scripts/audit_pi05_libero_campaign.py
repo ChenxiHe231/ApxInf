@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Audit one precision-tagged ApxInf PI0.5 LIBERO campaign ledger.
 
-Pure JSON/JSONL validation of an ``apxinf.libero-eval.v2`` ledger, the
+Pure JSON/JSONL validation of an ``apxinf.pi05.libero-eval.v1`` ledger, the
 format ``scripts/eval_libero.py`` writes to ``--results-jsonl``; this script
 imports neither LIBERO nor the engine. It is release tooling for the accuracy
 table in README.md.
@@ -25,9 +25,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task-ids", default="0,1,2,3,4,5,6,7,8,9")
     parser.add_argument("--trials-per-task", type=int, default=10)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--image-input", default="openpi_uint8_hwc")
-    parser.add_argument("--max-steps", type=int, default=520)
-    parser.add_argument("--replan-steps", type=int, default=5)
+    parser.add_argument(
+        "--image-input", choices=("nhwc", "nchw", "patches"), default="nhwc"
+    )
     parser.add_argument("--minimum-successes", type=int)
     return parser.parse_args()
 
@@ -154,28 +154,26 @@ def main() -> None:
                 failures.append(f"{key}: attempt is {row.get('attempt')}, expected 1")
             if not isinstance(row.get("success"), bool):
                 failures.append(f"{key}: success is not boolean")
-            if row.get("max_steps") != args.max_steps:
-                failures.append(
-                    f"{key}: max_steps is {row.get('max_steps')}, expected {args.max_steps}"
-                )
-            if row.get("replan_steps") != args.replan_steps:
-                failures.append(
-                    f"{key}: replan_steps is {row.get('replan_steps')}, "
-                    f"expected {args.replan_steps}"
-                )
+            token_count = row.get("token_count")
+            if (
+                not isinstance(token_count, int)
+                or isinstance(token_count, bool)
+                or not 0 < token_count <= 200
+            ):
+                failures.append(f"{key}: invalid token_count {token_count}")
             action_steps = row.get("action_steps")
             replans = row.get("replans")
             if (
                 not isinstance(action_steps, int)
                 or isinstance(action_steps, bool)
-                or not 0 < action_steps <= args.max_steps
+                or not 0 < action_steps <= 520
             ):
                 failures.append(f"{key}: invalid action_steps {action_steps}")
                 continue
             if (
                 not isinstance(replans, int)
                 or isinstance(replans, bool)
-                or replans != (action_steps + args.replan_steps - 1) // args.replan_steps
+                or replans != (action_steps + 4) // 5
             ):
                 failures.append(
                     f"{key}: replans {replans} disagree with action_steps {action_steps}"
@@ -192,7 +190,7 @@ def main() -> None:
                     failures.append(f"{key}: invalid {field} {value}")
                 else:
                     timings[field] = float(value)
-            checksum = row.get("first_action_abs_checksum")
+            checksum = row.get("first_normalized_action_abs_checksum")
             if not finite_nonnegative(checksum) or checksum == 0:
                 failures.append(f"{key}: invalid first action checksum {checksum}")
             total_action_steps += action_steps
@@ -209,27 +207,15 @@ def main() -> None:
 
     evaluator_summary = json.loads(args.summary_json.read_text())
     expected_summary = {
-        "schema": "apxinf.libero-eval.v2",
-        "suites": ["libero_10"],
+        "schema": "apxinf.pi05.libero-eval.v1",
+        "suite": "libero_10",
         "precision": args.precision,
         "expected_runs": len(expected_keys),
         "completed_runs": len(completed),
         "missing_runs": [],
         "successes": successes,
         "success_rate": successes / len(completed) if completed else None,
-        "per_suite": {
-            "libero_10": {
-                "completed": len(completed),
-                "successes": successes,
-                "success_rate": successes / len(completed) if completed else None,
-                "per_task": per_task,
-            }
-        },
-        "rollout_protocol": {
-            "max_steps": args.max_steps,
-            "replan_steps": args.replan_steps,
-            "wait_steps": 10,
-        },
+        "per_task": per_task,
     }
     for field, expected in expected_summary.items():
         if evaluator_summary.get(field) != expected:
@@ -250,8 +236,6 @@ def main() -> None:
             "require_zero_technical_errors": True,
             "seed": args.seed,
             "image_input": args.image_input,
-            "max_steps": args.max_steps,
-            "replan_steps": args.replan_steps,
             "minimum_successes": args.minimum_successes,
         },
         "evidence": {

@@ -35,9 +35,8 @@ python scripts/bench_pi05.py --random-weights --model-variant fp8_static --layer
   --views 2 --token-count 10 --action-horizon 10 --num-flow-steps 10 --autotune
 ```
 
-Reported latency is P50 after the requested warm-up/sample counts
-(`--warmup` / `--samples`). The defaults are 10 warm-ups and 30 samples; the
-BF16 command above explicitly requests 100 samples.
+Reported latency is P50 over 30 samples after 10 warm-up iterations
+(`--warmup` / `--samples`).
 
 ### Run a policy through Python API
 

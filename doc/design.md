@@ -65,7 +65,7 @@ gained `as_any()` for downcasting; `decode_forward_workspace` was removed.
 These are places where model-structure knowledge has leaked into the
 backend layer. Each should move to `apxinf-model`.
 
-### 1. `decode_forward_capturable` in the former CUDA backend
+### 1. `decode_forward_capturable` in `apxinf-cuda/src/backend.rs`
 
 **The big one.** ~200 lines that hardcode the full Llama/Qwen3 transformer
 decode forward:
@@ -105,7 +105,7 @@ primitive ops + device management.
 `backend.matmul(...)`, `backend.rms_norm(...)`, etc. directly. The
 workspace + graph capture is orchestrated by the model.
 
-### 4. `CudaDecodeWorkspace` in the former CUDA backend
+### 4. `CudaDecodeWorkspace` in `apxinf-cuda/src/decode_workspace.rs`
 
 The struct has Llama-specific buffer names (`q`, `k`, `v`, `q_rope`,
 `k_rope`, `scores`, `attn_weights`, `attn_out`, `attn_proj`,
@@ -116,7 +116,7 @@ A different model architecture would need different buffers.
 workspace struct with the buffers it needs. The backend provides
 `CudaBuffer` (raw GPU memory allocation) as a building block.
 
-### 5. `CudaDecodeGraph` in the former CUDA backend
+### 5. `CudaDecodeGraph` in `apxinf-cuda/src/backend.rs`
 
 Per-bucket captured CUDA Graphs for the decode forward. The graph
 capture/replay mechanism is backend-level, but "what to capture" (the
