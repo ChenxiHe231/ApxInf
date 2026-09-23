@@ -1191,7 +1191,12 @@ fn prefill_step(
     let mut gdn_index = 0usize;
     let mut attention_index = 0usize;
 
+    let timing = std::env::var("APXINF_QWEN38_LAYER_TIMING").is_ok();
+    let mut attention_time = 0.0f64;
+    let mut gdn_time = 0.0f64;
+
     for layer in model.layers.iter() {
+        let layer_start = timing.then(Instant::now);
         match layer {
             Layer::Attention(attention) => {
                 let cache = &mut kv_caches[attention_index];
@@ -1349,6 +1354,21 @@ fn prefill_step(
                 nvfp4_mlp_rows(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch, tokens);
             }
         }
+        if let Some(start) = layer_start {
+            ctx.synchronize().unwrap();
+            let elapsed = start.elapsed().as_secs_f64();
+            match layer {
+                Layer::Attention(_) => attention_time += elapsed,
+                Layer::Gdn(_) => gdn_time += elapsed,
+            }
+        }
+    }
+
+    if timing {
+        println!(
+            "  prefill split: attention {:8.2} ms ({} layers)   gdn {:8.2} ms ({} layers)",
+            attention_time * 1e3, attention_index, gdn_time * 1e3, gdn_index
+        );
     }
 }
 

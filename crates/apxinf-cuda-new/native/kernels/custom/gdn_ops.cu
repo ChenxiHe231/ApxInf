@@ -643,30 +643,38 @@ __global__ void chunk_scan_kernel(
     // small). Then copy into s.T's own storage? s.T currently holds intra_attn,
     // which we still need. Put the inverse in a fresh region: reuse s.pw (no
     // longer needed after ut/intra) as the inverse buffer.
-    if (tid == 0) {
-      // Build strictly-lower L = -tril(ut_system, -1) into s.pw.
-      for (int i = 0; i < kChunk; ++i) {
-        for (int j = 0; j < kChunk; ++j) {
-          s.pw[i][j] = (i > j) ? -s.M[i][j] : 0.0f;
-        }
-      }
-      // Forward substitution accumulation (in place on s.pw).
-      for (int i = 1; i < kChunk; ++i) {
-        for (int j = 0; j < i; ++j) {
-          float acc = s.pw[i][j];  // row (== ut_system[..i, :i][row])
-          // + sum_{p} row_i[p] * sub[p][j], p over :i (0..i-1)
-          float extra = 0.0f;
-          for (int p = 0; p < i; ++p) {
-            extra += s.pw[i][p] * s.pw[p][j];
-          }
-          s.pw[i][j] = acc + extra;
-        }
-      }
-      // Add identity to get the unit-lower-triangular inverse T.
-      for (int i = 0; i < kChunk; ++i) {
-        s.pw[i][i] += 1.0f;
-      }
+    // Forward substitution, parallel over columns.
+    //
+    // This inverts the unit lower triangular (I - L) where
+    // L = -tril(ut_system, -1). Done by one thread it is a triple loop --
+    // about 64^3/6 = 44k serial iterations while the other 127 threads wait on
+    // the barrier, which measured as the dominant cost of the whole scan.
+    //
+    // Column j of the inverse depends only on column j, so the columns are
+    // independent and one thread can own each. The row loop stays sequential
+    // because row i needs rows below it. The key to avoiding the read/write
+    // race that forces the serial version is not to materialize L at all:
+    // L[i][p] is just -M[i][p], so the recurrence reads M (untouched) and
+    // writes s.pw (the result), and no thread reads what another is writing.
+    const int col = tid;
+    if (col < kChunk) {
+      for (int i = 0; i < kChunk; ++i) s.pw[i][col] = 0.0f;
     }
+    __syncthreads();
+
+    for (int i = 1; i < kChunk; ++i) {
+      if (col < i) {
+        // T[i][col] = L[i][col] + sum_{p in (col, i)} L[i][p] * T[p][col]
+        float acc = -s.M[i][col];
+        for (int p = col + 1; p < i; ++p) {
+          acc += (-s.M[i][p]) * s.pw[p][col];
+        }
+        s.pw[i][col] = acc;
+      }
+      __syncthreads();
+    }
+
+    if (col < kChunk) s.pw[col][col] += 1.0f;
     __syncthreads();
     // s.pw now holds T (the inverse). s.T holds intra_chunk_attn. s.M free.
 
