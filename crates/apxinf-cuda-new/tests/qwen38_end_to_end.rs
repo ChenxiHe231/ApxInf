@@ -936,6 +936,51 @@ fn attention_cache_dir() -> Option<String> {
     )
 }
 
+/// Report the magnitude range of a BF16 tensor, to decide whether an FP16
+/// kernel could carry it.
+///
+/// FlashInfer's generic GDN prefill variant -- the one our 48 value heads and
+/// group of 3 force us onto, neither being a power of two -- exists only with
+/// FP16 I/O. FP16 saturates at 65504 and loses its last normal near 6.1e-5,
+/// so adopting it hinges on where these activations actually sit. Measuring
+/// beats assuming: the checkpoint is calibrated, and its magnitudes are not
+/// obvious from the architecture.
+fn probe_fp16_range(label: &str, tensor: &Tensor, elements: usize) {
+    let buffer = CudaBuffer::from_tensor(tensor).unwrap();
+    let mut bytes = vec![0u8; elements * 2];
+    buffer.copy_to_host(&mut bytes).unwrap();
+
+    let mut max_abs = 0.0f32;
+    let mut min_nonzero = f32::INFINITY;
+    let mut nonfinite = 0usize;
+    let mut subnormal_in_fp16 = 0usize;
+    for pair in bytes.chunks_exact(2) {
+        let value = f32::from_bits((u16::from_le_bytes([pair[0], pair[1]]) as u32) << 16);
+        if !value.is_finite() {
+            nonfinite += 1;
+            continue;
+        }
+        let magnitude = value.abs();
+        if magnitude > max_abs {
+            max_abs = magnitude;
+        }
+        if magnitude > 0.0 {
+            if magnitude < min_nonzero {
+                min_nonzero = magnitude;
+            }
+            // 6.104e-5 is the smallest normal FP16; below it precision decays.
+            if magnitude < 6.104e-5 {
+                subnormal_in_fp16 += 1;
+            }
+        }
+    }
+    let headroom = 65504.0f32 / max_abs.max(f32::MIN_POSITIVE);
+    println!(
+        "  fp16 probe {label:<14} max|x|={max_abs:11.4}  min|x|={min_nonzero:.3e}  \
+headroom={headroom:9.1e}x  subnormal={subnormal_in_fp16}  nonfinite={nonfinite}"
+    );
+}
+
 /// A view of the leading `dims` elements of a larger allocation.
 ///
 /// `view` requires the shape to describe the whole buffer exactly, so it
@@ -1310,6 +1355,22 @@ fn prefill_step(
                     tokens, GDN_V_HEADS,
                 )
                 .unwrap();
+
+                if gdn_index == 1 && std::env::var("APXINF_QWEN38_FP16_PROBE").is_ok() {
+                    // The conv output carries q, k and v; v is the widest and
+                    // the one a delta-rule update accumulates into.
+                    let q_w = GDN_K_HEADS * GDN_HEAD_DIM;
+                    let v_w = GDN_V_HEADS * GDN_HEAD_DIM;
+                    probe_fp16_range("qkv(conv)", &scratch.gdn_conv, tokens * QKV_WIDTH);
+                    let v_only = CudaBuffer::from_tensor(&scratch.gdn_conv)
+                        .unwrap()
+                        .view(2 * q_w * 2, v_w * 2)
+                        .unwrap()
+                        .as_tensor(Shape::new(vec![v_w]), DType::BF16)
+                        .unwrap();
+                    probe_fp16_range("v(token 0)", &v_only, v_w);
+                    probe_fp16_range("z(gate)", &scratch.gdn_z, tokens * Z_WIDTH);
+                }
 
                 // q, k and v stay interleaved in the conv output; the scan
                 // reads them in place through its row strides.
