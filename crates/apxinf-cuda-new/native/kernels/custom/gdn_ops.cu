@@ -616,10 +616,18 @@ __global__ void chunk_scan_kernel(
     // v_beta and k_beta are applied on the fly. k_beta[t] = beta[t]*k[t].
     // ut_system[i][j] = (k_beta[i] . k[j]) * pw[i][j]
     // intra[i][j]     = (q[i]     . k[j]) * pw[i][j]
-    // Both are 64x64. Thread `tid` computes column j=tid for all rows i.
-    if (tid < kChunk) {
-      const int j = tid;
-      for (int i = 0; i < kChunk; ++i) {
+    // Both are 64x64, and this is the heaviest block in the scan: 64 rows x
+    // 128 depth per column. Mapping one thread per column would leave half the
+    // block idle, since there are 64 columns and kDim = 128 threads. Splitting
+    // the row range as well keeps every thread busy -- thread t takes column
+    // t % 64 and the half of the rows selected by t / 64. Rows are disjoint
+    // between the two halves, so no reduction is needed.
+    {
+      const int j = tid % kChunk;
+      const int row_half = tid / kChunk;          // 0 or 1
+      const int i_begin = row_half * (kChunk / 2);
+      const int i_end = i_begin + (kChunk / 2);
+      for (int i = i_begin; i < i_end; ++i) {
         float ut = 0.0f, at = 0.0f;
         const float bi = s.beta[i];
         for (int d = 0; d < kDim; ++d) {
