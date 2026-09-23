@@ -523,12 +523,12 @@ fn fp8_projection_rows(
     let k = weight.weight.shape().dims()[1];
     let n = weight.weight.shape().dims()[0];
 
-    let source_rows = view(source, vec![rows, k], DType::BF16);
-    let quantized_rows = view(quantized, vec![rows, k], DType::F8E4M3);
+    let source_rows = prefix(source, vec![rows, k], DType::BF16);
+    let quantized_rows = prefix(quantized, vec![rows, k], DType::F8E4M3);
     ops::quantize_fp8_per_tensor(ctx, &source_rows, &quantized_rows, weight.input_scale)
         .unwrap();
 
-    let mut out_rows = view(output, vec![rows, n], DType::BF16);
+    let mut out_rows = prefix(output, vec![rows, n], DType::BF16);
     let mut args = ops::GemmArgs::new(&quantized_rows, transposed, &mut out_rows);
     args.quantization = ops::GemmQuantization::Fp8UnitScale;
     args.alpha = weight.alpha;
@@ -884,6 +884,22 @@ fn capacity_of(cache: &Tensor) -> usize {
     cache.shape().dims()[1]
 }
 
+/// A view of the leading `dims` elements of a larger allocation.
+///
+/// `view` requires the shape to describe the whole buffer exactly, so it
+/// cannot express "the first N rows". Prefill allocates every buffer at
+/// `seq_padded` but hands most operators the true token count, so it needs
+/// this instead.
+fn prefix(tensor: &Tensor, dims: Vec<usize>, dtype: DType) -> Tensor {
+    let span = dims.iter().product::<usize>() * dtype.size_in_bytes();
+    CudaBuffer::from_tensor(tensor)
+        .unwrap()
+        .view(0, span)
+        .unwrap()
+        .as_tensor(Shape::new(dims), dtype)
+        .unwrap()
+}
+
 fn view(tensor: &Tensor, dims: Vec<usize>, dtype: DType) -> Tensor {
     CudaBuffer::from_tensor(tensor)
         .unwrap()
@@ -1017,8 +1033,8 @@ fn bf16_matmul_rows(
     rows: usize,
 ) {
     let dims = weight.shape().dims().to_vec();
-    let source = view(input, vec![rows, dims[0]], DType::BF16);
-    let mut out = view(output, vec![rows, dims[1]], DType::BF16);
+    let source = prefix(input, vec![rows, dims[0]], DType::BF16);
+    let mut out = prefix(output, vec![rows, dims[1]], DType::BF16);
     ops::gemm(ctx, ops::GemmArgs::new(&source, weight, &mut out)).unwrap();
 }
 
@@ -1031,8 +1047,8 @@ fn nvfp4_mlp_rows(
     scratch: &mut PrefillScratch,
     rows: usize,
 ) {
-    let hidden_rows = view(&scratch.hidden, vec![rows, HIDDEN], DType::BF16);
-    let activation = view(&scratch.nvfp4_activation, vec![rows, HIDDEN / 2], DType::E2M1Pair);
+    let hidden_rows = prefix(&scratch.hidden, vec![rows, HIDDEN], DType::BF16);
+    let activation = prefix(&scratch.nvfp4_activation, vec![rows, HIDDEN / 2], DType::E2M1Pair);
     ops::nvfp4_quantize_rms_norm(
         ctx,
         &hidden_rows,
@@ -1046,7 +1062,7 @@ fn nvfp4_mlp_rows(
     )
     .unwrap();
 
-    let mut fused = view(&scratch.mlp_fused, vec![rows, 2 * INTERMEDIATE], DType::BF16);
+    let mut fused = prefix(&scratch.mlp_fused, vec![rows, 2 * INTERMEDIATE], DType::BF16);
     ops::gemm(
         ctx,
         ops::GemmArgs::nvfp4(
@@ -1062,7 +1078,7 @@ fn nvfp4_mlp_rows(
     .unwrap();
 
     let mlp_activation =
-        view(&scratch.mlp_activation, vec![rows, INTERMEDIATE / 2], DType::E2M1Pair);
+        prefix(&scratch.mlp_activation, vec![rows, INTERMEDIATE / 2], DType::E2M1Pair);
     ops::nvfp4_quantize_swiglu(
         ctx,
         &fused,
@@ -1074,7 +1090,7 @@ fn nvfp4_mlp_rows(
     )
     .unwrap();
 
-    let mut mlp_out = view(&scratch.mlp_out, vec![rows, HIDDEN], DType::BF16);
+    let mut mlp_out = prefix(&scratch.mlp_out, vec![rows, HIDDEN], DType::BF16);
     ops::gemm(
         ctx,
         ops::GemmArgs::nvfp4(
@@ -1089,7 +1105,7 @@ fn nvfp4_mlp_rows(
     )
     .unwrap();
 
-    let residual = view(&scratch.hidden, vec![rows, HIDDEN], DType::BF16);
+    let residual = prefix(&scratch.hidden, vec![rows, HIDDEN], DType::BF16);
     ops::add_into(ctx, &mlp_out, &residual).unwrap();
 }
 
@@ -1115,8 +1131,8 @@ fn prefill_step(
     assert!(tokens > 0 && tokens <= scratch.capacity, "prompt exceeds prefill capacity");
     let seq_padded = tokens.div_ceil(CHUNK) * CHUNK;
 
-    let token_ids = view(&scratch.tokens, vec![tokens], DType::I32);
-    let hidden_rows = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+    let token_ids = prefix(&scratch.tokens, vec![tokens], DType::I32);
+    let hidden_rows = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
     ops::embedding_gather(ctx, &model.embedding, &token_ids, &hidden_rows).unwrap();
 
     let rotary = ops::rotary_dim(HEAD_DIM, PARTIAL_ROTARY);
@@ -1129,8 +1145,8 @@ fn prefill_step(
                 let cache = &mut kv_caches[attention_index];
                 attention_index += 1;
 
-                let hidden = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
-                let normalized = view(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
+                let hidden = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+                let normalized = prefix(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
                 ops::rms_norm(ctx, &hidden, &attention.input_norm, &normalized, EPSILON).unwrap();
 
                 fp8_projection_rows(
@@ -1142,10 +1158,10 @@ fn prefill_step(
                     tokens,
                 );
                 let fused_heads =
-                    view(&scratch.qkv_fused, vec![tokens, HEADS, 2 * HEAD_DIM], DType::BF16);
-                let query = view(&scratch.query, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
+                    prefix(&scratch.qkv_fused, vec![tokens, HEADS, 2 * HEAD_DIM], DType::BF16);
+                let query = prefix(&scratch.query, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
                 let query_gate =
-                    view(&scratch.query_gate, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
+                    prefix(&scratch.query_gate, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
                 ops::split_query_and_gate(ctx, &fused_heads, &query, &query_gate).unwrap();
 
                 // Rows 0..tokens of the cache are a contiguous prefix, so k and
@@ -1158,14 +1174,16 @@ fn prefill_step(
 
                 // Per-head RMSNorm is independent per row, so the token axis
                 // folds into the head axis.
-                let query_heads = view(&scratch.query, vec![tokens * HEADS, HEAD_DIM], DType::BF16);
+                let query_heads = prefix(&scratch.query, vec![tokens * HEADS, HEAD_DIM], DType::BF16);
                 let key_heads = cache_rows(&cache.keys, tokens, vec![tokens * KV_HEADS, HEAD_DIM]);
                 ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
                 ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
 
-                let positions = view(&scratch.positions, vec![tokens], DType::I32);
-                let query_tokens = view(&scratch.query, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
-                let key_tokens = cache_rows(&cache.keys, tokens, vec![1, tokens, KV_HEADS, HEAD_DIM]);
+                let positions = prefix(&scratch.positions, vec![tokens], DType::I32);
+                // RoPE takes [tokens, heads, head_dim]; the batch axis the
+                // attention call wants is added separately below.
+                let query_tokens = prefix(&scratch.query, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
+                let key_tokens = cache_rows(&cache.keys, tokens, vec![tokens, KV_HEADS, HEAD_DIM]);
                 ops::partial_rope(ctx, &query_tokens, &positions, rotary, ROPE_THETA).unwrap();
                 ops::partial_rope(ctx, &key_tokens, &positions, rotary, ROPE_THETA).unwrap();
 
@@ -1174,20 +1192,20 @@ fn prefill_step(
                 // work of its own.
                 let keys = view(&cache.keys, vec![1, capacity_of(&cache.keys), KV_HEADS, HEAD_DIM], DType::BF16);
                 let values = view(&cache.values, vec![1, capacity_of(&cache.values), KV_HEADS, HEAD_DIM], DType::BF16);
-                let query_4d = view(&scratch.query, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
-                let mut out_4d = view(&scratch.attention_out, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
+                let query_4d = prefix(&scratch.query, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
+                let mut out_4d = prefix(&scratch.attention_out, vec![1, tokens, HEADS, HEAD_DIM], DType::BF16);
                 let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
                 args.valid_key_tokens = tokens;
                 args.query_start = 0;
                 ops::kv_cache_attention(ctx, args).unwrap();
 
-                let gate_flat = view(&scratch.query_gate, vec![tokens, HEADS * HEAD_DIM], DType::BF16);
-                let attention_out = view(&scratch.attention_out, vec![tokens, HEADS * HEAD_DIM], DType::BF16);
+                let gate_flat = prefix(&scratch.query_gate, vec![tokens, HEADS * HEAD_DIM], DType::BF16);
+                let attention_out = prefix(&scratch.attention_out, vec![tokens, HEADS * HEAD_DIM], DType::BF16);
                 ops::apply_output_gate(ctx, &attention_out, &gate_flat).unwrap();
                 fp8_projection_rows(ctx, &attention.o, &attention_out, &scratch.attention_fp8, &mut scratch.projected, tokens);
 
-                let projected = view(&scratch.projected, vec![tokens, HIDDEN], DType::BF16);
-                let residual = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+                let projected = prefix(&scratch.projected, vec![tokens, HIDDEN], DType::BF16);
+                let residual = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
                 ops::add_into(ctx, &projected, &residual).unwrap();
 
                 nvfp4_mlp_rows(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch, tokens);
@@ -1196,8 +1214,8 @@ fn prefill_step(
                 let state = &mut gdn_states[gdn_index];
                 gdn_index += 1;
 
-                let hidden = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
-                let normalized = view(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
+                let hidden = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+                let normalized = prefix(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
                 ops::rms_norm(ctx, &hidden, &gdn.input_norm, &normalized, EPSILON).unwrap();
 
                 fp8_projection_rows(ctx, &gdn.qkv, &normalized, &scratch.fp8_activation, &mut scratch.gdn_qkv, tokens);
@@ -1205,8 +1223,8 @@ fn prefill_step(
 
                 // One launch over the prompt, and it reseeds the window so the
                 // first decode step continues correctly.
-                let qkv_rows = view(&scratch.gdn_qkv, vec![tokens, QKV_WIDTH], DType::BF16);
-                let conv_rows = view(&scratch.gdn_conv, vec![tokens, QKV_WIDTH], DType::BF16);
+                let qkv_rows = prefix(&scratch.gdn_qkv, vec![tokens, QKV_WIDTH], DType::BF16);
+                let conv_rows = prefix(&scratch.gdn_conv, vec![tokens, QKV_WIDTH], DType::BF16);
                 ops::gdn_causal_conv_forward(
                     ctx,
                     &qkv_rows,
@@ -1223,10 +1241,10 @@ fn prefill_step(
                 bf16_matmul_rows(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b, tokens);
                 // Only the real rows are written; the padding keeps g = 0 and
                 // beta = 0, which the scan treats as the identity.
-                let a_rows = view(&scratch.gdn_a, vec![tokens, GDN_V_HEADS], DType::BF16);
-                let b_rows = view(&scratch.gdn_b, vec![tokens, GDN_V_HEADS], DType::BF16);
-                let decay_rows = view(&scratch.gdn_decay, vec![tokens, GDN_V_HEADS], DType::F32);
-                let beta_rows = view(&scratch.gdn_beta, vec![tokens, GDN_V_HEADS], DType::F32);
+                let a_rows = prefix(&scratch.gdn_a, vec![tokens, GDN_V_HEADS], DType::BF16);
+                let b_rows = prefix(&scratch.gdn_b, vec![tokens, GDN_V_HEADS], DType::BF16);
+                let decay_rows = prefix(&scratch.gdn_decay, vec![tokens, GDN_V_HEADS], DType::F32);
+                let beta_rows = prefix(&scratch.gdn_beta, vec![tokens, GDN_V_HEADS], DType::F32);
                 ops::gdn_decay_and_beta_seq(
                     ctx, &a_rows, &b_rows, &gdn.a_log, &gdn.dt_bias, &decay_rows, &beta_rows,
                     tokens, GDN_V_HEADS,
@@ -1235,10 +1253,10 @@ fn prefill_step(
 
                 // q, k and v stay interleaved in the conv output; the scan
                 // reads them in place through its row strides.
-                let fused = view(&scratch.gdn_conv, vec![seq_padded, QKV_WIDTH], DType::BF16);
-                let g_padded = view(&scratch.gdn_decay, vec![seq_padded, GDN_V_HEADS], DType::F32);
-                let beta_padded = view(&scratch.gdn_beta, vec![seq_padded, GDN_V_HEADS], DType::F32);
-                let readout = view(&scratch.gdn_readout, vec![seq_padded, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                let fused = prefix(&scratch.gdn_conv, vec![seq_padded, QKV_WIDTH], DType::BF16);
+                let g_padded = prefix(&scratch.gdn_decay, vec![seq_padded, GDN_V_HEADS], DType::F32);
+                let beta_padded = prefix(&scratch.gdn_beta, vec![seq_padded, GDN_V_HEADS], DType::F32);
+                let readout = prefix(&scratch.gdn_readout, vec![seq_padded, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
                 let q_width = GDN_K_HEADS * GDN_HEAD_DIM;
                 ops::gdn_chunk_scan_interleaved(
                     ctx,
@@ -1257,20 +1275,20 @@ fn prefill_step(
                 )
                 .unwrap();
 
-                let readout_rows = view(&scratch.gdn_readout, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
-                let z_heads = view(&scratch.gdn_z, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
-                let gated = view(&scratch.gdn_gated, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                let readout_rows = prefix(&scratch.gdn_readout, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                let z_heads = prefix(&scratch.gdn_z, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                let gated = prefix(&scratch.gdn_gated, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
                 ops::gdn_gated_norm_seq(
                     ctx, &readout_rows, &z_heads, &gdn.norm_weight, &gated, tokens,
                     GDN_V_HEADS, GDN_HEAD_DIM, EPSILON,
                 )
                 .unwrap();
 
-                let flat = view(&scratch.gdn_gated, vec![tokens, Z_WIDTH], DType::BF16);
+                let flat = prefix(&scratch.gdn_gated, vec![tokens, Z_WIDTH], DType::BF16);
                 fp8_projection_rows(ctx, &gdn.out, &flat, &scratch.gdn_fp8, &mut scratch.projected, tokens);
 
-                let projected = view(&scratch.projected, vec![tokens, HIDDEN], DType::BF16);
-                let residual = view(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
+                let projected = prefix(&scratch.projected, vec![tokens, HIDDEN], DType::BF16);
+                let residual = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
                 ops::add_into(ctx, &projected, &residual).unwrap();
 
                 nvfp4_mlp_rows(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch, tokens);
