@@ -2,35 +2,15 @@
 
 This document lists the model-independent L3 semantics currently exposed by `apxinf-cuda-new`. Model code must match the complete mathematical semantic and tensor contract, not only the operator name. If no interface matches completely, record an operator gap and follow [`doc/adding-new-kernels.md`](../../doc/adding-new-kernels.md).
 
-This document describes only public contracts and does not promise a specific provider, candidate, or autotune winner. Every operator supports eager execution and CUDA Graph capture/replay. GEMM and Attention prepare reusable state through `ExecutionSession`; stateless families are captured directly and do not require a prepare cache entry.
+This document describes only public contracts and does not promise a specific provider, candidate, or autotune winner. Every operator supports eager execution and `prepare_with_session` → capture → replay.
 
 ## Shared Constraints
 
 - Input, output, bias, and scale tensors must reside on the CUDA device of the current `CudaContext`.
 - Tensors use contiguous row-major layout; output storage must not overlap read-only inputs.
 - Shapes must be nonempty, and dimensions passed to the native layer must not exceed `i32::MAX`.
-- GEMM/Attention policy fields such as workspace, graph-safe, and deterministic affect only candidate eligibility and the recipe; stateless direct families expose no policy.
+- Policy fields such as workspace, graph-safe, and deterministic affect only candidate eligibility and the recipe; they do not change the L3 mathematical semantic.
 - `l3-operator` comments are machine-readable markers. A unit test compares them with the Rust semantic metadata registered by each operator family to ensure that every public semantic appears exactly once; a new family must be added to that set.
-
-## Stateless Direct Families
-
-Gather, Norm, Pointwise, Quantization, and RoPE each have one stateless, zero-workspace implementation per semantic. Their L3 call path is `normalize → launch → native *_launch(runtime, spec, bindings) → asynchronous kernel submission`. They have no tuning policy, candidate registry, native heap execution, `ExecutionKey`, typed session-cache entry, or prepared-sequence entry, and they do not synchronize. CUDA Graph captures their kernel launches directly.
-
-Norm intentionally has no `NormArgs { semantic, Option<...>... }` union. Each mathematical contract has its own typed API, so required tensors are required fields and unrelated tensors cannot be supplied:
-
-| Semantic | Rust API | Required bindings |
-| --- | --- | --- |
-| RMS norm | `rms_norm(ctx, RmsNormArgs)` | input, weight, normalized, eps |
-| Layer norm | `layer_norm(ctx, LayerNormArgs)` | input, weight, bias, normalized, eps |
-| Adaptive RMS norm | `adaptive_rms_norm(ctx, AdaptiveRmsNormArgs)` | input, norm style, normalized, eps |
-| Bias + residual | `bias_residual(ctx, BiasResidualArgs)` | input, optional bias, residual, hidden |
-| Bias + residual + RMS norm | `bias_residual_rms_norm(ctx, BiasResidualRmsNormArgs)` | input, optional bias, residual, weight, hidden, normalized, eps |
-| Bias + residual + layer norm | `bias_residual_layer_norm(ctx, BiasResidualLayerNormArgs)` | input, optional bias, residual, weight, norm bias, hidden, normalized, eps |
-| Adaptive gate + residual | `ada_gate_residual(ctx, AdaGateResidualArgs)` | input, residual, gate style, hidden |
-| Adaptive gate + residual + RMS norm | `ada_gate_residual_rms_norm(ctx, AdaGateResidualRmsNormArgs)` | input, residual, norm style, gate style, hidden, normalized, eps |
-| BF16 bias-then-residual | `bias_then_residual(ctx, BiasThenResidualArgs)` | input, optional bias, residual, hidden |
-
-This lifecycle distinction changes dispatch and ownership only. L0 launch geometry, arithmetic, and rounding remain the migrated ApxInf CUDA implementation and must not be changed as part of a lifecycle refactor.
 
 ## Shared GEMM Contract
 
@@ -78,18 +58,6 @@ Quantization occurs before the API call; the current L3 contract does not includ
 | Mathematical semantic | `Y = GELU_tanh(alpha * projection(A,B) + bias) / output_scale` |
 | Constraints | bias dtype matches the projection dtype; GELU uses the Torch reference's tanh approximation; W8A8 is unsupported |
 | Reference test | `gemm_bias_gelu_all_candidates_match_torch` |
-
-<!-- l3-operator:gemm_bias_residual -->
-### `gemm_bias_residual`
-
-| Item | Contract |
-| --- | --- |
-| Rust API | `ops::gemm_bias_residual(ctx, GemmBiasResidualArgs { gemm, bias, residual })` |
-| Inputs | `A=[M,K]`, `B=[K,N]`, optional `bias=[N]`, `residual=[M,N]`; supports `Fp8UnitScale` |
-| Output | `Y=[M,N]` in F16 |
-| Mathematical semantic | `Y = (alpha * projection(A,B) + optional_bias + residual) / output_scale`, with bias broadcast across M |
-| Constraints | bias and residual are F16; the native FP8 cuBLASLt candidate requires `output_scale=1`, while the baseline candidate preserves the semantic for other positive output scales |
-| Reference test | `gemm_bias_residual_all_candidates_match_torch` |
 
 <!-- l3-operator:gemm_geglu -->
 ### `gemm_geglu`
@@ -145,6 +113,6 @@ Attention computes `softmax(mask(scale * (Q @ K^T))) @ V`. Q/K/V have the same d
 
 ## Testing Responsibilities
 
-The catalog test ensures only that semantics are neither missing nor duplicated; it cannot validate the written contracts. A new L3 semantic must also add a semantic test to `src/ops/tests/l3_behavior.rs`. Direct families require an independent numerical reference plus eager/CUDA Graph capture/replay coverage; prepared families require an independent-reference test for every candidate/configuration plus prepare/capture/replay coverage.
+The catalog test ensures only that semantics are neither missing nor duplicated; it cannot validate the written contracts. A new L3 semantic must also add a semantic test to `src/ops/tests/l3_behavior.rs` and an independent-reference all-candidate numerical test to `src/ops/tests/precision/precision.rs`.
 
 Tests must run through `crates/apxinf-cuda-new/test-new.sh`; a normal `cargo test` from the repository root does not automatically test this crate.

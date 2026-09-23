@@ -180,14 +180,6 @@ pub(super) fn bf16_bits_tensor(device: usize, shape: Vec<usize>, values: &[u16])
     bytes_tensor(device, shape, DType::BF16, &bytes)
 }
 
-pub(super) fn f16_bits_tensor(device: usize, shape: Vec<usize>, values: &[u16]) -> Tensor {
-    let bytes: Vec<_> = values
-        .iter()
-        .flat_map(|value| value.to_ne_bytes())
-        .collect();
-    bytes_tensor(device, shape, DType::F16, &bytes)
-}
-
 pub(super) fn f32_tensor(device: usize, shape: Vec<usize>, values: &[f32]) -> Tensor {
     let bytes: Vec<_> = values
         .iter()
@@ -323,26 +315,15 @@ fn gpu_e2e_candidate_alignment_is_selected_and_keyed_from_actual_bindings() {
     let execution = super::execution::prepare(&ctx, misaligned).unwrap();
     let summary = execution.summary().to_owned();
     eprintln!("GPU_ALIGNMENT_MISALIGNED {summary}");
-    if matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
-        assert!(summary.contains("cutlass-fp8=skip(alignment)"), "{summary}");
-    } else {
-        assert!(!summary.contains("cutlass-fp8="), "{summary}");
-    }
+    assert!(summary.contains("cutlass-fp8=skip(alignment)"), "{summary}");
     assert!(
         summary.contains("cublasLt+custom-epilogue=skip(alignment)"),
         "{summary}"
     );
-    if matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
-        assert!(
-            summary.contains("cublasLt-native-fp8+custom-epilogue=skip(alignment)"),
-            "{summary}"
-        );
-    } else {
-        assert!(
-            summary.contains("cublasLt-native-fp8+custom-epilogue=skip(device)"),
-            "{summary}"
-        );
-    }
+    assert!(
+        summary.contains("cublasLt-native-fp8+custom-epilogue=skip(alignment)"),
+        "{summary}"
+    );
     assert!(
         !summary.contains("source=memory"),
         "alignment key aliased: {summary}"
@@ -365,7 +346,7 @@ pub(super) fn values(tensor: &Tensor) -> Vec<f32> {
         .collect()
 }
 
-pub(super) fn f16_values(tensor: &Tensor) -> Vec<f32> {
+fn f16_values(tensor: &Tensor) -> Vec<f32> {
     assert_eq!(tensor.dtype(), DType::F16);
     let buffer = CudaBuffer::from_tensor(tensor).unwrap();
     let mut bytes = vec![0; buffer.len()];
@@ -467,61 +448,6 @@ fn gpu_e2e_autotune_times_candidates_and_checks_winner_capture() {
 }
 
 #[test]
-fn gpu_e2e_native_fp8_bias_recipe_captures_and_restores() {
-    let cache_dir = scratch_cache_dir("native-fp8-bias-recipe");
-    let cache = cache_dir.to_string_lossy().into_owned();
-    let run = |ctx: &CudaContext, seed: bool| {
-        let (m, k, n) = (64, 64, 64);
-        let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
-        let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
-        let bias = f16_tensor(0, vec![n], &vec![0.5; n]);
-        let mut out = zeros_tensor(0, vec![m, n], DType::F16);
-        let normalized = {
-            let mut args = GemmArgs::new(&a, &b, &mut out)
-                .with_immutable_weight(WeightVersion::new(1));
-            args.quantization = GemmQuantization::Fp8UnitScale;
-            args.policy.online_tune = false;
-            args.policy.allow_fallback = false;
-            args.policy.cache_dir = Some(cache.clone());
-            super::contracts::normalize(
-                ctx,
-                args,
-                super::contracts::Semantic::GemmBias,
-                Some(&bias),
-            )
-            .unwrap()
-        };
-        if seed {
-            super::execution::seed_recipe(ctx, &normalized, 2, 2, 1, 0).unwrap();
-        }
-        let execution = super::execution::prepare(ctx, normalized).unwrap();
-        assert!(
-            execution
-                .summary()
-                .starts_with("cublasLt-native-fp8-bias config=0 "),
-            "{}",
-            execution.summary()
-        );
-        assert!(execution.summary().contains("source=recipe"));
-        let graph = crate::capture(ctx, || execution.enqueue()).unwrap();
-        graph.replay().unwrap();
-        ctx.synchronize().unwrap();
-        assert!(f16_values(&out).iter().all(|&value| value == 64.5));
-        drop((graph, execution));
-    };
-
-    let ctx = CudaContext::new(0).unwrap();
-    if !matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
-        std::fs::remove_dir_all(cache_dir).unwrap();
-        return;
-    }
-    run(&ctx, true);
-    drop(ctx);
-    run(&CudaContext::new(0).unwrap(), false);
-    std::fs::remove_dir_all(cache_dir).unwrap();
-}
-
-#[test]
 fn gpu_e2e_graph_replay_overwrites_sentinel_and_matches_numeric_result() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, n) = (7, 19, 22);
@@ -615,144 +541,6 @@ fn scratch_cache_dir(label: &str) -> std::path::PathBuf {
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
-}
-
-#[test]
-#[ignore = "SM89-focused route selection"]
-fn attention_pi05_action_sm89_workspace_and_recipe_lifecycle() {
-    fn run(ctx: &CudaContext, cache: Option<&str>, workspace_limit: usize, tune: bool) -> String {
-        let (batch, query_tokens, key_tokens, query_heads, kv_heads, head_dim) =
-            (1, 10, 522, 8, 1, 256);
-        let query_shape = vec![batch, query_tokens, query_heads, head_dim];
-        let key_value_shape = vec![batch, key_tokens, kv_heads, head_dim];
-        let query = zeros_tensor(0, query_shape.clone(), DType::BF16);
-        let key = zeros_tensor(0, key_value_shape.clone(), DType::BF16);
-        let value = zeros_tensor(0, key_value_shape, DType::BF16);
-        let mut output = zeros_tensor(0, query_shape, DType::BF16);
-        let mut args = AttentionArgs::new(&query, &key, &value, &mut output);
-        args.policy.allow_fallback = false;
-        args.policy.graph_safe = true;
-        args.policy.online_tune = tune;
-        args.policy.workspace_limit = workspace_limit;
-        args.policy.cache_dir = cache.map(str::to_owned);
-        let normalized = super::attention_contracts::normalize(ctx, args).unwrap();
-        super::attention_execution::prepare(ctx, normalized)
-            .unwrap()
-            .summary()
-            .to_owned()
-    }
-
-    let low_workspace = run(&CudaContext::new(0).unwrap(), None, 1024, true);
-    assert!(
-        low_workspace.starts_with("flash-attention-2 config=0 "),
-        "low workspace must retain the direct candidate: {low_workspace}"
-    );
-    for configuration in [2, 3, 5, 9] {
-        assert!(
-            low_workspace.contains(&format!(
-                "flash-attention-2-split-kv#{configuration}=reject(Attention workspace policy exceeded before allocation)"
-            )),
-            "split-KV config {configuration} was not rejected by the workspace prefilter: {low_workspace}"
-        );
-    }
-
-    let cache_dir = scratch_cache_dir("attention-splitkv-recipe");
-    let cache = cache_dir.to_string_lossy().into_owned();
-    let ctx = CudaContext::new(0).unwrap();
-    let cold = run(&ctx, Some(&cache), 256 * 1024 * 1024, true);
-    assert!(
-        cold.starts_with("flash-attention-2-split-kv config=") && cold.contains("source=tuned"),
-        "cold SM89 tune did not select split-KV: {cold}"
-    );
-    let selected = cold.split(" workspace=").next().unwrap();
-    let warm = run(&ctx, Some(&cache), 256 * 1024 * 1024, false);
-    assert!(
-        warm.starts_with(selected) && warm.contains("source=memory-recipe"),
-        "warm restore did not reuse {selected}: {warm}"
-    );
-    let restored = run(
-        &CudaContext::new(0).unwrap(),
-        Some(&cache),
-        256 * 1024 * 1024,
-        false,
-    );
-    assert!(
-        restored.starts_with(selected) && restored.contains("source=recipe"),
-        "cold runtime did not restore persisted {selected}: {restored}"
-    );
-    std::fs::remove_dir_all(cache_dir).unwrap();
-}
-
-#[test]
-fn attention_splitkv_supports_boundary_excludes_mha() {
-    let ctx = CudaContext::new(0).unwrap();
-    let (batch, query_tokens, key_tokens, heads, head_dim) = (1, 3, 65, 1, 256);
-    let query_shape = vec![batch, query_tokens, heads, head_dim];
-    let key_value_shape = vec![batch, key_tokens, heads, head_dim];
-    let query = zeros_tensor(0, query_shape.clone(), DType::BF16);
-    let key = zeros_tensor(0, key_value_shape.clone(), DType::BF16);
-    let value = zeros_tensor(0, key_value_shape, DType::BF16);
-    let mut output = zeros_tensor(0, query_shape, DType::BF16);
-    let mut args = AttentionArgs::new(&query, &key, &value, &mut output);
-    args.policy.allow_fallback = false;
-    args.policy.graph_safe = true;
-    args.policy.online_tune = true;
-    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
-    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
-    assert!(
-        !execution
-            .summary()
-            .starts_with("flash-attention-2-split-kv ")
-            && execution
-                .summary()
-                .contains("flash-attention-2-split-kv=skip(contract)"),
-        "MHA must remain outside the split-KV candidate contract: {}",
-        execution.summary()
-    );
-}
-
-#[test]
-fn attention_splitkv_alignment_boundary_uses_custom_fallback() {
-    fn misaligned_zeros(shape: Vec<usize>) -> Tensor {
-        let bytes = shape.iter().product::<usize>() * DType::BF16.size_in_bytes();
-        let backing = crate::CudaBuffer::alloc_zeros(bytes + 2, 0).unwrap();
-        backing
-            .view(2, bytes)
-            .unwrap()
-            .as_tensor(Shape::new(shape), DType::BF16)
-            .unwrap()
-    }
-
-    let ctx = CudaContext::new(0).unwrap();
-    let (batch, query_tokens, key_tokens, query_heads, kv_heads, head_dim) =
-        (1, 10, 522, 8, 1, 256);
-    let query_shape = vec![batch, query_tokens, query_heads, head_dim];
-    let key_value_shape = vec![batch, key_tokens, kv_heads, head_dim];
-    let query = misaligned_zeros(query_shape.clone());
-    let key = misaligned_zeros(key_value_shape.clone());
-    let value = misaligned_zeros(key_value_shape);
-    let mut output = misaligned_zeros(query_shape);
-    let mut args = AttentionArgs::new(&query, &key, &value, &mut output);
-    args.policy.allow_fallback = true;
-    args.policy.graph_safe = true;
-    args.policy.online_tune = true;
-    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
-    assert_eq!(normalized.spec.q_alignment, 2);
-    assert_eq!(normalized.spec.k_alignment, 2);
-    assert_eq!(normalized.spec.v_alignment, 2);
-    assert_eq!(normalized.spec.output_alignment, 2);
-    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
-    assert!(
-        execution.summary().starts_with("custom-attention-fallback ")
-            && execution
-                .summary()
-                .contains("flash-attention-2-split-kv=skip(alignment)"),
-        "misaligned Attention did not skip split-KV and choose custom: {}",
-        execution.summary()
-    );
-    execution.enqueue_for_test().unwrap();
-    ctx.synchronize().unwrap();
-    assert!(values(&output).iter().all(|&value| value == 0.0));
 }
 
 /// A Recipe is shared by every caller whose Spec matches, and alpha is no longer
@@ -870,42 +658,6 @@ fn gpu_e2e_scale_values_do_not_fragment_the_tuning_cache() {
     assert!(
         restored.contains("source=recipe"),
         "a different alpha must restore the persisted recipe: {restored}"
-    );
-    std::fs::remove_dir_all(cache_dir).unwrap();
-}
-
-#[test]
-fn gpu_e2e_output_scale_unit_predicate_partitions_the_recipe_key() {
-    let cache_dir = scratch_cache_dir("gemm-output-scale-key");
-    let cache = cache_dir.to_string_lossy().into_owned();
-    let (m, k, n) = (6, 9, 24);
-    let run = |ctx: &CudaContext, output_scale: f32| -> String {
-        let a = tensor(0, vec![m, k], &vec![0.5; m * k]);
-        let b = tensor(0, vec![k, n], &vec![0.25; k * n]);
-        let mut out = tensor(0, vec![m, n / 2], &vec![0.0; m * n / 2]);
-        let mut args = GemmArgs::new(&a, &b, &mut out);
-        args.output_scale = output_scale;
-        args.policy.cache_dir = Some(cache.clone());
-        args.policy.online_tune = true;
-        args.policy.allow_fallback = false;
-        prepare_test_geglu(ctx, GemmGegluArgs { gemm: args })
-            .unwrap()
-            .summary()
-            .to_owned()
-    };
-
-    let ctx = CudaContext::new(0).unwrap();
-    let unit = run(&ctx, 1.0);
-    assert!(unit.contains("source=tuned"), "unit scale did not tune: {unit}");
-    let first_non_unit = run(&ctx, 0.5);
-    assert!(
-        first_non_unit.contains("source=tuned"),
-        "unit and non-unit output scales incorrectly shared a Recipe: {first_non_unit}"
-    );
-    let reused_non_unit = run(&ctx, 0.25);
-    assert!(
-        reused_non_unit.contains("source=memory"),
-        "non-unit output scale values fragmented the Recipe cache: {reused_non_unit}"
     );
     std::fs::remove_dir_all(cache_dir).unwrap();
 }
@@ -1260,179 +1012,6 @@ fn tuning_isolated_from_user_buffers_and_replay_results() {
 }
 
 #[test]
-fn nonblocking_output_initialization_is_ordered_before_operator_writes() {
-    const TOKENS: usize = 3 * 256;
-    const HEADS: usize = 16;
-    const HEAD_DIM: usize = 72;
-    const WIDTH: usize = HEADS * HEAD_DIM;
-
-    let ctx = CudaContext::new(0).unwrap();
-    let packed_values: Vec<_> = (0..TOKENS * 3 * WIDTH)
-        .map(|index| ((index % 127) as f32 - 63.0) / 64.0)
-        .collect();
-    let packed = tensor(0, vec![TOKENS, 3 * WIDTH], &packed_values);
-    let expected_q: Vec<_> = packed_values
-        .chunks_exact(3 * WIDTH)
-        .flat_map(|row| row[..WIDTH].iter().copied())
-        .collect();
-    let expected_k: Vec<_> = packed_values
-        .chunks_exact(3 * WIDTH)
-        .flat_map(|row| row[WIDTH..2 * WIDTH].iter().copied())
-        .collect();
-    let expected_v: Vec<_> = packed_values
-        .chunks_exact(3 * WIDTH)
-        .flat_map(|row| row[2 * WIDTH..].iter().copied())
-        .collect();
-    let output_shape = Shape::new(vec![TOKENS, HEADS, HEAD_DIM]);
-    let read_bf16 = |tensor: &Tensor| {
-        // The allocation memset and direct operator launch are intentionally
-        // asynchronous on the context stream.  Synchronize only when the test
-        // crosses back to host memory to observe their ordered result.
-        ctx.synchronize().unwrap();
-        let buffer = CudaBuffer::from_tensor(tensor).unwrap();
-        let mut bytes = vec![0; buffer.len()];
-        buffer.copy_to_host(&mut bytes).unwrap();
-        bytes
-            .chunks_exact(2)
-            .map(|chunk| bf16::from_bits(u16::from_ne_bytes([chunk[0], chunk[1]])).to_f32())
-            .collect::<Vec<_>>()
-    };
-
-    for iteration in 0..20 {
-        let mut q = ctx
-            .allocate_output(output_shape.clone(), DType::BF16)
-            .unwrap();
-        let mut k = ctx
-            .allocate_output(output_shape.clone(), DType::BF16)
-            .unwrap();
-        let mut v = ctx
-            .allocate_output(output_shape.clone(), DType::BF16)
-            .unwrap();
-        rope(
-            &ctx,
-            RopeArgs {
-                semantic: RopeSemantic::SplitQkvBias,
-                qkv: &packed,
-                bias: None,
-                q: &mut q,
-                k: &mut k,
-                v: &mut v,
-                q_heads: HEADS,
-                kv_heads: HEADS,
-                head_dim: HEAD_DIM,
-                theta: 1.0,
-                position_offset: 0,
-                kv_output_offset: 0,
-            },
-        )
-        .unwrap();
-        assert!(
-            read_bf16(&q) == expected_q,
-            "Q drifted at iteration {iteration}"
-        );
-        assert!(
-            read_bf16(&k) == expected_k,
-            "K drifted at iteration {iteration}"
-        );
-        assert!(
-            read_bf16(&v) == expected_v,
-            "V drifted at iteration {iteration}"
-        );
-    }
-}
-
-#[test]
-fn gpu_e2e_cutlass_sm89_geglu_prepacks_once_before_graph_replay() {
-    let ctx = CudaContext::new(0).unwrap();
-    if ctx.caps().sm != 89 {
-        return;
-    }
-
-    let (m, k, n) = (10, 1024, 8192);
-    let a = zeros_tensor(0, vec![m, k], DType::BF16);
-    let b = zeros_tensor(0, vec![k, n], DType::BF16);
-    let mut out = zeros_tensor(0, vec![m, n / 2], DType::BF16);
-    let cache_dir = std::env::temp_dir().join(format!(
-        "apxinf-sm89-geglu-prepack-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&cache_dir).unwrap();
-    let cache_dir_string = cache_dir.to_string_lossy().into_owned();
-
-    let normalized = {
-        let mut args =
-            GemmArgs::new(&a, &b, &mut out).with_immutable_weight(WeightVersion::new(1));
-        args.policy.online_tune = false;
-        args.policy.allow_fallback = false;
-        args.policy.cache_dir = Some(cache_dir_string.clone());
-        super::contracts::normalize(&ctx, args, super::contracts::Semantic::GemmGeglu, None)
-            .unwrap()
-    };
-    super::execution::seed_recipe(&ctx, &normalized, 3, 4, 1, 0).unwrap();
-    drop(normalized);
-
-    let execution = {
-        let mut args =
-            GemmArgs::new(&a, &b, &mut out).with_immutable_weight(WeightVersion::new(1));
-        args.policy.online_tune = false;
-        args.policy.allow_fallback = false;
-        args.policy.cache_dir = Some(cache_dir_string.clone());
-        prepare_test_geglu(&ctx, GemmGegluArgs { gemm: args }).unwrap()
-    };
-    assert_eq!(execution.weight_prepack_count(), 1);
-
-    execution.enqueue().unwrap();
-    execution.enqueue().unwrap();
-    ctx.synchronize().unwrap();
-    assert_eq!(execution.weight_prepack_count(), 1);
-
-    let graph = crate::capture(&ctx, || execution.enqueue()).unwrap();
-    graph.replay().unwrap();
-    graph.replay().unwrap();
-    ctx.synchronize().unwrap();
-    assert_eq!(execution.weight_prepack_count(), 1);
-
-    drop((graph, execution));
-
-    let mutable_normalized = {
-        let mut args = GemmArgs::new(&a, &b, &mut out);
-        args.policy.online_tune = false;
-        args.policy.allow_fallback = false;
-        args.policy.cache_dir = Some(cache_dir_string.clone());
-        super::contracts::normalize(&ctx, args, super::contracts::Semantic::GemmGeglu, None)
-            .unwrap()
-    };
-    super::execution::seed_recipe(&ctx, &mutable_normalized, 3, 4, 1, 0).unwrap();
-    drop(mutable_normalized);
-
-    let mutable = {
-        let mut args = GemmArgs::new(&a, &b, &mut out);
-        args.policy.online_tune = false;
-        args.policy.allow_fallback = false;
-        args.policy.cache_dir = Some(cache_dir_string);
-        prepare_test_geglu(&ctx, GemmGegluArgs { gemm: args }).unwrap()
-    };
-    assert_eq!(mutable.weight_prepack_count(), 0);
-    mutable.enqueue().unwrap();
-    ctx.synchronize().unwrap();
-    assert_eq!(mutable.weight_prepack_count(), 1);
-
-    let mutable_graph = crate::capture(&ctx, || mutable.enqueue()).unwrap();
-    assert_eq!(mutable.weight_prepack_count(), 2);
-    mutable_graph.replay().unwrap();
-    mutable_graph.replay().unwrap();
-    ctx.synchronize().unwrap();
-    assert_eq!(mutable.weight_prepack_count(), 2);
-
-    drop((mutable_graph, mutable));
-    std::fs::remove_dir_all(cache_dir).unwrap();
-}
-
-#[test]
 fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, n) = (522, 2048, 32768);
@@ -1462,17 +1041,7 @@ fn gpu_e2e_cutlass_geglu_prepack_is_bound_to_allocation_and_version() {
     // Provider 3, implementation 2, version 2 is the FP8 CUTLASS GeGLU
     // candidate. Seeding avoids an enormous CPU-reference autotune while
     // keeping execution construction and public enqueue/capture paths real.
-    let seeded = super::execution::seed_recipe(&ctx, &normalized, 3, 2, 2, 0);
-    if !matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
-        let error = seeded.expect_err("CUTLASS GeGLU must remain unavailable outside SM100");
-        assert!(
-            error.to_string().contains("test recipe candidate is unavailable"),
-            "{error}"
-        );
-        std::fs::remove_dir_all(cache_dir).unwrap();
-        return;
-    }
-    seeded.unwrap();
+    super::execution::seed_recipe(&ctx, &normalized, 3, 2, 2, 0).unwrap();
     drop(normalized);
 
     let session = ExecutionSession::with_capacity(1, 0).unwrap();

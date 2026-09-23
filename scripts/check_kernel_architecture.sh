@@ -28,25 +28,15 @@ search_pattern() {
     fi
 
     local paths=()
-    local grep_globs=(--include='*.rs')
     while (($#)); do
         if [[ "$1" == '-g' ]]; then
-            local glob="$2"
-            case "$glob" in
-                '*.rs') ;;
-                '!**/tests/**') grep_globs+=(--exclude-dir=tests) ;;
-                *)
-                    echo "kernel architecture check: unsupported grep fallback glob: $glob" >&2
-                    exit 2
-                    ;;
-            esac
             shift 2
         else
             paths+=("$1")
             shift
         fi
     done
-    grep -R -n -E "${grep_globs[@]}" "$pattern" "${paths[@]}"
+    grep -R -n -E --include='*.rs' "$pattern" "${paths[@]}"
 }
 
 search_cuda_pattern() {

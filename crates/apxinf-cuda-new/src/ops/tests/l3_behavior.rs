@@ -5,10 +5,9 @@
 //! resource lifetime, binding rule, or capture behavior not already covered by
 //! the shared framework tests.
 
-use super::framework::{bytes_tensor, f16_tensor, f16_values, tensor, values};
+use super::framework::{tensor, values};
 use super::*;
 use crate::CudaContext;
-use apxinf_core::DType;
 use half::bf16;
 
 fn u32_buffer(device: usize, values: &[u32]) -> crate::CudaBuffer {
@@ -241,34 +240,6 @@ fn gemm_bias_has_its_own_semantic_api() {
     let expected = [3.5, 2.5, 4.0, 2.0, 3.5, 2.5, 4.0, 2.0];
     for (actual, expected) in values(&out).iter().zip(expected) {
         assert!((*actual - expected).abs() < 0.01);
-    }
-}
-
-#[test]
-fn gemm_bias_residual_supports_present_and_absent_bias() {
-    let ctx = CudaContext::new(0).unwrap();
-    let a = bytes_tensor(0, vec![1, 16], DType::F8E4M3, &[0; 16]);
-    let b = bytes_tensor(0, vec![16, 16], DType::F8E4M3, &[0; 256]);
-    let bias = f16_tensor(0, vec![16], &[0.5; 16]);
-    let residual = f16_tensor(0, vec![1, 16], &[1.25; 16]);
-
-    for (bias, expected) in [(Some(&bias), 1.75), (None, 1.25)] {
-        let mut out = f16_tensor(0, vec![1, 16], &[0.0; 16]);
-        let mut gemm = GemmArgs::new(&a, &b, &mut out);
-        gemm.quantization = GemmQuantization::Fp8UnitScale;
-        gemm.policy.online_tune = false;
-        gemm_bias_residual(
-            &ctx,
-            GemmBiasResidualArgs {
-                gemm,
-                bias,
-                residual: &residual,
-            },
-        )
-        .unwrap();
-        assert!(f16_values(&out)
-            .iter()
-            .all(|actual| (*actual - expected).abs() < 0.01));
     }
 }
 
@@ -562,30 +533,6 @@ fn segmented_attention_prepares_before_capture_and_replays_from_cache() {
     graph.replay().unwrap();
     ctx.synchronize().unwrap();
     assert_eq!(values(&out), expected);
-}
-
-#[test]
-fn reserved_prefix_uses_session_storage_during_capture() {
-    let ctx = CudaContext::new(0).unwrap();
-    let prefix = tensor(0, vec![2, 2], &[1.0, 2.0, 3.0, 4.0]);
-    let session = ExecutionSession::with_capacity(4096, 0).unwrap();
-
-    let prepared = prepare_with_session(&session, || reserve_prefix(&ctx, &prefix, 4)).unwrap();
-    ctx.synchronize().unwrap();
-    let expected = vec![1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0];
-    assert_eq!(values(&prepared), expected);
-
-    let captured = std::cell::RefCell::new(None);
-    let graph = crate::capture(&ctx, || {
-        let output = with_session(&session, || reserve_prefix(&ctx, &prefix, 4))?;
-        captured.replace(Some(output));
-        Ok(())
-    })
-    .unwrap();
-    let output = captured.into_inner().unwrap();
-    graph.replay().unwrap();
-    ctx.synchronize().unwrap();
-    assert_eq!(values(&output), expected);
 }
 
 #[test]

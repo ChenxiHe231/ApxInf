@@ -7,16 +7,13 @@ action decoder on RTX 4090 / SM89. The optimization keeps the same attention
 math and only changes the FA2 kernel variant used for small-query, long-KV MQA
 shapes.
 
-The split-KV candidate follows the legacy FA2 eligibility domain rather than a
-single model shape:
+The optimization targets the action-stage attention shape:
 
 ```text
 Sq <= 64
 Sk > Sq
 num_q_heads > num_kv_heads
-head_dim in {128, 256}
-dtype == BF16
-dense causal or non-causal attention
+head_dim == 256
 ```
 
 For the measured Pi0.5 H10 profile this corresponds to:
@@ -37,38 +34,27 @@ a combine kernel but reduces total attention time.
 The implementation reuses the vendored FlashAttention-2 source already present
 in ApxInf. It does not introduce a new attention algorithm.
 
-The current cuda-new implementation is an independent L1 Attention candidate:
+Main changes:
 
-- L0 reuses the vendored FA2 split-KV wrapper and the upstream BF16 D128/D256,
-  causal/non-causal instantiations.
-- The descriptor has a stable provider/implementation/version identity,
-  precise shape/dtype/semantic support, and 16-byte alignment requirements.
-- Configurations enumerate legal split counts from the KV tile geometry.
-  Online tuning compares those configurations with regular FA2 on the actual
-  GPU instead of adding a model-specific dispatch branch.
-- `resource_requirements` is configuration-specific. `prepare` allocates and
-  owns `softmax_lse`, `softmax_lse_accum`, and `o_accum`; `enqueue` only launches
-  on the bound stream and performs no allocation, tuning, or synchronization.
-- The Attention build fingerprint includes the adapter and FA2 source set, so
-  adding this candidate creates a new recipe namespace. Cold tuning persists
-  the chosen implementation/configuration and warm preparation restores it.
-- The PI0.5 model has no provider-, candidate-, or architecture-specific
-  branch and does not reserve split-KV graph scratch. Provider state owns its
-  resources before capture.
+- Added a BF16 split-KV C++ wrapper around
+  `run_mha_fwd_splitkv_dispatch<cutlass::bfloat16_t, 256, false>`.
+- Added the SM80-family hdim256 BF16 split-KV FA2 instantiation.
+- Exposed the new entry through the stable C ABI and Rust FFI.
+- Routed `attention::mqa_bf16` to split-KV only for the small-query GQA/MQA
+  shape above.
+- Added split-KV graph scratch only at BF16 CUDA runtime capture time on
+  SM80-family devices. This keeps non-SM80-family workspace sizing unchanged.
+- Updated the RTX4090 SM89 BF16 tactics file kernel build id.
 
-Regular FA2 remains a separate candidate for larger shapes and for any shape
-where it wins tuning. There is no model-level split-KV switch.
+The default path remains regular FA2 for larger attention shapes, including the
+language-stage prefix self-attention. The split-KV path can be disabled for
+debugging with:
 
-## Historical pre-cuda-new measurements
+```bash
+APXINF_DISABLE_FA2_SPLITKV=1
+```
 
-The correctness and performance numbers in this section were collected before
-the cuda-new L1 candidate migration. They explain the optimization target, but
-they are not acceptance evidence for the current implementation. Current
-acceptance requires independent-reference all-candidate eager and graph tests,
-workspace/alignment boundary tests, recipe cold/warm restore, and end-to-end
-PI0.5 comparison on the target GPU.
-
-### Correctness
+## Correctness
 
 End-to-end BF16 CUDA graph integrity still passes with bitwise equality between
 eager execution and graph replay:
@@ -100,7 +86,7 @@ relative_l2 = 0.002327
 These differences are expected for an equivalent BF16 FA2 split-KV execution
 path.
 
-### Performance
+## Performance
 
 Measurements were taken on RTX 4090 / SM89 with Pi0.5 BF16, H=10, token=10,
 10 flow steps, graph replay timing, and NHWC RGB input inside the captured
@@ -127,7 +113,7 @@ The same runs passed the built-in BF16 eager-vs-graph integrity check:
 3-view split-KV: eager_vs_graph.bitwise_equal = true, max_abs = 0
 ```
 
-Historical workspace usage, including the old model-owned split-KV scratch:
+Workspace usage with split-KV enabled:
 
 ```text
 2-view H10 token=10: capacity = 3,615,987,712 bytes, used = 1,511,330,688 bytes
@@ -146,22 +132,42 @@ regular FA2   P50 = 50.45 ms
 split-KV FA2  P50 = 44.12 ms
 ```
 
-## Platform acceptance
+## Platform Notes
 
-The candidate is compiled with the ordinary FA2 source set for configured CUDA
-targets. It is not selected by a PI0.5 architecture branch: target capability,
-the exact Attention contract, workspace policy, alignment, and measured tuning
-decide whether it is eligible and whether it wins. A result on RTX 4090 / SM89
-does not by itself accept Orin or Thor.
+This optimization is currently wired for the SM80-family FA2 build path, which
+includes SM80, SM86, SM87, and SM89. RTX 4090 uses SM89.
 
-For each target platform:
+Thor / SM100-family behavior is isolated:
+
+- the Rust FFI declaration and `attention::mqa_bf16` dispatch are compiled only
+  under `apxinf_fa2_sm80`;
+- the new BF16 split-KV FA2 instantiation is added to the CUDA build only when
+  the selected NVCC architecture is SM80-family;
+- the C adapter export and C++ split-KV wrapper are guarded with
+  `APXINF_FA2_SM80`, so SM100 builds do not require the split-KV BF16 symbol;
+- the extra split-KV graph scratch is added only when runtime device caps report
+  `CudaArchFamily::Sm80`;
+- only the RTX 4090 records now stored in
+  `configs/tuning/nvidia/rtx4090-sm89/tactics.json` were retuned. Thor records
+  were not changed.
+
+The same optimization principle applies to other platforms: whenever the Pi0.5
+action decoder has a small query length and long KV cache, a split-KV attention
+backend can improve occupancy without changing model semantics.
+
+Platform-specific enablement requires:
+
+- a compiled FA2 split-KV instantiation for the platform and head dimension;
+- a wrapper that exposes split-KV scratch pointers;
+- runtime workspace allocation for `softmax_lse_accum` and `o_accum`;
+- a dispatch guard that only selects split-KV for shapes where it wins;
+- numerical comparison against the platform's regular attention path.
+
+For future non-SM89 targets, use the same validation pattern:
 
 1. Compare regular attention vs split-KV attention on the exact action-stage
    shapes.
 2. Check operator-level numerical error.
 3. Check end-to-end eager-vs-graph integrity.
-4. Prove graph capture/replay with provider resources prepared beforehand.
-5. Prove workspace and alignment rejection boundaries and cold/warm recipe
-   restoration.
-6. Benchmark 2-view and 3-view graph replay latency with the target platform's
-   complete, compatible tactics set.
+4. Benchmark 2-view and 3-view graph replay latency with the target platform's
+   tuned GEMM tactics.

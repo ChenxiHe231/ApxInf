@@ -225,7 +225,7 @@ crates/
       model / blocks          model forward order and layer implementation
       model_runner / prepare  execution preparation, state and resource lifetime
       backend.rs              family CUDA-facing seam when required
-  apxinf-cuda-new/             safe device operations and kernel implementation
+  apxinf-cuda/                 safe device operations and kernel implementation
   apxinf-py/                   thin native language adapter
 python/apxinf/apxinf/
   checkpoints/                Python compatibility and checkpoint metadata handling

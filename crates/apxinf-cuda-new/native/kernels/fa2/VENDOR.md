@@ -1,8 +1,7 @@
 # Vendored: Flash-Attention 2 forward kernels
 
 ApxInf compiles the upstream BF16 head-dimension 128 and 256 non-causal
-instantiations plus the upstream BF16 head-dimension 128/256 split-KV
-instantiations. Additional FP16 and causal BF16 direct instantiations live in the
+instantiations. Additional FP16 and causal BF16 instantiations live in the
 ApxInf-owned `native/kernels/attention` directory. The repository-local
 raw-pointer wrapper in `../fa2.cu` owns parameter marshalling. Split planning,
 provider selection, and other execution policy belong outside this vendored
@@ -34,12 +33,6 @@ directory makes upstream provenance auditable by byte-for-byte comparison.
 The compatibility layer is inference-only: dropout is disabled, and it is not
 intended to emulate PyTorch beyond the types and checks required to instantiate
 the forward kernels.
-
-`build.rs` fixes the unused dropout, ALiBi, softcap, and local/window feature
-axes off for the ordinary FA2 translation units, matching the legacy ApxInf FA2
-build. The raw-pointer wrapper never enables those axes. These four defines are
-part of the Attention build-fingerprint version so a recipe cannot cross the
-compile-policy boundary.
 
 ## Direct E4M3 extension
 

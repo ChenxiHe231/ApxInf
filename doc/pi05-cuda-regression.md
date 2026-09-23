@@ -54,13 +54,7 @@ Before a formal T=10 or T=21 run, pin the text, token IDs, tokenizer hash, and s
 
 ### 3.1 Fixed baseline fixtures
 
-The baseline uses two real LIBERO first-replan fixtures. The repository pins
-their names and SHA256 identities, but does **not** track the NPZ payloads. A
-formal run must restore them from the campaign artifact archive or capture the
-same first-replan observations again, and reject them unless the hashes below
-match. The prompts and token IDs below are the actual baseline inputs. They
-replace the optional example prompts above and must not be interchanged when
-reproducing the baseline.
+The baseline uses the real LIBERO first-replan fixtures already stored in the repository. The prompts and token IDs below are the actual baseline inputs. They replace the optional example prompts above and must not be interchanged when reproducing the baseline.
 
 | `T` | Fixture | Prompt | PaliGemma token IDs |
 |---:|---|---|---|
@@ -194,35 +188,3 @@ Input update + graph
 Image decoding, camera rotation, and CPU resize are outside both boundaries by default. If Python/client end-to-end latency is also measured, report it in a separate table.
 
 Use Nsight Systems and Nsight Compute only to locate bottlenecks. Profilers change timing behavior, so profiler-instrumented measurements must not replace uninstrumented formal benchmark results.
-
-## 9. cuda-new migration acceptance sequence
-
-Run the gates in this order; do not interpret a compile-only or synthetic run as
-PI0.5 qualification.
-
-1. Build the native CUDA objects and the focused PI0.5 Rust targets on SM110,
-   SM87, and SM89. SM89 must run BF16; unsupported FP8 capability must return an
-   explicit error rather than silently selecting BF16.
-2. Run the fixed T=10 and T=21 fixtures through eager and CUDA Graph paths.
-   Eager/graph cosine must be at least `0.999999`; BF16 and INT8 max-abs must be
-   at most `1e-2`, and FP8 max-abs at most `1e-3`.
-3. Compare graph output with the pinned reference. Require cosine / relative-L2
-   of `0.999 / 0.05` for BF16, `0.997 / 0.10` for FP8, and `0.995 / 0.10` for
-   INT8; INT8 additionally requires max-abs at most `0.125`.
-   The repository does not track reference-action payloads. If the original
-   campaign archive is unavailable, regenerate them from the pinned baseline
-   source revision, checkpoint, calibration and fixture identities, then retain
-   the full action array, producing-command manifest and SHA256 with the new
-   campaign. A candidate output must never be used to generate its own reference.
-4. On Thor and Orin, measure every matching cell in the tables above with 10
-   warm-ups and 30 samples. A cell whose P50 or P95 is more than 3% slower is a
-   migration failure pending investigation. If a delta is between 1% and 3%,
-   repeat five alternating baseline/candidate cycles before accepting it as
-   noise. The geometric-mean P50 across a device/precision path must not be more
-   than 1% slower.
-5. Record peak device memory separately. Preparation/autotuning time is a cold
-   metric and must remain outside graph-replay and input-update timing.
-
-The RTX 4090 currently has no canonical table in this document, so it is a
-native-build, BF16 smoke, eager/graph integrity, and paired old/new comparison
-target. Do not substitute its result for Thor FP8 or Orin INT8 qualification.

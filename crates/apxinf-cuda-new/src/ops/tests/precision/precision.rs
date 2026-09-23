@@ -6,14 +6,12 @@
 //! depend on or prescribe a candidate's internal implementation.
 
 use super::framework::{
-    bf16_bits_tensor, bytes_tensor, f16_bits_tensor, f16_tensor, f32_tensor, scales, tensor,
-    zeros_tensor,
+    bf16_bits_tensor, bytes_tensor, f16_tensor, f32_tensor, scales, tensor, zeros_tensor,
 };
 use super::l3_behavior::{attention_reference, kv_cache_attention_reference};
 use super::*;
 use crate::CudaContext;
 use apxinf_core::{DType, Tensor};
-use half::f16;
 use std::time::Instant;
 
 #[path = "torch_l3_fixtures.rs"]
@@ -95,94 +93,6 @@ fn attention_all_candidates_match_reference() {
         true,
     );
     super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
-}
-
-#[allow(clippy::too_many_arguments)]
-fn validate_splitkv_attention_shape(
-    query_tokens: usize,
-    key_tokens: usize,
-    query_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
-    causal: bool,
-    constant_value_by_dimension: bool,
-) {
-    let ctx = CudaContext::new(0).unwrap();
-    let batch = 1;
-    let query_values: Vec<_> = (0..batch * query_tokens * query_heads * head_dim)
-        .map(|index| ((index * 3 % 17) as f32 - 8.0) / 16.0)
-        .collect();
-    let key_values: Vec<_> = (0..batch * key_tokens * kv_heads * head_dim)
-        .map(|index| ((index * 5 % 19) as f32 - 9.0) / 16.0)
-        .collect();
-    let value_values: Vec<_> = (0..batch * key_tokens * kv_heads * head_dim)
-        .map(|index| {
-            if constant_value_by_dimension {
-                ((index % head_dim) as f32 % 13.0 - 6.0) / 16.0
-            } else {
-                ((index * 7 % 23) as f32 - 11.0) / 16.0
-            }
-        })
-        .collect();
-    let query = tensor(
-        0,
-        vec![batch, query_tokens, query_heads, head_dim],
-        &query_values,
-    );
-    let key = tensor(
-        0,
-        vec![batch, key_tokens, kv_heads, head_dim],
-        &key_values,
-    );
-    let value = tensor(
-        0,
-        vec![batch, key_tokens, kv_heads, head_dim],
-        &value_values,
-    );
-    let mut out = zeros_tensor(
-        0,
-        vec![batch, query_tokens, query_heads, head_dim],
-        DType::BF16,
-    );
-    let mut args = AttentionArgs::new(&query, &key, &value, &mut out);
-    if causal {
-        args = args.causal();
-    }
-    args.policy.allow_fallback = false;
-    args.policy.graph_safe = true;
-    let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
-    let expected = if constant_value_by_dimension {
-        (0..batch * query_tokens * query_heads * head_dim)
-            .map(|index| ((index % head_dim) as f32 % 13.0 - 6.0) / 16.0)
-            .collect()
-    } else {
-        attention_reference(
-            &query_values,
-            &key_values,
-            &value_values,
-            batch,
-            query_tokens,
-            key_tokens,
-            query_heads,
-            kv_heads,
-            head_dim,
-            1.0 / (head_dim as f32).sqrt(),
-            causal,
-        )
-    };
-    super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
-}
-
-#[test]
-fn attention_pi05_action_splitkv_all_candidates_match_reference_and_graph() {
-    validate_splitkv_attention_shape(10, 522, 8, 1, 256, false, true);
-}
-
-#[test]
-fn attention_splitkv_causal_and_noncausal_match_independent_reference_and_graph() {
-    validate_splitkv_attention_shape(3, 129, 2, 1, 128, false, false);
-    validate_splitkv_attention_shape(3, 129, 2, 1, 128, true, false);
-    validate_splitkv_attention_shape(3, 65, 2, 1, 256, false, false);
 }
 
 #[test]
@@ -329,44 +239,6 @@ fn attention_f16_vision_uses_fa2_and_matches_reference() {
     assert!(
         execution.summary().starts_with("flash-attention-2 "),
         "unexpected F16 vision provider: {}",
-        execution.summary()
-    );
-}
-
-#[test]
-fn attention_f16_packed_vision_qkv_uses_strided_fa2_and_matches_reference() {
-    let ctx = CudaContext::new(0).unwrap();
-    if ctx.caps().arch_family != crate::CudaArchFamily::Sm100 {
-        return;
-    }
-    let (batch, tokens, heads, head_dim) = (1, 256, 16, 72);
-    let plane_elements = heads * head_dim;
-    let mut qkv_values = vec![0.0; batch * tokens * 3 * plane_elements];
-    for token in 0..batch * tokens {
-        let value_start = (token * 3 + 2) * plane_elements;
-        qkv_values[value_start..value_start + plane_elements]
-            .fill((token % 7) as f32 / 8.0);
-    }
-    let qkv = f16_tensor(0, vec![batch, tokens, 3, heads, head_dim], &qkv_values);
-    let mut out = zeros_tensor(0, vec![batch, tokens, heads, head_dim], DType::F16);
-    let mut args = PackedQkvAttentionArgs::new(&qkv, &mut out);
-    // Production Python callers disable online tuning by default. The single
-    // fixed packed-QKV implementation must therefore also serve as the cold
-    // fallback when no recipe has been cached yet.
-    args.policy.online_tune = false;
-    args.policy.allow_fallback = true;
-    args.policy.graph_safe = true;
-    let normalized = super::attention_contracts::normalize_packed_qkv(&ctx, args).unwrap();
-    let expected_value = (0..tokens).map(|token| (token % 7) as f32 / 8.0).sum::<f32>()
-        / tokens as f32;
-    let expected = vec![expected_value; batch * tokens * plane_elements];
-    super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
-    let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
-    assert!(
-        execution
-            .summary()
-            .starts_with("flash-attention-2-packed-qkv "),
-        "unexpected packed vision provider: {}",
         execution.summary()
     );
 }
@@ -521,23 +393,6 @@ fn attention_f16_mqa_522_uses_direct_e4m3_fa2() {
     args.policy.graph_safe = true;
     let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
     let expected = vec![1.0; batch * tokens * query_heads * head_dim];
-
-    if !matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
-        let validation_error =
-            super::attention_execution::validate_candidates(&ctx, &normalized, &expected)
-                .expect_err("direct E4M3 FA2 must remain unavailable outside SM100");
-        assert!(validation_error
-            .to_string()
-            .contains("no registered Attention candidate applies"));
-        let prepare_error = super::attention_execution::prepare(&ctx, normalized)
-            .err()
-            .expect("direct E4M3 FA2 must not prepare outside SM100");
-        assert!(prepare_error
-            .to_string()
-            .contains("no candidate satisfies the operator Spec and Policy"));
-        return;
-    }
-
     super::attention_execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
     let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
     assert!(
@@ -708,53 +563,6 @@ fn gemm_bias_all_candidates_match_torch() {
 }
 
 #[test]
-fn gemm_bias_residual_all_candidates_match_torch() {
-    use torch_fixture as f;
-
-    let ctx = CudaContext::new(0).unwrap();
-    let a = bytes_tensor(0, vec![f::M, f::K], DType::F8E4M3, f::FP8_A);
-    let b = bytes_tensor(0, vec![f::K, f::N], DType::F8E4M3, f::FP8_B);
-    let bias = f16_bits_tensor(0, vec![f::N], f::FP8_UNIT_BIAS);
-    let residual = f16_bits_tensor(0, vec![f::M, f::N], f::FP8_RESIDUAL);
-    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F16);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.quantization = GemmQuantization::Fp8UnitScale;
-    configure_torch_case(&mut args, f::FP8_UNIT_ALPHA, f::FP8_UNIT_OUTPUT_SCALE);
-    let normalized = super::contracts::normalize_bias_residual(
-        &ctx,
-        args,
-        Some(&bias),
-        &residual,
-    )
-    .unwrap();
-    super::execution::validate_candidates(
-        &ctx,
-        &normalized,
-        f::FP8_UNIT_GEMM_BIAS_RESIDUAL,
-    )
-    .unwrap();
-
-    // Bias is optional for PI0.5 checkpoints which omit a linear bias. The
-    // residual must still be consumed as cuBLASLt C with beta=1.
-    let ctx = CudaContext::new(0).unwrap();
-    let a = bytes_tensor(0, vec![f::M, f::K], DType::F8E4M3, f::FP8_A);
-    let b = bytes_tensor(0, vec![f::K, f::N], DType::F8E4M3, f::FP8_B);
-    let residual = f16_bits_tensor(0, vec![f::M, f::N], f::FP8_RESIDUAL);
-    let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F16);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.quantization = GemmQuantization::Fp8UnitScale;
-    configure_torch_case(&mut args, f::FP8_UNIT_ALPHA, f::FP8_UNIT_OUTPUT_SCALE);
-    let normalized =
-        super::contracts::normalize_bias_residual(&ctx, args, None, &residual).unwrap();
-    let expected: Vec<_> = f::FP8_UNIT_GEMM
-        .iter()
-        .zip(f::FP8_RESIDUAL)
-        .map(|(projection, residual)| projection + f16::from_bits(*residual).to_f32())
-        .collect();
-    super::execution::validate_candidates(&ctx, &normalized, &expected).unwrap();
-}
-
-#[test]
 fn gemm_bias_gelu_all_candidates_match_torch() {
     use torch_fixture as f;
 
@@ -794,93 +602,6 @@ fn gemm_bias_gelu_all_candidates_match_torch() {
 }
 
 #[test]
-fn fp8_gemm_bias_gelu_can_quantize_directly_with_f16_bias() {
-    const M: usize = 512;
-    const K: usize = 1152;
-    const N: usize = 4304;
-
-    let ctx = CudaContext::new(0).unwrap();
-    // E4M3 encodings: 0x38 = 1.0 and 0x30 = 0.5.
-    let a = bytes_tensor(0, vec![M, K], DType::F8E4M3, &vec![0x38; M * K]);
-    let b = bytes_tensor(0, vec![K, N], DType::F8E4M3, &vec![0x30; K * N]);
-    let bias = f16_tensor(0, vec![N], &vec![0.5; N]);
-    let mut out = zeros_tensor(0, vec![M, N], DType::F8E4M3);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.quantization = GemmQuantization::Fp8UnitScale;
-    args.alpha = 4.0 / K as f32;
-    args.output_scale = 2.0;
-    validate_all_candidates(
-        &ctx,
-        args,
-        super::contracts::Semantic::GemmBiasGelu,
-        Some(&bias),
-        &vec![1.25; M * N],
-    )
-    .unwrap();
-}
-
-#[test]
-fn fp8_gemm_bias_gelu_quant_matches_three_stage_path() {
-    const M: usize = 512;
-    const K: usize = 1152;
-    const N: usize = 4304;
-
-    let ctx = CudaContext::new(0).unwrap();
-    let a = bytes_tensor(0, vec![M, K], DType::F8E4M3, &vec![0x38; M * K]);
-    let b = bytes_tensor(0, vec![K, N], DType::F8E4M3, &vec![0x30; K * N]);
-    let bias = f16_tensor(0, vec![N], &vec![0.5; N]);
-
-    let mut projection = zeros_tensor(0, vec![M, N], DType::F16);
-    let mut legacy_gemm = GemmArgs::new(&a, &b, &mut projection);
-    legacy_gemm.quantization = GemmQuantization::Fp8UnitScale;
-    legacy_gemm.alpha = 4.0 / K as f32;
-    legacy_gemm.policy.online_tune = false;
-    gemm_bias(
-        &ctx,
-        GemmBiasArgs {
-            gemm: legacy_gemm,
-            bias: &bias,
-        },
-    )
-    .unwrap();
-    let mut gelu = zeros_tensor(0, vec![M, N], DType::F16);
-    let mut pointwise_args =
-        PointwiseArgs::new(PointwiseSemantic::BiasActivation, &projection, &mut gelu);
-    pointwise_args.activation = PointwiseActivation::Gelu;
-    pointwise(&ctx, pointwise_args).unwrap();
-    let mut expected = zeros_tensor(0, vec![M, N], DType::F8E4M3);
-    let mut quantize = QuantizationArgs::new(
-        QuantizationSemantic::FixedScaleE4m3,
-        &gelu,
-        &mut expected,
-    );
-    quantize.scale = 2.0;
-    quantization(&ctx, quantize).unwrap();
-
-    let mut actual = zeros_tensor(0, vec![M, N], DType::F8E4M3);
-    let mut fused_gemm = GemmArgs::new(&a, &b, &mut actual);
-    fused_gemm.quantization = GemmQuantization::Fp8UnitScale;
-    fused_gemm.alpha = 4.0 / K as f32;
-    fused_gemm.output_scale = 2.0;
-    gemm_bias_gelu(
-        &ctx,
-        GemmBiasGeluArgs {
-            gemm: fused_gemm,
-            bias: &bias,
-        },
-    )
-    .unwrap();
-
-    let bytes = |tensor: &Tensor| {
-        let buffer = crate::CudaBuffer::from_tensor(tensor).unwrap();
-        let mut host = vec![0; buffer.len()];
-        buffer.copy_to_host(&mut host).unwrap();
-        host
-    };
-    assert_eq!(bytes(&actual), bytes(&expected));
-}
-
-#[test]
 fn gemm_geglu_all_candidates_match_torch() {
     use torch_fixture as f;
 
@@ -912,168 +633,6 @@ fn gemm_geglu_all_candidates_match_torch() {
         super::contracts::Semantic::GemmGeglu,
         None,
         f::FP8_UNIT_GEMM_GEGLU,
-    )
-    .unwrap();
-}
-
-#[test]
-fn fp8_production_geglu_non_unit_scale_matches_independent_reference() {
-    let ctx = CudaContext::new(0).unwrap();
-    if !matches!(ctx.caps().arch_family, crate::CudaArchFamily::Sm100) {
-        return;
-    }
-
-    // This is the PI0.5 language-layer production shape.  Make the first K
-    // element one for every activation row and every gate/up weight column,
-    // leaving the remaining operands zero.  Every projection is therefore
-    // exactly one, independent of the production weight-column packing.
-    let (m, k, n) = (522, 2048, 32768);
-    let mut a_values = vec![0; m * k];
-    for row in 0..m {
-        a_values[row * k] = 0x38; // E4M3 1.0
-    }
-    let mut b_values = vec![0; k * n];
-    b_values[..n].fill(0x38); // E4M3 1.0 in logical K row zero
-    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &a_values);
-    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &b_values);
-    let mut out = zeros_tensor(0, vec![m, n / 2], DType::F8E4M3);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.quantization = GemmQuantization::Fp8UnitScale;
-    // The generic cuBLAS candidates materialize unpacked FP8 operands plus a
-    // full projection.  Keep them in this all-candidate gate instead of
-    // silently filtering them through the production 256 MiB policy.
-    args.policy.workspace_limit = 512 * 1024 * 1024;
-    let gelu_one = 0.5_f32
-        * (1.0
-            + (0.7978845608028654_f32 * (1.0 + 0.044715_f32)).tanh());
-    configure_torch_case(&mut args, 1.0, gelu_one);
-    validate_all_candidates(
-        &ctx,
-        args,
-        super::contracts::Semantic::GemmGeglu,
-        None,
-        &vec![1.0; m * n / 2],
-    )
-    .unwrap();
-}
-
-fn validate_bf16_sm89_geglu_shape(
-    ctx: &CudaContext,
-    m: usize,
-    k: usize,
-    n: usize,
-    immutable_weight: bool,
-) {
-    let one = 0x3f80_u16;
-    let mut a_values = vec![0; m * k];
-    for row in 0..m {
-        a_values[row * k] = one;
-    }
-    let inner = n / 2;
-    let mut b_values = vec![0; k * n];
-    let mut expected_row = Vec::with_capacity(inner);
-    for column in 0..inner {
-        let (gate, gate_bits) = if column % 2 == 0 {
-            (1.0_f32, 0x3f80_u16)
-        } else {
-            (2.0_f32, 0x4000_u16)
-        };
-        let (up, up_bits) = if column % 3 == 0 {
-            (-1.0_f32, 0xbf80_u16)
-        } else {
-            (0.5_f32, 0x3f00_u16)
-        };
-        b_values[column] = gate_bits;
-        b_values[inner + column] = up_bits;
-        let gelu = 0.5_f32
-            * gate
-            * (1.0
-                + (0.7978845608028654_f32 * (gate + 0.044715_f32 * gate.powi(3))).tanh());
-        expected_row.push(gelu * up);
-    }
-    let a = bf16_bits_tensor(0, vec![m, k], &a_values);
-    let b = bf16_bits_tensor(0, vec![k, n], &b_values);
-    let mut out = zeros_tensor(0, vec![m, n / 2], DType::BF16);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    if immutable_weight {
-        args = args.with_immutable_weight(WeightVersion::new(1));
-    }
-    configure_torch_case(&mut args, 1.0, 1.0);
-    let expected = expected_row.repeat(m);
-    validate_all_candidates(
-        &ctx,
-        args,
-        super::contracts::Semantic::GemmGeglu,
-        None,
-        &expected,
-    )
-    .unwrap();
-}
-
-#[test]
-fn bf16_sm89_production_geglu_shapes_match_reference_and_graph() {
-    let ctx = CudaContext::new(0).unwrap();
-    if ctx.caps().sm != 89 {
-        return;
-    }
-    for (m, k, n) in [
-        (10, 1024, 8192),
-        (522, 2048, 32768),
-        (533, 2048, 32768),
-    ] {
-        validate_bf16_sm89_geglu_shape(&ctx, m, k, n, true);
-    }
-    // Mutable weights must take the enqueue-time adjacent-pair pack path, and
-    // graph capture must preserve that pack before the fused GEMM.
-    validate_bf16_sm89_geglu_shape(&ctx, 10, 1024, 8192, false);
-}
-
-#[test]
-fn bf16_gemm_geglu_all_candidates_cover_packed_output_path() {
-    let ctx = CudaContext::new(0).unwrap();
-    let (m, k, inner) = (2, 4, 4);
-    let a_values = [
-        0.25, -0.5, 0.75, 1.0, -1.0, 0.5, 0.25, -0.75,
-    ];
-    let b_values = [
-        0.5, -0.25, 0.75, 1.0, -0.5, 0.25, 1.0, -0.75,
-        -1.0, 0.5, 0.25, -0.5, 0.75, 1.0, -0.25, 0.5,
-        0.25, 0.75, -0.5, 1.0, 1.0, -0.5, 0.75, 0.25,
-        1.0, -0.75, 0.5, 0.25, -0.25, 0.5, -1.0, 0.75,
-    ];
-    let mut projection = vec![0.0f32; m * 2 * inner];
-    for row in 0..m {
-        for column in 0..2 * inner {
-            projection[row * 2 * inner + column] = (0..k)
-                .map(|depth| a_values[row * k + depth] * b_values[depth * 2 * inner + column])
-                .sum();
-        }
-    }
-    let gelu = |value: f32| {
-        0.5 * value
-            * (1.0 + (0.797_884_6 * (value + 0.044_715 * value * value * value)).tanh())
-    };
-    let expected = (0..m * inner)
-        .map(|index| {
-            let row = index / inner;
-            let column = index % inner;
-            gelu(projection[row * 2 * inner + column])
-                * projection[row * 2 * inner + inner + column]
-        })
-        .collect::<Vec<_>>();
-
-    let a = tensor(0, vec![m, k], &a_values);
-    let b = tensor(0, vec![k, 2 * inner], &b_values);
-    let mut out = zeros_tensor(0, vec![m, inner], DType::BF16);
-    let mut args = GemmArgs::new(&a, &b, &mut out);
-    args.policy.allow_fallback = false;
-    args.policy.graph_safe = true;
-    validate_all_candidates(
-        &ctx,
-        args,
-        super::contracts::Semantic::GemmGeglu,
-        None,
-        &expected,
     )
     .unwrap();
 }
