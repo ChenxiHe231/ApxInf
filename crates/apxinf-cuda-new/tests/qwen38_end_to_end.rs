@@ -2428,7 +2428,25 @@ fn generate_from_a_real_prompt() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(32);
 
-    let prompt_ids: Vec<u32> = tokenizer.encode(&prompt).expect("encode prompt");
+    // APXINF_QWEN38_PROMPT_LEN=N ignores the text and builds N deterministic
+    // token ids, matching a fixed-prompt-length random dataset.
+    let prompt_ids: Vec<u32> = match std::env::var("APXINF_QWEN38_PROMPT_LEN") {
+        Ok(n) => {
+            let n: usize = n.parse().expect("PROMPT_LEN must be an integer");
+            // A fixed LCG over the vocab: reproducible, spread across ids, and
+            // clear of the special tokens near the top of the range.
+            let mut state = 0x2545_F491_4F6C_DD1Du64;
+            (0..n)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((state >> 16) as usize % (VOCAB - 1000)) as u32
+                })
+                .collect()
+        }
+        Err(_) => tokenizer.encode(&prompt).expect("encode prompt"),
+    };
     let eos = tokenizer.eos_token_id();
     println!("prompt: {prompt:?}");
     println!("prompt tokens ({}): {prompt_ids:?}", prompt_ids.len());
@@ -2522,7 +2540,9 @@ fn generate_from_a_real_prompt() {
             panic!("token id {next} outside vocabulary at step {i}");
         }
         generated.push(next as u32);
-        if eos.map(|e| e as i32 == next).unwrap_or(false) {
+        // A fixed-length benchmark must not stop early on EOS.
+        let fixed_len = std::env::var("APXINF_QWEN38_FIXED_DECODE").is_ok();
+        if !fixed_len && eos.map(|e| e as i32 == next).unwrap_or(false) {
             break;
         }
         let pos = n_prompt + i;
