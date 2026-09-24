@@ -110,7 +110,10 @@ fn cosine_rel_l2(got: &[f32], want: &[f32]) -> (f64, f64) {
 /// Normalizing on the host means both kernels see the same vectors: ours will
 /// normalize again, which is the identity on a unit vector, and FlashInfer
 /// requires it done by the caller.
-fn make_inputs(seq: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+#[allow(clippy::type_complexity)]
+fn make_inputs(
+    seq: usize,
+) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut q = vec![0.0f32; seq * Q_HEADS * HEAD_DIM];
     let mut k = vec![0.0f32; seq * Q_HEADS * HEAD_DIM];
     let mut v = vec![0.0f32; seq * V_HEADS * HEAD_DIM];
@@ -123,6 +126,11 @@ fn make_inputs(seq: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)
     for (index, value) in v.iter_mut().enumerate() {
         *value = ((index as f32) * 0.0007).sin() * 0.8;
     }
+    // Keep the unnormalized copies: our scan normalizes internally and the
+    // FlashInfer path normalizes on the device, so each gets the form it
+    // expects from identical numbers.
+    let q_raw = q.clone();
+    let k_raw = k.clone();
     for row in 0..seq * Q_HEADS {
         for buffer in [&mut q, &mut k] {
             let slice = &mut buffer[row * HEAD_DIM..(row + 1) * HEAD_DIM];
@@ -139,7 +147,7 @@ fn make_inputs(seq: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)
     let beta: Vec<f32> = (0..seq * V_HEADS)
         .map(|i| 0.2 + 0.6 * (((i as f32) * 0.019).cos().abs()))
         .collect();
-    (q, k, v, g, beta)
+    (q, k, v, g, beta, q_raw, k_raw)
 }
 
 #[test]
@@ -148,8 +156,8 @@ fn flashinfer_gdn_matches_our_chunk_scan() {
     let ctx = CudaContext::new(0).unwrap();
     let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
 
-    for &seq in &[CHUNK, 2 * CHUNK, 512] {
-        let (q, k, v, g, beta) = make_inputs(seq);
+    for &seq in &[CHUNK, 2 * CHUNK, 512, 1024, 2048] {
+        let (q, k, v, g, beta, q_raw, k_raw) = make_inputs(seq);
 
         // --- our scan: BF16, q/k interleaved is not needed here, and it
         // normalizes and scales internally.
@@ -166,14 +174,50 @@ fn flashinfer_gdn_matches_our_chunk_scan() {
         )
         .unwrap();
 
-        // --- FlashInfer: FP16, caller-normalized q/k, scale as an argument.
-        let q_h = upload(&ctx, &f16_bytes(&q), vec![seq, Q_HEADS, HEAD_DIM], DType::F16);
-        let k_h = upload(&ctx, &f16_bytes(&k), vec![seq, Q_HEADS, HEAD_DIM], DType::F16);
-        let v_h = upload(&ctx, &f16_bytes(&v), vec![seq, V_HEADS, HEAD_DIM], DType::F16);
-        // Stock kernel wants linear-space alpha, so exponentiate here. With
-        // APXINF_GDN_LOG_GATE defined it consumes `g` directly instead.
-        let alpha: Vec<f32> = g.iter().map(|x| x.exp()).collect();
-        let g_fi = upload(&ctx, &f32_bytes(&alpha), vec![seq, V_HEADS], DType::F32);
+        // --- FlashInfer, reached the way the model reaches it.
+        //
+        // The conversion runs on the device through gdn_prepare_flashinfer,
+        // not on the host. An earlier version of this test normalized and
+        // narrowed here instead, which exercised the vendored kernel while
+        // leaving our own preparation pass entirely uncovered -- and that is
+        // exactly where the bug was: a warp reduction where the block needed a
+        // block reduction, so the L2 norm summed 32 of 128 elements. This
+        // comparison passed at every length while the model emitted garbage.
+        //
+        // So hand it what the model hands it: one interleaved BF16 row of
+        // q | k | v, unnormalized, and the natural-log decay.
+        let row_width = 2 * Q_HEADS * HEAD_DIM + V_HEADS * HEAD_DIM;
+        let mut interleaved = vec![0.0f32; seq * row_width];
+        for token in 0..seq {
+            let row = token * row_width;
+            for head in 0..Q_HEADS {
+                for d in 0..HEAD_DIM {
+                    let source = (token * Q_HEADS + head) * HEAD_DIM + d;
+                    interleaved[row + head * HEAD_DIM + d] = q_raw[source];
+                    interleaved[row + (Q_HEADS + head) * HEAD_DIM + d] = k_raw[source];
+                }
+            }
+            for index in 0..V_HEADS * HEAD_DIM {
+                interleaved[row + 2 * Q_HEADS * HEAD_DIM + index] =
+                    v[token * V_HEADS * HEAD_DIM + index];
+            }
+        }
+        let fused = upload(
+            &ctx,
+            &bf16_bytes(&interleaved),
+            vec![seq, row_width],
+            DType::BF16,
+        );
+        let q_h = zeros(&ctx, vec![seq, Q_HEADS, HEAD_DIM], DType::F16);
+        let k_h = zeros(&ctx, vec![seq, Q_HEADS, HEAD_DIM], DType::F16);
+        let v_h = zeros(&ctx, vec![seq, V_HEADS, HEAD_DIM], DType::F16);
+        let g_fi = zeros(&ctx, vec![seq, V_HEADS], DType::F32);
+        let g_log = upload(&ctx, &f32_bytes(&g), vec![seq, V_HEADS], DType::F32);
+        ops::gdn_prepare_flashinfer(
+            &ctx, &fused, &q_h, &k_h, &v_h, &g_log, &g_fi, seq, row_width,
+            Q_HEADS, V_HEADS, HEAD_DIM, 1e-6,
+        )
+        .unwrap();
         let beta_fi = upload(&ctx, &f32_bytes(&beta), vec![seq, V_HEADS], DType::F32);
         let out_fi = zeros(&ctx, vec![seq, V_HEADS, HEAD_DIM], DType::F16);
         let state_fi = zeros(&ctx, vec![V_HEADS, HEAD_DIM, HEAD_DIM], DType::F32);
