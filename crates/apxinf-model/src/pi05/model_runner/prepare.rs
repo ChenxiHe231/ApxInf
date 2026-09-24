@@ -1,12 +1,12 @@
 //! Shared PI0.5 preparation and captured resource ownership.
 use crate::pi05::backend::{
-    capture as capture_cuda_graph, ops, transfers, Context, DeviceBuffer as CudaBuffer,
-    ExecutionSession, RuntimeBackend,
+    self, capture as capture_cuda_graph, ops, transfers, Context, DeviceBuffer as CudaBuffer,
+    ExecutionSession,
 };
 use crate::pi05::model::Pi05Model;
 use crate::pi05::model::{ModelOperation, ModelVariant, PrepareBlocks, WorkspaceRequirements};
 use crate::pi05::{Pi05Config, Pi05ImageLayout};
-use apxinf_core::{Backend, Error, Graph, Result, Tensor};
+use apxinf_core::{Error, Graph, Result, Tensor};
 use std::sync::Arc;
 
 fn allocate_session(
@@ -24,7 +24,7 @@ pub struct CapturedGraph {
     noise: Tensor,
     token_ids: CudaBuffer,
     token_count: usize,
-    backend: Arc<RuntimeBackend>,
+    backend: Arc<Context>,
     // Retain every fixed weight referenced by the captured computation.
     _fixed: Box<dyn std::any::Any>,
     session: ExecutionSession,
@@ -37,7 +37,7 @@ impl CapturedGraph {
 
     pub fn replay_and_synchronize(&self) -> Result<()> {
         self.graph.replay()?;
-        self.backend.synchronize()
+        backend::synchronize(&self.backend)
     }
 
     pub fn output(&self) -> &Tensor {
@@ -74,7 +74,7 @@ impl CapturedGraph {
                 token_ids.len()
             )));
         }
-        self.backend.synchronize()?;
+        backend::synchronize(&self.backend)?;
         transfers::copy_cpu_to_cuda(patches, &self.patches)?;
         self.update_tokens(token_ids)
     }
@@ -111,7 +111,7 @@ impl CapturedGraph {
                 token_ids.len()
             )));
         }
-        self.backend.synchronize()?;
+        backend::synchronize(&self.backend)?;
         raw_images.copy_from_host(images).map_err(Error::Cuda)?;
         self.update_tokens(token_ids)
     }
@@ -127,12 +127,12 @@ impl CapturedGraph {
 
 struct CaptureBuilder<'a, B: PrepareBlocks> {
     model: &'a Arc<Pi05Model<B>>,
-    backend: &'a Arc<RuntimeBackend>,
+    backend: &'a Arc<Context>,
     config: &'a Pi05Config,
 }
 impl<B: PrepareBlocks> CaptureBuilder<'_, B> {
     fn ctx(&self) -> &Context {
-        self.backend.context()
+        self.backend
     }
     #[allow(clippy::too_many_arguments)]
     fn infer_captured_inputs(
@@ -184,7 +184,7 @@ impl<B: PrepareBlocks> CaptureBuilder<'_, B> {
             ));
         }
         let modulation = self.model.prepare_all_modulation(time_embeddings)?;
-        backend.synchronize()?;
+        backend::synchronize(backend)?;
         let session = allocate_session(
             &self.model.workspace_requirements(token_count)?,
             self.ctx().device_id(),
@@ -200,7 +200,7 @@ impl<B: PrepareBlocks> CaptureBuilder<'_, B> {
                 &modulation,
             )
         })?;
-        backend.synchronize()?;
+        backend::synchronize(backend)?;
         drop(eager_output);
 
         let captured_output = std::cell::RefCell::new(None);
@@ -276,7 +276,7 @@ impl<B: PrepareBlocks> CaptureBuilder<'_, B> {
             .map_err(Error::Cuda)?;
         let patch_rows = self.config.num_views * self.config.patches_per_view();
         let patch_width = 3 * self.config.patch_size * self.config.patch_size;
-        let patches = backend.to_device(&Tensor::zeros(
+        let patches = backend::to_device(backend, &Tensor::zeros(
             vec![patch_rows, patch_width],
             self.model.raw_patch_dtype(),
         ))?;

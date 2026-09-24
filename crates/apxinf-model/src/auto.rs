@@ -50,19 +50,13 @@ pub struct LoadOptions {
     /// (except CPU backends, which currently require f32).
     pub text_weight_dtype: Option<DType>,
     pub calibration_path: Option<PathBuf>,
-    /// Optional cuda-new exact-recipe cache directory.
-    ///
-    /// For command-line compatibility, a path ending in `.json` is treated as
-    /// a legacy tactics-database name and mapped to a sibling `.recipes`
-    /// directory. The JSON is never parsed or converted: cuda-new must tune
-    /// every missing exact recipe itself.
     pub tuning_path: Option<PathBuf>,
     /// Additional named model artifacts that are not embedded in the primary
     /// checkpoint. Model loaders must reject missing or unknown required
     /// assets instead of discovering them through process-global state.
     pub assets: BTreeMap<String, PathBuf>,
-    /// Enable cuda-new online autotuning from real inference requests. When
-    /// false, missing exact recipes use an operator's safe fallback.
+    /// Enable online GEMM autotuning from real inference requests. When false,
+    /// missing records resolve once to a safe inference fallback.
     pub autotune: bool,
     /// Explicit architecture config, overriding any on-disk `config.json`.
     pub config: Option<Pi05Config>,
@@ -310,8 +304,21 @@ impl AutoModel {
                 "model {model_name} does not yet support model_variant"
             )));
         }
+
+        if matches!(model_name, "pi05" | "pi05-cuda") {
+            #[cfg(feature = "cuda")]
+            return crate::pi05::load_with_cuda_new(path, device, options);
+
+            #[cfg(not(feature = "cuda"))]
+            return Err(Error::Other("PI0.5 requires CUDA support".into()));
+        }
+
         register_builtin_models();
         let backend = create_backend(device)?;
+        #[cfg(feature = "cuda")]
+        if let Some(cuda) = crate::accelerator::cuda::downcast(&*backend) {
+            configure_cuda_tuning(cuda, path, options)?;
+        }
         let device_name = match device {
             Device::Cuda(_) => Some("cuda"),
             Device::Cpu => None,
@@ -351,12 +358,6 @@ pub(crate) struct CudaRecipeOptions {
     pub online_tune: bool,
 }
 
-/// Resolve model-load tuning intent into cuda-new's per-operator policy.
-///
-/// cuda-new stores one file per exact recipe in a directory. An old tactics
-/// JSON therefore cannot be installed or translated. Mapping a legacy-looking
-/// path to a sibling directory preserves the caller's chosen location while
-/// guaranteeing a cache miss followed by a complete tune when requested.
 #[cfg(any(feature = "cuda", test))]
 pub(crate) fn cuda_recipe_options(options: &LoadOptions) -> Result<CudaRecipeOptions> {
     let cache_dir = options
@@ -394,6 +395,68 @@ fn exact_recipe_directory(path: &Path) -> PathBuf {
     }
 }
 
+#[cfg(feature = "cuda")]
+fn configure_cuda_tuning(
+    cuda: &apxinf_cuda::CudaBackend,
+    model_path: &Path,
+    options: &LoadOptions,
+) -> Result<()> {
+    use apxinf_cuda::tuning::{TuningDb, TuningMode, TuningPaths};
+
+    let default_paths = TuningPaths::resolve_for_cuda(
+        "configs/tuning",
+        cuda.context().caps(),
+        cuda.context().library_versions(),
+    );
+    let model_root = if model_path.is_dir() {
+        model_path
+    } else {
+        model_path.parent().unwrap_or_else(|| Path::new("."))
+    };
+    let legacy_path = model_root.join("tactics.json");
+    let selected = select_cuda_tuning_database_path(&default_paths.tactics, &legacy_path, options);
+    let database = selected
+        .as_deref()
+        .map(TuningDb::from_json_file)
+        .transpose()?;
+    let paths = options
+        .tuning_path
+        .clone()
+        .map(TuningPaths::from_tactics)
+        .unwrap_or(default_paths);
+    let mode = if options.autotune {
+        TuningMode::AutoTune
+    } else {
+        TuningMode::Inference
+    };
+    apxinf_cuda::kernels::gemm::configure_tuning(
+        cuda.context(),
+        mode,
+        database.as_ref().map(std::slice::from_ref).unwrap_or(&[]),
+        Some(paths),
+    )
+}
+
+#[cfg(any(feature = "cuda", test))]
+fn select_cuda_tuning_database_path(
+    default_path: &Path,
+    legacy_path: &Path,
+    options: &LoadOptions,
+) -> Option<PathBuf> {
+    match options.tuning_path.as_ref() {
+        Some(path) if path.is_file() => Some(path.clone()),
+        Some(_) if options.autotune => None,
+        Some(path) => Some(path.clone()),
+        None => default_path
+            .is_file()
+            .then(|| default_path.to_path_buf())
+            .or_else(|| {
+                (options.synthetic.is_none() && legacy_path.is_file())
+                    .then(|| legacy_path.to_path_buf())
+            }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,53 +475,50 @@ mod tests {
     }
 
     #[test]
-    fn model_local_legacy_tactics_are_never_discovered() {
-        let directory = temporary_directory("model-local-legacy-tactics");
-        std::fs::write(directory.join("tactics.json"), "{}").unwrap();
-
-        let resolved = cuda_recipe_options(&LoadOptions::default()).unwrap();
-        assert_eq!(resolved.cache_dir, None);
-        assert!(!resolved.online_tune);
-
-        std::fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn explicit_legacy_json_is_invalidated_into_a_fresh_recipe_directory() {
-        let directory = temporary_directory("explicit-legacy-tactics");
-        let legacy_path = directory.join("explicit.json");
-        std::fs::write(&legacy_path, r#"{"schema_version":1}"#).unwrap();
+    fn synthetic_load_ignores_model_local_legacy_tactics() {
+        let directory = temporary_directory("synthetic-tactics");
+        let default_path = directory.join("missing-hardware-tactics.json");
+        let legacy_path = directory.join("tactics.json");
+        std::fs::write(&legacy_path, "{}").unwrap();
         let options = LoadOptions {
-            tuning_path: Some(legacy_path),
-            autotune: true,
+            synthetic: Some(SyntheticWeights { seed: 0 }),
             ..LoadOptions::default()
         };
 
-        let resolved = cuda_recipe_options(&options).unwrap();
         assert_eq!(
-            resolved.cache_dir.as_deref(),
-            directory.join("explicit.recipes").to_str()
+            select_cuda_tuning_database_path(&default_path, &legacy_path, &options),
+            None
         );
-        assert!(resolved.online_tune);
-
+        assert_eq!(
+            select_cuda_tuning_database_path(&default_path, &legacy_path, &LoadOptions::default()),
+            Some(legacy_path)
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn explicit_recipe_directory_and_autotune_intent_are_preserved() {
-        let directory = temporary_directory("exact-recipe-directory");
-        let cache = directory.join("recipes");
-        std::fs::create_dir_all(&cache).unwrap();
-        let options = LoadOptions {
-            tuning_path: Some(cache.clone()),
-            autotune: false,
+    fn synthetic_load_still_uses_hardware_or_explicit_tactics() {
+        let directory = temporary_directory("explicit-tactics");
+        let default_path = directory.join("hardware.json");
+        let legacy_path = directory.join("tactics.json");
+        let explicit_path = directory.join("explicit.json");
+        std::fs::write(&default_path, "{}").unwrap();
+        std::fs::write(&legacy_path, "{}").unwrap();
+        std::fs::write(&explicit_path, "{}").unwrap();
+        let mut options = LoadOptions {
+            synthetic: Some(SyntheticWeights { seed: 0 }),
             ..LoadOptions::default()
         };
 
-        let resolved = cuda_recipe_options(&options).unwrap();
-        assert_eq!(resolved.cache_dir.as_deref(), cache.to_str());
-        assert!(!resolved.online_tune);
-
+        assert_eq!(
+            select_cuda_tuning_database_path(&default_path, &legacy_path, &options),
+            Some(default_path.clone())
+        );
+        options.tuning_path = Some(explicit_path.clone());
+        assert_eq!(
+            select_cuda_tuning_database_path(&default_path, &legacy_path, &options),
+            Some(explicit_path)
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

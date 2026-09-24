@@ -910,7 +910,7 @@ pub(in crate::pi05::model) mod backbone {
         }
 
         fn ctx(&self) -> &Context {
-            self.backend.context()
+            &self.backend
         }
 
         pub fn encode_vision(&self, patches: &Tensor) -> Result<Tensor> {
@@ -1256,6 +1256,6 @@ impl crate::pi05::model::PrepareBlocks for backbone::Int8DynamicBlocks {
                 nhwc: matches!(layout, crate::pi05::Pi05ImageLayout::Nhwc),
             },
         );
-        ops::gather(self.backend.context(), args)
+        ops::gather(&self.backend, args)
     }
 }

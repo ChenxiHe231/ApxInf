@@ -2,15 +2,15 @@
 use super::blocks::{Bf16Blocks, Fp8StaticBlocks, Int8DynamicBlocks, L3Policies};
 use super::Pi05Model;
 use super::{Bf16Model, Fp8StaticModel, Int8DynamicModel};
-use crate::pi05::backend::RuntimeBackend;
+use crate::pi05::backend::{self, Context};
 use crate::pi05::weights::{
     Bf16Weights, Fp8StaticActivationScales, Fp8StaticWeights, Int8DynamicWeights,
 };
 use crate::pi05::{sinusoidal_time_embedding, Pi05Config};
-use apxinf_core::{Backend, Result, Tensor};
+use apxinf_core::{Result, Tensor};
 use std::sync::Arc;
 pub fn build_bf16_model(
-    backend: Arc<RuntimeBackend>,
+    backend: Arc<Context>,
     config: Arc<Pi05Config>,
     weights: Arc<Bf16Weights>,
 ) -> Result<Arc<Pi05Model<Bf16Blocks>>> {
@@ -27,7 +27,7 @@ pub(in crate::pi05) fn build_bf16_model_with_policies(
     )?)))
 }
 pub fn build_fp8_static_model(
-    backend: Arc<RuntimeBackend>,
+    backend: Arc<Context>,
     config: Arc<Pi05Config>,
     weights: Arc<Fp8StaticWeights>,
     scales: Arc<Fp8StaticActivationScales>,
@@ -46,7 +46,7 @@ pub(in crate::pi05) fn build_fp8_static_model_with_policies(
     )?)))
 }
 pub fn build_int8_dynamic_model(
-    backend: Arc<RuntimeBackend>,
+    backend: Arc<Context>,
     config: Arc<Pi05Config>,
     weights: Arc<Int8DynamicWeights>,
 ) -> Result<Arc<Pi05Model<Int8DynamicBlocks>>> {
@@ -64,7 +64,7 @@ pub(in crate::pi05) fn build_int8_dynamic_model_with_policies(
 }
 pub fn upload_time_embeddings_bf16(
     config: &Pi05Config,
-    backend: &dyn Backend,
+    context: &Context,
 ) -> Result<Vec<Tensor>> {
     (0..config.num_flow_steps)
         .map(|step| {
@@ -78,7 +78,7 @@ pub fn upload_time_embeddings_bf16(
             .into_iter()
             .map(half::bf16::from_f32)
             .collect::<Vec<_>>();
-            backend.to_device(&Tensor::from_bf16(
+            backend::to_device(context, &Tensor::from_bf16(
                 vec![1, config.action_expert.width],
                 &values,
             )?)
@@ -87,7 +87,7 @@ pub fn upload_time_embeddings_bf16(
 }
 pub fn upload_time_embeddings_fp8_static(
     config: &Pi05Config,
-    backend: &dyn Backend,
+    context: &Context,
 ) -> Result<Vec<Tensor>> {
     (0..config.num_flow_steps)
         .map(|step| {
@@ -102,7 +102,7 @@ pub fn upload_time_embeddings_fp8_static(
             .map(half::f16::from_f32)
             .collect::<Vec<_>>();
             let tensor = Tensor::from_f16(vec![1, config.action_expert.width], &values)?;
-            backend.to_device(&tensor)
+            backend::to_device(context, &tensor)
         })
         .collect()
 }

@@ -42,9 +42,7 @@ pub use model_runner::{Pi05ModelRunner, Pi05PreparedInference};
 pub use weights::*;
 
 #[cfg(feature = "cuda")]
-pub(crate) fn register_builtin() {
-    crate::registry::register("pi05-cuda", load::load_registered);
-}
+pub(crate) use load::load_with_cuda_new;
 
 #[cfg(feature = "cuda")]
 pub use backend::ImageLayout as Pi05ImageLayout;

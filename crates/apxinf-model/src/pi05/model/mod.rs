@@ -24,7 +24,7 @@ pub(in crate::pi05) use model::{
 };
 pub(super) use model::{ModelOperation, ModelVariant};
 
-use crate::pi05::backend::{DeviceBuffer, RuntimeBackend};
+use crate::pi05::backend::{Context, DeviceBuffer};
 use crate::pi05::Pi05ImageLayout;
 use apxinf_core::DType;
 use std::sync::Arc;
@@ -34,7 +34,7 @@ pub struct WorkspaceRequirements {
     pub bytes: usize,
 }
 pub trait PrepareBlocks: Blocks + 'static {
-    fn backend(&self) -> &Arc<RuntimeBackend>;
+    fn backend(&self) -> &Arc<Context>;
     fn workspace_requirements(&self, tokens: usize) -> Result<WorkspaceRequirements>;
     fn raw_patch_dtype(&self) -> DType;
     fn preprocess(
@@ -46,7 +46,7 @@ pub trait PrepareBlocks: Blocks + 'static {
 }
 
 impl<B: PrepareBlocks> Pi05Model<B> {
-    pub(in crate::pi05) fn backend(&self) -> &Arc<RuntimeBackend> {
+    pub(in crate::pi05) fn backend(&self) -> &Arc<Context> {
         self.blocks.backend()
     }
     pub(in crate::pi05) fn config(&self) -> &crate::pi05::Pi05Config {

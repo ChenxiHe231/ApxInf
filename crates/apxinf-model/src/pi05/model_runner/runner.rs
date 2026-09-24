@@ -5,9 +5,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use apxinf_core::{
-    Backend, DType, Device, Error, NormalGenerator, Result, SamplingBackend, Tensor,
-};
+use apxinf_core::{DType, Device, Error, NormalGenerator, Result, Tensor};
 use half::{bf16, f16};
 
 use crate::vla::{
@@ -17,8 +15,8 @@ use crate::vla::{
 
 use super::prepare::CapturedGraph;
 use crate::pi05::backend::{
-    ops, transfers, DeviceBuffer, ExecutionSession, ImageLayout as KernelImageLayout,
-    RuntimeBackend,
+    self, ops, transfers, Context, DeviceBuffer, ExecutionSession,
+    ImageLayout as KernelImageLayout,
 };
 use crate::pi05::model::ModelVariant;
 use crate::pi05::Pi05Config;
@@ -105,7 +103,7 @@ fn eager_traversal<T>(
 /// Each call fully binds input and RNG key; there is no implicit episode counter.
 pub struct Pi05PreparedInference {
     spec: InferenceSpec,
-    backend: Arc<RuntimeBackend>,
+    backend: Arc<Context>,
     config: Arc<Pi05Config>,
     model: ModelVariant,
     strategy: ExecStrategy,
@@ -116,7 +114,7 @@ pub struct Pi05PreparedInference {
 impl Pi05PreparedInference {
     fn update_eager_inputs(&self, inputs: &EagerInputs, request: &VlaRequest<'_>) -> Result<()> {
         let observation = request.observation;
-        self.backend.synchronize()?;
+        backend::synchronize(&self.backend)?;
         let patches = normalize_tensor(
             match &observation.vision {
                 VisionObservation::Patches(patches) => Some(patches),
@@ -272,7 +270,7 @@ impl Pi05PreparedInference {
 /// retains only the most recently used shape. Callers that need more than one
 /// simultaneously prepared shape can own those plans explicitly via `prepare`.
 pub struct Pi05ModelRunner {
-    backend: Arc<RuntimeBackend>,
+    backend: Arc<Context>,
     config: Arc<Pi05Config>,
     model: ModelVariant,
     prepared: RefCell<Option<(InferenceSpec, Rc<Pi05PreparedInference>)>>,
@@ -317,7 +315,7 @@ where
 
 impl Pi05ModelRunner {
     pub(in crate::pi05) fn new(
-        backend: Arc<RuntimeBackend>,
+        backend: Arc<Context>,
         config: Arc<Pi05Config>,
         model: ModelVariant,
     ) -> Self {
@@ -345,14 +343,15 @@ impl Pi05ModelRunner {
         let cuda = &*self.backend;
         let dtype = self.model.input_dtype();
         let raw_rgb = spec.image_layout.is_some();
-        let patches = self.backend.to_device(&Tensor::zeros(
+        let patches = backend::to_device(&self.backend, &Tensor::zeros(
             patch_shape(&self.config),
             self.model.captured_patch_dtype(raw_rgb),
         ))?;
-        let noise = self
-            .backend
-            .to_device(&Tensor::zeros(noise_shape(&self.config), dtype))?;
-        let normal_generator = self.backend.create_normal_generator(noise.clone())?;
+        let noise = backend::to_device(
+            &self.backend,
+            &Tensor::zeros(noise_shape(&self.config), dtype),
+        )?;
+        let normal_generator = backend::create_normal_generator(&self.backend, noise.clone())?;
         let token_ids = DeviceBuffer::alloc_zeros(spec.token_count * 4, cuda.device_id())
             .map_err(Error::Cuda)?;
         Ok(PreparedBuffers {
@@ -394,7 +393,7 @@ impl Pi05ModelRunner {
                 )
             })
         })?;
-        self.backend.synchronize()?;
+        backend::synchronize(&self.backend)?;
         drop(output);
         Ok(inputs)
     }
@@ -577,14 +576,14 @@ impl VlaRuntime for Pi05ModelRunner {
     }
 
     fn clear_prepared(&self) -> Result<()> {
-        self.backend.synchronize()?;
+        backend::synchronize(&self.backend)?;
         drop(self.prepared.borrow_mut().take());
         Ok(())
     }
 
     fn infer_host_f32(&self, request: &VlaRequest<'_>) -> Result<Vec<f32>> {
         let action = self.infer(request)?;
-        self.backend.to_cpu(action.tensor())?.to_f32_vec()
+        backend::to_cpu(action.tensor())?.to_f32_vec()
     }
 
     fn calibration_amax(&self, request: &VlaRequest<'_>) -> Result<BTreeMap<String, f32>> {
@@ -697,7 +696,7 @@ mod tests {
     fn native_preparation_failure_falls_back_and_retained_plan_runs() {
         let path =
             std::env::var("APXINF_PI05_TEST_CHECKPOINT").expect("fixed real checkpoint required");
-        let backend = Arc::new(RuntimeBackend::new(0).unwrap());
+        let backend = Arc::new(Context::new(0).unwrap());
         let runner = load_model_runner(
             Path::new(&path),
             backend.clone(),
@@ -720,7 +719,7 @@ mod tests {
         let request = VlaRequest::provided(&observation, &noise);
         let spec = observation.inference_spec();
         let failing_capture = |_: &Tensor, _: &DeviceBuffer, _: &Tensor| -> Result<CapturedGraph> {
-            crate::pi05::backend::capture(backend.context(), || backend.synchronize())?;
+            crate::pi05::backend::capture(&backend, || backend::synchronize(&backend))?;
             panic!("CUDA must reject synchronization during stream capture");
         };
         assert!(runner
@@ -736,8 +735,7 @@ mod tests {
                 fallback_reason: Some(_)
             }
         ));
-        let expected = backend
-            .to_cpu(fallback.run(&request).unwrap().tensor())
+        let expected = backend::to_cpu(fallback.run(&request).unwrap().tensor())
             .unwrap()
             .to_f32_vec()
             .unwrap();
@@ -759,7 +757,7 @@ mod tests {
     fn native_prepare_for_reuses_prepared_execution() {
         let path =
             std::env::var("APXINF_PI05_TEST_CHECKPOINT").expect("fixed real checkpoint required");
-        let backend = Arc::new(RuntimeBackend::new(0).unwrap());
+        let backend = Arc::new(Context::new(0).unwrap());
         let runner = load_model_runner(
             Path::new(&path),
             backend.clone(),
@@ -783,17 +781,15 @@ mod tests {
         let request = VlaRequest::provided(&observation, &noise);
         for policy in [ExecutionPolicy::Eager, ExecutionPolicy::RequireGraph] {
             let prepared = runner.prepare_for(&request, policy).unwrap();
-            let first = backend
-                .to_cpu(prepared.run(&request).unwrap().tensor())
+            let first = backend::to_cpu(prepared.run(&request).unwrap().tensor())
                 .unwrap()
                 .to_f32_vec()
                 .unwrap();
-            let second = backend
-                .to_cpu(prepared.run(&request).unwrap().tensor())
+            let second = backend::to_cpu(prepared.run(&request).unwrap().tensor())
                 .unwrap()
                 .to_f32_vec()
                 .unwrap();
-            backend.synchronize().unwrap();
+            backend::synchronize(&backend).unwrap();
             assert_eq!(first, second);
             assert!(second.iter().all(|x| x.is_finite()));
         }
@@ -804,7 +800,7 @@ mod tests {
     fn rgb_calibration_reuses_prepared_eager_traversal() {
         let path =
             std::env::var("APXINF_PI05_TEST_CHECKPOINT").expect("fixed real checkpoint required");
-        let backend = Arc::new(RuntimeBackend::new(0).unwrap());
+        let backend = Arc::new(Context::new(0).unwrap());
         let runner = load_model_runner(
             Path::new(&path),
             backend,

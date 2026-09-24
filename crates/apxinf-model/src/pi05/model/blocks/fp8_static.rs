@@ -933,16 +933,16 @@ fn vision_layer_fp8_static_with_policies(
 
 #[cfg(test)]
 mod tests {
-    use apxinf_core::{Backend, Tensor};
+    use apxinf_core::Tensor;
     use half::f16;
 
     use super::*;
-    use crate::pi05::backend::RuntimeBackend as CudaBackend;
+    use crate::pi05::backend::{self, Context};
     use crate::pi05::{
         Fp8StaticDeviceLayerNorm, Fp8StaticDeviceVisionBlock, Fp8StaticLinearWeights, LinearWeights,
     };
 
-    fn zero_linear(input: usize, output: usize, backend: &dyn Backend) -> Fp8StaticLinearWeights {
+    fn zero_linear(input: usize, output: usize, backend: &Context) -> Fp8StaticLinearWeights {
         Fp8StaticLinearWeights::from_host(
             &LinearWeights {
                 weight: Tensor::from_f32(vec![input, output], &vec![0.0; input * output]).unwrap(),
@@ -956,7 +956,7 @@ mod tests {
     fn zero_linear_with_bias(
         input: usize,
         output: usize,
-        backend: &dyn Backend,
+        backend: &Context,
     ) -> Fp8StaticLinearWeights {
         Fp8StaticLinearWeights::from_host(
             &LinearWeights {
@@ -970,7 +970,7 @@ mod tests {
 
     #[test]
     fn zero_weight_language_layer_is_residual_identity() {
-        let backend = CudaBackend::new(0).unwrap();
+        let backend = Context::new(0).unwrap();
         let config = GemmaVariantConfig {
             width: 16,
             depth: 1,
@@ -981,21 +981,23 @@ mod tests {
         };
         let norm = Tensor::from_f16(vec![16], &vec![f16::ONE; 16]).unwrap();
         let weights = Fp8StaticDeviceLanguageLayer {
-            input_norm_scale: backend.to_device(&norm).unwrap(),
+            input_norm_scale: backend::to_device(&backend, &norm).unwrap(),
             qkv: zero_linear(16, 32, &backend),
             output: zero_linear(16, 16, &backend),
-            post_attention_norm_scale: backend.to_device(&norm).unwrap(),
+            post_attention_norm_scale: backend::to_device(&backend, &norm).unwrap(),
             gate_up: zero_linear(16, 64, &backend),
             down: zero_linear(32, 16, &backend),
         };
         let source = (0..64)
             .map(|i| f16::from_f32((i as f32 - 31.0) / 32.0))
             .collect::<Vec<_>>();
-        let input = backend
-            .to_device(&Tensor::from_f16(vec![4, 16], &source).unwrap())
-            .unwrap();
+        let input = backend::to_device(
+            &backend,
+            &Tensor::from_f16(vec![4, 16], &source).unwrap(),
+        )
+        .unwrap();
         let output = language_layer_fp8_static(
-            backend.context(),
+            &backend,
             config,
             &weights,
             Fp8StaticTransformerLayerScales {
@@ -1011,24 +1013,28 @@ mod tests {
             10_000.0,
         )
         .unwrap();
-        let output = backend.to_cpu(&output.hidden).unwrap();
+        let output = backend::to_cpu(&output.hidden).unwrap();
         assert_eq!(output.as_f16().unwrap(), source.as_slice());
     }
 
     #[test]
     fn zero_weight_vision_layer_is_residual_identity_across_views() {
-        let backend = CudaBackend::new(0).unwrap();
+        let backend = Context::new(0).unwrap();
         let width = 16;
         let inner = 32;
         let heads = 2;
         let head_dim = 8;
         let affine = Fp8StaticDeviceLayerNorm {
-            weight: backend
-                .to_device(&Tensor::from_f16(vec![width], &vec![f16::ONE; width]).unwrap())
-                .unwrap(),
-            bias: backend
-                .to_device(&Tensor::from_f16(vec![width], &vec![f16::ZERO; width]).unwrap())
-                .unwrap(),
+            weight: backend::to_device(
+                &backend,
+                &Tensor::from_f16(vec![width], &vec![f16::ONE; width]).unwrap(),
+            )
+            .unwrap(),
+            bias: backend::to_device(
+                &backend,
+                &Tensor::from_f16(vec![width], &vec![f16::ZERO; width]).unwrap(),
+            )
+            .unwrap(),
         };
         let weights = Fp8StaticDeviceVisionBlock {
             norm1: Fp8StaticDeviceLayerNorm {
@@ -1044,11 +1050,13 @@ mod tests {
         let source = (0..8 * width)
             .map(|i| f16::from_f32((i as f32 - 63.0) / 64.0))
             .collect::<Vec<_>>();
-        let input = backend
-            .to_device(&Tensor::from_f16(vec![8, width], &source).unwrap())
-            .unwrap();
+        let input = backend::to_device(
+            &backend,
+            &Tensor::from_f16(vec![8, width], &source).unwrap(),
+        )
+        .unwrap();
         let output = vision_layer_fp8_static(
-            backend.context(),
+            &backend,
             &weights,
             Fp8StaticVisionLayerScales {
                 attention_norm: 0.01,
@@ -1063,7 +1071,7 @@ mod tests {
             1e-6,
         )
         .unwrap();
-        let output = backend.to_cpu(&output).unwrap();
+        let output = backend::to_cpu(&output).unwrap();
         assert_eq!(output.as_f16().unwrap(), source.as_slice());
     }
 
@@ -1150,7 +1158,7 @@ pub(in crate::pi05::model) mod backbone {
         }
 
         fn ctx(&self) -> &Context {
-            self.backend.context()
+            &self.backend
         }
 
         pub fn encode_vision(&self, patches: &Tensor) -> Result<Tensor> {
@@ -1582,7 +1590,7 @@ impl crate::pi05::model::PrepareBlocks for backbone::Fp8StaticBlocks {
         patches: &Tensor,
         layout: crate::pi05::Pi05ImageLayout,
     ) -> Result<()> {
-        let ctx = self.backend.context();
+        let ctx = &self.backend;
         let mut f16_patches = output(ctx, patches.shape().dims().to_vec(), DType::F16)?;
         let geometry = ops::GatherPatchGeometry {
             views: self.config.num_views,

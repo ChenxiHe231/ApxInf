@@ -5,12 +5,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use apxinf_core::{Backend, Error, Result, Tensor};
+use apxinf_core::{Error, Result, Tensor};
 
-use crate::pi05::{backend::RuntimeBackend, Bf16Weights, Pi05CalibrationPlan, Pi05Config};
+use crate::pi05::{backend::{self, Context}, Bf16Weights, Pi05CalibrationPlan, Pi05Config};
 
 pub struct Pi05CalibrationObserver {
-    backend: Arc<RuntimeBackend>,
+    backend: Arc<Context>,
     sites: HashMap<usize, String>,
     plan: Pi05CalibrationPlan,
     records: RefCell<BTreeMap<String, f32>>,
@@ -56,7 +56,7 @@ pub(in crate::pi05::model) fn observe_bf16_activation(
 
 impl Pi05CalibrationObserver {
     pub fn new(
-        backend: Arc<RuntimeBackend>,
+        backend: Arc<Context>,
         config: &Pi05Config,
         weights: &Bf16Weights,
     ) -> Result<Self> {
@@ -171,7 +171,7 @@ impl Pi05CalibrationObserver {
         };
         // The host vector is scoped to this reduction and dropped immediately;
         // the collector retains only one scalar per logical site.
-        let values = self.backend.to_cpu(activation)?.to_f32_vec()?;
+        let values = backend::to_cpu(activation)?.to_f32_vec()?;
         let amax = finite_amax(values, name)?;
         let mut records = self.records.borrow_mut();
         records
@@ -220,7 +220,6 @@ impl Pi05Model<Bf16Blocks> {
         noise: &Tensor,
         embeddings: &[Tensor],
     ) -> Result<std::collections::BTreeMap<String, f32>> {
-        use apxinf_core::Backend;
         let observer = Rc::new(Pi05CalibrationObserver::new(
             self.blocks.backend.clone(),
             &self.blocks.config,
@@ -228,7 +227,7 @@ impl Pi05Model<Bf16Blocks> {
         )?);
         let _guard = install_bf16_observer(observer.clone())?;
         self.infer(patches, ids, count, noise, embeddings)?;
-        self.blocks.backend.synchronize()?;
+        backend::synchronize(&self.blocks.backend)?;
         observer.records()
     }
 }

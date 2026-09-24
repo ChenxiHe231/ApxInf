@@ -2,9 +2,9 @@
 mod linear {
     //! Output-channel-quantized W8A8 linear weights for π0.5.
 
-    use apxinf_core::{Backend, DType, Error, Result, Shape, Tensor};
+    use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-    use crate::pi05::backend::{ops, Context, RuntimeBackend};
+    use crate::pi05::backend::{self, ops, Context};
     use crate::pi05::weights::packing::concat_host_2d;
     use crate::pi05::LinearWeights;
 
@@ -29,7 +29,7 @@ mod linear {
     }
 
     impl Int8DynamicLinearWeights {
-        pub fn from_host(linear: &LinearWeights, backend: &RuntimeBackend) -> Result<Self> {
+        pub fn from_host(linear: &LinearWeights, backend: &Context) -> Result<Self> {
             Self::from_host_parts(&[linear], backend)
         }
 
@@ -37,7 +37,7 @@ mod linear {
         /// quantize every output channel across its complete input row.
         pub fn from_host_parts(
             linears: &[&LinearWeights],
-            backend: &RuntimeBackend,
+            backend: &Context,
         ) -> Result<Self> {
             if linears.is_empty() {
                 return Err(Error::Other(
@@ -51,22 +51,23 @@ mod linear {
                     .collect::<Vec<_>>(),
             )?;
             let (quantized, scales, input_dim, output_dim) = quantize_output_channels(&packed)?;
-            let weight = backend.to_device(&Tensor::from_i8(
+            let weight = backend::to_device(backend, &Tensor::from_i8(
                 vec![input_dim, output_dim],
                 &quantized,
             )?)?;
-            let channel_scales =
-                backend.to_device(&Tensor::from_f32(vec![output_dim], &scales)?)?;
+            let channel_scales = backend::to_device(
+                backend,
+                &Tensor::from_f32(vec![output_dim], &scales)?,
+            )?;
             let bias = if linears.iter().all(|linear| linear.bias.is_none()) {
                 None
             } else if linears.iter().all(|linear| linear.bias.is_some()) {
-                Some(concat_biases_bf16(
+                Some(backend::to_device(backend, &concat_biases_bf16(
                     &linears
                         .iter()
                         .map(|linear| linear.bias.as_ref().unwrap())
                         .collect::<Vec<_>>(),
-                    backend,
-                )?)
+                )?)?)
             } else {
                 return Err(Error::Other(
                     "cannot pack INT8 projections with mixed bias presence".into(),
@@ -173,7 +174,7 @@ mod linear {
         Ok((quantized, scales, input_dim, output_dim))
     }
 
-    fn concat_biases_bf16(tensors: &[&Tensor], backend: &dyn Backend) -> Result<Tensor> {
+    fn concat_biases_bf16(tensors: &[&Tensor]) -> Result<Tensor> {
         let mut values = Vec::new();
         for tensor in tensors {
             if tensor.shape().dims().len() != 1 || tensor.dtype() == DType::F8E4M3 {
@@ -183,7 +184,7 @@ mod linear {
             }
             values.extend(tensor.to_f32_vec()?.into_iter().map(half::bf16::from_f32));
         }
-        backend.to_device(&Tensor::from_bf16(vec![values.len()], &values)?)
+        Tensor::from_bf16(vec![values.len()], &values)
     }
 
     #[cfg(test)]
@@ -236,7 +237,7 @@ pub use linear::*;
 
 use apxinf_core::{Result, Tensor};
 
-use crate::pi05::backend::RuntimeBackend;
+use crate::pi05::backend::Context;
 use crate::pi05::{
     bf16_to_device, ActionLayerWeights, AdaRmsNormWeights, LanguageLayerWeights, LayerNormWeights,
     Pi05Weights, VisionBlockWeights,
@@ -292,7 +293,7 @@ pub struct Int8DynamicWeights {
 }
 
 impl Int8DynamicWeights {
-    pub fn from_host(weights: &Pi05Weights, backend: &RuntimeBackend) -> Result<Self> {
+    pub fn from_host(weights: &Pi05Weights, backend: &Context) -> Result<Self> {
         Ok(Self {
             patch_embedding: Int8DynamicLinearWeights::from_host(
                 &weights.vision.patch_embedding,
@@ -335,7 +336,7 @@ impl Int8DynamicWeights {
 }
 
 impl Int8DynamicDeviceLayerNorm {
-    fn from_host(weights: &LayerNormWeights, backend: &RuntimeBackend) -> Result<Self> {
+    fn from_host(weights: &LayerNormWeights, backend: &Context) -> Result<Self> {
         Ok(Self {
             weight: bf16_to_device(&weights.weight, backend)?,
             bias: bf16_to_device(&weights.bias, backend)?,
@@ -344,7 +345,7 @@ impl Int8DynamicDeviceLayerNorm {
 }
 
 impl Int8DynamicDeviceVisionBlock {
-    fn from_host(weights: &VisionBlockWeights, backend: &RuntimeBackend) -> Result<Self> {
+    fn from_host(weights: &VisionBlockWeights, backend: &Context) -> Result<Self> {
         Ok(Self {
             norm1: Int8DynamicDeviceLayerNorm::from_host(&weights.norm1, backend)?,
             qkv: Int8DynamicLinearWeights::from_host_parts(
@@ -360,7 +361,7 @@ impl Int8DynamicDeviceVisionBlock {
 }
 
 impl Int8DynamicDeviceLanguageLayer {
-    fn from_host(weights: &LanguageLayerWeights, backend: &RuntimeBackend) -> Result<Self> {
+    fn from_host(weights: &LanguageLayerWeights, backend: &Context) -> Result<Self> {
         Ok(Self {
             input_norm_scale: bf16_to_device(&weights.input_norm_scale, backend)?,
             qkv: Int8DynamicLinearWeights::from_host_parts(
@@ -383,7 +384,7 @@ impl Int8DynamicDeviceLanguageLayer {
 }
 
 impl Int8DynamicDeviceActionLayer {
-    fn from_host(weights: &ActionLayerWeights, backend: &RuntimeBackend) -> Result<Self> {
+    fn from_host(weights: &ActionLayerWeights, backend: &Context) -> Result<Self> {
         Ok(Self {
             input_modulation: modulation_to_device(&weights.input_norm, backend)?,
             qkv: Int8DynamicLinearWeights::from_host_parts(
@@ -407,7 +408,7 @@ impl Int8DynamicDeviceActionLayer {
 
 fn modulation_to_device(
     weights: &AdaRmsNormWeights,
-    backend: &RuntimeBackend,
+    backend: &Context,
 ) -> Result<Int8DynamicLinearWeights> {
     Int8DynamicLinearWeights::from_host(&weights.modulation, backend)
 }

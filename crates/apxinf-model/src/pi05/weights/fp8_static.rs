@@ -2,8 +2,9 @@
 mod linear {
     //! Device-ready static-FP8 linear weights.
 
-    use apxinf_core::{Backend, DType, Error, Result, Tensor};
+    use apxinf_core::{DType, Error, Result, Tensor};
 
+    use crate::pi05::backend::{self, Context};
     use crate::pi05::weights::packing::concat_host_2d;
     use crate::pi05::{quantize_e4m3_absmax, LinearWeights};
 
@@ -17,35 +18,24 @@ mod linear {
     }
 
     impl Fp8StaticLinearWeights {
-        pub fn from_host(linear: &LinearWeights, backend: &dyn Backend) -> Result<Self> {
-            Self::from_host_parts(&[linear], backend)
+        pub fn from_host(linear: &LinearWeights, context: &Context) -> Result<Self> {
+            Self::from_host_parts(&[linear], context)
         }
 
         /// Concatenate projections along their output dimension before applying
         /// one absmax quantization scale. This produces graph-ready QKV and
         /// gate/up matrices without runtime concatenation or mixed descales.
-        pub fn from_host_parts(linears: &[&LinearWeights], backend: &dyn Backend) -> Result<Self> {
+        pub fn from_host_parts(linears: &[&LinearWeights], context: &Context) -> Result<Self> {
             if linears.is_empty() {
                 return Err(Error::Other("cannot pack an empty FP8 linear group".into()));
             }
-            let weight_host =
-                concat_host_2d(&linears.iter().map(|x| &x.weight).collect::<Vec<_>>())?;
-            let quantized = quantize_e4m3_absmax(&weight_host)?;
+            let (quantized, bias) = pack_host_parts(linears)?;
             let weight_scale = quantized.scale;
-            let weight = backend.to_device(&quantized.values)?;
-            let bias = if linears.iter().all(|x| x.bias.is_none()) {
-                None
-            } else if linears.iter().all(|x| x.bias.is_some()) {
-                let biases = linears
-                    .iter()
-                    .map(|x| x.bias.as_ref().unwrap())
-                    .collect::<Vec<_>>();
-                Some(backend.to_device(&concat_host_1d_f16(&biases)?)?)
-            } else {
-                return Err(Error::Other(
-                    "cannot pack projections with a mixture of present and absent biases".into(),
-                ));
-            };
+            let weight = backend::to_device(context, &quantized.values)?;
+            let bias = bias
+                .as_ref()
+                .map(|bias| backend::to_device(context, bias))
+                .transpose()?;
             Ok(Self {
                 weight,
                 weight_scale,
@@ -54,13 +44,38 @@ mod linear {
         }
     }
 
-    pub fn fp16_to_device(tensor: &Tensor, backend: &dyn Backend) -> Result<Tensor> {
+    fn pack_host_parts(
+        linears: &[&LinearWeights],
+    ) -> Result<(crate::pi05::Fp8Tensor, Option<Tensor>)> {
+        let weight_host =
+            concat_host_2d(&linears.iter().map(|x| &x.weight).collect::<Vec<_>>())?;
+        let quantized = quantize_e4m3_absmax(&weight_host)?;
+        let bias = if linears.iter().all(|x| x.bias.is_none()) {
+            None
+        } else if linears.iter().all(|x| x.bias.is_some()) {
+            let biases = linears
+                .iter()
+                .map(|x| x.bias.as_ref().unwrap())
+                .collect::<Vec<_>>();
+            Some(concat_host_1d_f16(&biases)?)
+        } else {
+            return Err(Error::Other(
+                "cannot pack projections with a mixture of present and absent biases".into(),
+            ));
+        };
+        Ok((quantized, bias))
+    }
+
+    pub fn fp16_to_device(tensor: &Tensor, context: &Context) -> Result<Tensor> {
         let values = tensor.to_f32_vec()?;
         let values = values
             .iter()
             .map(|value| half::f16::from_f32(*value))
             .collect::<Vec<_>>();
-        backend.to_device(&Tensor::from_f16(tensor.shape().dims().to_vec(), &values)?)
+        backend::to_device(
+            context,
+            &Tensor::from_f16(tensor.shape().dims().to_vec(), &values)?,
+        )
     }
 
     fn concat_host_1d_f16(tensors: &[&Tensor]) -> Result<Tensor> {
@@ -77,8 +92,6 @@ mod linear {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use apxinf_core::CpuBackend;
-
         fn linear(weight: &[f32], shape: [usize; 2], bias: Option<&[f32]>) -> LinearWeights {
             LinearWeights {
                 weight: Tensor::from_f32(shape.to_vec(), weight).unwrap(),
@@ -91,11 +104,10 @@ mod linear {
             let q = linear(&[1., 2., 3., 4.], [2, 2], Some(&[1., 2.]));
             let k = linear(&[5., 6.], [2, 1], Some(&[3.]));
             let v = linear(&[7., 8.], [2, 1], Some(&[4.]));
-            let packed =
-                Fp8StaticLinearWeights::from_host_parts(&[&q, &k, &v], &CpuBackend).unwrap();
-            assert_eq!(packed.weight.shape().dims(), &[2, 4]);
-            assert_eq!(packed.weight.dtype(), DType::F8E4M3);
-            let bias = packed.bias.unwrap();
+            let (packed, bias) = pack_host_parts(&[&q, &k, &v]).unwrap();
+            assert_eq!(packed.values.shape().dims(), &[2, 4]);
+            assert_eq!(packed.values.dtype(), DType::F8E4M3);
+            let bias = bias.unwrap();
             assert_eq!(bias.dtype(), DType::F16);
             assert_eq!(bias.to_f32_vec().unwrap(), vec![1., 2., 3., 4.]);
         }
@@ -105,7 +117,8 @@ mod linear {
 pub use linear::*;
 // Fully materialized static-FP8 π0.5 weights.
 
-use apxinf_core::{Backend, Result, Tensor};
+use apxinf_core::{Result, Tensor};
+use crate::pi05::backend::Context;
 
 use crate::pi05::{
     ActionLayerWeights, AdaRmsNormWeights, LanguageLayerWeights, LayerNormWeights, Pi05Weights,
@@ -167,7 +180,7 @@ pub struct Fp8StaticWeights {
 }
 
 impl Fp8StaticWeights {
-    pub fn from_host(weights: &Pi05Weights, backend: &dyn Backend) -> Result<Self> {
+    pub fn from_host(weights: &Pi05Weights, backend: &Context) -> Result<Self> {
         let vision_layers = weights
             .vision
             .blocks
@@ -213,7 +226,7 @@ impl Fp8StaticWeights {
 }
 
 impl Fp8StaticDeviceLayerNorm {
-    fn from_host(weights: &LayerNormWeights, backend: &dyn Backend) -> Result<Self> {
+    fn from_host(weights: &LayerNormWeights, backend: &Context) -> Result<Self> {
         Ok(Self {
             weight: fp16_to_device(&weights.weight, backend)?,
             bias: fp16_to_device(&weights.bias, backend)?,
@@ -222,7 +235,7 @@ impl Fp8StaticDeviceLayerNorm {
 }
 
 impl Fp8StaticDeviceVisionBlock {
-    fn from_host(weights: &VisionBlockWeights, backend: &dyn Backend) -> Result<Self> {
+    fn from_host(weights: &VisionBlockWeights, backend: &Context) -> Result<Self> {
         Ok(Self {
             norm1: Fp8StaticDeviceLayerNorm::from_host(&weights.norm1, backend)?,
             qkv: Fp8StaticLinearWeights::from_host_parts(
@@ -238,7 +251,7 @@ impl Fp8StaticDeviceVisionBlock {
 }
 
 impl Fp8StaticDeviceLanguageLayer {
-    fn from_host(weights: &LanguageLayerWeights, backend: &dyn Backend) -> Result<Self> {
+    fn from_host(weights: &LanguageLayerWeights, backend: &Context) -> Result<Self> {
         Ok(Self {
             input_norm_scale: fp16_to_device(&weights.input_norm_scale, backend)?,
             qkv: Fp8StaticLinearWeights::from_host_parts(
@@ -261,7 +274,7 @@ impl Fp8StaticDeviceLanguageLayer {
 }
 
 impl Fp8StaticDeviceActionLayer {
-    fn from_host(weights: &ActionLayerWeights, backend: &dyn Backend) -> Result<Self> {
+    fn from_host(weights: &ActionLayerWeights, backend: &Context) -> Result<Self> {
         Ok(Self {
             input_modulation: modulation_to_device(&weights.input_norm, backend)?,
             qkv: Fp8StaticLinearWeights::from_host_parts(
@@ -285,7 +298,7 @@ impl Fp8StaticDeviceActionLayer {
 
 fn modulation_to_device(
     weights: &AdaRmsNormWeights,
-    backend: &dyn Backend,
+    backend: &Context,
 ) -> Result<Fp8StaticLinearWeights> {
     Fp8StaticLinearWeights::from_host(&weights.modulation, backend)
 }

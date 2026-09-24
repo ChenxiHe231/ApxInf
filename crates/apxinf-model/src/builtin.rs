@@ -1,42 +1,31 @@
 //! Built-in model registrations used by [`crate::AutoModel`].
 
-#[cfg(not(feature = "pi05-only"))]
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use apxinf_core::{Backend, Device, Result};
-#[cfg(not(feature = "pi05-only"))]
-use apxinf_core::{DType, Error, Tensor};
+use apxinf_core::{Backend, DType, Device, Error, Result, Tensor};
 
 use crate::auto::{LoadOptions, LoadedModel};
-#[cfg(not(feature = "pi05-only"))]
 use crate::llama::{GeneralLlama, LlamaWeights};
-#[cfg(not(feature = "pi05-only"))]
 use crate::qwen3vl::{GeneralQwen3VL, Qwen3VLConfig};
 use crate::registry;
 
 /// Register every implementation shipped in this crate. Re-registering is
 /// harmless and keeps `AutoModel::load_model` self-contained for users.
 pub fn register_builtin_models() {
-    #[cfg(not(feature = "pi05-only"))]
-    {
-        registry::register("llama", load_llama);
-        registry::register("qwen3_vl", load_qwen3vl);
-        registry::register("qwen3vl", load_qwen3vl);
-        registry::register("qwen_drive", load_qwen_drive);
-    }
+    registry::register("llama", load_llama);
+    registry::register("qwen3_vl", load_qwen3vl);
+    registry::register("qwen3vl", load_qwen3vl);
+    registry::register("qwen_drive", load_qwen_drive);
 
     #[cfg(feature = "cuda")]
-    crate::pi05::register_builtin();
-    #[cfg(all(feature = "cuda", not(feature = "pi05-only")))]
     crate::walloss::register_builtin();
-    #[cfg(all(feature = "cuda", not(feature = "pi05-only")))]
+    #[cfg(feature = "cuda")]
     crate::pi0fast::register_builtin();
-    #[cfg(all(feature = "cuda", not(feature = "pi05-only")))]
+    #[cfg(feature = "cuda")]
     crate::gr00t::register_builtin();
 }
-#[cfg(not(feature = "pi05-only"))]
 fn load_llama(
     path: &Path,
     device: Device,
@@ -62,7 +51,6 @@ fn load_llama(
     )?)))
 }
 
-#[cfg(not(feature = "pi05-only"))]
 fn load_qwen3vl(
     path: &Path,
     _device: Device,
@@ -81,7 +69,6 @@ fn load_qwen3vl(
     Ok(LoadedModel::text(Box::new(model)))
 }
 
-#[cfg(not(feature = "pi05-only"))]
 fn load_qwen_drive(
     path: &Path,
     device: Device,
@@ -101,7 +88,6 @@ fn load_qwen_drive(
     }
 }
 
-#[cfg(not(feature = "pi05-only"))]
 fn upcast_bf16_weights(tensors: &mut HashMap<String, Tensor>) -> Result<()> {
     for tensor in tensors.values_mut() {
         if tensor.dtype() != DType::BF16 {
