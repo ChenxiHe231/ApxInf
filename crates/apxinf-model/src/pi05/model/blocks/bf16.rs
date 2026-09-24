@@ -877,7 +877,7 @@ pub(in crate::pi05::model) mod backbone {
         }
 
         fn ctx(&self) -> &Context {
-            self.backend.context()
+            &self.backend
         }
 
         pub fn encode_vision(&self, patches: &Tensor) -> Result<Tensor> {
@@ -1209,7 +1209,7 @@ impl crate::pi05::model::PrepareBlocks for backbone::Bf16Blocks {
     ) -> Result<()> {
         let mut patches = patches.clone();
         l3_gather(
-            self.backend.context(),
+            &self.backend,
             GatherArgs::rgb_to_patches(
                 images,
                 &mut patches,
