@@ -5,6 +5,8 @@
 #endif
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 namespace {
@@ -377,6 +379,23 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
         " config=" + std::to_string(execution->configuration) +
         " workspace=" + std::to_string(execution->resource_bytes) +
         " source=" + source;
+    // The per-attempt autotune report is otherwise only reachable from unit
+    // tests inside the library crate, which is exactly where an integration
+    // run cannot see it. APXINF_GEMM_REPORT=1 puts it on stderr.
+    static const bool report = std::getenv("APXINF_GEMM_REPORT") != nullptr;
+    if (report) {
+      std::fprintf(stderr,
+                   "[apxinf-gemm] sem=%u m=%lld n=%lld k=%lld a=%u b=%u "
+                   "out=%u quant=%u alpha_unit=%u | %s\n",
+                   normalized_spec.semantic,
+                   static_cast<long long>(normalized_spec.m),
+                   static_cast<long long>(normalized_spec.n),
+                   static_cast<long long>(normalized_spec.k),
+                   normalized_spec.a_dtype, normalized_spec.b_dtype,
+                   normalized_spec.output_dtype, normalized_spec.quantization,
+                   normalized_spec.alpha_is_unit,
+                   execution->summary.c_str());
+    }
     *output = reinterpret_cast<apxinf_gemm_execution_t>(execution.release());
   });
 }

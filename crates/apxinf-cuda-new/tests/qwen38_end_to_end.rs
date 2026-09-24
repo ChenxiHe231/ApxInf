@@ -1353,12 +1353,29 @@ fn prefill_step(
                 let state = &mut gdn_states[gdn_index];
                 gdn_index += 1;
 
+                // APXINF_QWEN38_GDN_STAGES=1 times the stages inside a GDN
+                // layer. It synchronizes between them, so the total inflates;
+                // the split is what it is for.
+                let stages = std::env::var("APXINF_QWEN38_GDN_STAGES").is_ok();
+                let mut mark = stages.then(Instant::now);
+                let mut stage = |label: &str, mark: &mut Option<Instant>| {
+                    if let Some(start) = mark {
+                        ctx.synchronize().unwrap();
+                        let elapsed = start.elapsed().as_secs_f64() * 1e3;
+                        if gdn_index == 1 {
+                            println!("    gdn stage {label:<14} {elapsed:8.3} ms");
+                        }
+                        *mark = Some(Instant::now());
+                    }
+                };
+
                 let hidden = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
                 let normalized = prefix(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
                 ops::rms_norm(ctx, &hidden, &gdn.input_norm, &normalized, EPSILON).unwrap();
 
                 fp8_projection_rows(ctx, &gdn.qkv, &normalized, &scratch.fp8_activation, &mut scratch.gdn_qkv, tokens);
                 fp8_projection_rows(ctx, &gdn.z, &normalized, &scratch.fp8_activation, &mut scratch.gdn_z, tokens);
+                stage("qkv+z proj", &mut mark);
 
                 // One launch over the prompt, and it reseeds the window so the
                 // first decode step continues correctly.
@@ -1375,6 +1392,7 @@ fn prefill_step(
                     CONV_WIDTH,
                 )
                 .unwrap();
+                stage("conv", &mut mark);
 
                 bf16_matmul_rows(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a, tokens);
                 bf16_matmul_rows(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b, tokens);
@@ -1389,6 +1407,7 @@ fn prefill_step(
                     tokens, GDN_V_HEADS,
                 )
                 .unwrap();
+                stage("a/b+decay", &mut mark);
 
                 if gdn_index == 1 && std::env::var("APXINF_QWEN38_FP16_PROBE").is_ok() {
                     // The conv output carries q, k and v; v is the widest and
@@ -1458,6 +1477,7 @@ fn prefill_step(
                         ctx, &out_rows, &readout_bf, tokens * GDN_V_HEADS * GDN_HEAD_DIM,
                     )
                     .unwrap();
+                    stage("scan(flashinfer)", &mut mark);
                 } else {
 
                 // q, k and v stay interleaved in the conv output; the scan
@@ -1483,6 +1503,7 @@ fn prefill_step(
                     GDN_HEAD_DIM,
                 )
                 .unwrap();
+                stage("scan(ours)", &mut mark);
                 }
 
                 let readout_rows = prefix(&scratch.gdn_readout, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
@@ -1494,14 +1515,18 @@ fn prefill_step(
                 )
                 .unwrap();
 
+                stage("gated norm", &mut mark);
+
                 let flat = prefix(&scratch.gdn_gated, vec![tokens, Z_WIDTH], DType::BF16);
                 fp8_projection_rows(ctx, &gdn.out, &flat, &scratch.gdn_fp8, &mut scratch.projected, tokens);
+                stage("out proj", &mut mark);
 
                 let projected = prefix(&scratch.projected, vec![tokens, HIDDEN], DType::BF16);
                 let residual = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
                 ops::add_into(ctx, &projected, &residual).unwrap();
 
                 nvfp4_mlp_rows(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch, tokens);
+                stage("mlp", &mut mark);
             }
         }
         if let Some(start) = layer_start {
