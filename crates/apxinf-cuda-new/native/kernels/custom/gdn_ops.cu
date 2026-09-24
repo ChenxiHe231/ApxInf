@@ -497,6 +497,26 @@ namespace {
 constexpr int kChunk = 64;   // chunk_size
 constexpr int kDim = 128;    // k_dim == v_dim for this model
 
+// log2(e). The cumulative decay is carried in log2 space so that every decay
+// factor is a bare __exp2f (one MUFU.EX2) instead of a __expf, which nvcc
+// expands to five instructions: the log2(e) multiply, a denormal-range test and
+// two predicated fixup multiplies around the MUFU.EX2. The chunk scan evaluates
+// on the order of 10k decay factors per thread per chunk, so that expansion was
+// more than half of the kernel's arithmetic.
+constexpr float kLog2e = 1.4426950408889634f;
+
+// 2**x, one MUFU.EX2. CUDA exposes no __exp2f intrinsic (only the accurate
+// exp2f, which still carries the denormal fixup), so go at the instruction
+// directly. Every decay factor in the scan has a non-positive argument, so the
+// result is in (0, 1]: nothing can overflow, and the .ftz flush of a result
+// below 2**-126 to zero is indistinguishable from the denormal in the sums
+// these feed.
+__device__ __forceinline__ float exp2_fast(float x) {
+  float r;
+  asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(x));
+  return r;
+}
+
 // Shared-memory scratch for one chunk of one head. ~209 KiB, so the launch opts
 // into the large dynamic shared-memory carveout.
 struct ChunkShared {
@@ -508,7 +528,7 @@ struct ChunkShared {
   float pw[kChunk][kChunk]; // pairwise_decay (lower-tri incl diag), else 0
   float T[kChunk][kChunk];  // forward-substitution inverse (unit lower-tri)
   float M[kChunk][kChunk];  // ut_system, then intra_chunk_attn
-  float cum[kChunk];        // cumulative decay within the chunk
+  float cum[kChunk];        // cumulative decay, in LOG2 space (see below)
   float g[kChunk];          // per-token log decay for this head
   float beta[kChunk];       // per-token beta for this head
 };
@@ -592,22 +612,29 @@ __global__ void chunk_scan_kernel(
     __syncthreads();
 
     // --- Cumulative decay and pairwise decay --------------------------------
-    // cum[t] = sum_{j<=t} g[j] (inclusive). Single thread does the scan (64).
+    // cum[t] = log2(e) * sum_{j<=t} g[j] (inclusive). Single thread does the
+    // scan (64). Folding log2(e) in here once is what puts cum in log2 space:
+    // exp(cum_nat) == exp2(log2(e) * cum_nat), so every downstream decay factor
+    // is exp2 of a difference of these values. EVERY read of s.cum and of
+    // cum_last below is the argument of an exp2 -- there is no site that wants
+    // the natural-log value -- so no read has to undo the scaling. Adding one
+    // must either exp2 it back or divide by kLog2e.
     if (tid == 0) {
       float acc = 0.0f;
       for (int t = 0; t < kChunk; ++t) {
-        acc += s.g[t];
+        acc += s.g[t] * kLog2e;
         s.cum[t] = acc;
       }
     }
     __syncthreads();
 
-    // pairwise_decay[i][j] = exp(cum[i] - cum[j]) for i >= j, else 0.
+    // pairwise_decay[i][j] = exp2(cum[i] - cum[j]) for i >= j, else 0
+    // (cum is log2-space, so this is the natural-log exp of the reference).
     // Thread `tid` (a column j) fills column j for all rows i, when tid<kChunk.
     if (tid < kChunk) {
       const int j = tid;
       for (int i = 0; i < kChunk; ++i) {
-        s.pw[i][j] = (i >= j) ? __expf(s.cum[i] - s.cum[j]) : 0.0f;
+        s.pw[i][j] = (i >= j) ? exp2_fast(s.cum[i] - s.cum[j]) : 0.0f;
       }
     }
     __syncthreads();
@@ -697,7 +724,7 @@ __global__ void chunk_scan_kernel(
         for (int p = 0; p <= i; ++p) {  // T is lower-triangular
           const float t = s.pw[i][p];
           const float vbeta = s.beta[p] * s.v[p][d];
-          const float dkb = s.beta[p] * s.k[p][d] * __expf(s.cum[p]);
+          const float dkb = s.beta[p] * s.k[p][d] * exp2_fast(s.cum[p]);
           nvv += t * vbeta;
           kc += t * dkb;
         }
@@ -721,7 +748,7 @@ __global__ void chunk_scan_kernel(
     // v-column d = tid of the state (so it holds S_ref[*][d], i.e. state[d][*]).
     // Every thread reads the full k-vector of q_scaled / k_cumdecay from shared.
     const float cum_last = s.cum[kChunk - 1];
-    const float chunk_decay = __expf(cum_last);
+    const float chunk_decay = exp2_fast(cum_last);
     const int d = tid;  // this thread owns v-dim index d
 
     // Load this thread's column of S_ref: sref_col[k] = S_ref[k][d]
@@ -745,7 +772,7 @@ __global__ void chunk_scan_kernel(
     //   q_scaled[i][k] = q[i][k] * exp(cum[i])
     // out[i][d] = inter[i][d] + sum_j intra[i][j] * v_new[j][d]
     for (int i = 0; i < kChunk; ++i) {
-      const float ecum_i = __expf(s.cum[i]);
+      const float ecum_i = exp2_fast(s.cum[i]);
       float inter = 0.0f;
       for (int kk = 0; kk < kDim; ++kk) {
         inter += (s.q[i][kk] * ecum_i) * sref_col[kk];
@@ -765,7 +792,7 @@ __global__ void chunk_scan_kernel(
     for (int kk = 0; kk < kDim; ++kk) {
       float upd = 0.0f;
       for (int i = 0; i < kChunk; ++i) {
-        const float kscaled = s.k[i][kk] * __expf(cum_last - s.cum[i]);
+        const float kscaled = s.k[i][kk] * exp2_fast(cum_last - s.cum[i]);
         upd += kscaled * s.nv[i][d];
       }
       const float newval = sref_col[kk] * chunk_decay + upd;
