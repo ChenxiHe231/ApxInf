@@ -381,6 +381,9 @@ __global__ void widen_f16_to_bf16_kernel(const __half* __restrict__ input,
 //
 // One block per token; the block walks the heads, using all its threads for
 // each L2 reduction.
+// 1024 threads is the CUDA maximum, so 32 warps bounds the partials.
+constexpr int kMaxWarpsPerBlock = 32;
+
 __global__ void gdn_prepare_flashinfer_kernel(
     const __nv_bfloat16* __restrict__ fused, __half* __restrict__ q_out,
     __half* __restrict__ k_out, __half* __restrict__ v_out,
@@ -391,7 +394,17 @@ __global__ void gdn_prepare_flashinfer_kernel(
   const int tid = threadIdx.x;
   const long long row = (long long)token * row_width;
 
+  // A block reduction, not a warp one. The block is `dim` = 128 threads, so
+  // four warps cover a head and a bare __shfl_down_sync would reduce only the
+  // first 32 elements -- an L2 norm over a quarter of the vector, which stays
+  // finite and plausible-looking while being entirely wrong. (The older
+  // l2_normalize_heads_kernel launches 32 threads, so a warp reduction is
+  // enough there; this one cannot copy it.)
+  __shared__ float partials[kMaxWarpsPerBlock];
   __shared__ float reduced;
+  const int lane = tid & 31;
+  const int warp = tid >> 5;
+  const int warps = (blockDim.x + 31) / 32;
 
   // q and k: normalize each head, then narrow.
   for (int pass = 0; pass < 2; ++pass) {
@@ -407,7 +420,13 @@ __global__ void gdn_prepare_flashinfer_kernel(
       for (int shift = 16; shift > 0; shift >>= 1) {
         sum += __shfl_down_sync(0xFFFFFFFFu, sum, shift);
       }
-      if (tid == 0) reduced = sum;
+      if (lane == 0) partials[warp] = sum;
+      __syncthreads();
+      if (tid == 0) {
+        float total = 0.0f;
+        for (int index = 0; index < warps; ++index) total += partials[index];
+        reduced = total;
+      }
       __syncthreads();
       const float inverse = rsqrtf(reduced + epsilon);
       __half* out = destination + ((long long)token * k_heads + head) * dim;
