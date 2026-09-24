@@ -200,3 +200,54 @@ matching mistakes.
 None of this ends up mattering for speed: bf16 buys occupancy that a shorter
 chunk buys more cheaply, and variant 8 -- every buffer still f32 -- is the
 fastest shape measured.
+
+### Round 3 -- does the chunk-length trend continue below 32? (smem-perf3.log)
+
+    v   shape              shared      blk/SM  regs  spill st/ld   gdn ms (min)
+    8   chunk32 f32        44.38 KiB      3    168    20 /   36      1840.4
+    11  chunk16 f32        19.19 KiB      3    168     0 /    0      1842.0
+    10  chunk16 f32        19.19 KiB      2    232     0 /    0      2190.1
+    12  chunk16 f32        19.19 KiB      4    128   208 /  320      2006.0
+    13  chunk32 f32        44.38 KiB      5     96   512 /  816      2653.0
+
+No. Chunk 16 at three blocks per SM is 1842 against chunk 32's 1840 -- a tie
+inside the 1-3% run-to-run spread, and this is the clean comparison, since
+chunk 16 at three blocks is the one shape in the whole sweep that compiles
+with zero spill. The 64 -> 32 step was worth 1.38x and the 32 -> 16 step is
+worth nothing, so the superlinear terms have stopped being what the kernel
+spends its time on by chunk 32. Going shorter only multiplies the per-chunk
+fixed costs -- the state reload, the barriers around the substitution -- against
+twice as many chunks.
+
+Variant 13 closes the occupancy question from the other side: chunk 32 at five
+blocks per SM has to fit in 96 registers, spills 512 B per thread, and lands at
+2653 ms, worse than the 209 KiB original. The ladder 2 / 3 / 4 / 5 blocks at
+chunk 32 reads 1971 / 1840 / 2247 / 2653. Three is the peak and the fall-off
+past it tracks spill volume (20 B / 240 B / 512 B), not anything about shared
+memory.
+
+### Result
+
+    original chunk scan   208.75 KiB   1 block/SM    2535.8 ms
+    shipped default       44.38 KiB    3 blocks/SM   1840.4 ms     1.38x
+
+    core_attn_out          cosine 0.999996  relL2 0.00282   (unchanged)
+    recurrent_state_final  cosine 0.999997  relL2 0.00230   (unchanged)
+    decode equivalence     cosine 1.000000  relL2 0.00087   (unchanged)
+
+Both gate tests pass at exactly their previous values, because no buffer was
+demoted: the shared block is f32 throughout and the 4.7x reduction is entirely
+the re-association plus the shorter chunk.
+
+### What was freed by aliasing vs demoted
+
+    freed, no precision cost   v, nv (v_new), kcd   96.00 KiB   re-association
+    freed, no precision cost   half of q, k, pw, at, ut
+                                                    56.38 KiB   chunk 64 -> 32
+    demoted to bf16                                  0.00 KiB   none shipped
+
+`pw` was already doing double duty before this change (pairwise decay, then the
+UT inverse) and `ut` dies at the end of the substitution, but nothing after it
+wants 16 KiB, so pure aliasing had nothing left to give. Every byte saved here
+came from not materializing a buffer at all, or from making every buffer
+shorter.
