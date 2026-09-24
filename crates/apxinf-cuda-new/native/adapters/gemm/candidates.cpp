@@ -1,5 +1,7 @@
 #include "internal.h"
 
+#include <cstdlib>
+
 #ifdef APXINF_GEMM_CUTLASS
 #include "../../kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.h"
 #endif
@@ -81,11 +83,24 @@ void cublaslt_configurations(const Spec&,
 }
 
 #ifdef APXINF_GEMM_CUTLASS
+// Escape hatch for the pre-change candidate set, kept so the F16-only and the
+// F16-or-BF16 registries can be compared inside one binary.
+bool cutlass_fp8_bf16_disabled() {
+  static const bool disabled =
+      std::getenv("APXINF_GEMM_FP8_NO_CUTLASS_BF16") != nullptr;
+  return disabled;
+}
+
 bool supports_cutlass_fp8(const Spec& spec) {
+  // The kernel is one template over the epilogue output element, so BF16 is
+  // the same candidate rather than a second implementation id.
+  const bool output_supported =
+      spec.output_dtype == APXINF_DTYPE_F16 ||
+      (spec.output_dtype == APXINF_DTYPE_BF16 && !cutlass_fp8_bf16_disabled());
   return spec.semantic == APXINF_GEMM_SEMANTIC_GEMM &&
          spec.a_dtype == APXINF_DTYPE_E4M3 &&
          spec.b_dtype == APXINF_DTYPE_E4M3 &&
-         spec.output_dtype == APXINF_DTYPE_F16 &&
+         output_supported &&
          spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
          spec.n % 16 == 0 &&
          spec.k % 16 == 0 && spec.output_scale_is_unit != 0;
