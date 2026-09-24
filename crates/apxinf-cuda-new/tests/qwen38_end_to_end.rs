@@ -516,6 +516,55 @@ fn fp8_projection_rows(
     output: &mut Tensor,
     rows: usize,
 ) {
+    quantize_shared_fp8_activation(ctx, &[weight], source, quantized, rows);
+    fp8_projection_prequantized(ctx, weight, quantized, output, rows);
+}
+
+/// Quantize one activation for a group of projections that all read it.
+///
+/// ModelOpt records `input_scale` per projection, but the GDN `qkv`/`z` pair
+/// and the attention `q`/`k`/`v` triple consume the same post-norm
+/// activation, and in this checkpoint their scales are bit-identical --
+/// calibration saw one tensor. Quantizing per projection therefore recomputes
+/// the same FP8 bytes two or three times. At 2048 tokens each repeat is
+/// 10.5M elements of duplicate work, and it measured as the largest remaining
+/// item in the projection stage once the GEMM itself was fixed.
+///
+/// The scales are asserted rather than assumed. A checkpoint that calibrated
+/// them apart needs one buffer per projection, and quietly applying one
+/// scale to all of them would be an accuracy fault with no symptom here.
+fn quantize_shared_fp8_activation(
+    ctx: &CudaContext,
+    weights: &[&Fp8Weight],
+    source: &Tensor,
+    quantized: &Tensor,
+    rows: usize,
+) {
+    let (first, rest) = weights.split_first().expect("no projection to quantize for");
+    let k = first.weight.shape().dims()[1];
+    for other in rest {
+        assert_eq!(
+            other.input_scale, first.input_scale,
+            "projections sharing an activation must share input_scale"
+        );
+        assert_eq!(other.weight.shape().dims()[1], k, "shared activation width");
+    }
+
+    let source_rows = prefix(source, vec![rows, k], DType::BF16);
+    let quantized_rows = prefix(quantized, vec![rows, k], DType::F8E4M3);
+    ops::quantize_fp8_per_tensor(ctx, &source_rows, &quantized_rows, first.input_scale).unwrap();
+}
+
+/// One projection over an activation `quantize_shared_fp8_activation` already
+/// wrote. Unit-scale FP8 with `alpha = weight_scale * input_scale` is the
+/// contract `qwen38_fp8_projection.rs` accepts at relative L2 2.70%.
+fn fp8_projection_prequantized(
+    ctx: &CudaContext,
+    weight: &Fp8Weight,
+    quantized: &Tensor,
+    output: &mut Tensor,
+    rows: usize,
+) {
     let transposed = weight
         .transposed
         .as_ref()
@@ -523,11 +572,7 @@ fn fp8_projection_rows(
     let k = weight.weight.shape().dims()[1];
     let n = weight.weight.shape().dims()[0];
 
-    let source_rows = prefix(source, vec![rows, k], DType::BF16);
     let quantized_rows = prefix(quantized, vec![rows, k], DType::F8E4M3);
-    ops::quantize_fp8_per_tensor(ctx, &source_rows, &quantized_rows, weight.input_scale)
-        .unwrap();
-
     let mut out_rows = prefix(output, vec![rows, n], DType::BF16);
     let mut args = ops::GemmArgs::new(&quantized_rows, transposed, &mut out_rows);
     args.quantization = ops::GemmQuantization::Fp8UnitScale;
@@ -1285,10 +1330,18 @@ fn prefill_step(
                 let normalized = prefix(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
                 ops::rms_norm(ctx, &hidden, &attention.input_norm, &normalized, EPSILON).unwrap();
 
-                fp8_projection_rows(
+                // q, k and v read the same post-norm activation, so it is
+                // quantized once for all three.
+                quantize_shared_fp8_activation(
+                    ctx,
+                    &[&attention.q, &attention.k, &attention.v],
+                    &normalized,
+                    &scratch.fp8_activation,
+                    tokens,
+                );
+                fp8_projection_prequantized(
                     ctx,
                     &attention.q,
-                    &normalized,
                     &scratch.fp8_activation,
                     &mut scratch.qkv_fused,
                     tokens,
@@ -1305,8 +1358,8 @@ fn prefill_step(
                 let mut key_rows = cache_rows(&cache.keys, tokens, vec![tokens, KV_HEADS * HEAD_DIM]);
                 let mut value_rows =
                     cache_rows(&cache.values, tokens, vec![tokens, KV_HEADS * HEAD_DIM]);
-                fp8_projection_rows(ctx, &attention.k, &normalized, &scratch.fp8_activation, &mut key_rows, tokens);
-                fp8_projection_rows(ctx, &attention.v, &normalized, &scratch.fp8_activation, &mut value_rows, tokens);
+                fp8_projection_prequantized(ctx, &attention.k, &scratch.fp8_activation, &mut key_rows, tokens);
+                fp8_projection_prequantized(ctx, &attention.v, &scratch.fp8_activation, &mut value_rows, tokens);
 
                 // Per-head RMSNorm is independent per row, so the token axis
                 // folds into the head axis.
@@ -1373,8 +1426,13 @@ fn prefill_step(
                 let normalized = prefix(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
                 ops::rms_norm(ctx, &hidden, &gdn.input_norm, &normalized, EPSILON).unwrap();
 
-                fp8_projection_rows(ctx, &gdn.qkv, &normalized, &scratch.fp8_activation, &mut scratch.gdn_qkv, tokens);
-                fp8_projection_rows(ctx, &gdn.z, &normalized, &scratch.fp8_activation, &mut scratch.gdn_z, tokens);
+                // qkv and z read the same post-norm activation, so it is
+                // quantized once for both.
+                quantize_shared_fp8_activation(
+                    ctx, &[&gdn.qkv, &gdn.z], &normalized, &scratch.fp8_activation, tokens,
+                );
+                fp8_projection_prequantized(ctx, &gdn.qkv, &scratch.fp8_activation, &mut scratch.gdn_qkv, tokens);
+                fp8_projection_prequantized(ctx, &gdn.z, &scratch.fp8_activation, &mut scratch.gdn_z, tokens);
                 stage("qkv+z proj", &mut mark);
 
                 // One launch over the prompt, and it reseeds the window so the
