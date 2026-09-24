@@ -1137,7 +1137,7 @@ using bf16 = __nv_bfloat16;
 // occupancy and the precision of the demoted planes is being measured.
 int smem_variant() {
   const char* e = getenv("APXINF_GDN_SMEM_VARIANT");
-  return e ? atoi(e) : 1;
+  return e ? atoi(e) : 8;
 }
 
 }  // namespace
@@ -1179,7 +1179,11 @@ int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
     case 7:  return APXINF_GDN_LAUNCH(16, float, float, 6);  //  19.19 KiB
     case 8:  return APXINF_GDN_LAUNCH(32, float, float, 3);  //  44.38 KiB
     case 9:  return APXINF_GDN_LAUNCH(32, float, bf16,  3);  //  38.38 KiB
-    default: return APXINF_GDN_LAUNCH(64, float, float, 2);
+    case 10: return APXINF_GDN_LAUNCH(16, float, float, 2);  //  19.19 KiB
+    case 11: return APXINF_GDN_LAUNCH(16, float, float, 3);  //  19.19 KiB
+    case 12: return APXINF_GDN_LAUNCH(16, float, float, 4);  //  19.19 KiB
+    case 13: return APXINF_GDN_LAUNCH(32, float, float, 5);  //  44.38 KiB
+    default: return APXINF_GDN_LAUNCH(32, float, float, 3);
   }
 #undef APXINF_GDN_LAUNCH
 }
