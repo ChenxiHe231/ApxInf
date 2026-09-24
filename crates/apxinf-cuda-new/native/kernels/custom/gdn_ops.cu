@@ -545,6 +545,20 @@ __global__ void chunk_scan_kernel(
   // = state_port[v][k]; we compute against S_ref and store back transposed.
   float* head_state = state + (long long)head * kDim * kDim;
 
+  // This block owns the head's state for the whole scan -- no other block
+  // touches it -- so carry it across the chunk loop instead of reading it back
+  // from global at the top of every chunk and writing it back at the bottom.
+  // Thread `tid` owns v-column d = tid, i.e. sref_col[k] = S_ref[k][d]
+  // = state_port[d][k] = head_state[d*kDim + k]. The round-trip was 128 KB per
+  // chunk per head (196 MB per layer at 2048 tokens each way) sitting between
+  // the two halves of the serial dependency, so its latency was on the
+  // critical path once per chunk. Bit-identical results: the arithmetic and
+  // its order are unchanged.
+  float sref_col[kDim];
+  for (int kk = 0; kk < kDim; ++kk) {
+    sref_col[kk] = head_state[(long long)tid * kDim + kk];
+  }
+
   for (int c = 0; c < num_chunks; ++c) {
     const int base = c * kChunk;  // first token of this chunk
 
@@ -723,13 +737,7 @@ __global__ void chunk_scan_kernel(
     const float cum_last = s.cum[kChunk - 1];
     const float chunk_decay = __expf(cum_last);
     const int d = tid;  // this thread owns v-dim index d
-
-    // Load this thread's column of S_ref: sref_col[k] = S_ref[k][d]
-    //   = state_port[d][k] = head_state[d*kDim + k]
-    float sref_col[kDim];
-    for (int kk = 0; kk < kDim; ++kk) {
-      sref_col[kk] = head_state[(long long)d * kDim + kk];
-    }
+    // sref_col[] is live from the previous chunk (see the hoist above).
 
     // v_new[i][d] = new_values[i][d] - sum_k k_cumdecay[i][k] * S_ref[k][d]
     for (int i = 0; i < kChunk; ++i) {
@@ -762,17 +770,21 @@ __global__ void chunk_scan_kernel(
 
     // S_ref[k][d] = S_ref[k][d] * chunk_decay + sum_i k_scaled[i][k]*v_new[i][d]
     //   k_scaled[i][k] = k[i][k] * exp(cum_last - cum[i])
+    // Kept in sref_col across chunks; written out once after the loop.
     for (int kk = 0; kk < kDim; ++kk) {
       float upd = 0.0f;
       for (int i = 0; i < kChunk; ++i) {
         const float kscaled = s.k[i][kk] * __expf(cum_last - s.cum[i]);
         upd += kscaled * s.nv[i][d];
       }
-      const float newval = sref_col[kk] * chunk_decay + upd;
-      // store back in port layout state[d][k]
-      head_state[(long long)d * kDim + kk] = newval;
+      sref_col[kk] = sref_col[kk] * chunk_decay + upd;
     }
     __syncthreads();
+  }
+
+  // Store the final state back in port layout state[d][k].
+  for (int kk = 0; kk < kDim; ++kk) {
+    head_state[(long long)tid * kDim + kk] = sref_col[kk];
   }
 }
 
