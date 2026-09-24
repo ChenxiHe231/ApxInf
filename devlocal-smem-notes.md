@@ -120,3 +120,83 @@ is worth about 7% on top (2020 -> 1885), not the bulk of the win.
 Round 2 adds variant 0 -- the original 209 KiB kernel, compiled into the same
 binary at its original 163 registers -- so the baseline becomes an A/B inside
 one build rather than a comparison across two.
+
+### Round 2 -- min of 3-4 rounds, all variants in ONE binary (smem-perf2.log)
+
+    v  shape                 shared      blk/SM  gdn ms (min)   vs v0
+    0  chunk64 f32 original  208.75 KiB     1       2535.8      1.00x
+    1  chunk64 f32           112.75 KiB     2       2713.7      0.93x
+    6  chunk32 f32            44.38 KiB     2       1971.0      1.29x
+    8  chunk32 f32            44.38 KiB     3       1872.5      1.35x
+    2  chunk32 f32            44.38 KiB     4       2246.6      1.13x
+    4  chunk64 bf16/bf16      56.75 KiB     3       1990.4      1.27x
+    9  chunk32 f32/bf16       38.38 KiB     3       1882.6      1.35x
+
+Spread within a variant is 1-3%, so the ordering is solid.
+
+The headline is variant 1. It halves the shared block with no rounding change
+and doubles blocks per SM, which is the entire premise of this task, and it is
+**7% slower than the 209 KiB original**. Occupancy was not the thing to buy.
+
+What is actually expensive is the chunk length. Holding blocks/SM fixed at 2,
+going from chunk 64 (v1, 2714 ms) to chunk 32 (v6, 1971 ms) is 1.38x on its
+own. The scan's per-chunk cost is dominated by terms that grow faster than the
+chunk count falls: the forward substitution is O(C^3) over C columns, so O(C^2)
+per thread per chunk and O(L*C) over the sequence, and the ut/attn product is
+O(C^2 * D) per chunk, O(L*C*D) over the sequence. Both halve when C halves.
+Only the state fold, O(D^2) per chunk, doubles, and it is the small term.
+Shortening the chunk is a real arithmetic reduction, not a scheduling trick;
+the shared-memory saving is a side effect of it.
+
+Occupancy is then worth a further 5% on top and is not monotone: 2 -> 3 -> 4
+blocks/SM at chunk 32 goes 1971 -> 1873 -> 2247. The fourth block has to fit
+in 128 registers/thread and pays 240 B of spill stores per thread; the third
+fits in 168 with 20 B. Past three blocks the spill traffic costs more than the
+extra latency hiding returns.
+
+### Accuracy, against the layer-0 reference tensors (smem-acc2.log)
+
+Note: `chunk_scan_matches_reference_tensors_layer0` silently `return`s when it
+cannot find `devlocal/qwen38-nvfp4/reference-tensors/seq8`, and a fresh
+worktree does not have it -- `devlocal` is in .git/info/exclude and does not
+come along. It reports "ok" while testing nothing. Symlinking devlocal from
+the main checkout makes it real; the first pass of this sweep was measuring
+only the decode-equivalence test without noticing.
+
+    v  shape                 core_attn_out    recurrent_state    decode-equiv
+                             cosine   relL2   cosine    relL2    worst cos/relL2
+    0  chunk64 f32 original  0.999996 0.00282 0.999997 0.00230  1.000000 0.00087
+    1  chunk64 f32           0.999996 0.00282 0.999997 0.00230  1.000000 0.00087
+    6  chunk32 f32           0.999996 0.00282 0.999997 0.00230  1.000000 0.00087
+    8  chunk32 f32           0.999996 0.00282 0.999997 0.00230  1.000000 0.00087
+    2  chunk32 f32           0.999996 0.00282 0.999997 0.00230  1.000000 0.00087
+    7  chunk16 f32           0.999996 0.00282 0.999997 0.00230  1.000000 0.00087
+    9  chunk32 f32/bf16      0.999997 0.00263 0.999997 0.00251  0.999999 0.00148
+    4  chunk64 bf16/bf16     0.999996 0.00285 0.999995 0.00319  0.999999 0.00113
+    3  chunk64 bf16/f32      0.999994 0.00394 0.999996 0.00291  1.000000 0.00000
+    5  chunk32 bf16/f32      0.999994 0.00394 0.999996 0.00291  1.000000 0.00000
+
+Every f32 shape, at every chunk length, reproduces the baseline to all printed
+digits. The re-association and the chunk change are both exact in the sense
+that matters here.
+
+**bf16 on q/k is not free.** Variants 3 and 5 are the ones that demote the q/k
+planes, and they are the ones that move: core_attn_out relL2 0.00282 -> 0.00394,
+a 40% increase in error, and cosine 0.999996 -> 0.999994. That still clears the
+0.9999 bar, but it does not hold "at current values", so on the brief's own
+terms it is a fail. The matrix planes are the cheap ones to demote (variant 9,
+relL2 0.00263, inside the noise) -- the opposite of the previous run's guess
+that k and v_new were the safe pair.
+
+The direction of the error is worth recording because it is a trap. On the
+decode-equivalence test the bf16-q/k variants score relL2 exactly 0.00000,
+a *perfect* score, while the accurate f32 variants score 0.00087. That is not
+because they are better: the decode path L2-normalizes in place into a bf16
+tensor, so rounding our shared q/k to bf16 makes the two paths agree on the
+same rounding error. Scored against the actual reference the same variants are
+the worst of the set. A test that compares two of your own kernels rewards
+matching mistakes.
+
+None of this ends up mattering for speed: bf16 buys occupancy that a shorter
+chunk buys more cheaply, and variant 8 -- every buffer still f32 -- is the
+fastest shape measured.
