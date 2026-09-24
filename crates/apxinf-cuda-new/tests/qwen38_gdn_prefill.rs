@@ -287,8 +287,21 @@ fn chunk_scan_matches_reference_tensors_layer0() {
     let dir = match ref_dir() {
         Some(d) => d,
         None => {
-            eprintln!("reference tensors not found; skipping");
-            return;
+            // Silently returning here reports a pass having asserted nothing.
+            // That is how this test spent a session validating kernels it
+            // never compared: the tensors live under devlocal, which is
+            // gitignored and so absent from every fresh worktree.
+            // APXINF_QWEN38_ALLOW_NO_REFERENCE=1 opts out deliberately.
+            if std::env::var("APXINF_QWEN38_ALLOW_NO_REFERENCE").is_ok() {
+                eprintln!("reference tensors not found; skipping by request");
+                return;
+            }
+            panic!(
+                "reference tensors not found under devlocal/qwen38-nvfp4/\
+reference-tensors/seq8. This test compares nothing without them. Link or copy \
+devlocal into this checkout, or set APXINF_QWEN38_ALLOW_NO_REFERENCE=1 to skip \
+on purpose."
+            );
         }
     };
     let ctx = CudaContext::new(0).unwrap();

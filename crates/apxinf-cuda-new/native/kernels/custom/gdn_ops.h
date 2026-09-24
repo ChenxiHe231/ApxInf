@@ -49,6 +49,22 @@ int gdn_causal_conv_forward(const void* input, const void* weight,
                             int channels, int kernel_width,
                             cudaStream_t stream);
 
+// Convert one prompt's GDN projection into what the FlashInfer prefill
+// kernel expects, in a single pass.
+//
+// `fused` is [tokens, row_width] BF16 with q, k and v along each row. Writes
+// q/k L2-normalized and narrowed to FP16, v narrowed, and `alpha = exp(g)`.
+// q is left unscaled -- that kernel takes the scale as an argument.
+// Widen an FP16 buffer to BF16. The FlashInfer scan emits FP16 and the rest
+// of this model is BF16.
+int gdn_widen_f16_to_bf16(const void* input, void* output, long long count,
+                          cudaStream_t stream);
+
+int gdn_prepare_flashinfer(const void* fused, void* q_out, void* k_out,
+                           void* v_out, const void* g, void* alpha, int tokens,
+                           int row_width, int k_heads, int v_heads, int dim,
+                           float epsilon, cudaStream_t stream);
+
 // L2-normalize each head in place; the delta rule needs unit-norm q and k.
 int gdn_l2_normalize_heads(void* data, int heads, int head_dim, float epsilon,
                            cudaStream_t stream);

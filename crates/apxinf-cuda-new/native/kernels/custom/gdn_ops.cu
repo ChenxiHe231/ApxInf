@@ -22,6 +22,7 @@
 #include "gdn_ops.h"
 
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 
 #include <cstdint>
 
@@ -349,7 +350,120 @@ __global__ void gated_norm_seq_kernel(const __nv_bfloat16* __restrict__ input,
   }
 }
 
+
+// Widen FP16 back to BF16. The FlashInfer scan emits FP16; everything
+// downstream of it in this model is BF16.
+__global__ void widen_f16_to_bf16_kernel(const __half* __restrict__ input,
+                                         __nv_bfloat16* __restrict__ output,
+                                         long long count) {
+  const long long index = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= count) return;
+  output[index] = __float2bfloat16(__half2float(input[index]));
+}
+
+// Prepare a chunk of the GDN projection for the FlashInfer prefill kernel.
+//
+// That kernel wants what ours does not: q, k and v split into separate
+// contiguous FP16 tensors, q and k L2-normalized by the caller (it refuses to
+// do it itself), q left unscaled (the scale is a kernel argument), and the
+// decay as a linear-space alpha rather than our natural log.
+//
+// All of that is one pass over the conv output. As separate steps it would
+// reread the same bytes four times, and at 2048 tokens the projection is 40 MB
+// -- enough for the conversion to cost as much as the kernel it feeds.
+//
+//   fused   [tokens, row_width] bf16, q | k | v laid out along each row
+//   q_out   [tokens, k_heads, dim] fp16, L2-normalized
+//   k_out   [tokens, k_heads, dim] fp16, L2-normalized
+//   v_out   [tokens, v_heads, dim] fp16
+//   g_in    [tokens, v_heads] f32, natural-log decay
+//   alpha   [tokens, v_heads] f32, exp(g)
+//
+// One block per token; the block walks the heads, using all its threads for
+// each L2 reduction.
+__global__ void gdn_prepare_flashinfer_kernel(
+    const __nv_bfloat16* __restrict__ fused, __half* __restrict__ q_out,
+    __half* __restrict__ k_out, __half* __restrict__ v_out,
+    const float* __restrict__ g_in, float* __restrict__ alpha, int tokens,
+    int row_width, int k_heads, int v_heads, int dim, float epsilon) {
+  const int token = blockIdx.x;
+  if (token >= tokens) return;
+  const int tid = threadIdx.x;
+  const long long row = (long long)token * row_width;
+
+  __shared__ float reduced;
+
+  // q and k: normalize each head, then narrow.
+  for (int pass = 0; pass < 2; ++pass) {
+    const int offset = pass * k_heads * dim;
+    __half* destination = pass == 0 ? q_out : k_out;
+    for (int head = 0; head < k_heads; ++head) {
+      const __nv_bfloat16* source = fused + row + offset + (long long)head * dim;
+      float sum = 0.0f;
+      for (int index = tid; index < dim; index += blockDim.x) {
+        const float value = __bfloat162float(source[index]);
+        sum += value * value;
+      }
+      for (int shift = 16; shift > 0; shift >>= 1) {
+        sum += __shfl_down_sync(0xFFFFFFFFu, sum, shift);
+      }
+      if (tid == 0) reduced = sum;
+      __syncthreads();
+      const float inverse = rsqrtf(reduced + epsilon);
+      __half* out = destination + ((long long)token * k_heads + head) * dim;
+      for (int index = tid; index < dim; index += blockDim.x) {
+        out[index] = __float2half(__bfloat162float(source[index]) * inverse);
+      }
+      __syncthreads();
+    }
+  }
+
+  // v: narrowed as-is. No normalization, no scaling.
+  const int v_offset = 2 * k_heads * dim;
+  const long long v_span = (long long)v_heads * dim;
+  for (long long index = tid; index < v_span; index += blockDim.x) {
+    v_out[(long long)token * v_span + index] =
+        __float2half(__bfloat162float(fused[row + v_offset + index]));
+  }
+
+  // The kernel takes linear-space decay; ours is a natural log.
+  for (int head = tid; head < v_heads; head += blockDim.x) {
+    alpha[(long long)token * v_heads + head] =
+        __expf(g_in[(long long)token * v_heads + head]);
+  }
+}
+
 }  // namespace
+
+int gdn_widen_f16_to_bf16(const void* input, void* output, long long count,
+                          cudaStream_t stream) {
+  if (count <= 0) return -1;
+  const int threads = 256;
+  const long long blocks = (count + threads - 1) / threads;
+  widen_f16_to_bf16_kernel<<<(int)blocks, threads, 0, stream>>>(
+      static_cast<const __half*>(input),
+      static_cast<__nv_bfloat16*>(output), count);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int gdn_prepare_flashinfer(const void* fused, void* q_out, void* k_out,
+                           void* v_out, const void* g, void* alpha, int tokens,
+                           int row_width, int k_heads, int v_heads, int dim,
+                           float epsilon, cudaStream_t stream) {
+  if (tokens <= 0 || row_width <= 0 || k_heads <= 0 || v_heads <= 0 ||
+      dim <= 0) {
+    return -1;
+  }
+  if (2 * k_heads * dim + v_heads * dim > row_width) return -2;
+  const int threads = dim >= 128 ? 128 : dim;
+  gdn_prepare_flashinfer_kernel<<<tokens, threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(fused), static_cast<__half*>(q_out),
+      static_cast<__half*>(k_out), static_cast<__half*>(v_out),
+      static_cast<const float*>(g), static_cast<float*>(alpha), tokens,
+      row_width, k_heads, v_heads, dim, epsilon);
+  return cudaGetLastError() == cudaSuccess ? 0 : -3;
+}
+
 
 int gdn_causal_conv_forward(const void* input, const void* weight,
                             void* output, void* window, int tokens,
