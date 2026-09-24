@@ -464,3 +464,92 @@ pub fn gdn_chunk_scan_interleaved(
         ))
     }
 }
+
+/// Chunked gated delta rule on the vendored FlashInfer Cake kernel.
+///
+/// The fast path for prefill. Our own `gdn_chunk_scan` stays as the reference
+/// it is checked against; this one measured 0.427 ms at 2048 tokens on the
+/// 16/48-head shape against 48 ms for a layer of the hand-written scan.
+///
+/// Differences from `gdn_chunk_scan`, all of which the caller must honour:
+///
+/// * `q`, `k`, `v` and `out` are **FP16**, not BF16. The head-generic variant
+///   our 48 value heads force exists only with FP16 I/O; the probe in
+///   `devlocal/qwen38-nvfp4/reports/flashinfer-gdn-feasibility.md` measured
+///   four orders of magnitude of headroom on real activations.
+/// * `q` and `k` must **already be L2-normalized**, and `q` must **not** be
+///   pre-scaled -- pass `scale` instead.
+/// * `tokens` needs no padding. The kernel clamps its TMA descriptors per
+///   sequence, so the `chunk_size` multiple `gdn_chunk_scan` requires is gone.
+///
+/// `state` is `[v_heads, 128, 128]` f32 in `[H, V, K]` order, updated in
+/// place -- the same layout `gdn_recurrent_step` uses, so decode continues
+/// without conversion.
+#[allow(clippy::too_many_arguments)]
+pub fn flashinfer_gdn_prefill(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    out: &Tensor,
+    gate_log: &Tensor,
+    beta: &Tensor,
+    cu_seqlens: &Tensor,
+    state: &Tensor,
+    workspace: &Tensor,
+    tokens: usize,
+    q_heads: usize,
+    v_heads: usize,
+    num_seqs: usize,
+    scale: f32,
+) -> Result<()> {
+    if v_heads % q_heads != 0 {
+        return Err(invalid("GDN value heads must be a multiple of query heads"));
+    }
+    let head_dim = 128usize;
+    let q_dims = [tokens, q_heads, head_dim];
+    let v_dims = [tokens, v_heads, head_dim];
+
+    let q_buffer = tensor_storage(ctx, q, DType::F16, &q_dims)?;
+    let k_buffer = tensor_storage(ctx, k, DType::F16, &q_dims)?;
+    let v_buffer = tensor_storage(ctx, v, DType::F16, &v_dims)?;
+    let out_buffer = tensor_storage(ctx, out, DType::F16, &v_dims)?;
+    let gate_buffer = tensor_storage(ctx, gate_log, DType::F32, &[tokens, v_heads])?;
+    let beta_buffer = tensor_storage(ctx, beta, DType::F32, &[tokens, v_heads])?;
+    let seqlens_buffer = tensor_storage(ctx, cu_seqlens, DType::I32, &[num_seqs + 1])?;
+    let state_buffer =
+        tensor_storage(ctx, state, DType::F32, &[v_heads, head_dim, head_dim])?;
+    // The kernel treats this as raw bytes; validating it against its own
+    // declared shape keeps the check meaningful without inventing a dtype.
+    let workspace_dims = workspace.shape().dims().to_vec();
+    let workspace_buffer =
+        tensor_storage(ctx, workspace, workspace.dtype(), &workspace_dims)?;
+
+    unsafe {
+        status::check(abi::apxinf_flashinfer_gdn_prefill(
+            q_buffer.ptr(),
+            k_buffer.ptr(),
+            v_buffer.ptr(),
+            out_buffer.ptr(),
+            gate_buffer.ptr(),
+            beta_buffer.ptr(),
+            seqlens_buffer.ptr(),
+            state_buffer.ptr(),
+            workspace_buffer.ptr(),
+            tokens as i64,
+            q_heads as i64,
+            v_heads as i64,
+            num_seqs as i64,
+            scale,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+/// Scratch bytes `flashinfer_gdn_prefill` needs for its TMA rewrites.
+pub fn flashinfer_gdn_workspace_bytes(v_heads: usize, num_seqs: usize) -> usize {
+    unsafe {
+        abi::apxinf_flashinfer_gdn_workspace_bytes(v_heads as i64, num_seqs as i64)
+            .max(0) as usize
+    }
+}

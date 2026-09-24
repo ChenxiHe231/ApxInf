@@ -36,6 +36,27 @@ unsafe extern "C" {
         kernel_width: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_flashinfer_gdn_prefill(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        out: *mut c_void,
+        gate_log: *const c_void,
+        beta: *const c_void,
+        cu_seqlens: *const c_void,
+        state: *mut c_void,
+        tensor_map_workspace: *mut c_void,
+        tokens: i64,
+        q_heads: i64,
+        v_heads: i64,
+        num_seqs: i64,
+        scale: f32,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_flashinfer_gdn_workspace_bytes(
+        v_heads: i64,
+        num_seqs: i64,
+    ) -> i64;
     pub(crate) fn apxinf_gdn_causal_conv_forward(
         input: *const c_void,
         weight: *const c_void,
