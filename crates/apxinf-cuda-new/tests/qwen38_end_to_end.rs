@@ -577,6 +577,7 @@ fn fp8_projection_prequantized(
     let mut args = ops::GemmArgs::new(&quantized_rows, transposed, &mut out_rows);
     args.quantization = ops::GemmQuantization::Fp8UnitScale;
     args.alpha = weight.alpha;
+    args.policy.cache_dir = gemm_cache_dir();
     ops::gemm(ctx, args).unwrap();
 }
 
@@ -974,6 +975,22 @@ fn capacity_of(cache: &Tensor) -> usize {
 /// warm-up plus 10 timed launches per candidate -- which measured as 22 ms per
 /// attention layer at 2048 KV, against ~42 us of actual KV traffic. Persisting
 /// recipes lets a repeated KV length skip tuning entirely.
+/// Where tuned GEMM recipes are persisted.
+///
+/// Unlike attention, the GEMM tuning key does not move per call: it carries
+/// M, N, K and the scale *predicates*, not the scale values or the operand
+/// addresses, so one prefill shape tunes once and every later call in the
+/// process reports `source=memory-recipe`. The cache therefore changes
+/// nothing in steady state. What it removes is the one-time tune, which at
+/// these widths measured 0.4-0.7 s per distinct shape and is otherwise paid
+/// again by every fresh process.
+fn gemm_cache_dir() -> Option<String> {
+    Some(
+        std::env::var("APXINF_QWEN38_GEMM_TUNE_CACHE")
+            .unwrap_or_else(|_| "/tmp/apxinf-qwen38-gemm-recipes".to_string()),
+    )
+}
+
 fn attention_cache_dir() -> Option<String> {
     Some(
         std::env::var("APXINF_QWEN38_TUNE_CACHE")
@@ -1239,19 +1256,17 @@ fn nvfp4_mlp_rows(
     .unwrap();
 
     let mut fused = prefix(&scratch.mlp_fused, vec![rows, 2 * INTERMEDIATE], DType::BF16);
-    ops::gemm(
-        ctx,
-        ops::GemmArgs::nvfp4(
-            &activation,
-            &scratch.nvfp4_scales,
-            &gate_up.packed,
-            &gate_up.scales,
-            BLOCK,
-            gate_up.alpha,
-            &mut fused,
-        ),
-    )
-    .unwrap();
+    let mut args = ops::GemmArgs::nvfp4(
+        &activation,
+        &scratch.nvfp4_scales,
+        &gate_up.packed,
+        &gate_up.scales,
+        BLOCK,
+        gate_up.alpha,
+        &mut fused,
+    );
+    args.policy.cache_dir = gemm_cache_dir();
+    ops::gemm(ctx, args).unwrap();
 
     let mlp_activation =
         prefix(&scratch.mlp_activation, vec![rows, INTERMEDIATE / 2], DType::E2M1Pair);
@@ -1267,19 +1282,17 @@ fn nvfp4_mlp_rows(
     .unwrap();
 
     let mut mlp_out = prefix(&scratch.mlp_out, vec![rows, HIDDEN], DType::BF16);
-    ops::gemm(
-        ctx,
-        ops::GemmArgs::nvfp4(
-            &mlp_activation,
-            &scratch.mlp_scales,
-            &down.packed,
-            &down.scales,
-            BLOCK,
-            down.alpha,
-            &mut mlp_out,
-        ),
-    )
-    .unwrap();
+    let mut args = ops::GemmArgs::nvfp4(
+        &mlp_activation,
+        &scratch.mlp_scales,
+        &down.packed,
+        &down.scales,
+        BLOCK,
+        down.alpha,
+        &mut mlp_out,
+    );
+    args.policy.cache_dir = gemm_cache_dir();
+    ops::gemm(ctx, args).unwrap();
 
     let residual = prefix(&scratch.hidden, vec![rows, HIDDEN], DType::BF16);
     ops::add_into(ctx, &mlp_out, &residual).unwrap();
