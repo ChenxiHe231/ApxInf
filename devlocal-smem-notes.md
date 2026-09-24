@@ -251,3 +251,26 @@ UT inverse) and `ut` dies at the end of the substitution, but nothing after it
 wants 16 KiB, so pure aliasing had nothing left to give. Every byte saved here
 came from not materializing a buffer at all, or from making every buffer
 shorter.
+
+### Gate, exact command from the brief, shipped default, no env override
+
+    crates/apxinf-cuda-new/test-new.sh test -p apxinf-cuda \
+      --test qwen38_gdn_prefill -- --include-ignored --nocapture
+
+    core_attn_out (l0_16):        cosine 0.999996  relL2 0.00282
+    recurrent_state_final (l0_15): cosine 0.999997  relL2 0.00230
+    48 heads:                     cosine 1.000000, worst relL2 0.00087 (head 17)
+    test result: ok. 2 passed; 0 failed
+
+Identical to the values the brief lists as current, to every printed digit.
+
+    APXINF_QWEN38_PROMPT_LEN=2048 ... --test qwen38_end_to_end --release
+    prefill split: attention 310.69 ms (16 layers)   gdn 1892.48 ms (48 layers)
+
+1892 ms on a single shot with two other agents building; 1840 ms as the min of
+four rounds. Against the original kernel's 2536 ms measured in the same binary
+that is 1.38x, and against the 2333 ms in the brief (quieter box) 1.27x.
+
+Reproducing any row of the tables above needs two things: symlink `devlocal`
+from the main checkout, or the reference-tensor test passes without running,
+and set APXINF_GDN_SMEM_VARIANT. The map is in gdn_chunk_scan.
