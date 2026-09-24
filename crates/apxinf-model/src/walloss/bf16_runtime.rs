@@ -9,13 +9,14 @@ use apxinf_core::{
     Backend, DType, Device, Error, Graph, NormalGenerator, Result, SamplingBackend, Tensor,
 };
 
+use crate::accelerator::cuda::tuning;
 use crate::auto::{LoadOptions, LoadedModel, ModelPrecision};
 use crate::vla::{
     Action, ImageLayout, InferenceSpec, InitialLatent, PreparedInference, VisionObservation,
     VlaRequest, VlaRuntime,
 };
 
-use super::backend::{kernels, transfers, DeviceBuffer, ExecutionSession, RuntimeBackend};
+use super::backend::{kernels, transfers, DeviceBuffer, RuntimeBackend};
 use super::bf16_executor::{
     action_stack, language_prefix, solver_update, vision_tower, TransformerWeights,
     VisionTowerWeights,
@@ -49,7 +50,7 @@ pub struct WallossPreparedInference {
     geometry: Arc<DeviceVisionGeometry>,
     noise: Tensor,
     normal_generator: RefCell<Box<dyn NormalGenerator>>,
-    session: ExecutionSession,
+    workspace: kernels::GraphWorkspace,
     captured: RefCell<Option<WallossBf16CapturedGraph>>,
 }
 
@@ -172,7 +173,8 @@ impl WallossPreparedInference {
             },
             || {
                 let inputs = self.upload_inputs(&host)?;
-                let eager_output = self.session.prepare(|| self.execute(&inputs))?;
+                let eager_output =
+                    kernels::prepare_with_workspace(&self.workspace, || self.execute(&inputs))?;
                 if std::env::var_os("APXINF_WALLOSS_NO_GRAPH").is_some() {
                     return Ok(InitialRun::Eager(eager_output));
                 }
@@ -180,7 +182,8 @@ impl WallossPreparedInference {
                 drop(eager_output);
 
                 self.backend.begin_capture()?;
-                let output = match self.session.run(|| self.execute(&inputs)) {
+                let output =
+                    match kernels::with_workspace(&self.workspace, || self.execute(&inputs)) {
                         Ok(output) => output,
                         Err(error) => {
                             let _ = self.backend.end_capture();
@@ -544,8 +547,8 @@ impl WallossBf16Runtime {
         );
         let noise = self.backend.to_device(&noise_host)?;
         let normal_generator = self.backend.create_normal_generator(noise.clone())?;
-        let session =
-            ExecutionSession::with_capacity(BF16_WORKSPACE_BYTES, self.backend.context().device_id())?;
+        let workspace =
+            kernels::GraphWorkspace::new(BF16_WORKSPACE_BYTES, self.backend.context().device_id())?;
         Ok(WallossPreparedInference {
             spec,
             backend: Arc::clone(&self.backend),
@@ -556,7 +559,7 @@ impl WallossBf16Runtime {
             geometry: Arc::clone(&self.geometry),
             noise,
             normal_generator: RefCell::new(normal_generator),
-            session,
+            workspace,
             captured: RefCell::new(None),
         })
     }
@@ -638,6 +641,18 @@ pub(super) fn load_registered(
         .transpose()?
         .map(Arc::new);
     let host_weights = WallossWeights::from_safetensors(&mut config, path)?;
+    let dynamic_fp8 = matches!(options.precision, ModelPrecision::Fp8);
+    let tuning_path = options.tuning_path.clone().or_else(|| {
+        if dynamic_fp8 {
+            return None;
+        }
+        let candidate = root.join("tactics.json");
+        candidate.is_file().then_some(candidate)
+    });
+    if let Some(path) = tuning_path.as_deref() {
+        let database = tuning::TuningDb::from_json_file(path)?;
+        crate::accelerator::cuda::kernels::gemm::install_tuning_db(backend.context(), &database)?;
+    }
     let weights = match options.precision {
         ModelPrecision::Fp8 => WallossDeviceWeights::DynamicFp8(
             WallossDynamicFp8Weights::from_host(&host_weights, &*backend)?,

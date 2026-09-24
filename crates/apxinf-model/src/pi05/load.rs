@@ -5,21 +5,22 @@ use super::model::{
 };
 use super::*;
 use crate::auto::{cuda_recipe_options, LoadOptions, LoadedModel, ModelPrecision};
-use apxinf_core::{Backend, Device, Error, Result};
+use apxinf_core::{Device, Error};
+use apxinf_core::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-pub(super) fn load_registered(
+
+pub(crate) fn load_with_cuda_new(
     path: &Path,
     device: Device,
-    _backend: Arc<dyn Backend>,
     options: &LoadOptions,
 ) -> Result<LoadedModel> {
     let Device::Cuda(device_id) = device else {
         return Err(Error::Other("PI0.5 requires CUDA".into()));
     };
-    let backend = Arc::new(backend::Context::new(device_id).map_err(Error::Cuda)?);
+    let context = Arc::new(backend::Context::new(device_id).map_err(Error::Cuda)?);
     Ok(LoadedModel::Vla(Box::new(load_model_runner(
-        path, backend, options,
+        path, context, options,
     )?)))
 }
 
@@ -65,7 +66,7 @@ fn load_model_runner_with_policies(
             "PI0.5 uses model_variant instead of precision".into(),
         ));
     }
-    let sm = cuda.context().caps().sm;
+    let sm = cuda.caps().sm;
     let model_variant = options
         .model_variant
         .as_deref()
