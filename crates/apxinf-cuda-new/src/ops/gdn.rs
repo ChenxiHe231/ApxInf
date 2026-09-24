@@ -553,3 +553,79 @@ pub fn flashinfer_gdn_workspace_bytes(v_heads: usize, num_seqs: usize) -> usize 
             .max(0) as usize
     }
 }
+
+/// One-pass conversion of a GDN projection into FlashInfer's input form.
+///
+/// `flashinfer_gdn_prefill` wants q/k/v split into contiguous FP16 tensors
+/// with q and k L2-normalized and q unscaled, plus a linear-space decay. Doing
+/// those as separate ops would reread the projection four times; at 2048
+/// tokens it is 40 MB, so the conversion would rival the kernel it feeds.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_prepare_flashinfer(
+    ctx: &CudaContext,
+    fused: &Tensor,
+    q_out: &Tensor,
+    k_out: &Tensor,
+    v_out: &Tensor,
+    g: &Tensor,
+    alpha: &Tensor,
+    tokens: usize,
+    row_width: usize,
+    k_heads: usize,
+    v_heads: usize,
+    dim: usize,
+    epsilon: f32,
+) -> Result<()> {
+    if 2 * k_heads * dim + v_heads * dim > row_width {
+        return Err(invalid("GDN projection row is too narrow for q, k and v"));
+    }
+    let fused_buffer = tensor_storage(ctx, fused, DType::BF16, &[tokens, row_width])?;
+    let q_buffer = tensor_storage(ctx, q_out, DType::F16, &[tokens, k_heads, dim])?;
+    let k_buffer = tensor_storage(ctx, k_out, DType::F16, &[tokens, k_heads, dim])?;
+    let v_buffer = tensor_storage(ctx, v_out, DType::F16, &[tokens, v_heads, dim])?;
+    let g_buffer = tensor_storage(ctx, g, DType::F32, &[tokens, v_heads])?;
+    let alpha_buffer = tensor_storage(ctx, alpha, DType::F32, &[tokens, v_heads])?;
+    unsafe {
+        status::check(abi::apxinf_gdn_prepare_flashinfer(
+            fused_buffer.ptr(),
+            q_buffer.ptr(),
+            k_buffer.ptr(),
+            v_buffer.ptr(),
+            g_buffer.ptr(),
+            alpha_buffer.ptr(),
+            tokens as i64,
+            row_width as i64,
+            k_heads as i64,
+            v_heads as i64,
+            dim as i64,
+            epsilon,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+/// Widen an FP16 buffer to BF16.
+///
+/// The FlashInfer scan emits FP16 because the head-generic variant our 48
+/// value heads force has no BF16 build; everything downstream of it here is
+/// BF16.
+pub fn convert_f16_to_bf16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    output: &Tensor,
+    count: usize,
+) -> Result<()> {
+    let input_buffer = tensor_storage(ctx, input, DType::F16, input.shape().dims())?;
+    let output_buffer = tensor_storage(ctx, output, DType::BF16, output.shape().dims())?;
+    if input.shape().numel() < count || output.shape().numel() < count {
+        return Err(invalid("FP16 widening runs past one of its buffers"));
+    }
+    unsafe {
+        status::check(abi::apxinf_gdn_widen_f16_to_bf16(
+            input_buffer.ptr(),
+            output_buffer.ptr(),
+            count as i64,
+            ctx.stream().handle(),
+        ))
+    }
+}

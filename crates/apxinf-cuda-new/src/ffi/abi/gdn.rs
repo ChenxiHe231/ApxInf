@@ -36,6 +36,27 @@ unsafe extern "C" {
         kernel_width: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_gdn_widen_f16_to_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        count: i64,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_gdn_prepare_flashinfer(
+        fused: *const c_void,
+        q_out: *mut c_void,
+        k_out: *mut c_void,
+        v_out: *mut c_void,
+        g: *const c_void,
+        alpha: *mut c_void,
+        tokens: i64,
+        row_width: i64,
+        k_heads: i64,
+        v_heads: i64,
+        dim: i64,
+        epsilon: f32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_flashinfer_gdn_prefill(
         q: *const c_void,
         k: *const c_void,

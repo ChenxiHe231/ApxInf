@@ -1077,6 +1077,24 @@ struct PrefillScratch {
     gdn_gated: Tensor,
     gdn_fp8: Tensor,
     tokens: Tensor,
+    // Staging for the FlashInfer chunked scan, which takes q/k/v as separate
+    // FP16 tensors and a linear-space decay. Allocated only when that path is
+    // selected; see `use_flashinfer_gdn`.
+    gdn_q16: Option<Tensor>,
+    gdn_k16: Option<Tensor>,
+    gdn_v16: Option<Tensor>,
+    gdn_out16: Option<Tensor>,
+    gdn_alpha: Option<Tensor>,
+    cu_seqlens: Option<Tensor>,
+    flashinfer_workspace: Option<Tensor>,
+}
+
+/// Whether prefill runs the vendored FlashInfer chunked scan.
+///
+/// Off by default: our own scan is the one checked against the reference
+/// tensors. `APXINF_QWEN38_FLASHINFER_GDN=1` selects the faster path.
+fn use_flashinfer_gdn() -> bool {
+    std::env::var("APXINF_QWEN38_FLASHINFER_GDN").is_ok()
 }
 
 impl PrefillScratch {
@@ -1085,6 +1103,7 @@ impl PrefillScratch {
         let scale_bytes =
             |rows: usize, k: usize| vec![ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
         let t = capacity;
+        let flashinfer = use_flashinfer_gdn();
         PrefillScratch {
             capacity,
             hidden: zeros(ctx, vec![t, HIDDEN], DType::BF16),
@@ -1114,6 +1133,21 @@ impl PrefillScratch {
             gdn_gated: zeros(ctx, vec![t, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
             gdn_fp8: zeros(ctx, vec![t, Z_WIDTH], DType::F8E4M3),
             tokens: zeros(ctx, vec![t], DType::I32),
+            gdn_q16: flashinfer
+                .then(|| zeros(ctx, vec![t, GDN_K_HEADS, GDN_HEAD_DIM], DType::F16)),
+            gdn_k16: flashinfer
+                .then(|| zeros(ctx, vec![t, GDN_K_HEADS, GDN_HEAD_DIM], DType::F16)),
+            gdn_v16: flashinfer
+                .then(|| zeros(ctx, vec![t, GDN_V_HEADS, GDN_HEAD_DIM], DType::F16)),
+            gdn_out16: flashinfer
+                .then(|| zeros(ctx, vec![t, GDN_V_HEADS, GDN_HEAD_DIM], DType::F16)),
+            gdn_alpha: flashinfer.then(|| zeros(ctx, vec![t, GDN_V_HEADS], DType::F32)),
+            cu_seqlens: flashinfer.then(|| zeros(ctx, vec![2], DType::I32)),
+            flashinfer_workspace: flashinfer.then(|| {
+                let bytes = ops::flashinfer_gdn_workspace_bytes(GDN_V_HEADS, 1);
+                assert!(bytes > 0, "FlashInfer workspace query returned 0");
+                zeros(ctx, vec![bytes.div_ceil(4)], DType::F32)
+            }),
         }
     }
 }
@@ -1372,6 +1406,60 @@ fn prefill_step(
                     probe_fp16_range("z(gate)", &scratch.gdn_z, tokens * Z_WIDTH);
                 }
 
+                if let (Some(q16), Some(k16), Some(v16), Some(out16), Some(alpha),
+                        Some(cu), Some(workspace)) = (
+                    scratch.gdn_q16.as_ref(), scratch.gdn_k16.as_ref(),
+                    scratch.gdn_v16.as_ref(), scratch.gdn_out16.as_ref(),
+                    scratch.gdn_alpha.as_ref(), scratch.cu_seqlens.as_ref(),
+                    scratch.flashinfer_workspace.as_ref(),
+                ) {
+                    // One pass turns the interleaved BF16 projection into the
+                    // separate, L2-normalized, FP16 tensors this kernel wants,
+                    // plus the linear-space decay.
+                    let conv = prefix(&scratch.gdn_conv, vec![tokens, QKV_WIDTH], DType::BF16);
+                    let decay = prefix(&scratch.gdn_decay, vec![tokens, GDN_V_HEADS], DType::F32);
+                    let q_rows = prefix(q16, vec![tokens, GDN_K_HEADS, GDN_HEAD_DIM], DType::F16);
+                    let k_rows = prefix(k16, vec![tokens, GDN_K_HEADS, GDN_HEAD_DIM], DType::F16);
+                    let v_rows = prefix(v16, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::F16);
+                    let out_rows = prefix(out16, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::F16);
+                    let alpha_rows = prefix(alpha, vec![tokens, GDN_V_HEADS], DType::F32);
+                    let beta_rows2 = prefix(&scratch.gdn_beta, vec![tokens, GDN_V_HEADS], DType::F32);
+                    ops::gdn_prepare_flashinfer(
+                        ctx, &conv, &q_rows, &k_rows, &v_rows, &decay, &alpha_rows,
+                        tokens, QKV_WIDTH, GDN_K_HEADS, GDN_V_HEADS, GDN_HEAD_DIM,
+                        EPSILON,
+                    )
+                    .unwrap();
+
+                    // cu_seqlens for a single prompt. No padding needed: the
+                    // kernel clamps its TMA descriptors per sequence.
+                    CudaBuffer::from_tensor(cu)
+                        .unwrap()
+                        .copy_from_host(
+                            &[0i32, tokens as i32]
+                                .iter()
+                                .flat_map(|value| value.to_le_bytes())
+                                .collect::<Vec<u8>>(),
+                        )
+                        .unwrap();
+
+                    ops::flashinfer_gdn_prefill(
+                        ctx, &q_rows, &k_rows, &v_rows, &out_rows, &alpha_rows,
+                        &beta_rows2, cu, &state.recurrent, workspace, tokens,
+                        GDN_K_HEADS, GDN_V_HEADS, 1,
+                        1.0 / (GDN_HEAD_DIM as f32).sqrt(),
+                    )
+                    .unwrap();
+
+                    // Widen the readout back for the gated norm that follows.
+                    let readout_bf =
+                        prefix(&scratch.gdn_readout, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                    ops::convert_f16_to_bf16(
+                        ctx, &out_rows, &readout_bf, tokens * GDN_V_HEADS * GDN_HEAD_DIM,
+                    )
+                    .unwrap();
+                } else {
+
                 // q, k and v stay interleaved in the conv output; the scan
                 // reads them in place through its row strides.
                 let fused = prefix(&scratch.gdn_conv, vec![seq_padded, QKV_WIDTH], DType::BF16);
@@ -1395,6 +1483,7 @@ fn prefill_step(
                     GDN_HEAD_DIM,
                 )
                 .unwrap();
+                }
 
                 let readout_rows = prefix(&scratch.gdn_readout, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
                 let z_heads = prefix(&scratch.gdn_z, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
