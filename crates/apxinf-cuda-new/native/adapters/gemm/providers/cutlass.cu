@@ -99,7 +99,10 @@ cudaError_t launch_cutlass_fp8_gemm(Execution& state) {
   const auto& spec = state.spec;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
   using namespace apxinf::cuda::cutlass_ops;
-  check_cutlass_status(fp8_gemm_f16(
+  // supports_cutlass_fp8 admits exactly these two output dtypes.
+  const auto entry = spec.output_dtype == APXINF_DTYPE_BF16 ? fp8_gemm_bf16
+                                                            : fp8_gemm_f16;
+  check_cutlass_status(entry(
       bindings.a, bindings.b, bindings.output, spec.m, spec.n, spec.k,
       bindings.alpha, state.configuration, stream));
   return cudaSuccess;
