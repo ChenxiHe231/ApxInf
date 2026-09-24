@@ -8,6 +8,7 @@
 
 #include "../../framework/runtime_internal.h"
 #include "../../kernels/custom/gdn_ops.h"
+#include "../../kernels/flashinfer_gdn/flashinfer_gdn.h"
 
 #include <cstdint>
 #include <string>
@@ -83,6 +84,40 @@ extern "C" apxinf_status_t apxinf_gdn_causal_conv_step(
               static_cast<cudaStream_t>(stream)),
           "GDN conv step");
   });
+}
+
+extern "C" apxinf_status_t apxinf_flashinfer_gdn_prefill(
+    const void* q, const void* k, const void* v, void* out,
+    const void* gate_log, const void* beta, const void* cu_seqlens,
+    void* state, void* tensor_map_workspace, int64_t tokens, int64_t q_heads,
+    int64_t v_heads, int64_t num_seqs, float scale,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (q == nullptr || k == nullptr || v == nullptr || out == nullptr ||
+        gate_log == nullptr || beta == nullptr || cu_seqlens == nullptr ||
+        state == nullptr || tensor_map_workspace == nullptr ||
+        !extent(tokens) || !extent(q_heads) || !extent(v_heads) ||
+        !extent(num_seqs)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid FlashInfer GDN prefill arguments");
+    }
+    check(apxinf::cuda::flashinfer_gdn::prefill(
+              q, k, v, out, gate_log, beta, cu_seqlens, state,
+              tensor_map_workspace, static_cast<int>(tokens),
+              static_cast<int>(q_heads), static_cast<int>(v_heads),
+              static_cast<int>(num_seqs), scale,
+              static_cast<cudaStream_t>(stream)),
+          "FlashInfer GDN prefill");
+  });
+}
+
+extern "C" int64_t apxinf_flashinfer_gdn_workspace_bytes(int64_t v_heads,
+                                                         int64_t num_seqs) {
+  if (v_heads <= 0 || num_seqs <= 0) return 0;
+  return static_cast<int64_t>(apxinf::cuda::flashinfer_gdn::
+                                  tensor_map_workspace_bytes(
+                                      static_cast<int>(v_heads),
+                                      static_cast<int>(num_seqs)));
 }
 
 extern "C" apxinf_status_t apxinf_gdn_causal_conv_forward(

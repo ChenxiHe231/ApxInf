@@ -238,6 +238,7 @@ fn main() {
     .to_vec();
     generic_sources.push(native.join("kernels/custom/mlp_ops.cu"));
     generic_sources.push(native.join("kernels/custom/gdn_ops.cu"));
+    generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_tma.cpp"));
     generic_sources.push(native.join("kernels/custom/attn_ops.cu"));
     generic_sources.push(native.join("kernels/custom/model_ops.cu"));
     generic_sources.push(native.join("tests/framework_backend.cu"));
@@ -263,6 +264,11 @@ fn main() {
             .map(|source| operators.join(source)),
         );
         cutlass_sources.push(adapters.join("attention/providers/cutlass.cu"));
+        // Vendored FlashInfer Cake GDN prefill: plain CUDA C++, but it needs
+        // the same compute_110a codegen as the CUTLASS group because it emits
+        // tcgen05 and TMA. See native/kernels/flashinfer_gdn/README.md.
+        cutlass_sources
+            .push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_launch.cu"));
     }
     let has_fa2 = selection.targets.iter().any(|target| target.sm() >= 80);
     let mut fa2_sources = Vec::new();
@@ -464,5 +470,9 @@ fn main() {
     println!("cargo:rustc-link-lib=cublasLt");
     println!("cargo:rustc-link-lib=cublas");
     println!("cargo:rustc-link-lib=cudart");
+    // The vendored FlashInfer GDN prefill builds its TMA descriptors with
+    // cuTensorMapEncodeTiled, which lives in the driver library rather than
+    // the runtime.
+    println!("cargo:rustc-link-lib=cuda");
     println!("cargo:rustc-link-lib=stdc++");
 }

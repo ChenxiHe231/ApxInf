@@ -31,6 +31,21 @@ apxinf_status_t apxinf_gdn_causal_conv_step(void* window, const void* input,
                                             int64_t kernel_width,
                                             apxinf_cuda_stream_t stream);
 
+// Chunked gated delta rule on the vendored FlashInfer Cake kernel.
+//
+// q/k/v/out are FP16 and q/k must already be L2-normalized; `gate_log` is the
+// natural-log decay. See native/kernels/flashinfer_gdn/README.md.
+apxinf_status_t apxinf_flashinfer_gdn_prefill(
+    const void* q, const void* k, const void* v, void* out,
+    const void* gate_log, const void* beta, const void* cu_seqlens,
+    void* state, void* tensor_map_workspace, int64_t tokens, int64_t q_heads,
+    int64_t v_heads, int64_t num_seqs, float scale,
+    apxinf_cuda_stream_t stream);
+
+// Scratch bytes apxinf_flashinfer_gdn_prefill needs for TMA rewrites.
+int64_t apxinf_flashinfer_gdn_workspace_bytes(int64_t v_heads,
+                                              int64_t num_seqs);
+
 apxinf_status_t apxinf_gdn_causal_conv_forward(
     const void* input, const void* weight, void* output, void* window,
     int64_t tokens, int64_t channels, int64_t kernel_width,
