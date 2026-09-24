@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/apxinf-core",
+    "crates/apxinf-cuda",
     "crates/apxinf-cuda-new",
     "crates/apxinf-loader",
     "crates/apxinf-model",
@@ -19,7 +20,7 @@ default = []
 # CUDA GPU inference. NVTX profiling markers auto-detect the lib name at
 # build time: desktop CUDA 12.x uses libnvtx3interop; Drive OS / embedded
 # CUDA uses libnvToolsExt. Both are handled transparently — see
-# crates/apxinf-cuda-new/build.rs.
+# crates/apxinf-cuda/build.rs.
 cuda = ["dep:apxinf-cuda", "apxinf-cuda/nvtx", "apxinf-model/cuda"]
 # Same as `cuda` but with NVTX compiled out entirely (no-op stubs). Use
 # when the target has no NVTX library installed at all.
@@ -31,7 +32,7 @@ openblas = ["apxinf-core/openblas"]
 
 [dependencies]
 apxinf-core = { path = "crates/apxinf-core" }
-apxinf-cuda = { path = "crates/apxinf-cuda-new", optional = true, default-features = false }
+apxinf-cuda = { path = "crates/apxinf-cuda", optional = true, default-features = false }
 apxinf-loader = { path = "crates/apxinf-loader" }
 apxinf-model = { path = "crates/apxinf-model" }
 apxinf-tokenizer = { path = "crates/apxinf-tokenizer" }
