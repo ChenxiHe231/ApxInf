@@ -64,3 +64,59 @@ allocation granularity), and the natural f32 kernel wants 238.
 ## Measurements
 
 (appended as they land)
+
+### Round 1 -- single shot, 2048-token prompt, second `prefill split` (smem-perf1.log)
+
+    variant                                 blocks/SM   gdn ms
+    HEAD 40ec495, separate build                    1   2601.4
+    1   64 f32 f32                                  2   4895.5  <- discard
+    6   32 f32 f32                                  2   2019.7
+    8   32 f32 f32                                  3   1884.6
+    2   32 f32 f32                                  4   2224.0
+    7   16 f32 f32                                  6   2301.6
+    3   64 bf16 f32                                 2   2146.3
+    4   64 bf16 bf16                                3   2032.5
+    5   32 bf16 f32                                 6   2428.2
+
+Variant 1 ran first in a fresh binary (140 s vs 35 s for every later run) so it
+paid the cold GEMM autotune; its number is not comparable and is re-measured in
+round 2.
+
+Two things fall out of this and neither matches the previous runs story:
+
+### Round 1 -- single shot, 2048-token prompt, second `prefill split` (smem-perf1.log)
+
+    variant                                 blocks/SM   gdn ms
+    HEAD 40ec495, separate build                    1   2601.4
+    1   64 f32 f32                                  2   4895.5  <- discard
+    6   32 f32 f32                                  2   2019.7
+    8   32 f32 f32                                  3   1884.6
+    2   32 f32 f32                                  4   2224.0
+    7   16 f32 f32                                  6   2301.6
+    3   64 bf16 f32                                 2   2146.3
+    4   64 bf16 bf16                                3   2032.5
+    5   32 bf16 f32                                 6   2428.2
+
+Variant 1 ran first in a fresh binary (140 s vs 35 s for every later run) so it
+paid the cold GEMM autotune; its number is not comparable and is re-measured in
+round 2.
+
+Two things fall out of this, and neither matches the previous run's story:
+
+  - Occupancy is not monotone. 6 -> 8 -> 2 is the same arithmetic at 2 -> 3 -> 4
+    blocks/SM and it goes 2020 -> 1885 -> 2224. Three blocks wins; the fourth
+    block costs more in register spill (240 B store / 416 B load, against 20/36
+    at three blocks) than it returns in latency hiding. Six blocks (7, 5) is
+    worse still.
+  - bf16 buys nothing. Variant 4 is the previous run's "v4" shape -- bf16 q/k
+    and bf16 matrices, 56.75 KiB, 3 blocks/SM -- and at 2032 ms it is slower
+    than variant 8, which is 3 blocks/SM with every buffer still f32. Shared
+    memory stops being the binding constraint once the chunk is shortened, so
+    there is nothing left for the dtype demotion to buy.
+
+So the lever is the chunk length, not the dtype, and the occupancy it unlocks
+is worth about 7% on top (2020 -> 1885), not the bulk of the win.
+
+Round 2 adds variant 0 -- the original 209 KiB kernel, compiled into the same
+binary at its original 163 registers -- so the baseline becomes an A/B inside
+one build rather than a comparison across two.
