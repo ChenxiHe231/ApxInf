@@ -25,6 +25,7 @@
 #include <cuda_fp16.h>
 
 #include <cstdint>
+#include <cstdlib>
 
 namespace apxinf::cuda::gdn_ops {
 namespace {
@@ -627,11 +628,343 @@ int gdn_decay_and_beta(const void* a, const void* b, const void* a_log,
 
 namespace {
 
-constexpr int kChunk = 64;   // chunk_size
+constexpr int kChunk = 64;   // chunk_size the caller uses
 constexpr int kDim = 128;    // k_dim == v_dim for this model
 
-// Shared-memory scratch for one chunk of one head. ~209 KiB, so the launch opts
-// into the large dynamic shared-memory carveout.
+// ---------------------------------------------------------------------------
+// Shared-memory scratch for one chunk of one head.
+//
+// Only operands that one thread reads at a column other than its own have to
+// live here. Buffer lifetimes over one chunk iteration (phases as labelled in
+// the body below):
+//
+//   phase                       q    k    pw      T      M    v/nv/kcd chain
+//   A load                      W    W    -       -      -    W (private)
+//   B l2norm                    RW   RW   -       -      -    -
+//   C cum scan                  -    -    -       -      -    -
+//   D pairwise decay            -    -    W(dec)  -      -    -
+//   E ut_system + intra_attn    R    R    R(dec)  W(at)  W    -
+//   F forward substitution      -    -    W(inv)  -      R    -       <- M dies
+//   G w = beta*(v - e^cum*kS)   -    R    -       -      -    RW
+//   H v_new = T_inv @ w         -    -    R(inv)  -      -    RW      <- pw dies
+//   I out = q@S + intra@v_new   R    -    -       R(at)  -    R       <- q,T die
+//   J state fold                R    R    -       -      -    R       <- k dies
+//
+// The chain that was `v` -> `nv`/`kcd` -> `v_new` (96 KiB of the old 209 KiB)
+// is only ever touched at the owning thread's v-dim column, so it becomes a
+// per-thread array. What makes that work is re-associating the v_new formula:
+//
+//   v_new = T @ (beta*v) - (T @ (beta*e^cum*k)) @ S      (needs kcd across k)
+//         = T @ ( beta * (v - e^cum * (k @ S)) )         (all at column d)
+//
+// which is the same operation count, just contracted over k before the
+// triangular solve instead of after it, and costs nothing in precision.
+// The remaining five buffers overlap almost everywhere, so aliasing them buys
+// little: only `M` dies early and nothing later needs 16 KiB. Getting below
+// the 5-buffer floor therefore needs either a narrower dtype or a shorter
+// chunk, which is what the template parameters below select.
+//
+//   CHUNK=64 float/float  112.75 KiB    CHUNK=32 float/float   44.375 KiB
+//   CHUNK=64 bf16 /float   80.75 KiB    CHUNK=32 bf16 /float   28.375 KiB
+//   CHUNK=64 bf16 /bf16    56.75 KiB    CHUNK=32 bf16 /bf16    22.375 KiB
+//
+// against 228 KiB per SM. Blocks per SM is min(smem, register) limited; the
+// register side is what MINBLK (a __launch_bounds__ minimum) pins down.
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ float ldv(float x) { return x; }
+__device__ __forceinline__ float ldv(__nv_bfloat16 x) {
+  return __bfloat162float(x);
+}
+__device__ __forceinline__ void stv(float& d, float v) { d = v; }
+__device__ __forceinline__ void stv(__nv_bfloat16& d, float v) {
+  d = __float2bfloat16(v);
+}
+
+// QKT is the dtype of the q/k operand planes, MT of the three CHUNK x CHUNK
+// matrices (pairwise decay / UT inverse, intra-chunk attention, ut_system).
+template <int CHUNK, typename QKT, typename MT>
+struct ChunkSharedT {
+  QKT q[CHUNK][kDim];    // l2-normed q, scaled by k_dim**-0.5
+  QKT k[CHUNK][kDim];    // l2-normed k
+  MT pw[CHUNK][CHUNK];   // pairwise_decay, then the UT-transform inverse
+  MT at[CHUNK][CHUNK];   // intra_chunk_attn
+  MT ut[CHUNK][CHUNK];   // ut_system
+  float cum[CHUNK];      // cumulative decay within the chunk
+  float g[CHUNK];        // per-token log decay for this head
+  float beta[CHUNK];     // per-token beta for this head
+};
+
+// gdn chunked scan. Grid = v_heads blocks, block = kDim (128) threads.
+//
+//   q_in, k_in : [seq_padded, k_heads, kDim]  bf16   (post-conv, pre-l2norm)
+//   v_in       : [seq_padded, v_heads, kDim]  bf16
+//   g_in, b_in : [seq_padded, v_heads]        f32    (log decay, beta)
+//   out        : [seq_padded, v_heads, kDim]  bf16   (core_attn_out)
+//   state      : [v_heads, kDim(v_dim), kDim(k_dim)] f32  port layout, in/out
+//
+// The block loads a whole chunk, builds the UT transform by forward
+// substitution, then folds the chunk into the recurrent state. State rows are
+// held in global memory (port layout state[v][k]) and read/written per chunk.
+template <int CHUNK, typename QKT, typename MT, int MINBLK>
+__global__ __launch_bounds__(kDim, MINBLK) void chunk_scan_kernel_t(
+    const __nv_bfloat16* __restrict__ q_in,
+    const __nv_bfloat16* __restrict__ k_in,
+    const __nv_bfloat16* __restrict__ v_in, const float* __restrict__ g_in,
+    const float* __restrict__ b_in, __nv_bfloat16* __restrict__ out,
+    int q_row_stride, int k_row_stride, int v_row_stride,
+    float* __restrict__ state, int seq_padded, int v_heads, int k_heads,
+    int num_chunks) {
+  extern __shared__ char smem_raw[];
+  auto& s = *reinterpret_cast<ChunkSharedT<CHUNK, QKT, MT>*>(smem_raw);
+
+  const int head = blockIdx.x;
+  if (head >= v_heads) return;
+  const int tid = threadIdx.x;
+  const int k_head = head / (v_heads / k_heads);
+
+  float* head_state = state + (long long)head * kDim * kDim;
+
+  // Thread `tid` owns v-dim column d == tid throughout.
+  const int d = tid;
+  float vcol[CHUNK];     // v, then the delta w, then v_new -- all at column d
+  float sref_col[kDim];  // sref_col[k] = S_ref[k][d] = state_port[d][k]
+
+  for (int c = 0; c < num_chunks; ++c) {
+    const int base = c * CHUNK;  // first token of this chunk
+
+    // --- A: load q, k, v for the chunk --------------------------------------
+    // Each thread owns column `tid` (a dimension index) across all rows.
+    for (int t = 0; t < CHUNK; ++t) {
+      const int tok = base + t;
+      const __nv_bfloat16* qp =
+          q_in + (long long)tok * q_row_stride + (long long)k_head * kDim;
+      const __nv_bfloat16* kp =
+          k_in + (long long)tok * k_row_stride + (long long)k_head * kDim;
+      const __nv_bfloat16* vp =
+          v_in + (long long)tok * v_row_stride + (long long)head * kDim;
+      stv(s.q[t][tid], __bfloat162float(qp[tid]));
+      stv(s.k[t][tid], __bfloat162float(kp[tid]));
+      vcol[t] = __bfloat162float(vp[tid]);
+    }
+    // g and beta for this head over the chunk (CHUNK <= kDim so tid covers it).
+    if (tid < CHUNK) {
+      s.g[tid] = g_in[(long long)(base + tid) * v_heads + head];
+      s.beta[tid] = b_in[(long long)(base + tid) * v_heads + head];
+    }
+    __syncthreads();
+
+    // --- B: L2-normalize q and k over the dimension, scale q by kDim**-0.5 --
+    // Thread `tid` normalizes row `tid` (CHUNK <= blockDim.x).
+    const float q_scaling = rsqrtf((float)kDim);
+    if (tid < CHUNK) {
+      float qn = 0.0f, kn = 0.0f;
+      for (int dd = 0; dd < kDim; ++dd) {
+        const float qv = ldv(s.q[tid][dd]);
+        const float kv = ldv(s.k[tid][dd]);
+        qn += qv * qv;
+        kn += kv * kv;
+      }
+      const float qinv = rsqrtf(qn + 1e-6f);
+      const float kinv = rsqrtf(kn + 1e-6f);
+      for (int dd = 0; dd < kDim; ++dd) {
+        stv(s.q[tid][dd], ldv(s.q[tid][dd]) * qinv * q_scaling);
+        stv(s.k[tid][dd], ldv(s.k[tid][dd]) * kinv);
+      }
+    }
+    __syncthreads();
+
+    // --- C: cumulative decay ------------------------------------------------
+    // cum[t] = sum_{j<=t} g[j] (inclusive). Single thread does the scan.
+    if (tid == 0) {
+      float acc = 0.0f;
+      for (int t = 0; t < CHUNK; ++t) {
+        acc += s.g[t];
+        s.cum[t] = acc;
+      }
+    }
+    __syncthreads();
+
+    // --- D: pairwise decay --------------------------------------------------
+    // pairwise_decay[i][j] = exp(cum[i] - cum[j]) for i >= j, else 0.
+    // Thread `tid` (a column j) fills column j for all rows i, when tid<CHUNK.
+    if (tid < CHUNK) {
+      const int j = tid;
+      for (int i = 0; i < CHUNK; ++i) {
+        stv(s.pw[i][j], i >= j ? __expf(s.cum[i] - s.cum[j]) : 0.0f);
+      }
+    }
+    __syncthreads();
+
+    // --- E: ut_system and intra_chunk_attn ----------------------------------
+    // v_beta and k_beta are applied on the fly. k_beta[t] = beta[t]*k[t].
+    // ut_system[i][j] = (k_beta[i] . k[j]) * pw[i][j]
+    // intra[i][j]     = (q[i]     . k[j]) * pw[i][j]
+    // This is the heaviest block in the scan. Mapping one thread per column
+    // would leave kDim - CHUNK threads idle, so the row range is split too:
+    // thread t takes column t % CHUNK and the row slice selected by t / CHUNK.
+    // Row slices are disjoint, so no reduction is needed.
+    {
+      constexpr int kRowGroups = kDim / CHUNK;
+      constexpr int kRowsPer = CHUNK / kRowGroups;
+      const int j = tid % CHUNK;
+      const int i_begin = (tid / CHUNK) * kRowsPer;
+      const int i_end = i_begin + kRowsPer;
+      for (int i = i_begin; i < i_end; ++i) {
+        float utv = 0.0f, atv = 0.0f;
+        const float bi = s.beta[i];
+        for (int dd = 0; dd < kDim; ++dd) {
+          const float kjd = ldv(s.k[j][dd]);
+          utv += (bi * ldv(s.k[i][dd])) * kjd;
+          atv += ldv(s.q[i][dd]) * kjd;
+        }
+        const float pwij = ldv(s.pw[i][j]);
+        stv(s.ut[i][j], utv * pwij);  // ut_system
+        stv(s.at[i][j], atv * pwij);  // intra_chunk_attn, live until phase I
+      }
+    }
+    __syncthreads();
+
+    // --- F: forward substitution, parallel over columns ---------------------
+    // This inverts the unit lower triangular (I - L) where
+    // L = -tril(ut_system, -1). Done by one thread it is a triple loop --
+    // CHUNK^3/6 serial iterations while the other threads wait on the barrier,
+    // which measured as the dominant cost of the whole scan.
+    //
+    // Column j of the inverse depends only on column j, so the columns are
+    // independent and one thread can own each. The row loop stays sequential
+    // because row i needs rows below it. The key to avoiding the read/write
+    // race that forces the serial version is not to materialize L at all:
+    // L[i][p] is just -ut[i][p], so the recurrence reads ut (untouched) and
+    // writes s.pw (the result), and no thread reads what another is writing.
+    const int col = tid;
+    if (col < CHUNK) {
+      for (int i = 0; i < CHUNK; ++i) stv(s.pw[i][col], 0.0f);
+    }
+    __syncthreads();
+
+    for (int i = 1; i < CHUNK; ++i) {
+      if (col < i) {
+        // T[i][col] = L[i][col] + sum_{p in (col, i)} L[i][p] * T[p][col]
+        float acc = -ldv(s.ut[i][col]);
+        for (int p = col + 1; p < i; ++p) {
+          acc += (-ldv(s.ut[i][p])) * ldv(s.pw[p][col]);
+        }
+        stv(s.pw[i][col], acc);
+      }
+      __syncthreads();
+    }
+
+    if (col < CHUNK) stv(s.pw[col][col], ldv(s.pw[col][col]) + 1.0f);
+    __syncthreads();
+    // s.pw now holds T (the inverse). s.at holds intra_chunk_attn. s.ut free.
+
+    // --- Scan fold into the recurrent state ---------------------------------
+    // Reference (per chunk i):
+    //   q_scaled = q * exp(cum)                        [applied per token]
+    //   k_scaled = k * exp(cum[-1] - cum)
+    //   chunk_decay = exp(cum[-1])
+    //   v_new  = new_values - k_cumdecay @ S_ref       (S_ref[k][v])
+    //   inter  = q_scaled @ S_ref
+    //   out    = inter + intra_chunk_attn @ v_new
+    //   S_ref  = S_ref * chunk_decay + k_scaled^T @ v_new
+    //
+    // We hold S in the PORT layout state[v][k] = S_ref[k][v]. Thread `tid` owns
+    // v-column d = tid of the state (so it holds S_ref[*][d], i.e. state[d][*]).
+    // Every thread reads the full k-vector of q / k from shared.
+    const float cum_last = s.cum[CHUNK - 1];
+    const float chunk_decay = __expf(cum_last);
+
+    // Load this thread's column of S_ref: sref_col[k] = S_ref[k][d]
+    //   = state_port[d][k] = head_state[d*kDim + k]
+    for (int kk = 0; kk < kDim; ++kk) {
+      sref_col[kk] = head_state[(long long)d * kDim + kk];
+    }
+
+    // --- G: w[p] = beta[p] * (v[p][d] - exp(cum[p]) * (k[p] . S_ref[*][d])) -
+    // This is the contraction that used to be deferred to `k_cumdecay @ S_ref`
+    // after the triangular solve; pulling it in front of the solve keeps it at
+    // column d and removes the CHUNK x kDim k_cumdecay and new_values buffers.
+    for (int p = 0; p < CHUNK; ++p) {
+      float ks = 0.0f;
+      for (int kk = 0; kk < kDim; ++kk) {
+        ks += ldv(s.k[p][kk]) * sref_col[kk];
+      }
+      vcol[p] = s.beta[p] * (vcol[p] - __expf(s.cum[p]) * ks);
+    }
+
+    // --- H: v_new = T_inv @ w, in place -------------------------------------
+    // T_inv is lower-triangular, so row i reads rows 0..i only. Walking i
+    // downwards means every row it reads is still the pre-multiply value, so
+    // the product needs no second buffer.
+    for (int i = CHUNK - 1; i >= 0; --i) {
+      float acc = 0.0f;
+      for (int p = 0; p <= i; ++p) {
+        acc += ldv(s.pw[i][p]) * vcol[p];
+      }
+      vcol[i] = acc;
+    }
+    // vcol now holds v_new[*][d].
+
+    // --- I: out[i][d] = inter[i][d] + sum_{j<=i} intra[i][j] * v_new[j][d] --
+    //   inter[i][d] = sum_k (q[i][k] * exp(cum[i])) * S_ref[k][d]
+    for (int i = 0; i < CHUNK; ++i) {
+      const float ecum_i = __expf(s.cum[i]);
+      float inter = 0.0f;
+      for (int kk = 0; kk < kDim; ++kk) {
+        inter += (ldv(s.q[i][kk]) * ecum_i) * sref_col[kk];
+      }
+      float intra = 0.0f;
+      for (int j = 0; j <= i; ++j) {  // intra is lower-triangular (masked)
+        intra += ldv(s.at[i][j]) * vcol[j];
+      }
+      const int tok = base + i;
+      __nv_bfloat16* op = out + ((long long)tok * v_heads + head) * kDim;
+      op[d] = __float2bfloat16(inter + intra);
+    }
+
+    // --- J: S_ref[k][d] = S_ref[k][d]*chunk_decay + sum_i k_scaled[i][k]*v_new
+    //   k_scaled[i][k] = k[i][k] * exp(cum_last - cum[i])
+    for (int kk = 0; kk < kDim; ++kk) {
+      float upd = 0.0f;
+      for (int i = 0; i < CHUNK; ++i) {
+        const float kscaled = ldv(s.k[i][kk]) * __expf(cum_last - s.cum[i]);
+        upd += kscaled * vcol[i];
+      }
+      // store back in port layout state[d][k]
+      head_state[(long long)d * kDim + kk] = sref_col[kk] * chunk_decay + upd;
+    }
+    // Phases G..J only touch this thread's own column, but the next iteration
+    // overwrites s.q / s.k, so the block still has to meet here.
+    __syncthreads();
+  }
+}
+
+template <int CHUNK, typename QKT, typename MT, int MINBLK>
+int launch_chunk_scan(const __nv_bfloat16* q, const __nv_bfloat16* k,
+                      const __nv_bfloat16* v, const float* g, const float* b,
+                      __nv_bfloat16* out, float* state, int seq_padded,
+                      int v_heads, int k_heads, int q_row_stride,
+                      int k_row_stride, int v_row_stride, cudaStream_t stream) {
+  if (seq_padded % CHUNK != 0) return -3;
+  const int num_chunks = seq_padded / CHUNK;
+  const size_t shared = sizeof(ChunkSharedT<CHUNK, QKT, MT>);
+  auto kernel = chunk_scan_kernel_t<CHUNK, QKT, MT, MINBLK>;
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         (int)shared);
+    configured = true;
+  }
+  kernel<<<v_heads, kDim, shared, stream>>>(q, k, v, g, b, out, q_row_stride,
+                                            k_row_stride, v_row_stride, state,
+                                            seq_padded, v_heads, k_heads,
+                                            num_chunks);
+  return cudaGetLastError() == cudaSuccess ? 0 : -4;
+}
+
+// --- Reference shape, kept so the 209 KiB original can be timed against the
+// --- new shapes inside one binary instead of across two builds. -----------
 struct ChunkShared {
   float q[kChunk][kDim];    // l2-normed q, scaled by k_dim**-0.5
   float k[kChunk][kDim];    // l2-normed k
@@ -657,7 +990,7 @@ struct ChunkShared {
 // The block loads a whole chunk, builds the UT transform by forward
 // substitution, then folds the chunk into the recurrent state. State rows are
 // held in global memory (port layout state[v][k]) and read/written per chunk.
-__global__ void chunk_scan_kernel(
+__global__ void chunk_scan_kernel_v0(
     const __nv_bfloat16* __restrict__ q_in,
     const __nv_bfloat16* __restrict__ k_in,
     const __nv_bfloat16* __restrict__ v_in, const float* __restrict__ g_in,
@@ -665,7 +998,7 @@ __global__ void chunk_scan_kernel(
     int q_row_stride, int k_row_stride, int v_row_stride,
     float* __restrict__ state, int seq_padded, int v_heads, int k_heads,
     int num_chunks) {
-  extern __shared__ float smem_raw[];
+  extern __shared__ char smem_raw[];
   ChunkShared& s = *reinterpret_cast<ChunkShared*>(smem_raw);
 
   const int head = blockIdx.x;
@@ -909,6 +1242,37 @@ __global__ void chunk_scan_kernel(
   }
 }
 
+
+int launch_chunk_scan_v0(const __nv_bfloat16* q, const __nv_bfloat16* k,
+                         const __nv_bfloat16* v, const float* g, const float* b,
+                         __nv_bfloat16* out, float* state, int seq_padded,
+                         int v_heads, int k_heads, int q_row_stride,
+                         int k_row_stride, int v_row_stride,
+                         cudaStream_t stream) {
+  const int num_chunks = seq_padded / kChunk;
+  const size_t shared = sizeof(ChunkShared);
+  static bool configured = false;
+  if (!configured) {
+    cudaFuncSetAttribute(chunk_scan_kernel_v0,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                         (int)shared);
+    configured = true;
+  }
+  chunk_scan_kernel_v0<<<v_heads, kDim, shared, stream>>>(
+      q, k, v, g, b, out, q_row_stride, k_row_stride, v_row_stride, state,
+      seq_padded, v_heads, k_heads, num_chunks);
+  return cudaGetLastError() == cudaSuccess ? 0 : -4;
+}
+
+using bf16 = __nv_bfloat16;
+
+// Which shared-memory shape to run. Kept switchable while the trade between
+// occupancy and the precision of the demoted planes is being measured.
+int smem_variant() {
+  const char* e = getenv("APXINF_GDN_SMEM_VARIANT");
+  return e ? atoi(e) : 8;
+}
+
 }  // namespace
 
 int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
@@ -920,23 +1284,41 @@ int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
   if (chunk_size != kChunk || k_dim != kDim) return -2;
   if (num_chunks <= 0 || seq_padded != num_chunks * chunk_size) return -3;
 
-  const int threads = kDim;  // 128
-  const size_t shared = sizeof(ChunkShared);
-  static bool configured = false;
-  if (!configured) {
-    cudaFuncSetAttribute(chunk_scan_kernel,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize,
-                         (int)shared);
-    configured = true;
+  const auto* qp = static_cast<const __nv_bfloat16*>(q);
+  const auto* kp = static_cast<const __nv_bfloat16*>(k);
+  const auto* vp = static_cast<const __nv_bfloat16*>(v);
+  const auto* gp = static_cast<const float*>(g);
+  const auto* bp = static_cast<const float*>(beta);
+  auto* op = static_cast<__nv_bfloat16*>(out);
+  auto* sp = static_cast<float*>(state);
+
+#define APXINF_GDN_LAUNCH(CHUNK_, QKT_, MT_, MINBLK_)                        \
+  launch_chunk_scan<CHUNK_, QKT_, MT_, MINBLK_>(                             \
+      qp, kp, vp, gp, bp, op, sp, seq_padded, v_heads, k_heads, q_row_stride, \
+      k_row_stride, v_row_stride, stream)
+
+  static const int variant = smem_variant();
+  switch (variant) {
+    case 0:
+      return launch_chunk_scan_v0(qp, kp, vp, gp, bp, op, sp, seq_padded,
+                                  v_heads, k_heads, q_row_stride, k_row_stride,
+                                  v_row_stride, stream);             // 208.75 KiB
+    case 1:  return APXINF_GDN_LAUNCH(64, float, float, 2);  // 112.75 KiB
+    case 2:  return APXINF_GDN_LAUNCH(32, float, float, 4);  //  44.38 KiB
+    case 3:  return APXINF_GDN_LAUNCH(64, bf16,  float, 2);  //  80.75 KiB
+    case 4:  return APXINF_GDN_LAUNCH(64, bf16,  bf16,  3);  //  56.75 KiB
+    case 5:  return APXINF_GDN_LAUNCH(32, bf16,  float, 6);  //  28.38 KiB
+    case 6:  return APXINF_GDN_LAUNCH(32, float, float, 2);  //  44.38 KiB
+    case 7:  return APXINF_GDN_LAUNCH(16, float, float, 6);  //  19.19 KiB
+    case 8:  return APXINF_GDN_LAUNCH(32, float, float, 3);  //  44.38 KiB
+    case 9:  return APXINF_GDN_LAUNCH(32, float, bf16,  3);  //  38.38 KiB
+    case 10: return APXINF_GDN_LAUNCH(16, float, float, 2);  //  19.19 KiB
+    case 11: return APXINF_GDN_LAUNCH(16, float, float, 3);  //  19.19 KiB
+    case 12: return APXINF_GDN_LAUNCH(16, float, float, 4);  //  19.19 KiB
+    case 13: return APXINF_GDN_LAUNCH(32, float, float, 5);  //  44.38 KiB
+    default: return APXINF_GDN_LAUNCH(32, float, float, 3);
   }
-  chunk_scan_kernel<<<v_heads, threads, shared, stream>>>(
-      static_cast<const __nv_bfloat16*>(q),
-      static_cast<const __nv_bfloat16*>(k),
-      static_cast<const __nv_bfloat16*>(v), static_cast<const float*>(g),
-      static_cast<const float*>(beta), static_cast<__nv_bfloat16*>(out),
-      q_row_stride, k_row_stride, v_row_stride,
-      static_cast<float*>(state), seq_padded, v_heads, k_heads, num_chunks);
-  return cudaGetLastError() == cudaSuccess ? 0 : -4;
+#undef APXINF_GDN_LAUNCH
 }
 
 }  // namespace apxinf::cuda::gdn_ops
