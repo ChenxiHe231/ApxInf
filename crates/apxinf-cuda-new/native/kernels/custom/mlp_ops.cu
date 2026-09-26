@@ -84,13 +84,33 @@ __global__ void swiglu_kernel(const __nv_bfloat16* __restrict__ fused,
   output[index] = __float2bfloat16(silu(gate) * up);
 }
 
+// Eight elements per thread through 16-byte vectors. One bf16 per thread
+// (round-05 nsys: 46.7 ms of a 874 ms prefill across 130 calls) leaves the
+// kernel launch-and-index bound; the tail elements run scalar so any count
+// works. Same per-element arithmetic, bit-identical.
 __global__ void add_kernel(const __nv_bfloat16* __restrict__ addend,
                            __nv_bfloat16* __restrict__ accumulator,
                            long long count) {
+  const long long vectors = count / 8;
   const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-  if (index >= count) return;
-  accumulator[index] = __float2bfloat16(__bfloat162float(accumulator[index]) +
-                                        __bfloat162float(addend[index]));
+  if (index < vectors) {
+    uint4 a = reinterpret_cast<const uint4*>(addend)[index];
+    uint4 c = reinterpret_cast<uint4*>(accumulator)[index];
+    const __nv_bfloat16* av = reinterpret_cast<const __nv_bfloat16*>(&a);
+    __nv_bfloat16* cv = reinterpret_cast<__nv_bfloat16*>(&c);
+#pragma unroll
+    for (int element = 0; element < 8; ++element) {
+      cv[element] = __float2bfloat16(__bfloat162float(cv[element]) +
+                                     __bfloat162float(av[element]));
+    }
+    reinterpret_cast<uint4*>(accumulator)[index] = c;
+    return;
+  }
+  const long long tail = vectors * 8 + (index - vectors);
+  if (tail < count) {
+    accumulator[tail] = __float2bfloat16(__bfloat162float(accumulator[tail]) +
+                                         __bfloat162float(addend[tail]));
+  }
 }
 
 // E4M3 with bias 7, saturating at +-448. Values are pre-divided by the
@@ -115,12 +135,30 @@ __device__ __forceinline__ uint8_t to_e4m3(float value) {
   return sign | static_cast<uint8_t>((biased << 3) | fraction);
 }
 
+// Eight elements per thread, 16-byte input vectors and 8-byte output
+// stores. Same to_e4m3 per element in element order; bit-identical.
 __global__ void quantize_fp8_kernel(const __nv_bfloat16* __restrict__ input,
                                     uint8_t* __restrict__ output,
                                     long long count, float inverse_scale) {
+  const long long vectors = count / 8;
   const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-  if (index >= count) return;
-  output[index] = to_e4m3(__bfloat162float(input[index]) * inverse_scale);
+  if (index < vectors) {
+    const uint4 in = reinterpret_cast<const uint4*>(input)[index];
+    const __nv_bfloat16* iv = reinterpret_cast<const __nv_bfloat16*>(&in);
+    uint64_t packed = 0;
+#pragma unroll
+    for (int element = 0; element < 8; ++element) {
+      packed |= static_cast<uint64_t>(
+                    to_e4m3(__bfloat162float(iv[element]) * inverse_scale))
+                << (8 * element);
+    }
+    reinterpret_cast<uint64_t*>(output)[index] = packed;
+    return;
+  }
+  const long long tail = vectors * 8 + (index - vectors);
+  if (tail < count) {
+    output[tail] = to_e4m3(__bfloat162float(input[tail]) * inverse_scale);
+  }
 }
 
 // One warp per output row, four rows per block, 16-byte loads.
@@ -311,7 +349,9 @@ int quantize_fp8_per_tensor(const void* input, void* output, long long count,
                             float input_scale, cudaStream_t stream) {
   if (count <= 0 || !(input_scale > 0.0f)) return -1;
   const int threads = 256;
-  const long long blocks = (count + threads - 1) / threads;
+  // One thread per 8-element vector plus one per tail element.
+  const long long work = count / 8 + count % 8;
+  const long long blocks = (work + threads - 1) / threads;
   quantize_fp8_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input), static_cast<uint8_t*>(output),
       count, 1.0f / input_scale);
@@ -346,7 +386,9 @@ int add_bf16(const void* addend, void* accumulator, long long count,
              cudaStream_t stream) {
   if (count <= 0) return -1;
   const int threads = 256;
-  const long long blocks = (count + threads - 1) / threads;
+  // One thread per 8-element vector plus one per tail element.
+  const long long work = count / 8 + count % 8;
+  const long long blocks = (work + threads - 1) / threads;
   add_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(addend),
       static_cast<__nv_bfloat16*>(accumulator), count);
