@@ -198,6 +198,11 @@ __device__ __forceinline__ uint8_t quantize_e2m1(float value) {
 // negative, so this matches the unsigned encoding the kernel reads.
 __device__ __forceinline__ uint8_t quantize_e4m3_nonnegative(float value) {
   if (!(value > 0.0f)) return 0;
+  // Saturate at the E4M3 maximum (448). Without this, a block whose scale
+  // overflows encodes as 0x7F -- the E4M3 NaN -- and the GEMM turns the whole
+  // output row into NaN, which the later FP4/FP8 quantizers then launder into
+  // finite garbage. Found in round 06, refound debugging FlashInfer GDN.
+  if (value >= 448.0f) return 0x7e;
   int exponent;
   float mantissa = frexpf(value, &exponent);  // value = mantissa * 2^exponent
   mantissa *= 2.0f;
@@ -211,7 +216,7 @@ __device__ __forceinline__ uint8_t quantize_e4m3_nonnegative(float value) {
   }
   if (biased > 15) {                          // saturate at the E4M3 maximum
     biased = 15;
-    fraction = 7;
+    fraction = 6;                             // 0x7F would be NaN, not max
   }
   return static_cast<uint8_t>((biased << 3) | fraction);
 }
