@@ -143,6 +143,11 @@ __global__ void quantize_fp8_kernel(const __nv_bfloat16* __restrict__ input,
 // ms/tok end to end -- the kernel is latency-bound on loads, not FMA -- and
 // the reordered sum moved generated tokens, breaking the bit-identity gate
 // (round-02).
+//
+// Software prefetch instead: issue the next iteration's two loads before
+// converting the current one, so the load latency overlaps the 32 FMAs.
+// The values and their accumulation order are untouched -- only the issue
+// distance moves -- so this stays bit-identical.
 __global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
                                 const uint4* __restrict__ activation,
                                 __nv_bfloat16* __restrict__ output, int n,
@@ -154,9 +159,17 @@ __global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
 
   const uint4* weight_row = weight + (long long)row * k_vectors;
   float sum = 0.0f;
-  for (int index = lane; index < k_vectors; index += 32) {
-    const uint4 w = weight_row[index];
-    const uint4 a = activation[index];
+  int index = lane;
+  uint4 w = index < k_vectors ? weight_row[index] : uint4{0, 0, 0, 0};
+  uint4 a = index < k_vectors ? activation[index] : uint4{0, 0, 0, 0};
+  while (index < k_vectors) {
+    const int next = index + 32;
+    uint4 w_next{0, 0, 0, 0};
+    uint4 a_next{0, 0, 0, 0};
+    if (next < k_vectors) {
+      w_next = weight_row[next];
+      a_next = activation[next];
+    }
     const __nv_fp8x2_storage_t* wp =
         reinterpret_cast<const __nv_fp8x2_storage_t*>(&w);
     const __nv_fp8x2_storage_t* ap =
@@ -170,6 +183,9 @@ __global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
       sum += __low2float(wh) * __low2float(ah);
       sum += __high2float(wh) * __high2float(ah);
     }
+    w = w_next;
+    a = a_next;
+    index = next;
   }
   for (int offset = 16; offset > 0; offset >>= 1) {
     sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
