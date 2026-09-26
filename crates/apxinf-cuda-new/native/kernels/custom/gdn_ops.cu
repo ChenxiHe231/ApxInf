@@ -314,30 +314,38 @@ __global__ void decay_and_beta_seq_kernel(
 }
 
 // Sequence-axis gated norm: one block per (token, head).
+// One warp per (token, head) row, eight rows per block. The first version
+// launched one 32-thread block per row: 98304 blocks whose scheduling
+// overhead left the kernel at 9% memory throughput over 1.04 ms (round-05
+// ncu). Packing eight warps into a block cuts the block count 8x; each warp
+// runs exactly the loop the old block ran -- same lanes, same shuffle
+// reduction, lane 0's total broadcast by shuffle instead of shared memory --
+// so the arithmetic and its order are unchanged and outputs stay
+// bit-identical.
 __global__ void gated_norm_seq_kernel(const __nv_bfloat16* __restrict__ input,
                                       const __nv_bfloat16* __restrict__ gate,
                                       const __nv_bfloat16* __restrict__ weight,
                                       __nv_bfloat16* __restrict__ output,
                                       int tokens, int heads, int head_dim,
                                       float epsilon) {
-  const long long row = blockIdx.x;
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const long long row = (long long)blockIdx.x * (blockDim.x >> 5) + warp;
   if (row >= (long long)tokens * heads) return;
   const long long base = row * head_dim;
 
   float sum = 0.0f;
-  for (int index = threadIdx.x; index < head_dim; index += blockDim.x) {
+  for (int index = lane; index < head_dim; index += 32) {
     const float value = __bfloat162float(input[base + index]);
     sum += value * value;
   }
   for (int offset = 16; offset > 0; offset >>= 1) {
     sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
   }
-  __shared__ float total;
-  if (threadIdx.x == 0) total = sum;
-  __syncthreads();
+  const float total = __shfl_sync(0xFFFFFFFFu, sum, 0);
 
   const float scale = rsqrtf(total / static_cast<float>(head_dim) + epsilon);
-  for (int index = threadIdx.x; index < head_dim; index += blockDim.x) {
+  for (int index = lane; index < head_dim; index += 32) {
     const float normalized = __bfloat162float(input[base + index]) * scale *
                              __bfloat162float(weight[index]);
     const float z = __bfloat162float(gate[base + index]);
@@ -519,8 +527,12 @@ int gdn_gated_norm_seq(const void* input, const void* gate, const void* weight,
                        void* output, int tokens, int heads, int head_dim,
                        float epsilon, cudaStream_t stream) {
   if (tokens <= 0 || heads <= 0 || head_dim <= 0) return -1;
-  const int threads = head_dim >= 32 ? 32 : head_dim;
-  const long long blocks = (long long)tokens * heads;
+  // One warp per row; the kernel's reduction is warp-wide.
+  if (head_dim < 32) return -3;
+  constexpr int kRowsPerBlock = 8;
+  const int threads = kRowsPerBlock * 32;
+  const long long rows = (long long)tokens * heads;
+  const long long blocks = (rows + kRowsPerBlock - 1) / kRowsPerBlock;
   gated_norm_seq_kernel<<<(int)blocks, threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const __nv_bfloat16*>(gate),
