@@ -237,12 +237,16 @@ __global__ void decay_and_beta_kernel(const __nv_bfloat16* __restrict__ a,
 // timesteps are contiguous -- so it vectorizes along time and passes the
 // kernel_width-1 boundary values between threads through shared memory.
 //
-// Here x is [tokens, channels]: time-major. One channel's timesteps are
-// strided by `channels`, so vectorizing along time would scatter. Assigning
-// one thread per channel instead makes adjacent threads read adjacent
-// channels -- fully coalesced -- and, because each thread owns its channel for
-// the whole sequence, the cross-thread history exchange disappears entirely.
-// The window lives in registers and never reaches shared memory.
+// Here x is [tokens, channels]: time-major. Adjacent threads read adjacent
+// channels -- fully coalesced.
+//
+// Every output token depends on at most kernel_width-1 tokens of history, so
+// there is no true recurrence: one thread per (token, channel) output reads
+// its own four inputs directly. The first version instead had one thread per
+// channel walk the whole sequence -- 10240 threads with a 2048-long serial
+// dependency chain, which cannot occupy 20 SMs and measured 2.0 ms per layer
+// (98.6 ms of a 955 ms prefill, round-04 nsys). The window accumulation
+// order (oldest tap first) is unchanged, so outputs are bit-identical.
 //
 // What is taken from the reference is the arithmetic: the causal window
 // indexing, the zero left boundary, and folding SiLU into the same pass.
@@ -251,48 +255,39 @@ __global__ void causal_conv_forward_kernel(
     const __nv_bfloat16* __restrict__ weight,
     __nv_bfloat16* __restrict__ output, float* __restrict__ window,
     int tokens, int channels, int kernel_width) {
-  const int channel = blockIdx.x * blockDim.x + threadIdx.x;
-  if (channel >= channels) return;
+  const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  const long long total = (long long)tokens * channels;
+  if (index >= total) return;
+  const int token = static_cast<int>(index / channels);
+  const int channel = static_cast<int>(index % channels);
 
-  // kernel_width is 4 for this checkpoint; a fixed-size register window beats
-  // indexing through memory. history[kernel_width-1] is the newest sample.
-  constexpr int kMaxWidth = 8;
-  float history[kMaxWidth];
-#pragma unroll
-  for (int index = 0; index < kMaxWidth; ++index) history[index] = 0.0f;
-
-  float weights[kMaxWidth];
-  for (int index = 0; index < kernel_width; ++index) {
-    weights[index] =
-        __bfloat162float(weight[(long long)channel * kernel_width + index]);
-  }
-
-  // Prefill starts from a zero window: token 0 sees only itself, which is what
-  // a left-padded causal conv means. The single-token path carries its window
-  // across calls instead, and this kernel reseeds it at the end.
-  for (int token = 0; token < tokens; ++token) {
+  // Oldest tap first, exactly as the register window accumulated: tap i is
+  // input token `token - (kernel_width - 1) + i`, zero left of the sequence.
+  float accumulator = 0.0f;
+  for (int tap = 0; tap < kernel_width; ++tap) {
+    const int source = token - (kernel_width - 1) + tap;
     const float sample =
-        __bfloat162float(input[(long long)token * channels + channel]);
-    for (int index = 0; index < kernel_width - 1; ++index) {
-      history[index] = history[index + 1];
-    }
-    history[kernel_width - 1] = sample;
-
-    float accumulator = 0.0f;
-    for (int index = 0; index < kernel_width; ++index) {
-      accumulator += history[index] * weights[index];
-    }
-    output[(long long)token * channels + channel] =
-        __float2bfloat16(accumulator / (1.0f + __expf(-accumulator)));
+        source >= 0
+            ? __bfloat162float(input[(long long)source * channels + channel])
+            : 0.0f;
+    accumulator +=
+        sample *
+        __bfloat162float(weight[(long long)channel * kernel_width + tap]);
   }
+  output[index] = __float2bfloat16(accumulator / (1.0f + __expf(-accumulator)));
 
   // Hand the tail to the single-token path. Without this, the first decode
   // step after a prompt convolves against an empty window and is wrong --
-  // silently, because the shapes still line up.
-  if (window != nullptr) {
+  // silently, because the shapes still line up. The last token's thread owns
+  // the same history the serial version ended with.
+  if (window != nullptr && token == tokens - 1) {
     float* slot = window + (long long)channel * kernel_width;
-    for (int index = 0; index < kernel_width; ++index) {
-      slot[index] = history[index];
+    for (int tap = 0; tap < kernel_width; ++tap) {
+      const int source = tokens - kernel_width + tap;
+      slot[tap] =
+          source >= 0
+              ? __bfloat162float(input[(long long)source * channels + channel])
+              : 0.0f;
     }
   }
 }
@@ -490,11 +485,13 @@ int gdn_causal_conv_forward(const void* input, const void* weight,
                             int channels, int kernel_width,
                             cudaStream_t stream) {
   if (tokens <= 0 || channels <= 0 || kernel_width <= 0) return -1;
-  // The register window is fixed at 8; a wider kernel would silently truncate.
+  // The decode path's register window is fixed at 8; a wider kernel would
+  // silently truncate there, so reject it here too.
   if (kernel_width > 8) return -4;
   const int threads = 256;
-  const int blocks = (channels + threads - 1) / threads;
-  causal_conv_forward_kernel<<<blocks, threads, 0, stream>>>(
+  const long long total = (long long)tokens * channels;
+  const long long blocks = (total + threads - 1) / threads;
+  causal_conv_forward_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const __nv_bfloat16*>(weight),
       static_cast<__nv_bfloat16*>(output), static_cast<float*>(window), tokens,
