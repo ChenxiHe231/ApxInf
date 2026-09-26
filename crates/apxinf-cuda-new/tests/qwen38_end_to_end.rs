@@ -685,80 +685,13 @@ fn decode_step(
             Layer::Attention(attention) => {
                 let cache = &mut kv_caches[attention_index];
                 attention_index += 1;
-
-                ops::rms_norm(ctx, &scratch.hidden, &attention.input_norm, &scratch.normalized, EPSILON).unwrap();
-                fp8_projection(ctx, &attention.q, &scratch.normalized, &scratch.fp8_activation, &mut scratch.qkv_fused);
-                let fused_heads = view(&scratch.qkv_fused, vec![1, HEADS, 2 * HEAD_DIM], DType::BF16);
-                ops::split_query_and_gate(ctx, &fused_heads, &scratch.query, &scratch.query_gate).unwrap();
-
-                // k and v project directly into this token's cache slot.
-                let mut key_slot = cache_slot(&cache.keys, position, vec![1, KV_HEADS * HEAD_DIM]);
-                let mut value_slot = cache_slot(&cache.values, position, vec![1, KV_HEADS * HEAD_DIM]);
-                fp8_projection(ctx, &attention.k, &scratch.normalized, &scratch.fp8_activation, &mut key_slot);
-                fp8_projection(ctx, &attention.v, &scratch.normalized, &scratch.fp8_activation, &mut value_slot);
-
-                let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
-                let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
-                ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
-                ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
-
-                let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
-                let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
-                ops::partial_rope(ctx, &query_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
-                ops::partial_rope(ctx, &key_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
-
-                // The cache is allocated at full capacity; attention reads only
-                // the tokens written so far.
-                let valid = position + 1;
-                // Viewed at `valid`, not at the full allocation: the FA2
-                // candidate requires key_capacity == key_tokens, and a
-                // capacity-shaped view fails that for every step but the last,
-                // dropping decode onto the naive kernel whose cost grows with
-                // KV length.
-                let keys = cache_rows(&cache.keys, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
-                let values = cache_rows(&cache.values, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
-                let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
-                let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
-                let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
-                args.valid_key_tokens = valid;
-                args.query_start = position;
-            args.policy.cache_dir = attention_cache_dir();
-                ops::kv_cache_attention(ctx, args).unwrap();
-
-                let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
-                ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
-                fp8_projection(ctx, &attention.o, &scratch.attention_out, &scratch.attention_fp8, &mut scratch.projected);
-                ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
-
+                attention_mixer_forward(ctx, attention, cache, scratch, position, rotary);
                 nvfp4_mlp(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch);
             }
             Layer::Gdn(gdn) => {
-                let state = &mut gdn_states[gdn_index];
+                let state = &gdn_states[gdn_index];
                 gdn_index += 1;
-
-                ops::rms_norm(ctx, &scratch.hidden, &gdn.input_norm, &scratch.normalized, EPSILON).unwrap();
-                fp8_projection(ctx, &gdn.qkv, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_qkv);
-                fp8_projection(ctx, &gdn.z, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_z);
-
-                let qkv_flat = view(&scratch.gdn_qkv, vec![QKV_WIDTH], DType::BF16);
-                ops::gdn_causal_conv_step(ctx, &state.conv_window, &qkv_flat, &gdn.conv_weight, &scratch.gdn_conv).unwrap();
-
-                let (q, k, v) = split_gdn_qkv(ctx, &scratch.gdn_conv);
-                ops::gdn_l2_normalize_heads(ctx, &q, EPSILON).unwrap();
-                ops::gdn_l2_normalize_heads(ctx, &k, EPSILON).unwrap();
-
-                bf16_matvec(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a);
-                bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
-                ops::gdn_decay_and_beta(ctx, &scratch.gdn_a, &scratch.gdn_b, &gdn.a_log, &gdn.dt_bias, &scratch.gdn_decay, &scratch.gdn_beta).unwrap();
-
-                ops::gdn_recurrent_step(ctx, &state.recurrent, &q, &k, &v, &scratch.gdn_decay, &scratch.gdn_beta, &scratch.gdn_readout, GDN_K_HEADS).unwrap();
-                ops::gdn_gated_norm(ctx, &scratch.gdn_readout, &gdn_z_heads(ctx, &scratch.gdn_z), &gdn.norm_weight, &scratch.gdn_gated, EPSILON).unwrap();
-
-                let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
-                fp8_projection(ctx, &gdn.out, &flat, &scratch.gdn_fp8, &mut scratch.projected);
-                ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
-
-                nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
+                gdn_layer_forward(ctx, gdn, state, scratch);
             }
         }
         if let Some(start) = layer_start {
@@ -782,6 +715,97 @@ fn decode_step(
         );
     }
 
+    lm_head_forward(ctx, model, scratch);
+}
+
+/// The attention mixer: everything in an attention layer except its MLP.
+/// Split out because the graphed decode keeps exactly this part eager --
+/// the KV slot address and the valid-length view depend on `position`.
+fn attention_mixer_forward(
+    ctx: &CudaContext,
+    attention: &AttentionLayer,
+    cache: &mut KvCache,
+    scratch: &mut Scratch,
+    position: usize,
+    rotary: usize,
+) {
+    ops::rms_norm(ctx, &scratch.hidden, &attention.input_norm, &scratch.normalized, EPSILON).unwrap();
+    fp8_projection(ctx, &attention.q, &scratch.normalized, &scratch.fp8_activation, &mut scratch.qkv_fused);
+    let fused_heads = view(&scratch.qkv_fused, vec![1, HEADS, 2 * HEAD_DIM], DType::BF16);
+    ops::split_query_and_gate(ctx, &fused_heads, &scratch.query, &scratch.query_gate).unwrap();
+
+    // k and v project directly into this token's cache slot.
+    let mut key_slot = cache_slot(&cache.keys, position, vec![1, KV_HEADS * HEAD_DIM]);
+    let mut value_slot = cache_slot(&cache.values, position, vec![1, KV_HEADS * HEAD_DIM]);
+    fp8_projection(ctx, &attention.k, &scratch.normalized, &scratch.fp8_activation, &mut key_slot);
+    fp8_projection(ctx, &attention.v, &scratch.normalized, &scratch.fp8_activation, &mut value_slot);
+
+    let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
+    let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
+    ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
+    ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+
+    let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
+    let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
+    ops::partial_rope(ctx, &query_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
+    ops::partial_rope(ctx, &key_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
+
+    // The cache is allocated at full capacity; attention reads only
+    // the tokens written so far.
+    let valid = position + 1;
+    // Viewed at `valid`, not at the full allocation: the FA2
+    // candidate requires key_capacity == key_tokens, and a
+    // capacity-shaped view fails that for every step but the last,
+    // dropping decode onto the naive kernel whose cost grows with
+    // KV length.
+    let keys = cache_rows(&cache.keys, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
+    let values = cache_rows(&cache.values, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
+    let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
+    let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
+    let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
+    args.valid_key_tokens = valid;
+    args.query_start = position;
+    args.policy.cache_dir = attention_cache_dir();
+    ops::kv_cache_attention(ctx, args).unwrap();
+
+    let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
+    ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+    fp8_projection(ctx, &attention.o, &scratch.attention_out, &scratch.attention_fp8, &mut scratch.projected);
+    ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
+}
+
+/// One whole GDN layer (mixer and MLP). Nothing in it depends on `position`:
+/// the conv window and recurrent state advance in place on device, and every
+/// tensor argument is a stable scratch or weight address. That is what makes
+/// it CUDA-graph-capturable.
+fn gdn_layer_forward(ctx: &CudaContext, gdn: &GdnLayer, state: &GdnState, scratch: &mut Scratch) {
+    ops::rms_norm(ctx, &scratch.hidden, &gdn.input_norm, &scratch.normalized, EPSILON).unwrap();
+    fp8_projection(ctx, &gdn.qkv, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_qkv);
+    fp8_projection(ctx, &gdn.z, &scratch.normalized, &scratch.fp8_activation, &mut scratch.gdn_z);
+
+    let qkv_flat = view(&scratch.gdn_qkv, vec![QKV_WIDTH], DType::BF16);
+    ops::gdn_causal_conv_step(ctx, &state.conv_window, &qkv_flat, &gdn.conv_weight, &scratch.gdn_conv).unwrap();
+
+    let (q, k, v) = split_gdn_qkv(ctx, &scratch.gdn_conv);
+    ops::gdn_l2_normalize_heads(ctx, &q, EPSILON).unwrap();
+    ops::gdn_l2_normalize_heads(ctx, &k, EPSILON).unwrap();
+
+    bf16_matvec(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a);
+    bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
+    ops::gdn_decay_and_beta(ctx, &scratch.gdn_a, &scratch.gdn_b, &gdn.a_log, &gdn.dt_bias, &scratch.gdn_decay, &scratch.gdn_beta).unwrap();
+
+    ops::gdn_recurrent_step(ctx, &state.recurrent, &q, &k, &v, &scratch.gdn_decay, &scratch.gdn_beta, &scratch.gdn_readout, GDN_K_HEADS).unwrap();
+    ops::gdn_gated_norm(ctx, &scratch.gdn_readout, &gdn_z_heads(ctx, &scratch.gdn_z), &gdn.norm_weight, &scratch.gdn_gated, EPSILON).unwrap();
+
+    let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
+    fp8_projection(ctx, &gdn.out, &flat, &scratch.gdn_fp8, &mut scratch.projected);
+    ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
+
+    nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
+}
+
+/// Final norm, lm_head projection, greedy token selection.
+fn lm_head_forward(ctx: &CudaContext, model: &Model, scratch: &mut Scratch) {
     ops::rms_norm(ctx, &scratch.hidden, &model.final_norm, &scratch.normalized, EPSILON).unwrap();
     ops::nvfp4_quantize_activation(ctx, &scratch.normalized, &scratch.nvfp4_activation, &scratch.nvfp4_scales, model.lm_head.input_scale, BLOCK, ops::ScaleLayout::GemmAtom).unwrap();
     ops::gemm(
@@ -798,6 +822,163 @@ fn decode_step(
     )
     .unwrap();
     ops::argmax(ctx, &scratch.logits, &scratch.next_token).unwrap();
+}
+
+/// CUDA graphs over the position-independent majority of a decode step.
+///
+/// nsys (round-00) put the decode step at 1461 kernel launches with 16.7 ms
+/// of GPU idle between them. Everything except the 16 attention mixers reads
+/// and writes the same device addresses at every position, so it captures
+/// once and replays: `segments[k]` covers the MLP of the preceding attention
+/// layer (none for k=0, which instead opens with the embedding gather) plus
+/// the three following GDN layers; `head` is final norm + lm_head + argmax.
+/// Attention mixers stay eager between replays -- the KV slot address and
+/// the valid-length view change with `position`.
+struct DecodeGraphs {
+    /// Kept alive because the captured GEMM executions borrow its workspace.
+    _session: ops::ExecutionSession,
+    segments: Vec<apxinf_cuda::CapturedGraph>,
+    head: apxinf_cuda::CapturedGraph,
+}
+
+/// Run one segment's ops. Called twice per segment while building: once
+/// under `prepare_with_session` (executes, creates native GEMM resources at
+/// their final addresses) and once under `capture`+`with_session` (records;
+/// nothing executes). The traversals must enqueue the identical operator
+/// sequence -- the session enforces it.
+fn run_gdn_segment(
+    ctx: &CudaContext,
+    model: &Model,
+    mlp_of: Option<usize>,
+    run: &[(usize, usize)],
+    embedding: bool,
+    gdn_states: &[GdnState],
+    scratch: &mut Scratch,
+) {
+    if embedding {
+        ops::embedding_gather(ctx, &model.embedding, &scratch.token, &scratch.hidden).unwrap();
+    }
+    if let Some(layer) = mlp_of {
+        let Layer::Attention(attention) = &model.layers[layer] else {
+            unreachable!("mlp_of must name an attention layer")
+        };
+        nvfp4_mlp(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch);
+    }
+    for &(layer, gdn_index) in run {
+        let Layer::Gdn(gdn) = &model.layers[layer] else {
+            unreachable!("segment runs cover GDN layers")
+        };
+        gdn_layer_forward(ctx, gdn, &gdn_states[gdn_index], scratch);
+    }
+}
+
+/// Execute one full decode step at `position` eagerly and capture the graphs
+/// as a side effect. The prepare traversal of each segment is the step's real
+/// computation (state advances once, exactly as eager decode would); the
+/// capture traversal records without executing.
+fn capture_decode_graphs(
+    ctx: &CudaContext,
+    model: &Model,
+    scratch: &mut Scratch,
+    gdn_states: &[GdnState],
+    kv_caches: &mut [KvCache],
+    position: usize,
+) -> DecodeGraphs {
+    let session = ops::ExecutionSession::with_capacity(256 << 20, ctx.device_id()).unwrap();
+    let rotary = ops::rotary_dim(HEAD_DIM, PARTIAL_ROTARY);
+    let mut segments = Vec::new();
+    let mut attention_index = 0usize;
+    let mut gdn_index = 0usize;
+    let mut pending_mlp: Option<usize> = None;
+    let mut layer = 0usize;
+    while layer < LAYERS {
+        let mut run = Vec::new();
+        while layer < LAYERS && !is_full_attention(layer) {
+            run.push((layer, gdn_index));
+            gdn_index += 1;
+            layer += 1;
+        }
+        let embedding = segments.is_empty();
+        let mlp_of = pending_mlp.take();
+        ops::prepare_with_session(&session, || {
+            run_gdn_segment(ctx, model, mlp_of, &run, embedding, gdn_states, scratch);
+            Ok(())
+        })
+        .unwrap();
+        let graph = apxinf_cuda::capture(ctx, || {
+            ops::with_session(&session, || {
+                run_gdn_segment(ctx, model, mlp_of, &run, embedding, gdn_states, scratch);
+                Ok(())
+            })
+        })
+        .unwrap();
+        segments.push(graph);
+
+        if layer < LAYERS {
+            let Layer::Attention(attention) = &model.layers[layer] else {
+                unreachable!("is_full_attention marked an attention layer")
+            };
+            attention_mixer_forward(ctx, attention, &mut kv_caches[attention_index], scratch, position, rotary);
+            attention_index += 1;
+            pending_mlp = Some(layer);
+            layer += 1;
+        }
+    }
+
+    let mlp_of = pending_mlp.take();
+    ops::prepare_with_session(&session, || {
+        if let Some(l) = mlp_of {
+            let Layer::Attention(attention) = &model.layers[l] else { unreachable!() };
+            nvfp4_mlp(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch);
+        }
+        lm_head_forward(ctx, model, scratch);
+        Ok(())
+    })
+    .unwrap();
+    let head = apxinf_cuda::capture(ctx, || {
+        ops::with_session(&session, || {
+            if let Some(l) = mlp_of {
+                let Layer::Attention(attention) = &model.layers[l] else { unreachable!() };
+                nvfp4_mlp(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch);
+            }
+            lm_head_forward(ctx, model, scratch);
+            Ok(())
+        })
+    })
+    .unwrap();
+
+    DecodeGraphs {
+        _session: session,
+        segments,
+        head,
+    }
+}
+
+/// A decode step as graph replays with eager attention mixers in between.
+fn decode_step_replay(
+    ctx: &CudaContext,
+    model: &Model,
+    scratch: &mut Scratch,
+    kv_caches: &mut [KvCache],
+    position: usize,
+    graphs: &DecodeGraphs,
+) {
+    let rotary = ops::rotary_dim(HEAD_DIM, PARTIAL_ROTARY);
+    let mut attention_index = 0usize;
+    let mut segment = 0usize;
+    for (layer, entry) in model.layers.iter().enumerate() {
+        if is_full_attention(layer) {
+            let Layer::Attention(attention) = entry else {
+                unreachable!("is_full_attention marked an attention layer")
+            };
+            attention_mixer_forward(ctx, attention, &mut kv_caches[attention_index], scratch, position, rotary);
+            attention_index += 1;
+        } else if layer % FULL_ATTENTION_INTERVAL == 0 {
+            graphs.segments[segment].replay().unwrap();
+            segment += 1;
+        }
+    }
+    graphs.head.replay().unwrap();
 }
 
 
@@ -2874,6 +3055,11 @@ fn generate_from_a_real_prompt() {
     );
 
     // --- Greedy decode from the first generated token to EOS or the budget. ---
+    // APXINF_QWEN38_DECODE_GRAPH=1 runs the position-independent majority of
+    // each step as CUDA graph replays (capture happens on the first step,
+    // which is also that step's execution); attention mixers stay eager.
+    let use_graphs = std::env::var("APXINF_QWEN38_DECODE_GRAPH").is_ok();
+    let mut decode_graphs: Option<DecodeGraphs> = None;
     let mut generated: Vec<u32> = Vec::new();
     let mut next = first_token;
     let decode_start = Instant::now();
@@ -2891,7 +3077,25 @@ fn generate_from_a_real_prompt() {
         let pos = n_prompt + i;
         set_token(&ctx, &scratch, next);
         set_position(&ctx, &scratch, pos);
-        decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, pos);
+        if use_graphs {
+            match decode_graphs.as_ref() {
+                Some(graphs) => {
+                    decode_step_replay(&ctx, &model, &mut scratch, &mut kv_caches, pos, graphs)
+                }
+                None => {
+                    decode_graphs = Some(capture_decode_graphs(
+                        &ctx,
+                        &model,
+                        &mut scratch,
+                        &gdn_states,
+                        &mut kv_caches,
+                        pos,
+                    ))
+                }
+            }
+        } else {
+            decode_step(&ctx, &model, &mut scratch, &mut gdn_states, &mut kv_caches, pos);
+        }
         ctx.synchronize().unwrap();
         next = scratch.next_token_host();
         steps += 1;
