@@ -8,6 +8,7 @@
 #include "mlp_ops.h"
 
 #include <cuda_bf16.h>
+#include <cuda_fp4.h>
 #include <cuda_fp8.h>
 
 #include <cstdint>
@@ -133,6 +134,15 @@ __global__ void quantize_fp8_kernel(const __nv_bfloat16* __restrict__ input,
 // The activation is read from global rather than staged in shared: staging
 // makes every block re-read the same K bytes, which at N=10240 is 52 MB of
 // redundant traffic -- as much as the weights.
+//
+// Paired conversion (fp8x2 -> half2): one cvt per two elements. Round-00
+// ncu had the scalar-convert version at 58% SM; pairing dropped it to 24.5%
+// (141.7 vs 153 us). fp8->half is exact and the f32 accumulation order is
+// unchanged, so the sum is bit-identical to the scalar version. A second
+// accumulator chain (ILP) was tried on top and rejected: 89.38 vs 89.79
+// ms/tok end to end -- the kernel is latency-bound on loads, not FMA -- and
+// the reordered sum moved generated tokens, breaking the bit-identity gate
+// (round-02).
 __global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
                                 const uint4* __restrict__ activation,
                                 __nv_bfloat16* __restrict__ output, int n,
@@ -147,14 +157,18 @@ __global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
   for (int index = lane; index < k_vectors; index += 32) {
     const uint4 w = weight_row[index];
     const uint4 a = activation[index];
-    const __nv_fp8_storage_t* wb =
-        reinterpret_cast<const __nv_fp8_storage_t*>(&w);
-    const __nv_fp8_storage_t* ab =
-        reinterpret_cast<const __nv_fp8_storage_t*>(&a);
+    const __nv_fp8x2_storage_t* wp =
+        reinterpret_cast<const __nv_fp8x2_storage_t*>(&w);
+    const __nv_fp8x2_storage_t* ap =
+        reinterpret_cast<const __nv_fp8x2_storage_t*>(&a);
 #pragma unroll
-    for (int element = 0; element < 16; ++element) {
-      sum += __half2float(__nv_cvt_fp8_to_halfraw(wb[element], __NV_E4M3)) *
-             __half2float(__nv_cvt_fp8_to_halfraw(ab[element], __NV_E4M3));
+    for (int pair = 0; pair < 8; ++pair) {
+      const __half2 wh =
+          __half2(__nv_cvt_fp8x2_to_halfraw2(wp[pair], __NV_E4M3));
+      const __half2 ah =
+          __half2(__nv_cvt_fp8x2_to_halfraw2(ap[pair], __NV_E4M3));
+      sum += __low2float(wh) * __low2float(ah);
+      sum += __high2float(wh) * __high2float(ah);
     }
   }
   for (int offset = 16; offset > 0; offset >>= 1) {
@@ -162,11 +176,6 @@ __global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
   }
   if (lane == 0) output[row] = __float2bfloat16(alpha * sum);
 }
-
-// E2M1 magnitudes indexed by the low three bits; bit 3 is the sign.
-__constant__ float kE2M1Table[16] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
 
 __device__ __forceinline__ float from_e4m3(uint8_t code) {
   return __half2float(__nv_cvt_fp8_to_halfraw(code, __NV_E4M3));
@@ -176,6 +185,19 @@ __device__ __forceinline__ float from_e4m3(uint8_t code) {
 //
 // Each uint4 carries 32 FP4 values, which is exactly two scale blocks, so the
 // scale lookup is two loads per vector rather than one per element.
+//
+// FP4 decodes by bit placement, not by table or cvt. sm_110 has no FP4
+// hardware convert: __nv_cvt_fp4x2_to_halfraw2 compiles to a LOP3 sea that
+// left this kernel at 96% SM / 6% memory, 994 us for the down projection
+// (round-01 ncu, 01-gemv-hwcvt.ncu-rep). A __constant__ table per nibble is
+// as bad through a different pipe: 32 divergent constant-cache reads per
+// warp (round-01, 01-gemv-slow.ncu-rep, 4.7 ms).
+//
+// The placement trick: an E2M1 nibble scattered into a binary16 as
+// [sign<<15 | exp<<10..9 | man<<9] reads as the FP4 value scaled by 2^-14,
+// for normals and subnormals both. One shift-mask pair per element plus one
+// exact power-of-two multiply recovers the value; all of it dual-issues as
+// plain ALU.
 __global__ void nvfp4_gemv_kernel(const uint4* __restrict__ weight,
                                   const uint8_t* __restrict__ weight_scales,
                                   const uint4* __restrict__ activation,
@@ -191,6 +213,14 @@ __global__ void nvfp4_gemv_kernel(const uint4* __restrict__ weight,
   const uint8_t* weight_scale_row =
       weight_scales + (long long)row * k_vectors * 2;
 
+  // Both nibbles of one packed byte, placed into a half2. Exact.
+  const auto pair_to_half2 = [](uint32_t byte) -> __half2 {
+    const uint32_t bits = ((byte & 0x07u) << 9) | ((byte & 0x08u) << 12) |
+                          ((byte & 0x70u) << 21) | ((byte & 0x80u) << 24);
+    return *reinterpret_cast<const __half2*>(&bits);
+  };
+  constexpr float kRescale = 16384.0f;  // 2^14, exact
+
   float sum = 0.0f;
   for (int index = lane; index < k_vectors; index += 32) {
     const uint4 w = weight_row[index];
@@ -204,10 +234,16 @@ __global__ void nvfp4_gemv_kernel(const uint4* __restrict__ weight,
 #pragma unroll
       for (int byte = 0; byte < 8; ++byte) {
         const int offset = block * 8 + byte;
-        const uint8_t wpair = wb[offset];
-        const uint8_t apair = ab[offset];
-        accumulator += kE2M1Table[wpair & 0x0F] * kE2M1Table[apair & 0x0F];
-        accumulator += kE2M1Table[wpair >> 4] * kE2M1Table[apair >> 4];
+        const __half2 wh = pair_to_half2(wb[offset]);
+        const __half2 ah = pair_to_half2(ab[offset]);
+        // One 2^28 rescale per product pair keeps the f32 accumulation
+        // order of the reference kernel: (w*2^-14)*(a*2^-14)*2^28 == w*a
+        // exactly, because every intermediate is a power-of-two scaling
+        // of an exactly-representable value.
+        accumulator = fmaf(__low2float(wh) * __low2float(ah),
+                           kRescale * kRescale, accumulator);
+        accumulator = fmaf(__high2float(wh) * __high2float(ah),
+                           kRescale * kRescale, accumulator);
       }
       const int scale_index = index * 2 + block;
       sum += accumulator * from_e4m3(weight_scale_row[scale_index]) *

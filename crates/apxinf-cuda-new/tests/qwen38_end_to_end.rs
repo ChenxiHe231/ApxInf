@@ -90,9 +90,15 @@ fn scalar(tensors: &HashMap<String, Tensor>, name: &str) -> f32 {
 
 /// An NVFP4 weight with its relaid-out scales and the alpha folding both
 /// per-tensor scales.
+///
+/// Scales are kept in both layouts: the GEMM atom layout for prefill's
+/// block-scaled GEMM, and the checkpoint's row-major grid for the decode
+/// GEMV, which indexes scales directly. The duplicate costs N*K/16 bytes
+/// per weight (~1.1 GB across the model) and saves a relayout per step.
 struct Nvfp4Weight {
     packed: Tensor,
     scales: Tensor,
+    row_scales: Tensor,
     input_scale: f32,
     alpha: f32,
 }
@@ -128,6 +134,7 @@ fn load_nvfp4(
     Nvfp4Weight {
         packed,
         scales: relayout(ctx, &checkpoint_scales, n, k),
+        row_scales: checkpoint_scales,
         input_scale,
         alpha: input_scale * weight_scale_2,
     }
@@ -177,6 +184,7 @@ fn load_fused_gate_up(
     Nvfp4Weight {
         packed,
         scales: relayout(ctx, &checkpoint_scales, 2 * INTERMEDIATE, HIDDEN),
+        row_scales: checkpoint_scales,
         input_scale,
         alpha: input_scale * weight_scale_2,
     }
@@ -584,6 +592,13 @@ fn fp8_projection_prequantized(
 /// residual = residual + MLP(RMSNorm(residual)), with the residual being the
 /// running hidden state. Taking it from `scratch` rather than as a separate
 /// argument keeps the borrow disjoint.
+///
+/// M=1 stays on the block-scaled GEMM. Round-01 swapped these for the NVFP4
+/// GEMV and lost: the GEMM's 13.9% occupancy is not the number that matters
+/// at M=1 -- it streams weights at 191-202 GB/s, while every GEMV variant
+/// tried (table / hw-cvt / bit-placement) is decode-ALU-bound at <=127 GB/s
+/// (ncu/01-gemv-*.ncu-rep). FP4 nibble decode costs more per byte than the
+/// tensor core path's TMA feed.
 fn nvfp4_mlp(
     ctx: &CudaContext,
     gate_up: &Nvfp4Weight,
