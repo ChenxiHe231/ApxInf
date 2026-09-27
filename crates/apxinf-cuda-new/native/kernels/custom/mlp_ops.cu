@@ -117,24 +117,10 @@ __global__ void add_kernel(const __nv_bfloat16* __restrict__ addend,
 
 // E4M3 with bias 7, saturating at +-448. Values are pre-divided by the
 // per-tensor scale, so the representable range maps onto the calibrated one.
+// The hardware SATFINITE convert keeps subnormals (the old frexpf ladder
+// flushed them to signed zero -- vLLM parity defect D3, report 64).
 __device__ __forceinline__ uint8_t to_e4m3(float value) {
-  const uint8_t sign = value < 0.0f ? 0x80 : 0x00;
-  float magnitude = fabsf(value);
-  if (!(magnitude > 0.0f)) return sign;
-  if (magnitude >= 448.0f) return sign | 0x7E;  // saturate, never NaN
-  int exponent;
-  float mantissa = frexpf(magnitude, &exponent);
-  mantissa *= 2.0f;
-  exponent -= 1;
-  int biased = exponent + 7;
-  int fraction = __float2int_rn((mantissa - 1.0f) * 8.0f);
-  if (fraction > 7) {
-    fraction = 0;
-    ++biased;
-  }
-  if (biased <= 0) return sign;                 // flush subnormals to zero
-  if (biased > 15) return sign | 0x7E;
-  return sign | static_cast<uint8_t>((biased << 3) | fraction);
+  return __nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E4M3);
 }
 
 // Eight elements per thread, 16-byte input vectors and 8-byte output
@@ -163,22 +149,11 @@ __global__ void quantize_fp8_kernel(const __nv_bfloat16* __restrict__ input,
   }
 }
 
+// Same conversion as to_e4m3; kept as a separate name so the vector kernel's
+// dispatch identity survives (it used to be a bit-twiddling variant with the
+// same D3 subnormal flush).
 __device__ __forceinline__ uint8_t to_e4m3_bits(float value) {
-  const uint8_t sign = value < 0.0f ? 0x80 : 0;
-  const float magnitude = fabsf(value);
-  if (!(magnitude > 0.0f)) return sign;
-  if (magnitude >= 448.0f) return sign | 0x7e;
-  const uint32_t bits = __float_as_uint(magnitude);
-  const uint32_t mantissa = bits & 0x7fffff;
-  int biased = static_cast<int>((bits >> 23) & 255) - 120;
-  uint32_t fraction = (mantissa + 0x7ffff + ((mantissa >> 20) & 1)) >> 20;
-  if (fraction == 8) {
-    fraction = 0;
-    ++biased;
-  }
-  if (biased <= 0) return sign;
-  if (biased > 15) return sign | 0x7e;
-  return sign | static_cast<uint8_t>((biased << 3) | fraction);
+  return to_e4m3(value);
 }
 
 __global__ void quantize_fp8_vector_kernel(const uint4* __restrict__ input,
@@ -198,12 +173,9 @@ __global__ void quantize_fp8_vector_kernel(const uint4* __restrict__ input,
 }
 
 __device__ __forceinline__ uint16_t to_e4m3_native_pair(float low, float high) {
-  uint16_t packed = __nv_cvt_float2_to_fp8x2(make_float2(low, high), __NV_SATFINITE, __NV_E4M3);
-  if (!(fabsf(low) >= 0.01513671875f))
-    packed = (packed & 0xff00) | (low < 0.0f ? 0x80 : 0);
-  if (!(fabsf(high) >= 0.01513671875f))
-    packed = (packed & 0x00ff) | (high < 0.0f ? 0x8000 : 0);
-  return packed;
+  // Bare SATFINITE convert: the old small-magnitude zeroing branch replicated
+  // the D3 subnormal flush (report 64); the hardware keeps subnormals.
+  return __nv_cvt_float2_to_fp8x2(make_float2(low, high), __NV_SATFINITE, __NV_E4M3);
 }
 
 __global__ void quantize_fp8_native_pair_kernel(const uint4* __restrict__ input,
