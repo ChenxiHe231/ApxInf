@@ -8,6 +8,7 @@
 #include "mlp_ops.h"
 
 #include <cuda_bf16.h>
+#include <cuda_fp4.h>
 #include <cuda_fp8.h>
 
 #include <cstdint>
@@ -85,13 +86,33 @@ __global__ void swiglu_kernel(const __nv_bfloat16* __restrict__ fused,
   output[index] = __float2bfloat16(silu(gate) * up);
 }
 
+// Eight elements per thread through 16-byte vectors. One bf16 per thread
+// (round-05 nsys: 46.7 ms of a 874 ms prefill across 130 calls) leaves the
+// kernel launch-and-index bound; the tail elements run scalar so any count
+// works. Same per-element arithmetic, bit-identical.
 __global__ void add_kernel(const __nv_bfloat16* __restrict__ addend,
                            __nv_bfloat16* __restrict__ accumulator,
                            long long count) {
+  const long long vectors = count / 8;
   const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-  if (index >= count) return;
-  accumulator[index] = __float2bfloat16(__bfloat162float(accumulator[index]) +
-                                        __bfloat162float(addend[index]));
+  if (index < vectors) {
+    uint4 a = reinterpret_cast<const uint4*>(addend)[index];
+    uint4 c = reinterpret_cast<uint4*>(accumulator)[index];
+    const __nv_bfloat16* av = reinterpret_cast<const __nv_bfloat16*>(&a);
+    __nv_bfloat16* cv = reinterpret_cast<__nv_bfloat16*>(&c);
+#pragma unroll
+    for (int element = 0; element < 8; ++element) {
+      cv[element] = __float2bfloat16(__bfloat162float(cv[element]) +
+                                     __bfloat162float(av[element]));
+    }
+    reinterpret_cast<uint4*>(accumulator)[index] = c;
+    return;
+  }
+  const long long tail = vectors * 8 + (index - vectors);
+  if (tail < count) {
+    accumulator[tail] = __float2bfloat16(__bfloat162float(accumulator[tail]) +
+                                         __bfloat162float(addend[tail]));
+  }
 }
 
 // E4M3 with bias 7, saturating at +-448. Values are pre-divided by the
@@ -116,12 +137,30 @@ __device__ __forceinline__ uint8_t to_e4m3(float value) {
   return sign | static_cast<uint8_t>((biased << 3) | fraction);
 }
 
+// Eight elements per thread, 16-byte input vectors and 8-byte output
+// stores. Same to_e4m3 per element in element order; bit-identical.
 __global__ void quantize_fp8_kernel(const __nv_bfloat16* __restrict__ input,
                                     uint8_t* __restrict__ output,
                                     long long count, float inverse_scale) {
+  const long long vectors = count / 8;
   const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
-  if (index >= count) return;
-  output[index] = to_e4m3(__bfloat162float(input[index]) * inverse_scale);
+  if (index < vectors) {
+    const uint4 in = reinterpret_cast<const uint4*>(input)[index];
+    const __nv_bfloat16* iv = reinterpret_cast<const __nv_bfloat16*>(&in);
+    uint64_t packed = 0;
+#pragma unroll
+    for (int element = 0; element < 8; ++element) {
+      packed |= static_cast<uint64_t>(
+                    to_e4m3(__bfloat162float(iv[element]) * inverse_scale))
+                << (8 * element);
+    }
+    reinterpret_cast<uint64_t*>(output)[index] = packed;
+    return;
+  }
+  const long long tail = vectors * 8 + (index - vectors);
+  if (tail < count) {
+    output[tail] = to_e4m3(__bfloat162float(input[tail]) * inverse_scale);
+  }
 }
 
 __device__ __forceinline__ uint8_t to_e4m3_bits(float value) {
@@ -219,6 +258,20 @@ bool vector_elementwise_enabled(const void* source, const void* destination,
 // The activation is read from global rather than staged in shared: staging
 // makes every block re-read the same K bytes, which at N=10240 is 52 MB of
 // redundant traffic -- as much as the weights.
+//
+// Paired conversion (fp8x2 -> half2): one cvt per two elements. Round-00
+// ncu had the scalar-convert version at 58% SM; pairing dropped it to 24.5%
+// (141.7 vs 153 us). fp8->half is exact and the f32 accumulation order is
+// unchanged, so the sum is bit-identical to the scalar version. A second
+// accumulator chain (ILP) was tried on top and rejected: 89.38 vs 89.79
+// ms/tok end to end -- the kernel is latency-bound on loads, not FMA -- and
+// the reordered sum moved generated tokens, breaking the bit-identity gate
+// (round-02).
+//
+// Software prefetch instead: issue the next iteration's two loads before
+// converting the current one, so the load latency overlaps the 32 FMAs.
+// The values and their accumulation order are untouched -- only the issue
+// distance moves -- so this stays bit-identical.
 __global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
                                 const uint4* __restrict__ activation,
                                 __nv_bfloat16* __restrict__ output, int n,
@@ -230,18 +283,33 @@ __global__ void fp8_gemv_kernel(const uint4* __restrict__ weight,
 
   const uint4* weight_row = weight + (long long)row * k_vectors;
   float sum = 0.0f;
-  for (int index = lane; index < k_vectors; index += 32) {
-    const uint4 w = weight_row[index];
-    const uint4 a = activation[index];
-    const __nv_fp8_storage_t* wb =
-        reinterpret_cast<const __nv_fp8_storage_t*>(&w);
-    const __nv_fp8_storage_t* ab =
-        reinterpret_cast<const __nv_fp8_storage_t*>(&a);
-#pragma unroll
-    for (int element = 0; element < 16; ++element) {
-      sum += __half2float(__nv_cvt_fp8_to_halfraw(wb[element], __NV_E4M3)) *
-             __half2float(__nv_cvt_fp8_to_halfraw(ab[element], __NV_E4M3));
+  int index = lane;
+  uint4 w = index < k_vectors ? weight_row[index] : uint4{0, 0, 0, 0};
+  uint4 a = index < k_vectors ? activation[index] : uint4{0, 0, 0, 0};
+  while (index < k_vectors) {
+    const int next = index + 32;
+    uint4 w_next{0, 0, 0, 0};
+    uint4 a_next{0, 0, 0, 0};
+    if (next < k_vectors) {
+      w_next = weight_row[next];
+      a_next = activation[next];
     }
+    const __nv_fp8x2_storage_t* wp =
+        reinterpret_cast<const __nv_fp8x2_storage_t*>(&w);
+    const __nv_fp8x2_storage_t* ap =
+        reinterpret_cast<const __nv_fp8x2_storage_t*>(&a);
+#pragma unroll
+    for (int pair = 0; pair < 8; ++pair) {
+      const __half2 wh =
+          __half2(__nv_cvt_fp8x2_to_halfraw2(wp[pair], __NV_E4M3));
+      const __half2 ah =
+          __half2(__nv_cvt_fp8x2_to_halfraw2(ap[pair], __NV_E4M3));
+      sum += __low2float(wh) * __low2float(ah);
+      sum += __high2float(wh) * __high2float(ah);
+    }
+    w = w_next;
+    a = a_next;
+    index = next;
   }
   for (int offset = 16; offset > 0; offset >>= 1) {
     sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
@@ -299,6 +367,19 @@ __device__ __forceinline__ int unpack_e2m1_int8(unsigned selector) {
 //
 // Each uint4 carries 32 FP4 values, which is exactly two scale blocks, so the
 // scale lookup is two loads per vector rather than one per element.
+//
+// FP4 decodes by bit placement, not by table or cvt. sm_110 has no FP4
+// hardware convert: __nv_cvt_fp4x2_to_halfraw2 compiles to a LOP3 sea that
+// left this kernel at 96% SM / 6% memory, 994 us for the down projection
+// (round-01 ncu, 01-gemv-hwcvt.ncu-rep). A __constant__ table per nibble is
+// as bad through a different pipe: 32 divergent constant-cache reads per
+// warp (round-01, 01-gemv-slow.ncu-rep, 4.7 ms).
+//
+// The placement trick: an E2M1 nibble scattered into a binary16 as
+// [sign<<15 | exp<<10..9 | man<<9] reads as the FP4 value scaled by 2^-14,
+// for normals and subnormals both. One shift-mask pair per element plus one
+// exact power-of-two multiply recovers the value; all of it dual-issues as
+// plain ALU.
 __global__ void nvfp4_gemv_kernel(const uint4* __restrict__ weight,
                                   const uint8_t* __restrict__ weight_scales,
                                   const uint4* __restrict__ activation,
@@ -314,6 +395,14 @@ __global__ void nvfp4_gemv_kernel(const uint4* __restrict__ weight,
   const uint8_t* weight_scale_row =
       weight_scales + (long long)row * k_vectors * 2;
 
+  // Both nibbles of one packed byte, placed into a half2. Exact.
+  const auto pair_to_half2 = [](uint32_t byte) -> __half2 {
+    const uint32_t bits = ((byte & 0x07u) << 9) | ((byte & 0x08u) << 12) |
+                          ((byte & 0x70u) << 21) | ((byte & 0x80u) << 24);
+    return *reinterpret_cast<const __half2*>(&bits);
+  };
+  constexpr float kRescale = 16384.0f;  // 2^14, exact
+
   float sum = 0.0f;
   for (int index = lane; index < k_vectors; index += 32) {
     const uint4 w = weight_row[index];
@@ -327,10 +416,16 @@ __global__ void nvfp4_gemv_kernel(const uint4* __restrict__ weight,
 #pragma unroll
       for (int byte = 0; byte < 8; ++byte) {
         const int offset = block * 8 + byte;
-        const uint8_t wpair = wb[offset];
-        const uint8_t apair = ab[offset];
-        accumulator += kE2M1Table[wpair & 0x0F] * kE2M1Table[apair & 0x0F];
-        accumulator += kE2M1Table[wpair >> 4] * kE2M1Table[apair >> 4];
+        const __half2 wh = pair_to_half2(wb[offset]);
+        const __half2 ah = pair_to_half2(ab[offset]);
+        // One 2^28 rescale per product pair keeps the f32 accumulation
+        // order of the reference kernel: (w*2^-14)*(a*2^-14)*2^28 == w*a
+        // exactly, because every intermediate is a power-of-two scaling
+        // of an exactly-representable value.
+        accumulator = fmaf(__low2float(wh) * __low2float(ah),
+                           kRescale * kRescale, accumulator);
+        accumulator = fmaf(__high2float(wh) * __high2float(ah),
+                           kRescale * kRescale, accumulator);
       }
       const int scale_index = index * 2 + block;
       sum += accumulator * from_e4m3(weight_scale_row[scale_index]) *
@@ -454,7 +549,9 @@ int quantize_fp8_per_tensor(const void* input, void* output, long long count,
         static_cast<const uint4*>(input), static_cast<uint2*>(output), vectors, 1.0f / input_scale);
     return cudaGetLastError() == cudaSuccess ? 0 : -2;
   }
-  const long long blocks = (count + threads - 1) / threads;
+  // One thread per 8-element vector plus one per tail element.
+  const long long work = count / 8 + count % 8;
+  const long long blocks = (work + threads - 1) / threads;
   quantize_fp8_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input), static_cast<uint8_t*>(output),
       count, 1.0f / input_scale);
@@ -495,7 +592,9 @@ int add_bf16(const void* addend, void* accumulator, long long count,
         static_cast<const uint4*>(addend), static_cast<uint4*>(accumulator), vectors);
     return cudaGetLastError() == cudaSuccess ? 0 : -2;
   }
-  const long long blocks = (count + threads - 1) / threads;
+  // One thread per 8-element vector plus one per tail element.
+  const long long work = count / 8 + count % 8;
+  const long long blocks = (work + threads - 1) / threads;
   add_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(addend),
       static_cast<__nv_bfloat16*>(accumulator), count);
