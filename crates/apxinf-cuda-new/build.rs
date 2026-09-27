@@ -277,6 +277,7 @@ fn main() {
         fa2_sources.extend(
             [
                 "fa2.cu",
+                "fa2_decode_splitkv.cu",
                 "flash_attn/flash_fwd_hdim128_bf16_sm80.cu",
                 "flash_attn/flash_fwd_hdim256_bf16_sm80.cu",
             ]

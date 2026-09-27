@@ -13,6 +13,12 @@ extern "C" {
    has not yet been checked against a reference engine running this
    checkpoint. */
 
+apxinf_status_t apxinf_gdn_conv_prepare_flashinfer(
+    const void* input, const void* weight, void* window, void* q_out,
+    void* k_out, void* v_out, const void* decay, void* alpha,
+    int64_t tokens, int64_t k_heads, int64_t v_heads, float epsilon,
+    apxinf_cuda_stream_t stream);
+
 apxinf_status_t apxinf_gdn_recurrent_step(
     void* state, const void* q, const void* k, const void* v,
     const void* decay, const void* beta, void* output, int64_t v_heads,
@@ -63,6 +69,11 @@ apxinf_status_t apxinf_gdn_causal_conv_forward(
 apxinf_status_t apxinf_gdn_decay_and_beta_seq(
     const void* a, const void* b, const void* a_log, const void* dt_bias,
     void* decay, void* beta, int64_t tokens, int64_t heads,
+    apxinf_cuda_stream_t stream);
+
+apxinf_status_t apxinf_gdn_gated_norm_seq_f16(
+    const void* input, const void* gate, const void* weight, void* output,
+    int64_t tokens, int64_t heads, int64_t head_dim, float epsilon,
     apxinf_cuda_stream_t stream);
 
 apxinf_status_t apxinf_gdn_gated_norm_seq(

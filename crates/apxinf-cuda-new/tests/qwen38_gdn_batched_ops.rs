@@ -77,6 +77,70 @@ fn slice_of(tensor: &Tensor, elements: usize, dims: Vec<usize>, dtype: DType) ->
         .unwrap()
 }
 
+#[test]
+#[ignore = "requires a GPU"]
+fn fused_conv_prepare_matches_separate_and_continues_decode() {
+    let ctx = CudaContext::new(0).unwrap();
+    let read = |tensor: &Tensor| {
+        let buffer = CudaBuffer::from_tensor(tensor).unwrap();
+        let mut bytes = vec![0u8; buffer.len()];
+        buffer.copy_to_host(&mut bytes).unwrap();
+        assert!(!bytes.is_empty());
+        bytes
+    };
+    for (k_heads, v_heads) in [(1usize, 1usize), (16, 48), (16, 64)] {
+        let channels = (2 * k_heads + v_heads) * 128;
+        for tokens in [1usize, 3, 4, 63, 64, 65, 129, 2048] {
+            let values: Vec<f32> = (0..tokens * channels)
+                .map(|index| (index as f32 * 0.023).sin() * 3.5).collect();
+            let weights: Vec<f32> = (0..channels * 4)
+                .map(|index| (index as f32 * 0.043).cos() * 0.31).collect();
+            let input = upload_bf16(&ctx, &values, vec![tokens, channels]);
+            let weight = upload_bf16(&ctx, &weights, vec![channels, 4]);
+            let convolved = zeros(&ctx, vec![tokens, channels], DType::BF16);
+            let decay = upload_f32(&ctx, &vec![-0.125; tokens * v_heads], vec![tokens, v_heads]);
+            let reference = [
+                zeros(&ctx, vec![tokens, k_heads, 128], DType::F16),
+                zeros(&ctx, vec![tokens, k_heads, 128], DType::F16),
+                zeros(&ctx, vec![tokens, v_heads, 128], DType::F16),
+                zeros(&ctx, vec![tokens, v_heads], DType::F32),
+                zeros(&ctx, vec![channels, 4], DType::F32),
+            ];
+            let candidate: Vec<Tensor> = reference.iter().enumerate().map(|(index, tensor)| {
+                let output = zeros(&ctx, tensor.shape().dims().to_vec(), tensor.dtype());
+                let buffer = CudaBuffer::from_tensor(&output).unwrap();
+                buffer.copy_from_host(&vec![0xaa + index as u8; buffer.len()]).unwrap();
+                output
+            }).collect();
+            ops::gdn_causal_conv_forward(&ctx, &input, &weight, &convolved,
+                Some(&reference[4]), tokens, channels, 4).unwrap();
+            ops::gdn_prepare_flashinfer(&ctx, &convolved, &reference[0], &reference[1],
+                &reference[2], &decay, &reference[3], tokens, channels, k_heads, v_heads, 128, 1e-6).unwrap();
+            ops::gdn_conv_prepare_flashinfer(&ctx, &input, &weight, &candidate[4],
+                &candidate[0], &candidate[1], &candidate[2], &decay, &candidate[3],
+                tokens, k_heads, v_heads, 1e-6).unwrap();
+            ctx.synchronize().unwrap();
+            for (index, (expected, actual)) in reference.iter().zip(&candidate).enumerate() {
+                assert_eq!(read(expected), read(actual), "tokens={tokens}, heads={k_heads}/{v_heads}, output={index}");
+                if index < 3 {
+                    assert!(read(actual).chunks_exact(2).all(|bytes|
+                        half::f16::from_bits(u16::from_le_bytes([bytes[0], bytes[1]])).is_finite()));
+                } else {
+                    assert!(read_f32(actual).iter().all(|value| value.is_finite()));
+                }
+            }
+            let next = upload_bf16(&ctx, &values[..channels], vec![channels]);
+            let original_out = zeros(&ctx, vec![channels], DType::BF16);
+            let fused_out = zeros(&ctx, vec![channels], DType::BF16);
+            ops::gdn_causal_conv_step(&ctx, &reference[4], &next, &weight, &original_out).unwrap();
+            ops::gdn_causal_conv_step(&ctx, &candidate[4], &next, &weight, &fused_out).unwrap();
+            ctx.synchronize().unwrap();
+            assert_eq!(read(&original_out), read(&fused_out));
+            assert_eq!(read(&reference[4]), read(&candidate[4]));
+        }
+    }
+}
+
 fn worst_relative(produced: &[f32], expected: &[f32]) -> f32 {
     assert_eq!(produced.len(), expected.len());
     let mut worst = 0.0f32;
@@ -86,6 +150,99 @@ fn worst_relative(produced: &[f32], expected: &[f32]) -> f32 {
         worst = worst.max((got - want).abs() / want.abs().max(1e-2));
     }
     worst
+}
+
+#[test]
+#[ignore = "requires a GPU"]
+fn fused_fp16_gated_norm_matches_explicit_bf16_conversion() {
+    let ctx = CudaContext::new(0).unwrap();
+    let heads = 48;
+    let head_dim = 128;
+    let weight = upload_bf16(&ctx, &vec![1.0; head_dim], vec![head_dim]);
+    for tokens in [1, 3, 63, 64, 65, 129] {
+        let dims = vec![tokens, heads, head_dim];
+        let count = tokens * heads * head_dim;
+        let bytes: Vec<u8> = (0..count)
+            .flat_map(|index| {
+                let raw = (index % 65536) as u16;
+                let finite = if raw & 0x7c00 == 0x7c00 { 0 } else { raw };
+                finite.to_le_bytes()
+            })
+            .collect();
+        let buffer = CudaBuffer::alloc(bytes.len(), ctx.device_id()).unwrap();
+        buffer.copy_from_host(&bytes).unwrap();
+        let input = buffer.as_tensor(Shape::new(dims.clone()), DType::F16).unwrap();
+        let gate_values: Vec<f32> = (0..count)
+            .map(|index| ((index * 7919 % 65536) as f32 - 32768.0) / 4096.0)
+            .collect();
+        let gate = upload_bf16(&ctx, &gate_values, dims.clone());
+        let wide = zeros(&ctx, dims.clone(), DType::BF16);
+        let expected = zeros(&ctx, dims.clone(), DType::BF16);
+        let actual = zeros(&ctx, dims, DType::BF16);
+        CudaBuffer::from_tensor(&expected).unwrap().copy_from_host(&vec![0xaa; count * 2]).unwrap();
+        CudaBuffer::from_tensor(&actual).unwrap().copy_from_host(&vec![0x55; count * 2]).unwrap();
+        ops::convert_f16_to_bf16(&ctx, &input, &wide, count).unwrap();
+        ops::gdn_gated_norm_seq(&ctx, &wide, &gate, &weight, &expected, tokens, heads, head_dim, 1e-6).unwrap();
+        ops::gdn_gated_norm_seq(&ctx, &input, &gate, &weight, &actual, tokens, heads, head_dim, 1e-6).unwrap();
+        ctx.synchronize().unwrap();
+        let produced = read_bf16(&actual);
+        assert_eq!(produced.len(), count);
+        assert!(produced.iter().all(|value| value.is_finite()));
+        assert_eq!(produced, read_bf16(&expected), "tokens={tokens}");
+        let wrong_type = zeros(&ctx, vec![tokens, heads, head_dim], DType::F32);
+        assert!(ops::gdn_gated_norm_seq(&ctx, &wrong_type, &gate, &weight, &actual, tokens, heads, head_dim, 1e-6).is_err());
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with --test-threads=1"]
+fn preserved_warp_prepare_matches_four_warp_reduction() {
+    let ctx = CudaContext::new(0).unwrap();
+    let key_heads = 16;
+    let value_heads = 48;
+    let dim = 128;
+    let row_width = (2 * key_heads + value_heads) * dim;
+    let previous = std::env::var_os("APXINF_GDN_PREPARE_PARALLEL");
+    for tokens in [1, 3, 63, 64, 65, 129] {
+        let values: Vec<f32> = (0..tokens * row_width)
+            .map(|index| ((index * 7919 + 37) % 65536) as f32 / 4096.0 - 8.0)
+            .collect();
+        let fused = upload_bf16(&ctx, &values, vec![tokens, row_width]);
+        let decay = upload_f32(&ctx, &vec![-0.5; tokens * value_heads], vec![tokens, value_heads]);
+        let make_outputs = || [
+            zeros(&ctx, vec![tokens, key_heads, dim], DType::F16),
+            zeros(&ctx, vec![tokens, key_heads, dim], DType::F16),
+            zeros(&ctx, vec![tokens, value_heads, dim], DType::F16),
+            zeros(&ctx, vec![tokens, value_heads], DType::F32),
+        ];
+        let baseline = make_outputs();
+        let candidate = make_outputs();
+        for (variant, outputs) in [("0", &baseline), ("5", &candidate)] {
+            std::env::set_var("APXINF_GDN_PREPARE_PARALLEL", variant);
+            for output in outputs {
+                let storage = CudaBuffer::from_tensor(output).unwrap();
+                storage.copy_from_host(&vec![if variant == "0" { 0xaa } else { 0x55 }; storage.len()]).unwrap();
+            }
+            ops::gdn_prepare_flashinfer(&ctx, &fused, &outputs[0], &outputs[1], &outputs[2],
+                &decay, &outputs[3], tokens, row_width, key_heads, value_heads, dim, 1e-6).unwrap();
+        }
+        ctx.synchronize().unwrap();
+        for (expected, actual) in baseline.iter().zip(candidate.iter()) {
+            let first = CudaBuffer::from_tensor(expected).unwrap();
+            let second = CudaBuffer::from_tensor(actual).unwrap();
+            assert!(first.len() > 0);
+            assert_eq!(first.len(), second.len());
+            let mut expected_bytes = vec![0; first.len()];
+            let mut actual_bytes = vec![0; second.len()];
+            first.copy_to_host(&mut expected_bytes).unwrap();
+            second.copy_to_host(&mut actual_bytes).unwrap();
+            assert_eq!(expected_bytes, actual_bytes, "tokens={tokens}");
+        }
+    }
+    match previous {
+        Some(value) => std::env::set_var("APXINF_GDN_PREPARE_PARALLEL", value),
+        None => std::env::remove_var("APXINF_GDN_PREPARE_PARALLEL"),
+    }
 }
 
 const CHANNELS: usize = 10240;
@@ -114,7 +271,7 @@ fn batched_conv_matches_the_single_token_path() {
 
     // 65 deliberately straddles a chunk boundary and is not a multiple of any
     // natural tiling, so an off-by-one at the tail shows up.
-    for &tokens in &[1usize, 2, 4, 5, 63, 64, 65, 129] {
+    for &tokens in &[1usize, 2, 4, 5, 63, 64, 65, 129, 2049] {
         let (input, weight) = conv_inputs(tokens);
         let input_device = upload_bf16(&ctx, &input, vec![tokens, CHANNELS]);
         let weight_device = upload_bf16(&ctx, &weight, vec![CHANNELS, CONV_WIDTH]);
@@ -163,6 +320,7 @@ fn batched_conv_matches_the_single_token_path() {
         ctx.synchronize().unwrap();
 
         let worst = worst_relative(&read_bf16(&batched_out), &read_bf16(&stepped_out));
+        assert_eq!(read_bf16(&batched_out), read_bf16(&stepped_out), "conv bit equality, tokens={tokens}");
         println!("tokens={tokens:3}  conv output worst relative: {worst:.6}");
         // Both paths accumulate in f32 and round once to BF16, so they should
         // agree to the last bit; the tolerance only allows for the two loops
@@ -176,6 +334,7 @@ fn batched_conv_matches_the_single_token_path() {
         // wrong window still breaks the very next decode step.
         let window_worst =
             worst_relative(&read_f32(&batched_window), &read_f32(&stepped_window));
+        assert_eq!(read_f32(&batched_window), read_f32(&stepped_window), "conv state equality, tokens={tokens}");
         println!("tokens={tokens:3}  conv window  worst relative: {window_worst:.6}");
         assert!(
             window_worst < 1e-3,
@@ -361,6 +520,7 @@ fn sequence_gated_norm_matches_the_per_token_kernel() {
     ctx.synchronize().unwrap();
 
     let worst = worst_relative(&read_bf16(&output), &read_bf16(&stepped));
+    assert_eq!(read_bf16(&output), read_bf16(&stepped), "norm bit equality");
     println!("gated norm worst relative: {worst:.6}");
     assert!(worst < 1e-3, "sequence gated norm diverged: {worst}");
 }

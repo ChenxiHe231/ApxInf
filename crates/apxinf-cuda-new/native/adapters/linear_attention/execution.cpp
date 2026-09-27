@@ -122,6 +122,28 @@ extern "C" apxinf_status_t apxinf_gdn_prepare_flashinfer(
   });
 }
 
+extern "C" apxinf_status_t apxinf_gdn_conv_prepare_flashinfer(
+    const void* input, const void* weight, void* window, void* q_out,
+    void* k_out, void* v_out, const void* decay, void* alpha,
+    int64_t tokens, int64_t k_heads, int64_t v_heads, float epsilon,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || weight == nullptr || window == nullptr ||
+        q_out == nullptr || k_out == nullptr || v_out == nullptr ||
+        decay == nullptr || alpha == nullptr || !extent(tokens) ||
+        !extent(k_heads) || !extent(v_heads)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid fused GDN convolution preparation arguments");
+    }
+    check(apxinf::cuda::gdn_ops::gdn_conv_prepare_flashinfer(
+              input, weight, window, q_out, k_out, v_out, decay, alpha,
+              static_cast<int>(tokens), static_cast<int>(k_heads),
+              static_cast<int>(v_heads), epsilon,
+              static_cast<cudaStream_t>(stream)),
+          "fused GDN convolution preparation");
+  });
+}
+
 extern "C" apxinf_status_t apxinf_flashinfer_gdn_prefill(
     const void* q, const void* k, const void* v, void* out,
     const void* gate_log, const void* beta, const void* cu_seqlens,
@@ -209,6 +231,25 @@ extern "C" apxinf_status_t apxinf_gdn_gated_norm_seq(
               static_cast<int>(heads), static_cast<int>(head_dim), epsilon,
               static_cast<cudaStream_t>(stream)),
           "GDN sequence gated norm");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_gdn_gated_norm_seq_f16(
+    const void* input, const void* gate, const void* weight, void* output,
+    int64_t tokens, int64_t heads, int64_t head_dim, float epsilon,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || gate == nullptr || weight == nullptr ||
+        output == nullptr || !extent(tokens) || !extent(heads) ||
+        !extent(head_dim)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid GDN FP16 sequence gated norm arguments");
+    }
+    check(apxinf::cuda::gdn_ops::gdn_gated_norm_seq_f16(
+              input, gate, weight, output, static_cast<int>(tokens),
+              static_cast<int>(heads), static_cast<int>(head_dim), epsilon,
+              static_cast<cudaStream_t>(stream)),
+          "GDN FP16 sequence gated norm");
   });
 }
 

@@ -225,6 +225,7 @@ pub fn gdn_decay_and_beta_seq(
 }
 
 /// Sequence-axis `gdn_gated_norm`. Tensors are `[tokens, heads, head_dim]`.
+/// FP16 inputs are rounded to BF16 before normalization, matching explicit conversion.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_gated_norm_seq(
     ctx: &CudaContext,
@@ -238,12 +239,21 @@ pub fn gdn_gated_norm_seq(
     epsilon: f32,
 ) -> Result<()> {
     let dims = [tokens, heads, head_dim];
-    let input_buffer = tensor_storage(ctx, input, DType::BF16, &dims)?;
+    let input_dtype = input.dtype();
+    if input_dtype != DType::BF16 && input_dtype != DType::F16 {
+        return Err(invalid("GDN sequence gated norm expects BF16 or F16 input"));
+    }
+    let input_buffer = tensor_storage(ctx, input, input_dtype, &dims)?;
     let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
     let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[head_dim])?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
     unsafe {
-        status::check(abi::apxinf_gdn_gated_norm_seq(
+        let launch = if input_dtype == DType::F16 {
+            abi::apxinf_gdn_gated_norm_seq_f16
+        } else {
+            abi::apxinf_gdn_gated_norm_seq
+        };
+        status::check(launch(
             input_buffer.ptr(),
             gate_buffer.ptr(),
             weight_buffer.ptr(),
@@ -600,6 +610,48 @@ pub fn gdn_prepare_flashinfer(
             dim as i64,
             epsilon,
             ctx.stream().handle(),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_conv_prepare_flashinfer(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    window: &Tensor,
+    q_out: &Tensor,
+    k_out: &Tensor,
+    v_out: &Tensor,
+    decay: &Tensor,
+    alpha: &Tensor,
+    tokens: usize,
+    k_heads: usize,
+    v_heads: usize,
+    epsilon: f32,
+) -> Result<()> {
+    let channels = k_heads.checked_mul(2)
+        .and_then(|heads| heads.checked_add(v_heads))
+        .and_then(|heads| heads.checked_mul(128))
+        .ok_or_else(|| invalid("fused GDN channel count overflow"))?;
+    if tokens == 0 || tokens > i32::MAX as usize || k_heads == 0 || v_heads == 0
+        || channels > 536_870_911 || !epsilon.is_finite() || epsilon <= 0.0 {
+        return Err(invalid("invalid fused GDN dimensions or epsilon"));
+    }
+    let input_buffer = tensor_storage(ctx, input, DType::BF16, &[tokens, channels])?;
+    let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[channels, 4])?;
+    let window_buffer = tensor_storage(ctx, window, DType::F32, &[channels, 4])?;
+    let q_buffer = tensor_storage(ctx, q_out, DType::F16, &[tokens, k_heads, 128])?;
+    let k_buffer = tensor_storage(ctx, k_out, DType::F16, &[tokens, k_heads, 128])?;
+    let v_buffer = tensor_storage(ctx, v_out, DType::F16, &[tokens, v_heads, 128])?;
+    let decay_buffer = tensor_storage(ctx, decay, DType::F32, &[tokens, v_heads])?;
+    let alpha_buffer = tensor_storage(ctx, alpha, DType::F32, &[tokens, v_heads])?;
+    unsafe {
+        status::check(abi::apxinf_gdn_conv_prepare_flashinfer(
+            input_buffer.ptr(), weight_buffer.ptr(), window_buffer.ptr(),
+            q_buffer.ptr(), k_buffer.ptr(), v_buffer.ptr(), decay_buffer.ptr(),
+            alpha_buffer.ptr(), tokens as i64, k_heads as i64, v_heads as i64,
+            epsilon, ctx.stream().handle(),
         ))
     }
 }

@@ -34,6 +34,33 @@ bool supports_native_fp8(const Spec& spec) {
          spec.k % 16 == 0 && spec.n % 16 == 0;
 }
 
+bool supports_native_fp4(const Spec& spec) {
+#if CUDART_VERSION >= 12080
+  const char* enabled = std::getenv("APXINF_GEMM_CUBLASLT_NVFP4");
+  return enabled != nullptr && std::strcmp(enabled, "1") == 0 &&
+         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM &&
+         spec.quantization == APXINF_GEMM_QUANT_NVFP4_BLOCK &&
+         spec.a_dtype == APXINF_DTYPE_E2M1_PAIR &&
+         spec.b_dtype == APXINF_DTYPE_E2M1_PAIR &&
+         spec.output_dtype == APXINF_DTYPE_BF16 &&
+         spec.accumulation_dtype == APXINF_DTYPE_F32 &&
+         spec.sf_vec_size == 16 && spec.k % 64 == 0 &&
+         spec.n % 16 == 0 && spec.output_scale_is_unit != 0;
+#else
+  return false;
+#endif
+}
+
+AlignmentRequirements cublaslt_nvfp4_alignment(const Spec&) {
+  AlignmentRequirements requirements{};
+  requirements.a = 32;
+  requirements.b = 32;
+  requirements.a_block_scales = 16;
+  requirements.b_block_scales = 16;
+  requirements.output = 16;
+  return requirements;
+}
+
 AlignmentRequirements vendor_alignment(const Spec&) {
   return {};
 }
@@ -247,6 +274,11 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        kDeviceFeatureNativeFp8, true, false, false, supports_native_fp8,
        cublaslt_alignment, cublaslt_native_fp8_resource_requirements,
        cublaslt_configurations, prepare_cublaslt_native_fp8, launch_cublaslt,
+       destroy_cublaslt},
+      {kProviderCublasLt, 3, 1, "cublasLt-native-nvfp4",
+       kDeviceFeatureCutlassSm100, true, false, false, supports_native_fp4,
+       cublaslt_nvfp4_alignment, cublaslt_native_fp4_resource_requirements,
+       cublaslt_configurations, prepare_cublaslt_native_fp4, launch_cublaslt,
        destroy_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
       {kProviderCutlass, 1, 1, "cutlass-fp8", kDeviceFeatureCutlassSm100,

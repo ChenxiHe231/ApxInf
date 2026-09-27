@@ -65,6 +65,12 @@ int gdn_prepare_flashinfer(const void* fused, void* q_out, void* k_out,
                            int row_width, int k_heads, int v_heads, int dim,
                            float epsilon, cudaStream_t stream);
 
+int gdn_conv_prepare_flashinfer(const void* input, const void* weight,
+                               void* window, void* q_out, void* k_out,
+                               void* v_out, const void* decay, void* alpha,
+                               int tokens, int k_heads, int v_heads,
+                               float epsilon, cudaStream_t stream);
+
 // L2-normalize each head in place; the delta rule needs unit-norm q and k.
 int gdn_l2_normalize_heads(void* data, int heads, int head_dim, float epsilon,
                            cudaStream_t stream);
@@ -83,6 +89,10 @@ int gdn_decay_and_beta_seq(const void* a, const void* b, const void* a_log,
 
 // Sequence-axis gated norm. Tensors are [tokens, heads, head_dim] BF16;
 // `weight` stays [head_dim].
+int gdn_gated_norm_seq_f16(const void* input, const void* gate, const void* weight,
+                          void* output, int tokens, int heads, int head_dim,
+                          float epsilon, cudaStream_t stream);
+
 int gdn_gated_norm_seq(const void* input, const void* gate, const void* weight,
                        void* output, int tokens, int heads, int head_dim,
                        float epsilon, cudaStream_t stream);

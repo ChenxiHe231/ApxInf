@@ -6,6 +6,8 @@
 
 namespace apxinf::cuda::cutlass_ops {
 
+struct Nvfp4GemmExecution;
+
 // Number of tile/cluster configurations exposed to the autotuner.
 int nvfp4_gemm_tactic_count();
 
@@ -30,6 +32,17 @@ int nvfp4_gemm_bf16(const void* a, const void* a_sf, const void* b,
                     const void* b_sf, void* out, void* workspace,
                     size_t workspace_bytes, int m, int n, int k, int sf_vec,
                     float alpha, int tactic, cudaStream_t stream);
+
+// Prepare a fixed-address execution once; subsequent launches only enqueue
+// the already initialized CUTLASS kernel. The execution owns its workspace.
+Nvfp4GemmExecution* nvfp4_gemm_prepare(
+    const void* a, const void* a_sf, const void* b, const void* b_sf,
+    void* out, int m, int n, int k, int sf_vec, float alpha, int tactic,
+    cudaStream_t stream);
+int nvfp4_gemm_launch(Nvfp4GemmExecution* execution);
+void nvfp4_gemm_destroy(Nvfp4GemmExecution* execution);
+size_t nvfp4_gemm_execution_workspace_bytes(
+    const Nvfp4GemmExecution* execution);
 
 // Bytes required for one operand's block-scale buffer in the kernel's atom
 // layout. `rows` is M for the activation and N for the weight.

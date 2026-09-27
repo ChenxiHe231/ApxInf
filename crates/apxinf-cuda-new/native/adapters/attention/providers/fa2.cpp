@@ -1,8 +1,14 @@
 #include "../internal.h"
+#include <cstdlib>
+#include <cstring>
 
 #if defined(APXINF_ATTENTION_FA2)
 
 namespace apxinf::cuda::cutlass_ops {
+
+int fa2_bf16_decode_splitkv(const void* q, const void* k, const void* v,
+                           void* output, void* workspace, int key_tokens,
+                           float softmax_scale, cudaStream_t stream);
 
 int fa2_bf16(const void* q, const void* k, const void* v, void* output,
              void* softmax_lse, int batch, int query_tokens, int key_tokens,
@@ -30,11 +36,26 @@ namespace {
 
 struct Fa2State {
   float* softmax_lse = nullptr;
+  bool splitkv = false;
 };
+
+bool use_decode_splitkv(const Spec& spec) {
+  const char* enabled = std::getenv("APXINF_FA2_DECODE_SPLITKV");
+  return enabled != nullptr && std::strcmp(enabled, "1") == 0 &&
+         spec.dtype == APXINF_DTYPE_BF16 &&
+         spec.output_dtype == APXINF_DTYPE_BF16 && spec.batch == 1 &&
+         spec.query_tokens == 1 && spec.query_heads == 24 &&
+         spec.kv_heads == 4 && spec.head_dim == 256 &&
+         spec.key_tokens >= 128 &&
+         (spec.mask == APXINF_ATTENTION_MASK_NONE ||
+          (spec.mask == APXINF_ATTENTION_MASK_CAUSAL &&
+           spec.query_start == spec.key_tokens - 1));
+}
 
 }  // namespace
 
 size_t fa2_resource_requirements(const Spec& spec) {
+  if (use_decode_splitkv(spec)) return (24 + 5 * 24 * (1 + 256)) * sizeof(float);
   const uint64_t elements = static_cast<uint64_t>(spec.batch) *
                             spec.query_heads * spec.query_tokens;
   if (elements > SIZE_MAX / sizeof(float)) {
@@ -46,6 +67,7 @@ size_t fa2_resource_requirements(const Spec& spec) {
 
 void prepare_fa2(Execution& execution) {
   auto state = std::make_unique<Fa2State>();
+  state->splitkv = use_decode_splitkv(execution.spec);
   const size_t bytes = fa2_resource_requirements(execution.spec);
   if (bytes > execution.resource_limit) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
@@ -61,6 +83,13 @@ cudaError_t launch_fa2(Execution& execution) {
   const auto& spec = execution.spec;
   const auto& bindings = execution.bindings;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
+  if (state->splitkv) {
+    return static_cast<cudaError_t>(
+        apxinf::cuda::cutlass_ops::fa2_bf16_decode_splitkv(
+            bindings.query, bindings.key, bindings.value, bindings.output,
+            state->softmax_lse, static_cast<int>(spec.key_tokens),
+            bindings.scale, stream));
+  }
 #if defined(APXINF_ATTENTION_FA2_E4M3)
   if (spec.dtype == APXINF_DTYPE_F16 &&
       spec.output_dtype == APXINF_DTYPE_E4M3) {

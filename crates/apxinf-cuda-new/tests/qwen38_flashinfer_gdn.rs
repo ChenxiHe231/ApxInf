@@ -92,6 +92,8 @@ fn read_f32(tensor: &Tensor, count: usize) -> Vec<f32> {
 /// Cosine and relative L2 in f64, the pair the acceptance bars are written in.
 fn cosine_rel_l2(got: &[f32], want: &[f32]) -> (f64, f64) {
     assert_eq!(got.len(), want.len());
+    assert!(!got.is_empty());
+    assert!(got.iter().chain(want.iter()).all(|value| value.is_finite()));
     let (mut dot, mut ng, mut nw, mut err) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
     for (a, b) in got.iter().zip(want.iter()) {
         let (a, b) = (*a as f64, *b as f64);
@@ -100,8 +102,9 @@ fn cosine_rel_l2(got: &[f32], want: &[f32]) -> (f64, f64) {
         nw += b * b;
         err += (a - b) * (a - b);
     }
-    let cosine = if ng > 0.0 && nw > 0.0 { dot / (ng.sqrt() * nw.sqrt()) } else { 0.0 };
-    let rel = if nw > 0.0 { (err / nw).sqrt() } else { 0.0 };
+    assert!(ng > 0.0 && nw > 0.0);
+    let cosine = dot / (ng.sqrt() * nw.sqrt());
+    let rel = (err / nw).sqrt();
     (cosine, rel)
 }
 
@@ -156,8 +159,13 @@ fn flashinfer_gdn_matches_our_chunk_scan() {
     let ctx = CudaContext::new(0).unwrap();
     let scale = 1.0f32 / (HEAD_DIM as f32).sqrt();
 
-    for &seq in &[CHUNK, 2 * CHUNK, 512, 1024, 2048] {
+    for &(seq, nonzero_initial) in &[(CHUNK, false), (2 * CHUNK, false),
+        (512, false), (1024, false), (2048, false),
+        (CHUNK, true), (2 * CHUNK, true), (2048, true)] {
         let (q, k, v, g, beta, q_raw, k_raw) = make_inputs(seq);
+        let initial_state: Vec<f32> = (0..V_HEADS * HEAD_DIM * HEAD_DIM)
+            .map(|index| if nonzero_initial { (index as f32 * 0.013).sin() * 0.05 } else { 0.0 })
+            .collect();
 
         // --- our scan: BF16, q/k interleaved is not needed here, and it
         // normalizes and scales internally.
@@ -167,7 +175,7 @@ fn flashinfer_gdn_matches_our_chunk_scan() {
         let g_ours = upload(&ctx, &f32_bytes(&g), vec![seq, V_HEADS], DType::F32);
         let beta_ours = upload(&ctx, &f32_bytes(&beta), vec![seq, V_HEADS], DType::F32);
         let out_ours = zeros(&ctx, vec![seq, V_HEADS, HEAD_DIM], DType::BF16);
-        let state_ours = zeros(&ctx, vec![V_HEADS, HEAD_DIM, HEAD_DIM], DType::F32);
+        let state_ours = upload(&ctx, &f32_bytes(&initial_state), vec![V_HEADS, HEAD_DIM, HEAD_DIM], DType::F32);
         ops::gdn_chunk_scan(
             &ctx, &q_bf, &k_bf, &v_bf, &g_ours, &beta_ours, &out_ours, &state_ours,
             V_HEADS, Q_HEADS, CHUNK,
@@ -220,7 +228,7 @@ fn flashinfer_gdn_matches_our_chunk_scan() {
         .unwrap();
         let beta_fi = upload(&ctx, &f32_bytes(&beta), vec![seq, V_HEADS], DType::F32);
         let out_fi = zeros(&ctx, vec![seq, V_HEADS, HEAD_DIM], DType::F16);
-        let state_fi = zeros(&ctx, vec![V_HEADS, HEAD_DIM, HEAD_DIM], DType::F32);
+        let state_fi = upload(&ctx, &f32_bytes(&initial_state), vec![V_HEADS, HEAD_DIM, HEAD_DIM], DType::F32);
         let cu = upload(
             &ctx,
             &[0i32, seq as i32].iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>(),
@@ -247,7 +255,7 @@ fn flashinfer_gdn_matches_our_chunk_scan() {
         let (state_cos, state_rel) = cosine_rel_l2(&fi_state, &ours_state);
 
         println!(
-            "seq={seq:4}  out: cosine {out_cos:.6} relL2 {out_rel:.5}   \\
+            "seq={seq:4} nonzero_initial={nonzero_initial} out: cosine {out_cos:.6} relL2 {out_rel:.5}   \\
 state: cosine {state_cos:.6} relL2 {state_rel:.5}"
         );
 
@@ -274,11 +282,11 @@ state: cosine {state_cos:.6} relL2 {state_rel:.5}"
         // quantized paths to; relative L2 is reported but allowed to be
         // looser because it charges the dtype gap twice.
         assert!(
-            out_cos > 0.999,
+            out_cos >= 0.9999 && out_rel <= 0.01,
             "seq={seq}: FlashInfer output diverged from our scan, cosine {out_cos}"
         );
         assert!(
-            state_cos > 0.999,
+            state_cos >= 0.9999 && state_rel <= 0.01,
             "seq={seq}: FlashInfer state diverged from our scan, cosine {state_cos}"
         );
         // Cosine alone is blind to a scale error: a state that is the right

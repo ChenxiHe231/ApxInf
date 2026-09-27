@@ -15,6 +15,9 @@
 #include <cuda_bf16.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <memory>
 
 #include "cutlass/cutlass.h"
 #include "cutlass/numeric_types.h"
@@ -25,6 +28,14 @@
 #include "cutlass/util/packed_stride.hpp"
 
 namespace apxinf::cuda::cutlass_ops {
+
+struct Nvfp4GemmExecution {
+  void* implementation = nullptr;
+  int (*launch_fn)(void*) = nullptr;
+  void (*destroy_fn)(void*) = nullptr;
+  size_t workspace_bytes = 0;
+};
+
 namespace {
 
 using namespace cute;
@@ -116,6 +127,82 @@ int launch(const void* a, const void* a_sf, const void* b, const void* b_sf,
 }
 
 template <class Cfg>
+struct PreparedNvfp4 {
+  using Gemm = typename Cfg::Gemm;
+  Gemm gemm;
+  void* workspace = nullptr;
+  size_t workspace_bytes = 0;
+  cudaStream_t stream = nullptr;
+
+  ~PreparedNvfp4() {
+    if (workspace != nullptr) cudaFree(workspace);
+  }
+};
+
+template <class Cfg>
+int prepared_launch(void* opaque) {
+  auto* prepared = static_cast<PreparedNvfp4<Cfg>*>(opaque);
+  return prepared->gemm.run(prepared->stream) == cutlass::Status::kSuccess
+             ? 0
+             : -4;
+}
+
+template <class Cfg>
+void prepared_destroy(void* opaque) {
+  delete static_cast<PreparedNvfp4<Cfg>*>(opaque);
+}
+
+template <class Cfg>
+Nvfp4GemmExecution* prepare_persistent(
+    const void* a, const void* a_sf, const void* b, const void* b_sf,
+    void* out, int m, int n, int k, int sf_vec, float alpha,
+    cudaStream_t stream) {
+  using Gemm = typename Cfg::Gemm;
+  using StrideA = typename Gemm::GemmKernel::StrideA;
+  using StrideB = typename Gemm::GemmKernel::StrideB;
+  using StrideD = typename Gemm::GemmKernel::StrideD;
+  using SfConfig =
+      typename Gemm::GemmKernel::CollectiveMainloop::Sm1xxBlkScaledConfig;
+  using ElementSF = typename ElementA::ScaleFactorType;
+
+  auto prepared = std::make_unique<PreparedNvfp4<Cfg>>();
+  auto problem = cute::make_shape(m, n, k, 1);
+  StrideA stride_a = cutlass::make_cute_packed_stride(StrideA{}, {m, k, 1});
+  StrideB stride_b = cutlass::make_cute_packed_stride(StrideB{}, {n, k, 1});
+  StrideD stride_d = cutlass::make_cute_packed_stride(StrideD{}, {m, n, 1});
+  typename Gemm::Arguments args{
+      cutlass::gemm::GemmUniversalMode::kGemm,
+      problem,
+      {reinterpret_cast<typename ElementA::DataType const*>(a), stride_a,
+       reinterpret_cast<typename ElementB::DataType const*>(b), stride_b,
+       reinterpret_cast<ElementSF const*>(a_sf),
+       SfConfig::tile_atom_to_shape_SFA(problem),
+       reinterpret_cast<ElementSF const*>(b_sf),
+       SfConfig::tile_atom_to_shape_SFB(problem)},
+      {{alpha, 0.0f}, nullptr, stride_d, reinterpret_cast<ElementD*>(out),
+       stride_d}};
+  const size_t workspace_bytes = Gemm::get_workspace_size(args);
+  if (workspace_bytes != 0) {
+    if (cudaMalloc(&prepared->workspace, workspace_bytes) != cudaSuccess) {
+      return nullptr;
+    }
+  }
+  prepared->workspace_bytes = workspace_bytes;
+  prepared->stream = stream;
+  if (prepared->gemm.can_implement(args) != cutlass::Status::kSuccess ||
+      prepared->gemm.initialize(args, prepared->workspace, stream) !=
+          cutlass::Status::kSuccess) {
+    return nullptr;
+  }
+  auto execution = std::make_unique<Nvfp4GemmExecution>();
+  execution->implementation = prepared.release();
+  execution->launch_fn = &prepared_launch<Cfg>;
+  execution->destroy_fn = &prepared_destroy<Cfg>;
+  execution->workspace_bytes = workspace_bytes;
+  return execution.release();
+}
+
+template <class Cfg>
 size_t workspace_for(int m, int n, int k) {
   using Gemm = typename Cfg::Gemm;
   using StrideA = typename Gemm::GemmKernel::StrideA;
@@ -198,6 +285,7 @@ __device__ __forceinline__ uint8_t quantize_e2m1(float value) {
 // negative, so this matches the unsigned encoding the kernel reads.
 __device__ __forceinline__ uint8_t quantize_e4m3_nonnegative(float value) {
   if (!(value > 0.0f)) return 0;
+  if (value >= 448.0f) return 0x7e;
   int exponent;
   float mantissa = frexpf(value, &exponent);  // value = mantissa * 2^exponent
   mantissa *= 2.0f;
@@ -211,7 +299,7 @@ __device__ __forceinline__ uint8_t quantize_e4m3_nonnegative(float value) {
   }
   if (biased > 15) {                          // saturate at the E4M3 maximum
     biased = 15;
-    fraction = 7;
+    fraction = 6;
   }
   return static_cast<uint8_t>((biased << 3) | fraction);
 }
@@ -361,6 +449,38 @@ __global__ void quantize_swiglu_kernel(const __nv_bfloat16* __restrict__ src,
                     code);
 }
 
+__global__ void quantize_swiglu_vector_kernel(
+    const __nv_bfloat16* __restrict__ src, uint8_t* __restrict__ packed,
+    uint8_t* __restrict__ scales, int rows, int width, int blocks_per_row,
+    float input_scale, CanonicalSfConfig::LayoutSF layout, bool row_major) {
+  const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (index >= (long long)rows * blocks_per_row) return;
+  const int row = static_cast<int>(index / blocks_per_row);
+  const int block = static_cast<int>(index % blocks_per_row);
+  const long long base = (long long)row * 2 * width + (long long)block * 16;
+  const uint4 gate_first = reinterpret_cast<const uint4*>(src + base)[0];
+  const uint4 gate_second = reinterpret_cast<const uint4*>(src + base)[1];
+  const uint4 up_first = reinterpret_cast<const uint4*>(src + base + width)[0];
+  const uint4 up_second = reinterpret_cast<const uint4*>(src + base + width)[1];
+  const auto* gate_first_values = reinterpret_cast<const __nv_bfloat16*>(&gate_first);
+  const auto* gate_second_values = reinterpret_cast<const __nv_bfloat16*>(&gate_second);
+  const auto* up_first_values = reinterpret_cast<const __nv_bfloat16*>(&up_first);
+  const auto* up_second_values = reinterpret_cast<const __nv_bfloat16*>(&up_second);
+  float values[16];
+#pragma unroll
+  for (int offset = 0; offset < 8; ++offset) {
+    const float gate_low = __bfloat162float(gate_first_values[offset]);
+    const float gate_high = __bfloat162float(gate_second_values[offset]);
+    values[offset] = gate_low / (1.0f + __expf(-gate_low)) * __bfloat162float(up_first_values[offset]);
+    values[offset + 8] = gate_high / (1.0f + __expf(-gate_high)) * __bfloat162float(up_second_values[offset]);
+  }
+  unsigned long long output;
+  uint8_t code;
+  emit_nvfp4_block(values, 16, input_scale, reinterpret_cast<uint8_t*>(&output), code);
+  reinterpret_cast<unsigned long long*>(packed)[index] = output;
+  store_block_scale(scales, layout, row_major, row, block, 16, blocks_per_row, code);
+}
+
 }  // namespace
 
 int nvfp4_gemm_tactic_count() { return kTacticCount; }
@@ -407,6 +527,47 @@ int nvfp4_gemm_bf16(const void* a, const void* a_sf, const void* b,
     default:
       return -11;
   }
+}
+
+Nvfp4GemmExecution* nvfp4_gemm_prepare(
+    const void* a, const void* a_sf, const void* b, const void* b_sf,
+    void* out, int m, int n, int k, int sf_vec, float alpha, int tactic,
+    cudaStream_t stream) {
+  if (sf_vec != 16 || !nvfp4_gemm_tactic_supported(tactic, m, n, k, sf_vec)) {
+    return nullptr;
+  }
+  switch (tactic) {
+    case 0:
+      return prepare_persistent<Tactic0>(a, a_sf, b, b_sf, out, m, n, k,
+                                         sf_vec, alpha, stream);
+    case 1:
+      return prepare_persistent<Tactic1>(a, a_sf, b, b_sf, out, m, n, k,
+                                         sf_vec, alpha, stream);
+    case 2:
+      return prepare_persistent<Tactic2>(a, a_sf, b, b_sf, out, m, n, k,
+                                         sf_vec, alpha, stream);
+    case 3:
+      return prepare_persistent<Tactic3>(a, a_sf, b, b_sf, out, m, n, k,
+                                         sf_vec, alpha, stream);
+    default:
+      return nullptr;
+  }
+}
+
+int nvfp4_gemm_launch(Nvfp4GemmExecution* execution) {
+  if (execution == nullptr || execution->implementation == nullptr) return -1;
+  return execution->launch_fn(execution->implementation);
+}
+
+void nvfp4_gemm_destroy(Nvfp4GemmExecution* execution) {
+  if (execution == nullptr) return;
+  execution->destroy_fn(execution->implementation);
+  delete execution;
+}
+
+size_t nvfp4_gemm_execution_workspace_bytes(
+    const Nvfp4GemmExecution* execution) {
+  return execution == nullptr ? 0 : execution->workspace_bytes;
 }
 
 size_t nvfp4_scale_buffer_bytes(int rows, int k, int sf_vec) {
@@ -508,6 +669,16 @@ int nvfp4_quantize_swiglu(const void* src_bf16, void* dst_packed,
   const long long total = (long long)rows * k_blocks;
   const int threads = 256;
   const long long blocks = (total + threads - 1) / threads;
+  const char* vector_flag = std::getenv("APXINF_QWEN38_VECTOR_ELEMENTWISE");
+  if (vector_flag != nullptr && std::strcmp(vector_flag, "1") == 0 &&
+      reinterpret_cast<uintptr_t>(src_bf16) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(dst_packed) % 8 == 0) {
+    quantize_swiglu_vector_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(src_bf16), static_cast<uint8_t*>(dst_packed),
+        static_cast<uint8_t*>(dst_scales), rows, k, k_blocks, input_scale,
+        layout, row_major_scales != 0);
+    return cudaGetLastError() == cudaSuccess ? 0 : -21;
+  }
   quantize_swiglu_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(src_bf16),
       static_cast<uint8_t*>(dst_packed), static_cast<uint8_t*>(dst_scales),

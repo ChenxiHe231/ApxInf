@@ -11,6 +11,7 @@ namespace apxinf::gemm {
 namespace {
 
 struct CutlassGegluState {
+  apxinf::cuda::cutlass_ops::Nvfp4GemmExecution* nvfp4_execution = nullptr;
   void* packed_weight = nullptr;
   size_t packed_weight_bytes = 0;
   const void* packed_weight_source = nullptr;
@@ -21,6 +22,10 @@ struct CutlassGegluState {
   ~CutlassGegluState() { release_resources(); }
 
   void release_resources() noexcept {
+    if (nvfp4_execution != nullptr) {
+      apxinf::cuda::cutlass_ops::nvfp4_gemm_destroy(nvfp4_execution);
+    }
+    nvfp4_execution = nullptr;
     if (packed_weight != nullptr) cudaFree(packed_weight);
     packed_weight = nullptr;
     packed_weight_source = nullptr;
@@ -99,10 +104,7 @@ cudaError_t launch_cutlass_fp8_gemm(Execution& state) {
   const auto& spec = state.spec;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
   using namespace apxinf::cuda::cutlass_ops;
-  // supports_cutlass_fp8 admits exactly these two output dtypes.
-  const auto entry = spec.output_dtype == APXINF_DTYPE_BF16 ? fp8_gemm_bf16
-                                                            : fp8_gemm_f16;
-  check_cutlass_status(entry(
+  check_cutlass_status(fp8_gemm_f16(
       bindings.a, bindings.b, bindings.output, spec.m, spec.n, spec.k,
       bindings.alpha, state.configuration, stream));
   return cudaSuccess;
@@ -198,15 +200,26 @@ size_t cutlass_nvfp4_resource_requirements(const Spec& spec) {
 
 void prepare_cutlass_nvfp4(Execution& state) {
 #ifdef APXINF_GEMM_CUTLASS
-  const size_t bytes = cutlass_nvfp4_resource_requirements(state.spec);
+  const auto& bindings = state.bindings;
+  const auto& spec = state.spec;
+  const auto stream = static_cast<cudaStream_t>(bindings.stream);
+  auto owned = std::make_unique<CutlassGegluState>();
+  owned->nvfp4_execution = apxinf::cuda::cutlass_ops::nvfp4_gemm_prepare(
+      bindings.a, bindings.a_block_scales, bindings.b, bindings.b_block_scales,
+      bindings.output, static_cast<int>(spec.m), static_cast<int>(spec.n),
+      static_cast<int>(spec.k), static_cast<int>(spec.sf_vec_size),
+      bindings.alpha / bindings.output_scale, state.configuration, stream);
+  if (owned->nvfp4_execution == nullptr) {
+    throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                  "CUTLASS NVFP4 persistent prepare failed");
+  }
+  const size_t bytes =
+      apxinf::cuda::cutlass_ops::nvfp4_gemm_execution_workspace_bytes(
+          owned->nvfp4_execution);
   if (bytes > state.resource_limit) {
+    owned->release_resources();
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "NVFP4 GEMM workspace exceeds the policy limit");
-  }
-  auto owned = std::make_unique<CutlassGegluState>();
-  if (bytes != 0) {
-    check_cuda(cudaMalloc(&owned->packed_weight, bytes));
-    owned->packed_weight_bytes = bytes;
   }
   state.resource_bytes = bytes;
   state.provider_state = owned.release();
@@ -222,6 +235,11 @@ cudaError_t launch_cutlass_nvfp4(Execution& state) {
   const auto& spec = state.spec;
   auto& resources = provider(state);
   const auto stream = static_cast<cudaStream_t>(bindings.stream);
+  if (resources.nvfp4_execution == nullptr) return cudaErrorInvalidResourceHandle;
+  check_cutlass_status(apxinf::cuda::cutlass_ops::nvfp4_gemm_launch(
+      resources.nvfp4_execution));
+  return cudaSuccess;
+#if 0
   check_cutlass_status(apxinf::cuda::cutlass_ops::nvfp4_gemm_bf16(
       bindings.a, bindings.a_block_scales, bindings.b, bindings.b_block_scales,
       bindings.output, resources.packed_weight, resources.packed_weight_bytes,
@@ -229,6 +247,7 @@ cudaError_t launch_cutlass_nvfp4(Execution& state) {
       static_cast<int>(spec.k), static_cast<int>(spec.sf_vec_size),
       bindings.alpha / bindings.output_scale, state.configuration, stream));
   return cudaSuccess;
+#endif
 #else
   (void)state;
   (void)bindings;

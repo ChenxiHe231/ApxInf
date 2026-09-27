@@ -3,6 +3,21 @@ use std::ffi::c_void;
 use super::types::CudaStream;
 
 unsafe extern "C" {
+    pub(crate) fn apxinf_gdn_conv_prepare_flashinfer(
+        input: *const c_void,
+        weight: *const c_void,
+        window: *mut c_void,
+        q_out: *mut c_void,
+        k_out: *mut c_void,
+        v_out: *mut c_void,
+        decay: *const c_void,
+        alpha: *mut c_void,
+        tokens: i64,
+        k_heads: i64,
+        v_heads: i64,
+        epsilon: f32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_gdn_recurrent_step(
         state: *mut c_void,
         q: *const c_void,
@@ -100,6 +115,17 @@ unsafe extern "C" {
         stream: CudaStream,
     ) -> i32;
     pub(crate) fn apxinf_gdn_gated_norm_seq(
+        input: *const c_void,
+        gate: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        head_dim: i64,
+        epsilon: f32,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_gdn_gated_norm_seq_f16(
         input: *const c_void,
         gate: *const c_void,
         weight: *const c_void,

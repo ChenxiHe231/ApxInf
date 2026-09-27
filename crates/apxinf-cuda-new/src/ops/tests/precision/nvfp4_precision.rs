@@ -115,9 +115,15 @@ fn packed_scale_tensor(
 
 #[test]
 fn nvfp4_all_candidates_match_reference() {
+    for rows in [1, 63, 128, 256] {
+        nvfp4_candidates_match_reference_for_rows(rows);
+    }
+}
+
+fn nvfp4_candidates_match_reference_for_rows(m: usize) {
     let ctx = CudaContext::new(0).unwrap();
     let device = ctx.device_id();
-    let (m, n, k, block_size) = (256usize, 256usize, 512usize, 16u32);
+    let (n, k, block_size) = (256usize, 512usize, 16u32);
     let blocks = k / block_size as usize;
 
     let (a_packed, a_values) = pack_operand(m, k, 7);
@@ -178,6 +184,104 @@ fn nvfp4_rejects_operands_that_are_not_packed_fp4() {
 
     let args = GemmArgs::nvfp4(&a, &a_scales, &b, &b_scales, block_size, 1.0, &mut out);
     assert!(crate::ops::gemm(&ctx, args).is_err());
+}
+
+#[test]
+fn nvfp4_scale_saturates_to_finite_e4m3() {
+    let ctx = CudaContext::new(0).unwrap();
+    let device = ctx.device_id();
+    let scales = [0.0f32, 1.0, 416.0, 448.0, 464.0, 480.0, 512.0, 65536.0];
+    let expected = [0x00u8, 0x38, 0x7d, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e];
+    let width = scales.len() * 16;
+    let input: Vec<f32> = scales.iter().flat_map(|scale| {
+        (0..16).map(move |index| if index % 2 == 0 { scale * 6.0 } else { -scale * 6.0 })
+    }).collect();
+    let activation = tensor(device, vec![1, width], &input);
+    let packed = zeros_tensor(device, vec![1, width / 2], DType::E2M1Pair);
+    let output_scales = zeros_tensor(device, vec![scales.len()], DType::F8E4M3);
+    crate::ops::nvfp4_quantize_activation(&ctx, &activation, &packed,
+        &output_scales, 1.0, 16, crate::ops::ScaleLayout::RowMajor).unwrap();
+    ctx.synchronize().unwrap();
+    let mut actual = vec![0u8; expected.len()];
+    crate::CudaBuffer::from_tensor(&output_scales).unwrap().copy_to_host(&mut actual).unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+#[ignore = "requires APXINF_GEMM_CUBLASLT_NVFP4=1 and a supported GPU"]
+fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
+    assert_eq!(std::env::var("APXINF_GEMM_CUBLASLT_NVFP4").as_deref(), Ok("1"));
+    let ctx = CudaContext::new(0).unwrap();
+    let device = ctx.device_id();
+    let (rows, columns, reduction) = (1usize, 256usize, 512usize);
+    let activation = bytes_tensor(device, vec![rows, reduction / 2], DType::E2M1Pair,
+        &vec![0x22; rows * reduction / 2]);
+    let weights = bytes_tensor(device, vec![columns, reduction / 2], DType::E2M1Pair,
+        &vec![0x22; columns * reduction / 2]);
+    let first_scales = packed_scale_tensor(&ctx, &vec![0x38; rows * reduction / 16], rows, reduction, 16).unwrap();
+    let second_scales = packed_scale_tensor(&ctx, &vec![0x40; rows * reduction / 16], rows, reduction, 16).unwrap();
+    let weight_scales = packed_scale_tensor(&ctx, &vec![0x38; columns * reduction / 16], columns, reduction, 16).unwrap();
+    let mut output = zeros_tensor(device, vec![rows, columns], DType::BF16);
+    let cache = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../devlocal/qwen38-nvfp4/results")
+        .join(format!("nvfp4-lifecycle-{}", std::process::id()));
+    std::fs::create_dir_all(&cache).unwrap();
+    let cache = cache.to_string_lossy().into_owned();
+    let policy = GemmPolicy { online_tune: false, allow_fallback: false,
+        cache_dir: Some(cache.clone()), ..GemmPolicy::default() };
+    {
+        let mut args = GemmArgs::nvfp4(&activation, &first_scales, &weights, &weight_scales, 16, 1.0, &mut output);
+        args.policy = policy.clone();
+        let normalized = super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+        super::execution::seed_recipe(&ctx, &normalized, 2, 3, 1, 0).unwrap();
+    }
+    let session = ExecutionSession::with_capacity(1, 0).unwrap();
+    super::execution::reset_execution_create_count();
+    prepare_with_session(&session, || {
+        let mut args = GemmArgs::nvfp4(&activation, &first_scales, &weights, &weight_scales, 16, 1.0, &mut output);
+        args.policy = policy.clone();
+        gemm(&ctx, args)
+    }).unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(values(&output), vec![512.0; rows * columns]);
+    let missing_binding = with_session(&session, || {
+        let mut args = GemmArgs::nvfp4(&activation, &second_scales, &weights, &weight_scales, 16, 1.0, &mut output);
+        args.policy = policy.clone();
+        gemm(&ctx, args)
+    });
+    assert!(missing_binding.is_err());
+    prepare_with_session(&session, || {
+        let mut args = GemmArgs::nvfp4(&activation, &second_scales, &weights, &weight_scales, 16, 1.0, &mut output);
+        args.policy = policy.clone();
+        gemm(&ctx, args)
+    }).unwrap();
+    with_session(&session, || {
+        let mut args = GemmArgs::nvfp4(&activation, &second_scales, &weights, &weight_scales, 16, 1.0, &mut output);
+        args.policy = policy.clone();
+        gemm(&ctx, args)
+    }).unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(values(&output), vec![1024.0; rows * columns]);
+    assert_eq!(super::execution::execution_create_count(), 2);
+    prepare_with_session(&session, || {
+        let mut args = GemmArgs::nvfp4(&activation, &first_scales, &weights, &weight_scales, 16, 1.0, &mut output);
+        args.policy = policy.clone();
+        gemm(&ctx, args)
+    }).unwrap();
+    assert_eq!(super::execution::execution_create_count(), 2);
+    let graph = crate::capture(&ctx, || with_session(&session, || {
+        let mut args = GemmArgs::nvfp4(&activation, &first_scales, &weights, &weight_scales, 16, 1.0, &mut output);
+        args.policy = policy.clone();
+        gemm(&ctx, args)
+    })).unwrap();
+    drop(session);
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(values(&output), vec![512.0; rows * columns]);
+    let source = bytes_tensor(device, vec![rows, reduction / 16], DType::F8E4M3, &vec![0x44; rows * reduction / 16]);
+    crate::ops::nvfp4_pack_block_scales(&ctx, &source, &first_scales, rows, reduction, 16).unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(values(&output), vec![1536.0; rows * columns]);
 }
 
 #[test]

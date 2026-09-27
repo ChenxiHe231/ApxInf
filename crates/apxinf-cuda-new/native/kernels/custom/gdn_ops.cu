@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 namespace apxinf::cuda::gdn_ops {
 namespace {
@@ -250,9 +251,11 @@ __global__ void causal_conv_forward_kernel(
     const __nv_bfloat16* __restrict__ input,
     const __nv_bfloat16* __restrict__ weight,
     __nv_bfloat16* __restrict__ output, float* __restrict__ window,
-    int tokens, int channels, int kernel_width) {
+    int tokens, int channels, int kernel_width, int tokens_per_tile) {
   const int channel = blockIdx.x * blockDim.x + threadIdx.x;
   if (channel >= channels) return;
+  const int token_begin = blockIdx.y * tokens_per_tile;
+  const int token_end = min(tokens, token_begin + tokens_per_tile);
 
   // kernel_width is 4 for this checkpoint; a fixed-size register window beats
   // indexing through memory. history[kernel_width-1] is the newest sample.
@@ -260,6 +263,13 @@ __global__ void causal_conv_forward_kernel(
   float history[kMaxWidth];
 #pragma unroll
   for (int index = 0; index < kMaxWidth; ++index) history[index] = 0.0f;
+  for (int index = 0; index < kernel_width; ++index) {
+    const int source_token = token_begin - kernel_width + index;
+    if (source_token >= 0) {
+      history[index] = __bfloat162float(
+          input[(long long)source_token * channels + channel]);
+    }
+  }
 
   float weights[kMaxWidth];
   for (int index = 0; index < kernel_width; ++index) {
@@ -270,7 +280,7 @@ __global__ void causal_conv_forward_kernel(
   // Prefill starts from a zero window: token 0 sees only itself, which is what
   // a left-padded causal conv means. The single-token path carries its window
   // across calls instead, and this kernel reseeds it at the end.
-  for (int token = 0; token < tokens; ++token) {
+  for (int token = token_begin; token < token_end; ++token) {
     const float sample =
         __bfloat162float(input[(long long)token * channels + channel]);
     for (int index = 0; index < kernel_width - 1; ++index) {
@@ -289,10 +299,69 @@ __global__ void causal_conv_forward_kernel(
   // Hand the tail to the single-token path. Without this, the first decode
   // step after a prompt convolves against an empty window and is wrong --
   // silently, because the shapes still line up.
-  if (window != nullptr) {
+  if (window != nullptr && token_end == tokens) {
     float* slot = window + (long long)channel * kernel_width;
     for (int index = 0; index < kernel_width; ++index) {
       slot[index] = history[index];
+    }
+  }
+}
+
+template<int KernelWidth>
+__global__ void causal_conv_forward_pair_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    const __nv_bfloat16* __restrict__ weight,
+    __nv_bfloat16* __restrict__ output, float* __restrict__ window,
+    int tokens, int channels, int kernel_width, int tokens_per_tile) {
+  if constexpr (KernelWidth != 0) kernel_width = KernelWidth;
+  const int pair = blockIdx.x * blockDim.x + threadIdx.x;
+  const int channel0 = pair * 2;
+  if (channel0 >= channels) return;
+  const int channel1 = channel0 + 1;
+  const int token_begin = blockIdx.y * tokens_per_tile;
+  const int token_end = min(tokens, token_begin + tokens_per_tile);
+
+  constexpr int kMaxWidth = 8;
+  float history0[kMaxWidth] = {};
+  float history1[kMaxWidth] = {};
+  float weights0[kMaxWidth];
+  float weights1[kMaxWidth];
+  for (int index = 0; index < kernel_width; ++index) {
+    const int source_token = token_begin - kernel_width + index;
+    if (source_token >= 0) {
+      history0[index] = __bfloat162float(input[(long long)source_token * channels + channel0]);
+      if (channel1 < channels) history1[index] = __bfloat162float(input[(long long)source_token * channels + channel1]);
+    }
+    weights0[index] = __bfloat162float(weight[(long long)channel0 * kernel_width + index]);
+    if (channel1 < channels) weights1[index] = __bfloat162float(weight[(long long)channel1 * kernel_width + index]);
+  }
+
+  for (int token = token_begin; token < token_end; ++token) {
+    const long long base = (long long)token * channels;
+    const float sample0 = __bfloat162float(input[base + channel0]);
+    const float sample1 = channel1 < channels ? __bfloat162float(input[base + channel1]) : 0.0f;
+    for (int index = 0; index < kernel_width - 1; ++index) {
+      history0[index] = history0[index + 1];
+      history1[index] = history1[index + 1];
+    }
+    history0[kernel_width - 1] = sample0;
+    history1[kernel_width - 1] = sample1;
+    float accumulator0 = 0.0f;
+    float accumulator1 = 0.0f;
+    for (int index = 0; index < kernel_width; ++index) {
+      accumulator0 += history0[index] * weights0[index];
+      accumulator1 += history1[index] * weights1[index];
+    }
+    output[base + channel0] = __float2bfloat16(accumulator0 / (1.0f + __expf(-accumulator0)));
+    if (channel1 < channels) output[base + channel1] = __float2bfloat16(accumulator1 / (1.0f + __expf(-accumulator1)));
+  }
+
+  if (window != nullptr && token_end == tokens) {
+    float* slot0 = window + (long long)channel0 * kernel_width;
+    float* slot1 = window + (long long)channel1 * kernel_width;
+    for (int index = 0; index < kernel_width; ++index) {
+      slot0[index] = history0[index];
+      if (channel1 < channels) slot1[index] = history1[index];
     }
   }
 }
@@ -319,31 +388,41 @@ __global__ void decay_and_beta_seq_kernel(
 }
 
 // Sequence-axis gated norm: one block per (token, head).
-__global__ void gated_norm_seq_kernel(const __nv_bfloat16* __restrict__ input,
+template<typename Input>
+__device__ __forceinline__ float norm_input(const Input* input, long long index) {
+  return __bfloat162float(input[index]);
+}
+
+template<>
+__device__ __forceinline__ float norm_input<__half>(const __half* input, long long index) {
+  return __bfloat162float(__float2bfloat16(__half2float(input[index])));
+}
+
+template<typename Input>
+__global__ void gated_norm_seq_kernel(const Input* __restrict__ input,
                                       const __nv_bfloat16* __restrict__ gate,
                                       const __nv_bfloat16* __restrict__ weight,
                                       __nv_bfloat16* __restrict__ output,
                                       int tokens, int heads, int head_dim,
                                       float epsilon) {
-  const long long row = blockIdx.x;
+  const int lane = threadIdx.x & 31;
+  const long long row = (long long)blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
   if (row >= (long long)tokens * heads) return;
   const long long base = row * head_dim;
 
   float sum = 0.0f;
-  for (int index = threadIdx.x; index < head_dim; index += blockDim.x) {
-    const float value = __bfloat162float(input[base + index]);
+  for (int index = lane; index < head_dim; index += 32) {
+    const float value = norm_input(input, base + index);
     sum += value * value;
   }
   for (int offset = 16; offset > 0; offset >>= 1) {
     sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
   }
-  __shared__ float total;
-  if (threadIdx.x == 0) total = sum;
-  __syncthreads();
+  const float total = __shfl_sync(0xFFFFFFFFu, sum, 0);
 
   const float scale = rsqrtf(total / static_cast<float>(head_dim) + epsilon);
-  for (int index = threadIdx.x; index < head_dim; index += blockDim.x) {
-    const float normalized = __bfloat162float(input[base + index]) * scale *
+  for (int index = lane; index < head_dim; index += 32) {
+    const float normalized = norm_input(input, base + index) * scale *
                              __bfloat162float(weight[index]);
     const float z = __bfloat162float(gate[base + index]);
     output[base + index] =
@@ -453,6 +532,200 @@ __global__ void gdn_prepare_flashinfer_kernel(
   }
 }
 
+__global__ void gdn_prepare_flashinfer_preserved_warp_kernel(
+    const __nv_bfloat16* __restrict__ fused, __half* __restrict__ q_out,
+    __half* __restrict__ k_out, __half* __restrict__ v_out,
+    const float* __restrict__ g_in, float* __restrict__ alpha, int tokens,
+    int row_width, int k_heads, int v_heads, int dim, float epsilon) {
+  const int token = blockIdx.x;
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const long long row = (long long)token * row_width;
+  for (int head_block = warp; head_block < 2 * k_heads; head_block += 8) {
+    const auto* source = fused + row + (long long)head_block * 128;
+    float values[4];
+    float sums[4];
+#pragma unroll
+    for (int part = 0; part < 4; ++part) {
+      values[part] = __bfloat162float(source[part * 32 + lane]);
+      sums[part] = 0.0f;
+      sums[part] += values[part] * values[part];
+    }
+#pragma unroll
+    for (int shift = 16; shift > 0; shift >>= 1) {
+#pragma unroll
+      for (int part = 0; part < 4; ++part)
+        sums[part] += __shfl_down_sync(0xffffffffu, sums[part], shift);
+    }
+    float total = 0.0f;
+#pragma unroll
+    for (int part = 0; part < 4; ++part) total += sums[part];
+    total = __shfl_sync(0xffffffffu, total, 0);
+    const float inverse = rsqrtf(total + epsilon);
+    auto* destination = head_block < k_heads ? q_out : k_out;
+    const long long offset = ((long long)token * k_heads + head_block % k_heads) * 128;
+#pragma unroll
+    for (int part = 0; part < 4; ++part)
+      destination[offset + part * 32 + lane] = __float2half(values[part] * inverse);
+  }
+  const long long span = (long long)v_heads * 128;
+  for (long long index = threadIdx.x; index < span; index += blockDim.x)
+    v_out[(long long)token * span + index] =
+        __float2half(__bfloat162float(fused[row + 2 * k_heads * 128 + index]));
+  for (int head = threadIdx.x; head < v_heads; head += blockDim.x)
+    alpha[(long long)token * v_heads + head] = __expf(g_in[(long long)token * v_heads + head]);
+}
+
+template<int HeadsPerBlock>
+__global__ void fused_conv_prepare_kernel(
+    const __nv_bfloat16* input, const __nv_bfloat16* weights,
+    __half* query, __half* key, __half* value, const float* decay,
+    float* alpha, int tokens, int key_heads, int value_heads, float epsilon) {
+  const int token = blockIdx.x;
+  const int lane = threadIdx.x % 32;
+  const int warp = threadIdx.x / 32;
+  const int heads = 2 * key_heads + value_heads;
+  const int channels = heads * 128;
+  const int first_head = blockIdx.y * HeadsPerBlock;
+  for (int head = first_head + warp; head < min(heads, first_head + HeadsPerBlock); head += 8) {
+    float values[4];
+    float sums[4];
+#pragma unroll
+    for (int part = 0; part < 4; ++part) {
+      const int channel = head * 128 + part * 32 + lane;
+      float accumulator = 0.0f;
+#pragma unroll
+      for (int tap = 0; tap < 4; ++tap) {
+        const int source_token = token - 3 + tap;
+        const float sample = source_token < 0 ? 0.0f : __bfloat162float(input[(long long)source_token * channels + channel]);
+        accumulator += sample * __bfloat162float(weights[channel * 4 + tap]);
+      }
+      values[part] = __bfloat162float(__float2bfloat16(accumulator / (1.0f + __expf(-accumulator))));
+      sums[part] = 0.0f;
+      sums[part] += values[part] * values[part];
+    }
+    if (head < 2 * key_heads) {
+#pragma unroll
+      for (int shift = 16; shift > 0; shift >>= 1) {
+#pragma unroll
+        for (int part = 0; part < 4; ++part)
+          sums[part] += __shfl_down_sync(0xffffffffu, sums[part], shift);
+      }
+      float total = 0.0f;
+#pragma unroll
+      for (int part = 0; part < 4; ++part) total += sums[part];
+      total = __shfl_sync(0xffffffffu, total, 0);
+      const float inverse = rsqrtf(total + epsilon);
+      __half* destination = head < key_heads ? query : key;
+      const long long offset = ((long long)token * key_heads + head % key_heads) * 128;
+#pragma unroll
+      for (int part = 0; part < 4; ++part)
+        destination[offset + part * 32 + lane] = __float2half(values[part] * inverse);
+    } else {
+      const int value_head = head - 2 * key_heads;
+      const long long offset = ((long long)token * value_heads + value_head) * 128;
+#pragma unroll
+      for (int part = 0; part < 4; ++part)
+        value[offset + part * 32 + lane] = __float2half(values[part]);
+      if (lane == 0) alpha[(long long)token * value_heads + value_head] = __expf(decay[(long long)token * value_heads + value_head]);
+    }
+  }
+}
+
+__global__ void conv_final_window_kernel(const __nv_bfloat16* input, float* window, int tokens, int channels) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= channels * 4) return;
+  const int token = tokens - 4 + index % 4;
+  window[index] = token < 0 ? 0.0f : __bfloat162float(input[(long long)token * channels + index / 4]);
+}
+
+__global__ void gdn_prepare_flashinfer_parallel_kernel(
+    const __nv_bfloat16* __restrict__ fused, __half* __restrict__ q_out,
+    __half* __restrict__ k_out, __half* __restrict__ v_out,
+    const float* __restrict__ g_in, float* __restrict__ alpha, int tokens,
+    int row_width, int k_heads, int v_heads, int dim, float epsilon) {
+  const int token = blockIdx.x;
+  if (token >= tokens) return;
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const long long row = (long long)token * row_width;
+  if (warp < 2 * k_heads) {
+    const int pass = warp / k_heads;
+    const int head = warp % k_heads;
+    const int offset = pass * k_heads * dim;
+    const __nv_bfloat16* source = fused + row + offset + (long long)head * dim;
+    float sum = 0.0f;
+    for (int index = lane; index < dim; index += 32) {
+      const float value = __bfloat162float(source[index]);
+      sum += value * value;
+    }
+    for (int shift = 16; shift > 0; shift >>= 1) {
+      sum += __shfl_down_sync(0xFFFFFFFFu, sum, shift);
+    }
+    const float inverse = rsqrtf(sum + epsilon);
+    __half* destination = pass == 0 ? q_out : k_out;
+    __half* output = destination + ((long long)token * k_heads + head) * dim;
+    for (int index = lane; index < dim; index += 32) {
+      output[index] = __float2half(__bfloat162float(source[index]) * inverse);
+    }
+  }
+  const long long v_span = (long long)v_heads * dim;
+  for (long long index = threadIdx.x; index < v_span; index += blockDim.x) {
+    v_out[(long long)token * v_span + index] =
+        __float2half(__bfloat162float(fused[row + 2 * k_heads * dim + index]));
+  }
+  for (int head = threadIdx.x; head < v_heads; head += blockDim.x) {
+    alpha[(long long)token * v_heads + head] =
+        __expf(g_in[(long long)token * v_heads + head]);
+  }
+}
+
+__global__ void gdn_prepare_flashinfer_warp_kernel(
+    const __nv_bfloat16* __restrict__ fused, __half* __restrict__ q_out,
+    __half* __restrict__ k_out, __half* __restrict__ v_out,
+    const float* __restrict__ g_in, float* __restrict__ alpha, int tokens,
+    int row_width, int k_heads, int v_heads, int dim, float epsilon) {
+  const int token = blockIdx.x;
+  if (token >= tokens) return;
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int warps = blockDim.x >> 5;
+  const long long row = (long long)token * row_width;
+
+  for (int logical_head = warp; logical_head < 2 * k_heads;
+       logical_head += warps) {
+    const int pass = logical_head / k_heads;
+    const int head = logical_head - pass * k_heads;
+    const int offset = pass * k_heads * dim;
+    const __nv_bfloat16* source =
+        fused + row + offset + (long long)head * dim;
+    float sum = 0.0f;
+    for (int index = lane; index < dim; index += 32) {
+      const float value = __bfloat162float(source[index]);
+      sum += value * value;
+    }
+    for (int shift = 16; shift > 0; shift >>= 1) {
+      sum += __shfl_down_sync(0xFFFFFFFFu, sum, shift);
+    }
+    const float inverse = rsqrtf(sum + epsilon);
+    __half* destination = pass == 0 ? q_out : k_out;
+    __half* output = destination + ((long long)token * k_heads + head) * dim;
+    for (int index = lane; index < dim; index += 32) {
+      output[index] = __float2half(__bfloat162float(source[index]) * inverse);
+    }
+  }
+
+  const long long v_span = (long long)v_heads * dim;
+  for (long long index = threadIdx.x; index < v_span; index += blockDim.x) {
+    v_out[(long long)token * v_span + index] =
+        __float2half(__bfloat162float(fused[row + 2 * k_heads * dim + index]));
+  }
+  for (int head = threadIdx.x; head < v_heads; head += blockDim.x) {
+    alpha[(long long)token * v_heads + head] =
+        __expf(g_in[(long long)token * v_heads + head]);
+  }
+}
+
 }  // namespace
 
 int gdn_widen_f16_to_bf16(const void* input, void* output, long long count,
@@ -466,6 +739,30 @@ int gdn_widen_f16_to_bf16(const void* input, void* output, long long count,
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
+int gdn_conv_prepare_flashinfer(const void* input, const void* weight,
+                               void* window, void* q_out, void* k_out,
+                               void* v_out, const void* decay, void* alpha,
+                               int tokens, int k_heads, int v_heads,
+                               float epsilon, cudaStream_t stream) {
+  const long long channel_count = (2LL * k_heads + v_heads) * 128;
+  if (tokens <= 0 || k_heads <= 0 || v_heads <= 0 || channel_count > 536870911)
+    return -1;
+  const int channels = static_cast<int>(channel_count);
+  const int head_groups = (2 * k_heads + v_heads + 79) / 80;
+  fused_conv_prepare_kernel<80><<<dim3(tokens, head_groups), 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(weight), static_cast<__half*>(q_out),
+      static_cast<__half*>(k_out), static_cast<__half*>(v_out),
+      static_cast<const float*>(decay), static_cast<float*>(alpha),
+      tokens, k_heads, v_heads, epsilon);
+  const auto result = cudaGetLastError();
+  if (result != cudaSuccess) return static_cast<int>(result);
+  conv_final_window_kernel<<<(channels * 4 + 255LL) / 256, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input), static_cast<float*>(window),
+      tokens, channels);
+  return static_cast<int>(cudaGetLastError());
+}
+
 int gdn_prepare_flashinfer(const void* fused, void* q_out, void* k_out,
                            void* v_out, const void* g, void* alpha, int tokens,
                            int row_width, int k_heads, int v_heads, int dim,
@@ -475,6 +772,33 @@ int gdn_prepare_flashinfer(const void* fused, void* q_out, void* k_out,
     return -1;
   }
   if (2 * k_heads * dim + v_heads * dim > row_width) return -2;
+  const char* parallel = std::getenv("APXINF_GDN_PREPARE_PARALLEL");
+  if (parallel != nullptr && std::strcmp(parallel, "5") == 0 && dim == 128) {
+    gdn_prepare_flashinfer_preserved_warp_kernel<<<tokens, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(fused), static_cast<__half*>(q_out),
+        static_cast<__half*>(k_out), static_cast<__half*>(v_out),
+        static_cast<const float*>(g), static_cast<float*>(alpha), tokens,
+        row_width, k_heads, v_heads, dim, epsilon);
+    return cudaGetLastError() == cudaSuccess ? 0 : -3;
+  }
+  if (parallel != nullptr && std::strcmp(parallel, "2") == 0 &&
+      dim == 128 && k_heads <= 16 && v_heads <= 48) {
+    gdn_prepare_flashinfer_warp_kernel<<<tokens, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(fused), static_cast<__half*>(q_out),
+        static_cast<__half*>(k_out), static_cast<__half*>(v_out),
+        static_cast<const float*>(g), static_cast<float*>(alpha), tokens,
+        row_width, k_heads, v_heads, dim, epsilon);
+    return cudaGetLastError() == cudaSuccess ? 0 : -3;
+  }
+  if (parallel != nullptr && std::strcmp(parallel, "1") == 0 && dim == 128 &&
+      k_heads <= 16 && v_heads <= 48) {
+    gdn_prepare_flashinfer_parallel_kernel<<<tokens, 1024, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(fused), static_cast<__half*>(q_out),
+        static_cast<__half*>(k_out), static_cast<__half*>(v_out),
+        static_cast<const float*>(g), static_cast<float*>(alpha), tokens,
+        row_width, k_heads, v_heads, dim, epsilon);
+    return cudaGetLastError() == cudaSuccess ? 0 : -3;
+  }
   const int threads = dim >= 128 ? 128 : dim;
   gdn_prepare_flashinfer_kernel<<<tokens, threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(fused), static_cast<__half*>(q_out),
@@ -493,12 +817,39 @@ int gdn_causal_conv_forward(const void* input, const void* weight,
   // The register window is fixed at 8; a wider kernel would silently truncate.
   if (kernel_width > 8) return -4;
   const int threads = 256;
-  const int blocks = (channels + threads - 1) / threads;
-  causal_conv_forward_kernel<<<blocks, threads, 0, stream>>>(
+  const char* tile_env = std::getenv("APXINF_GDN_PREFILL_TILE");
+  int tokens_per_tile = tokens;
+  if (tile_env != nullptr && tile_env[0] != '\0') {
+    const int requested_tile = std::atoi(tile_env);
+    if (requested_tile > 0) tokens_per_tile = requested_tile;
+  } else {
+    const char* tiled = std::getenv("APXINF_GDN_PREFILL_TILED");
+    if (tiled != nullptr && tiled[0] == '1') tokens_per_tile = 64;
+  }
+  const bool pair_path = channels % 2 == 0 && std::getenv("APXINF_GDN_CONV_PAIR") != nullptr &&
+                         std::atoi(std::getenv("APXINF_GDN_CONV_PAIR")) == 1;
+  const int logical_channels = pair_path ? (channels + 1) / 2 : channels;
+  const int blocks = (logical_channels + threads - 1) / threads;
+  const dim3 grid(blocks, (tokens + tokens_per_tile - 1) / tokens_per_tile);
+  if (pair_path && kernel_width == 4) {
+    causal_conv_forward_pair_kernel<4><<<grid, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<const __nv_bfloat16*>(weight),
+        static_cast<__nv_bfloat16*>(output), static_cast<float*>(window), tokens,
+        channels, kernel_width, tokens_per_tile);
+  } else if (pair_path) {
+    causal_conv_forward_pair_kernel<0><<<grid, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<const __nv_bfloat16*>(weight),
+        static_cast<__nv_bfloat16*>(output), static_cast<float*>(window), tokens,
+        channels, kernel_width, tokens_per_tile);
+  } else {
+    causal_conv_forward_kernel<<<grid, threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const __nv_bfloat16*>(weight),
       static_cast<__nv_bfloat16*>(output), static_cast<float*>(window), tokens,
-      channels, kernel_width);
+      channels, kernel_width, tokens_per_tile);
+  }
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
@@ -522,8 +873,10 @@ int gdn_gated_norm_seq(const void* input, const void* gate, const void* weight,
                        void* output, int tokens, int heads, int head_dim,
                        float epsilon, cudaStream_t stream) {
   if (tokens <= 0 || heads <= 0 || head_dim <= 0) return -1;
-  const int threads = head_dim >= 32 ? 32 : head_dim;
-  const long long blocks = (long long)tokens * heads;
+  const char* grouped = std::getenv("APXINF_GDN_PREFILL_TILED");
+  const int warps = grouped != nullptr && grouped[0] == '1' ? 4 : 1;
+  const int threads = warps * 32;
+  const long long blocks = ((long long)tokens * heads + warps - 1) / warps;
   gated_norm_seq_kernel<<<(int)blocks, threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const __nv_bfloat16*>(gate),
@@ -532,6 +885,22 @@ int gdn_gated_norm_seq(const void* input, const void* gate, const void* weight,
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
+
+int gdn_gated_norm_seq_f16(const void* input, const void* gate, const void* weight,
+                          void* output, int tokens, int heads, int head_dim,
+                          float epsilon, cudaStream_t stream) {
+  if (tokens <= 0 || heads <= 0 || head_dim <= 0) return -1;
+  const char* grouped = std::getenv("APXINF_GDN_PREFILL_TILED");
+  const int warps = grouped != nullptr && grouped[0] == '1' ? 4 : 1;
+  const int threads = warps * 32;
+  const long long blocks = ((long long)tokens * heads + warps - 1) / warps;
+  gated_norm_seq_kernel<<<(int)blocks, threads, 0, stream>>>(
+      static_cast<const __half*>(input),
+      static_cast<const __nv_bfloat16*>(gate),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(output), tokens, heads, head_dim, epsilon);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
 
 int gdn_recurrent_step(void* state, const void* q, const void* k,
                        const void* v, const void* decay, const void* beta,
@@ -542,7 +911,11 @@ int gdn_recurrent_step(void* state, const void* q, const void* k,
   // One warp holds a row as 32 lanes x float4, so k_dim must be exactly 128.
   // Rejecting is better than silently taking a slower general path.
   if (k_dim != 128) return -4;
-  constexpr int kRowsPerBlock = 4;
+  // Eight independent rows per block halves the grid launch count for the
+  // 48x128 state update. The kernel has no inter-row synchronization, so the
+  // larger block only trades a little register residency for less scheduler
+  // overhead and better SM occupancy on Thor's 20-SM device.
+  constexpr int kRowsPerBlock = 8;
   const int threads = kRowsPerBlock * 32;
   const int blocks = (v_heads * v_dim + kRowsPerBlock - 1) / kRowsPerBlock;
   recurrent_step_kernel<<<blocks, threads, 0, stream>>>(
