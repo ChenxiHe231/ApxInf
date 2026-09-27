@@ -67,9 +67,17 @@ bool supports_fa2_packed_qkv(const Spec& spec) {
 
 bool supports_fa2_splitkv(const Spec& spec) {
   const int64_t key_tile = spec.head_dim == 128 ? 128 : 64;
-  return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
-         spec.dtype == APXINF_DTYPE_BF16 &&
-         spec.output_dtype == APXINF_DTYPE_BF16 &&
+  const bool layout_supported =
+      spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE ||
+      (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+       spec.key_capacity == spec.key_tokens &&
+       (spec.mask == APXINF_ATTENTION_MASK_NONE ||
+        spec.query_start == spec.key_tokens - spec.query_tokens));
+  const bool bf16_supported = spec.dtype == APXINF_DTYPE_BF16;
+  const bool f16_supported = spec.dtype == APXINF_DTYPE_F16 &&
+                             spec.mask == APXINF_ATTENTION_MASK_NONE;
+  return layout_supported && (bf16_supported || f16_supported) &&
+         spec.output_dtype == spec.dtype &&
          spec.query_tokens <= 64 && spec.key_tokens > spec.query_tokens &&
          spec.query_heads > spec.kv_heads &&
          spec.query_heads % spec.kv_heads == 0 &&
@@ -158,6 +166,11 @@ const ImplementationRegistry& registry(uint32_t semantic) {
   };
   static const ImplementationRegistry kv_cache_entries = {
 #if defined(APXINF_ATTENTION_FA2)
+      {kProviderFa2, 3, 1, "flash-attention-2-split-kv",
+       apxinf::gemm::kDeviceFeatureFa2, true, true, false,
+       supports_fa2_splitkv, fa2_alignment,
+       fa2_splitkv_resource_requirements, splitkv_configurations,
+       prepare_fa2_splitkv, launch_fa2_splitkv, destroy_fa2_splitkv},
       {kProviderFa2, 1, 1, "flash-attention-2-kv-cache",
        apxinf::gemm::kDeviceFeatureFa2, true, true, false, supports_fa2,
        fa2_alignment, fa2_resource_requirements, one_configuration,
