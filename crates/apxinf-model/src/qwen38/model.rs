@@ -1,0 +1,226 @@
+//! The [`LlmTrait`] wrapper: state, execution policy, and the generation
+//! surface over the moved harness internals in [`super::core`].
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use apxinf_core::{Backend, Device, DType, Error, Result, Shape, Tensor};
+use apxinf_cuda_new::{ops, CapturedGraph, CudaBuffer, CudaContext};
+use apxinf_loader::ModelConfig;
+
+use crate::accelerator::create_backend;
+use crate::llm_trait::LlmTrait;
+
+use super::config::{Qwen38Config, CHUNK, CONV_WIDTH, FULL_ATTENTION_INTERVAL, GDN_HEAD_DIM,
+    GDN_V_HEADS, HEAD_DIM, KV_HEADS, LAYERS, QKV_WIDTH, VOCAB};
+use super::core;
+
+/// Qwen3.8-27B-NVFP4. Batch 1, text only, BF16 KV cache.
+///
+/// Execution policy is fixed at load: batched FlashInfer-GDN prefill and
+/// CUDA-graph decode (per-layer GDN graphs + per-layer MLP graphs) are the
+/// defaults; [`Qwen38Config`] only exposes the two genuine numeric choices.
+pub struct Qwen38 {
+    ctx: CudaContext,
+    backend: Arc<dyn Backend>,
+    model: core::Model,
+    scratch: core::Scratch,
+    prefill: Option<core::PrefillScratch>,
+    gdn_states: Vec<core::GdnState>,
+    kv_caches: Vec<core::KvCache>,
+    mlp_graphs: Option<Vec<CapturedGraph>>,
+    gdn_graphs: Option<Vec<Option<CapturedGraph>>>,
+    position: usize,
+    kv_capacity: usize,
+}
+
+impl Qwen38 {
+    /// Load from an already-read checkpoint tensor map.
+    ///
+    /// `kv_capacity` bounds prompt + generation length; caches are allocated
+    /// once at this size. `config` selects the numeric options.
+    pub fn with_config(
+        weights: HashMap<String, Tensor>,
+        device: Device,
+        kv_capacity: usize,
+        config: Qwen38Config,
+    ) -> Result<Self> {
+        let Device::Cuda(ordinal) = device else {
+            return Err(Error::Other("qwen38 requires a CUDA device".into()));
+        };
+        core::FLASHINFER_GDN.store(config.flashinfer_gdn, std::sync::atomic::Ordering::Relaxed);
+        // The split-KV switch lives in the FA2 launcher, which reads it once
+        // per process; setting it before the first launch makes the config
+        // authoritative. TODO(cuda-new): thread through KvCacheAttentionArgs.
+        std::env::set_var(
+            "APXINF_FA2_DECODE_SPLITKV",
+            if config.splitkv { "1" } else { "0" },
+        );
+
+        let ctx = CudaContext::new(ordinal).map_err(Error::Cuda)?;
+        let backend = create_backend(device)?;
+        let model = core::load_model(&ctx, &weights, true);
+        ctx.synchronize().map_err(Error::Cuda)?;
+        drop(weights);
+
+        let capacity = kv_capacity.next_power_of_two();
+        let gdn_states: Vec<core::GdnState> = (0..LAYERS - LAYERS / FULL_ATTENTION_INTERVAL)
+            .map(|_| core::GdnState::new(&ctx))
+            .collect();
+        let kv_caches: Vec<core::KvCache> = (0..LAYERS / FULL_ATTENTION_INTERVAL)
+            .map(|_| core::KvCache::new(&ctx, capacity))
+            .collect();
+        let scratch = core::Scratch::new(&ctx);
+
+        Ok(Self {
+            ctx,
+            backend,
+            model,
+            scratch,
+            prefill: None,
+            gdn_states,
+            kv_caches,
+            mlp_graphs: None,
+            gdn_graphs: None,
+            position: 0,
+            kv_capacity: capacity,
+        })
+    }
+
+    fn ensure_graphs(&mut self) {
+        if self.mlp_graphs.is_none() {
+            self.mlp_graphs = Some(core::capture_mlp_graphs(&self.ctx, &self.model, &mut self.scratch));
+        }
+        if self.gdn_graphs.is_none() {
+            self.gdn_graphs = Some(core::capture_gdn_graphs(
+                &self.ctx,
+                &self.model,
+                &mut self.scratch,
+                &mut self.gdn_states,
+            ));
+        }
+    }
+
+    fn ensure_prefill_scratch(&mut self, tokens: usize) {
+        let needed = tokens.div_ceil(CHUNK) * CHUNK;
+        let enough = self
+            .prefill
+            .as_ref()
+            .map(|p| p.capacity() >= needed)
+            .unwrap_or(false);
+        if !enough {
+            self.prefill = Some(core::PrefillScratch::new(&self.ctx, needed));
+        }
+    }
+
+    /// Logits of the position decoded last, as a `[1, VOCAB]` BF16 tensor.
+    fn logits_view(&self) -> Tensor {
+        CudaBuffer::from_tensor(self.scratch.logits())
+            .unwrap()
+            .as_tensor(Shape::new(vec![1, VOCAB]), DType::BF16)
+            .unwrap()
+    }
+}
+
+impl LlmTrait for Qwen38 {
+    fn load(config: ModelConfig, weights: HashMap<String, Tensor>, device: Device) -> Result<Self> {
+        let capacity = config.max_seq_len.max(4096);
+        Self::with_config(weights, device, capacity, Qwen38Config::default())
+    }
+
+    /// `start_pos == 0` with several tokens runs the batched prefill; a single
+    /// token continues decoding at `start_pos` through the captured graphs.
+    /// Returns `[1, VOCAB]` logits for the last position — the shared
+    /// generation loop samples with `NextTokenLogits::last`, which is exactly
+    /// this row.
+    fn forward(&mut self, token_ids: &[u32], start_pos: u32) -> Result<Tensor> {
+        if token_ids.is_empty() {
+            return Err(Error::Other("forward: empty token_ids".into()));
+        }
+        let start = start_pos as usize;
+        if start + token_ids.len() > self.kv_capacity {
+            return Err(Error::Other(format!(
+                "sequence {} exceeds the KV capacity {} fixed at load",
+                start + token_ids.len(),
+                self.kv_capacity
+            )));
+        }
+
+        if start == 0 && token_ids.len() > 1 {
+            self.ensure_prefill_scratch(token_ids.len());
+            self.ensure_graphs();
+            let prefill = self.prefill.as_mut().unwrap();
+            core::write_tokens(&self.ctx, prefill, token_ids);
+            core::prefill_step(
+                &self.ctx,
+                &self.model,
+                prefill,
+                &mut self.gdn_states,
+                &mut self.kv_caches,
+                token_ids.len(),
+            );
+            core::prefill_logits(&self.ctx, &self.model, prefill, &self.scratch, token_ids.len());
+            self.ctx.synchronize().map_err(Error::Cuda)?;
+            self.position = token_ids.len();
+            return Ok(self.logits_view());
+        }
+
+        // Token-by-token: the harness decode path, graphs captured lazily on
+        // the first step.
+        self.ensure_graphs();
+        for (offset, &token) in token_ids.iter().enumerate() {
+            let position = start + offset;
+            core::set_token(&self.scratch, token as i32);
+            core::set_position(&self.scratch, position);
+            core::decode_step_with_mlp_graphs(
+                &self.ctx,
+                &self.model,
+                &mut self.scratch,
+                &mut self.gdn_states,
+                &mut self.kv_caches,
+                position,
+                self.mlp_graphs.as_ref().unwrap(),
+                self.gdn_graphs.as_deref(),
+            );
+        }
+        self.ctx.synchronize().map_err(Error::Cuda)?;
+        self.position = start + token_ids.len();
+        Ok(self.logits_view())
+    }
+
+    fn backend(&self) -> &dyn Backend {
+        &*self.backend
+    }
+
+    fn reset(&mut self) {
+        core::reset_state(&self.ctx, &mut self.gdn_states, &mut self.kv_caches);
+        self.position = 0;
+    }
+
+    fn vocab_size(&self) -> usize {
+        VOCAB
+    }
+}
+
+// Constructors the wrapper needs for state it owns per generation session.
+impl core::GdnState {
+    pub(crate) fn new(ctx: &CudaContext) -> Self {
+        core::GdnState {
+            recurrent: core::zeros(ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM, GDN_HEAD_DIM], DType::F32),
+            conv_window: core::zeros(ctx, vec![QKV_WIDTH, CONV_WIDTH], DType::F32),
+        }
+    }
+}
+
+impl core::KvCache {
+    pub(crate) fn new(ctx: &CudaContext, capacity: usize) -> Self {
+        core::KvCache {
+            keys: core::zeros(ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+            values: core::zeros(ctx, vec![1, capacity, KV_HEADS, HEAD_DIM], DType::BF16),
+        }
+    }
+}
+
+// Unused-import silencer for non-graph builds of ops.
+#[allow(unused_imports)]
+use ops as _ops_used;
