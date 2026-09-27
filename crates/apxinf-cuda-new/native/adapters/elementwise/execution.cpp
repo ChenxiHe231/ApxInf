@@ -31,7 +31,7 @@ bool valid_extent(int64_t value) {
 
 }  // namespace
 
-extern "C" apxinf_status_t apxinf_rms_norm_bf16(const void* input,
+extern "C" apxinf_status_t apxinf_new_rms_norm_bf16(const void* input,
                                                 const void* weight,
                                                 void* output, int64_t rows,
                                                 int64_t width, float epsilon,
@@ -65,7 +65,7 @@ extern "C" apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up,
   });
 }
 
-extern "C" apxinf_status_t apxinf_add_bf16(const void* addend,
+extern "C" apxinf_status_t apxinf_new_add_bf16(const void* addend,
                                            void* accumulator, int64_t count,
                                            apxinf_cuda_stream_t stream) {
   return abi_boundary([&] {

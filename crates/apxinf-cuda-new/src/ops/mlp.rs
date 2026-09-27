@@ -29,7 +29,7 @@ pub fn rms_norm(
     let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[width])?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
     unsafe {
-        status::check(abi::apxinf_rms_norm_bf16(
+        status::check(abi::apxinf_new_rms_norm_bf16(
             input_buffer.ptr(),
             weight_buffer.ptr(),
             output_buffer.ptr(),
@@ -79,7 +79,7 @@ pub fn add_into(ctx: &CudaContext, addend: &Tensor, accumulator: &Tensor) -> Res
     let addend_buffer = tensor_storage(ctx, addend, DType::BF16, &dims)?;
     let accumulator_buffer = tensor_storage(ctx, accumulator, DType::BF16, &dims)?;
     unsafe {
-        status::check(abi::apxinf_add_bf16(
+        status::check(abi::apxinf_new_add_bf16(
             addend_buffer.ptr(),
             accumulator_buffer.ptr(),
             dims.iter().product::<usize>() as i64,
