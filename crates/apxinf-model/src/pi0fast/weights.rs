@@ -373,7 +373,7 @@ fn transpose_2d(tensor: &Tensor) -> Result<Tensor> {
             Tensor::from_f8_e4m3(vec![cols, rows], &dst)
         }
         #[cfg(feature = "cuda")]
-        DType::I8 | DType::I32 => Err(Error::Other(format!(
+        DType::I8 | DType::I32 | DType::E2M1Pair => Err(Error::Other(format!(
             "π0-FAST linear weight transpose does not support {}",
             tensor.dtype()
         ))),
@@ -407,7 +407,7 @@ fn add_one(tensor: Tensor) -> Result<Tensor> {
             "π0-FAST RMSNorm parameters cannot be stored as unscaled FP8".into(),
         )),
         #[cfg(feature = "cuda")]
-        DType::I8 | DType::I32 => Err(Error::Other(format!(
+        DType::I8 | DType::I32 | DType::E2M1Pair => Err(Error::Other(format!(
             "π0-FAST RMSNorm parameters cannot use {} storage",
             tensor.dtype()
         ))),
