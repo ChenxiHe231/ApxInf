@@ -3,7 +3,7 @@ use std::ffi::c_void;
 use super::types::CudaStream;
 
 unsafe extern "C" {
-    pub(crate) fn apxinf_rms_norm_bf16(
+    pub(crate) fn apxinf_new_rms_norm_bf16(
         input: *const c_void,
         weight: *const c_void,
         output: *mut c_void,
@@ -46,7 +46,7 @@ unsafe extern "C" {
         alpha: f32,
         stream: CudaStream,
     ) -> i32;
-    pub(crate) fn apxinf_add_bf16(
+    pub(crate) fn apxinf_new_add_bf16(
         addend: *const c_void,
         accumulator: *mut c_void,
         count: i64,
