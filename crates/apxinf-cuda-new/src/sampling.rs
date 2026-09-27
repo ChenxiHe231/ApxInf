@@ -42,7 +42,9 @@ struct CudaTokenSampler {
     params: Option<TokenSamplingParams>,
     sequence_len: usize,
     rng: RngKey,
-    stream: crate::ffi::cudaStream_t,
+    // Retains the context stream so a sampler that outlives its CudaContext
+    // cannot launch onto a destroyed stream.
+    stream: std::sync::Arc<crate::stream::CudaStream>,
 }
 
 impl CudaTokenSampler {
@@ -87,7 +89,7 @@ impl CudaTokenSampler {
             params: None,
             sequence_len: 0,
             rng: RngKey::default(),
-            stream: ctx.stream().handle(),
+            stream: ctx.shared_stream(),
         })
     }
 }
@@ -224,7 +226,7 @@ impl TokenSampler for CudaTokenSampler {
                 self.scan_workspace.ptr(),
                 self.scan_workspace.len(),
                 self.output.ptr(),
-                self.stream,
+                self.stream.handle(),
             )
         };
         ffi::check_cuda(status).map_err(Error::Cuda)?;
@@ -233,7 +235,7 @@ impl TokenSampler for CudaTokenSampler {
         // the sampling kernels. Sampling returns a host token and therefore
         // must explicitly wait for its own stream before reading `output`.
         unsafe {
-            ffi::check_cuda(ffi::cudaStreamSynchronize(self.stream)).map_err(Error::Cuda)?;
+            ffi::check_cuda(ffi::cudaStreamSynchronize(self.stream.handle())).map_err(Error::Cuda)?;
         }
         let mut output = [0u8; OUTPUT_BYTES];
         self.output.copy_to_host(&mut output).map_err(Error::Cuda)?;
@@ -261,7 +263,8 @@ impl TokenSampler for CudaTokenSampler {
 
 struct CudaNormalGenerator {
     output: Tensor,
-    stream: crate::ffi::cudaStream_t,
+    // Retains the context stream; see CudaTokenSampler.
+    stream: std::sync::Arc<crate::stream::CudaStream>,
 }
 
 impl CudaNormalGenerator {
@@ -275,7 +278,7 @@ impl CudaNormalGenerator {
         dtype_tag(output.dtype())?;
         Ok(Self {
             output,
-            stream: ctx.stream().handle(),
+            stream: ctx.shared_stream(),
         })
     }
 }
@@ -297,7 +300,7 @@ impl NormalGenerator for CudaNormalGenerator {
                 rng.seed,
                 rng.sequence,
                 rng.draw,
-                self.stream,
+                self.stream.handle(),
             )
         };
         ffi::check_cuda(status).map_err(Error::Cuda)?;

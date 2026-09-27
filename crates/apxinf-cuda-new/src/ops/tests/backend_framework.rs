@@ -285,6 +285,9 @@ fn gpu_e2e_candidate_alignment_is_selected_and_keyed_from_actual_bindings() {
     let mut aligned_args = GemmArgs::new(&a, &b, &mut aligned_out);
     aligned_args.quantization = GemmQuantization::Fp8UnitScale;
     aligned_args.policy.allow_fallback = false;
+    // Empty cache_dir disables recipe persistence; this test must observe a
+    // fresh tune, not a recipe left in the default shared directory.
+    aligned_args.policy.cache_dir = Some(String::new());
     let aligned =
         super::contracts::normalize(&ctx, aligned_args, super::contracts::Semantic::Gemm, None)
             .unwrap();
@@ -304,6 +307,7 @@ fn gpu_e2e_candidate_alignment_is_selected_and_keyed_from_actual_bindings() {
     let mut misaligned_args = GemmArgs::new(&a, &b, &mut misaligned_out);
     misaligned_args.quantization = GemmQuantization::Fp8UnitScale;
     misaligned_args.policy.allow_fallback = false;
+    misaligned_args.policy.cache_dir = Some(String::new());
     let misaligned = super::contracts::normalize(
         &ctx,
         misaligned_args,
@@ -520,6 +524,9 @@ fn gpu_e2e_autotune_times_candidates_and_checks_winner_capture() {
     args.policy.online_tune = true;
     args.policy.allow_fallback = false;
     args.policy.graph_safe = true;
+    // Empty cache_dir disables recipe persistence; this test asserts on a
+    // fresh tune summary and must not read the default shared directory.
+    args.policy.cache_dir = Some(String::new());
 
     let normalized =
         super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
@@ -1285,8 +1292,19 @@ fn gpu_e2e_three_view_split_geglu_recipe_resources_and_replay() {
     ctx.synchronize().unwrap();
     let host = crate::transfers::to_cpu(&output).unwrap();
     assert!(host.as_f8_e4m3().unwrap().iter().all(|value| *value == 0));
+    // T21 three-view rows (M=789) are also a pinned production shape; the
+    // split-GeGLU candidate accepts them. An unrelated M stays rejected.
     let activation = zeros_tensor(0, vec![789, 2048], DType::F8E4M3);
     let mut output = zeros_tensor(0, vec![789, 16384], DType::F8E4M3);
+    let mut args = GemmArgs::new(&activation, &weight, &mut output);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.policy.cache_dir = Some(directory.0.to_string_lossy().into_owned());
+    let normalized =
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::GemmGeglu, None)
+            .unwrap();
+    super::execution::seed_recipe(&ctx, &normalized, 3, 5, 1, 0).unwrap();
+    let activation = zeros_tensor(0, vec![800, 2048], DType::F8E4M3);
+    let mut output = zeros_tensor(0, vec![800, 16384], DType::F8E4M3);
     let mut args = GemmArgs::new(&activation, &weight, &mut output);
     args.quantization = GemmQuantization::Fp8UnitScale;
     args.policy.cache_dir = Some(directory.0.to_string_lossy().into_owned());

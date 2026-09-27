@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
+#include <unordered_map>
 
 namespace apxinf::cuda_new::cutlass_ops {
 
@@ -97,6 +99,20 @@ size_t splitkv_lse_elements(const Spec& spec) {
       "FA2 split-KV LSE workspace size overflow");
 }
 
+// cudaGetDeviceProperties is a slow driver query; prepare can run per
+// autotune configuration, so cache the only field split-KV needs.
+int cached_multiprocessor_count(int device) {
+  static std::mutex mutex;
+  static std::unordered_map<int, int> counts;
+  std::lock_guard<std::mutex> lock(mutex);
+  const auto cached = counts.find(device);
+  if (cached != counts.end()) return cached->second;
+  cudaDeviceProp properties{};
+  check_cuda(cudaGetDeviceProperties(&properties, device));
+  counts.emplace(device, properties.multiProcessorCount);
+  return properties.multiProcessorCount;
+}
+
 }  // namespace
 
 size_t fa2_resource_requirements(const Spec& spec, int) {
@@ -159,14 +175,13 @@ size_t fa2_splitkv_resource_requirements(const Spec& spec,
 
 void prepare_fa2_splitkv(Execution& execution) {
   const auto& spec = execution.spec;
-  cudaDeviceProp properties{};
-  check_cuda(cudaGetDeviceProperties(&properties, execution.device));
+  const size_t multiprocessors = static_cast<size_t>(
+      cached_multiprocessor_count(execution.device));
   const size_t key_tile = spec.head_dim == 128 ? 128 : 64;
   const size_t key_tiles =
       (static_cast<size_t>(spec.key_tokens) + key_tile - 1) / key_tile;
   const size_t device_limit = std::min<size_t>(
-      128, std::min(key_tiles,
-                    static_cast<size_t>(properties.multiProcessorCount) * 2));
+      128, std::min(key_tiles, multiprocessors * 2));
   if (static_cast<size_t>(execution.configuration) > device_limit) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
                   "FA2 split-KV configuration exceeds device split limit");

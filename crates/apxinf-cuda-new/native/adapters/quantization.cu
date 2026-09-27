@@ -69,7 +69,13 @@ cudaError_t launch_quantize_rows_bf16_e4m3(
     return cudaErrorInvalidValue;
   }
   constexpr int threads = 256;
-  if (input_cols % 8 == 0 && output_cols % 8 == 0) {
+  // The vec8 kernel does alignas(16) BF16 pack loads and alignas(8) FP8
+  // stores; shape divisibility alone does not guarantee that for arbitrary
+  // buffer views, so gate on the actual pointers as well.
+  const bool vec8_aligned =
+      reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(output) % 8 == 0;
+  if (input_cols % 8 == 0 && output_cols % 8 == 0 && vec8_aligned) {
     constexpr int rows_per_block = threads / 32;
     const int blocks = (rows + rows_per_block - 1) / rows_per_block;
     quantize_rows_bf16_e4m3_vec8_kernel<<<blocks, threads, 0, stream>>>(
