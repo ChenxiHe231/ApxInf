@@ -1736,15 +1736,19 @@ fn prefill_step(
                         1.0 / (GDN_HEAD_DIM as f32).sqrt(),
                     )
                     .unwrap();
+                    stage("scan(flashinfer)", &mut mark);
 
-                    // Widen the readout back for the gated norm that follows.
-                    let readout_bf =
-                        prefix(&scratch.gdn_readout, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
-                    ops::convert_f16_to_bf16(
-                        ctx, &out_rows, &readout_bf, tokens * GDN_V_HEADS * GDN_HEAD_DIM,
+                    // The gated norm reads the scan's FP16 output directly;
+                    // its load replicates the old widen pass's rounding, so
+                    // the result is bit-identical without the extra
+                    // tokens*heads*dim round trip through memory.
+                    let z_heads = prefix(&scratch.gdn_z, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                    let gated = prefix(&scratch.gdn_gated, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
+                    ops::gdn_gated_norm_seq_f16(
+                        ctx, &out_rows, &z_heads, &gdn.norm_weight, &gated, tokens,
+                        GDN_V_HEADS, GDN_HEAD_DIM, EPSILON,
                     )
                     .unwrap();
-                    stage("scan(flashinfer)", &mut mark);
                 } else {
 
                 // q, k and v stay interleaved in the conv output; the scan
@@ -1771,7 +1775,6 @@ fn prefill_step(
                 )
                 .unwrap();
                 stage("scan(ours)", &mut mark);
-                }
 
                 let readout_rows = prefix(&scratch.gdn_readout, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
                 let z_heads = prefix(&scratch.gdn_z, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
@@ -1781,6 +1784,7 @@ fn prefill_step(
                     GDN_V_HEADS, GDN_HEAD_DIM, EPSILON,
                 )
                 .unwrap();
+                }
 
                 stage("gated norm", &mut mark);
 

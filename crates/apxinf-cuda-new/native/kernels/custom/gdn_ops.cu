@@ -322,7 +322,28 @@ __global__ void decay_and_beta_seq_kernel(
 // reduction, lane 0's total broadcast by shuffle instead of shared memory --
 // so the arithmetic and its order are unchanged and outputs stay
 // bit-identical.
-__global__ void gated_norm_seq_kernel(const __nv_bfloat16* __restrict__ input,
+//
+// `Input` is BF16 on the native path, FP16 straight from the FlashInfer scan
+// on the fused path. The FP16 read replicates the standalone widen pass --
+// f16 -> f32 -> bf16 -> f32 -- so folding the conversion in stays
+// bit-identical to running widen_f16_to_bf16 first (round-06: the widen was
+// 16.8 ms of prefill and pure memory traffic).
+template <typename Input>
+__device__ __forceinline__ float gated_norm_load(const Input* source,
+                                                 long long index);
+template <>
+__device__ __forceinline__ float gated_norm_load<__nv_bfloat16>(
+    const __nv_bfloat16* source, long long index) {
+  return __bfloat162float(source[index]);
+}
+template <>
+__device__ __forceinline__ float gated_norm_load<__half>(const __half* source,
+                                                         long long index) {
+  return __bfloat162float(__float2bfloat16(__half2float(source[index])));
+}
+
+template <typename Input>
+__global__ void gated_norm_seq_kernel(const Input* __restrict__ input,
                                       const __nv_bfloat16* __restrict__ gate,
                                       const __nv_bfloat16* __restrict__ weight,
                                       __nv_bfloat16* __restrict__ output,
@@ -336,7 +357,7 @@ __global__ void gated_norm_seq_kernel(const __nv_bfloat16* __restrict__ input,
 
   float sum = 0.0f;
   for (int index = lane; index < head_dim; index += 32) {
-    const float value = __bfloat162float(input[base + index]);
+    const float value = gated_norm_load(input, base + index);
     sum += value * value;
   }
   for (int offset = 16; offset > 0; offset >>= 1) {
@@ -346,7 +367,7 @@ __global__ void gated_norm_seq_kernel(const __nv_bfloat16* __restrict__ input,
 
   const float scale = rsqrtf(total / static_cast<float>(head_dim) + epsilon);
   for (int index = lane; index < head_dim; index += 32) {
-    const float normalized = __bfloat162float(input[base + index]) * scale *
+    const float normalized = gated_norm_load(input, base + index) * scale *
                              __bfloat162float(weight[index]);
     const float z = __bfloat162float(gate[base + index]);
     output[base + index] =
@@ -535,6 +556,24 @@ int gdn_gated_norm_seq(const void* input, const void* gate, const void* weight,
   const long long blocks = (rows + kRowsPerBlock - 1) / kRowsPerBlock;
   gated_norm_seq_kernel<<<(int)blocks, threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(gate),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(output), tokens, heads, head_dim, epsilon);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int gdn_gated_norm_seq_f16(const void* input, const void* gate,
+                           const void* weight, void* output, int tokens,
+                           int heads, int head_dim, float epsilon,
+                           cudaStream_t stream) {
+  if (tokens <= 0 || heads <= 0 || head_dim <= 0) return -1;
+  if (head_dim < 32) return -3;
+  constexpr int kRowsPerBlock = 8;
+  const int threads = kRowsPerBlock * 32;
+  const long long rows = (long long)tokens * heads;
+  const long long blocks = (rows + kRowsPerBlock - 1) / kRowsPerBlock;
+  gated_norm_seq_kernel<<<(int)blocks, threads, 0, stream>>>(
+      static_cast<const __half*>(input),
       static_cast<const __nv_bfloat16*>(gate),
       static_cast<const __nv_bfloat16*>(weight),
       static_cast<__nv_bfloat16*>(output), tokens, heads, head_dim, epsilon);

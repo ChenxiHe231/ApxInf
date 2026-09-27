@@ -110,6 +110,17 @@ unsafe extern "C" {
         epsilon: f32,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_gdn_gated_norm_seq_f16(
+        input: *const c_void,
+        gate: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        head_dim: i64,
+        epsilon: f32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_gdn_l2_normalize_heads(
         data: *mut c_void,
         heads: i64,

@@ -87,6 +87,14 @@ int gdn_gated_norm_seq(const void* input, const void* gate, const void* weight,
                        void* output, int tokens, int heads, int head_dim,
                        float epsilon, cudaStream_t stream);
 
+// Same, reading `input` as FP16 straight from the FlashInfer scan. The read
+// replicates widen_f16_to_bf16's rounding, so this equals running that pass
+// first, without materializing the BF16 copy.
+int gdn_gated_norm_seq_f16(const void* input, const void* gate,
+                           const void* weight, void* output, int tokens,
+                           int heads, int head_dim, float epsilon,
+                           cudaStream_t stream);
+
 
 // Gated DeltaNet chunked scan (parallel prefill). Faithful port of
 // torch_chunk_gated_delta_rule (forward-substitution export path). One block

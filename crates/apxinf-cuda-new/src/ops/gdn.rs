@@ -257,6 +257,42 @@ pub fn gdn_gated_norm_seq(
     }
 }
 
+/// Sequence-axis `gdn_gated_norm` reading FP16 input, as the FlashInfer scan
+/// emits it. The FP16 load replicates `convert_f16_to_bf16`'s rounding, so
+/// this equals running that conversion first -- without the extra pass over
+/// `tokens * heads * head_dim` elements each way.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_gated_norm_seq_f16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    gate: &Tensor,
+    weight: &Tensor,
+    output: &Tensor,
+    tokens: usize,
+    heads: usize,
+    head_dim: usize,
+    epsilon: f32,
+) -> Result<()> {
+    let dims = [tokens, heads, head_dim];
+    let input_buffer = tensor_storage(ctx, input, DType::F16, &dims)?;
+    let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
+    let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[head_dim])?;
+    let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
+    unsafe {
+        status::check(abi::apxinf_gdn_gated_norm_seq_f16(
+            input_buffer.ptr(),
+            gate_buffer.ptr(),
+            weight_buffer.ptr(),
+            output_buffer.ptr(),
+            tokens as i64,
+            heads as i64,
+            head_dim as i64,
+            epsilon,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
 /// L2-normalize each head in place.
 pub fn gdn_l2_normalize_heads(ctx: &CudaContext, data: &Tensor, epsilon: f32) -> Result<()> {
     let dims = data.shape().dims().to_vec();

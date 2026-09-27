@@ -212,6 +212,25 @@ extern "C" apxinf_status_t apxinf_gdn_gated_norm_seq(
   });
 }
 
+extern "C" apxinf_status_t apxinf_gdn_gated_norm_seq_f16(
+    const void* input, const void* gate, const void* weight, void* output,
+    int64_t tokens, int64_t heads, int64_t head_dim, float epsilon,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || gate == nullptr || weight == nullptr ||
+        output == nullptr || !extent(tokens) || !extent(heads) ||
+        !extent(head_dim)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid GDN sequence gated norm arguments");
+    }
+    check(apxinf::cuda::gdn_ops::gdn_gated_norm_seq_f16(
+              input, gate, weight, output, static_cast<int>(tokens),
+              static_cast<int>(heads), static_cast<int>(head_dim), epsilon,
+              static_cast<cudaStream_t>(stream)),
+          "GDN sequence gated norm (f16 input)");
+  });
+}
+
 extern "C" apxinf_status_t apxinf_gdn_l2_normalize_heads(
     void* data, int64_t heads, int64_t head_dim, float epsilon,
     apxinf_cuda_stream_t stream) {
