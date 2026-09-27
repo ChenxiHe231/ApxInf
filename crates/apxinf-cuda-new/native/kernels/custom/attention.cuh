@@ -33,6 +33,14 @@ __device__ inline __nv_bfloat16 from_float(float value) {
   return __float2bfloat16(value);
 }
 
+// Both attention_scores_softmax and attention_values derive the row length
+// from this helper, so `decode_meta` is read by two separate graph nodes and
+// correctness needs both reads to agree. The values read is strictly later in
+// stream order and can only observe a length >= the softmax read; the softmax
+// kernel zeroed the tail weights, so a longer values loop is benign. This
+// holds only under the KvCacheDecodeMeta::update contract (synchronize before
+// updating) plus a monotonically non-decreasing valid length — a decrease
+// published mid-replay would truncate the value accumulation.
 __device__ inline int runtime_valid_keys(int key_tokens, bool causal,
                                          int query_start, int query_token,
                                          const uint32_t* decode_meta) {
@@ -70,13 +78,6 @@ __global__ void attention_scores_softmax(
       ((static_cast<int64_t>(batch) * query_tokens + query_token) * query_heads +
        q_head) * head_dim;
   float* scores = probabilities + row * key_tokens;
-
-  if (valid_keys == 0) {
-    for (int key_token = 0; key_token < key_tokens; ++key_token) {
-      scores[key_token] = 0.0F;
-    }
-    return;
-  }
 
   float maximum = -CUDART_INF_F;
   for (int key_token = 0; key_token < valid_keys; ++key_token) {

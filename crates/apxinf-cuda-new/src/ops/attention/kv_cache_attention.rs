@@ -244,7 +244,8 @@ pub(crate) fn normalize(ctx: &CudaContext, args: KvCacheAttentionArgs<'_>) -> Re
                 meta.key_capacity
             )));
         }
-        meta.update(args.valid_key_tokens, args.query_start)?;
+        // Validate everything before `update`: mutating the mapped words on an
+        // error path could corrupt a replay in flight on the correct device.
         let address = meta.storage.address();
         if address.device() != ctx.device_id() {
             return Err(invalid(format!(
@@ -253,6 +254,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: KvCacheAttentionArgs<'_>) -> Re
                 ctx.device_id()
             )));
         }
+        meta.update(args.valid_key_tokens, args.query_start)?;
         resources.push(meta.storage.clone());
         address.ptr().cast_const().cast()
     } else {
