@@ -4,9 +4,9 @@ mod linear {
 
     use apxinf_core::{DType, Error, Result, Tensor};
 
-    use crate::pi05::backend::{self, Context};
+    use crate::pi05::backend::{self, ops, Context};
     use crate::pi05::weights::packing::concat_host_2d;
-    use crate::pi05::{quantize_e4m3_absmax, LinearWeights};
+    use crate::pi05::{LinearWeights, E4M3_MAX};
 
     #[derive(Debug)]
     pub struct Fp8StaticLinearWeights {
@@ -29,9 +29,16 @@ mod linear {
             if linears.is_empty() {
                 return Err(Error::Other("cannot pack an empty FP8 linear group".into()));
             }
-            let (quantized, bias) = pack_host_parts(linears)?;
-            let weight_scale = quantized.scale;
-            let weight = backend::to_device(context, &quantized.values)?;
+            let (weight_f16, weight_scale, bias) = pack_host_parts(linears)?;
+            let weight_f16 = backend::to_device(context, &weight_f16)?;
+            let mut weight = context.allocate_output(weight_f16.shape().clone(), DType::F8E4M3)?;
+            let mut quantization = ops::QuantizationArgs::new(
+                ops::QuantizationSemantic::FixedScaleE4m3,
+                &weight_f16,
+                &mut weight,
+            );
+            quantization.scale = weight_scale;
+            ops::quantization(context, quantization)?;
             let bias = bias
                 .as_ref()
                 .map(|bias| backend::to_device(context, bias))
@@ -44,12 +51,18 @@ mod linear {
         }
     }
 
-    fn pack_host_parts(
-        linears: &[&LinearWeights],
-    ) -> Result<(crate::pi05::Fp8Tensor, Option<Tensor>)> {
-        let weight_host =
-            concat_host_2d(&linears.iter().map(|x| &x.weight).collect::<Vec<_>>())?;
-        let quantized = quantize_e4m3_absmax(&weight_host)?;
+    fn pack_host_parts(linears: &[&LinearWeights]) -> Result<(Tensor, f32, Option<Tensor>)> {
+        let weight_host = concat_host_2d(&linears.iter().map(|x| &x.weight).collect::<Vec<_>>())?;
+        let values = weight_host.to_f32_vec()?;
+        let amax = values
+            .iter()
+            .fold(0.0f32, |maximum, value| maximum.max(value.abs()));
+        let scale = if amax == 0.0 { 1.0 } else { amax / E4M3_MAX };
+        let values = values
+            .into_iter()
+            .map(half::f16::from_f32)
+            .collect::<Vec<_>>();
+        let weight_f16 = Tensor::from_f16(weight_host.shape().dims().to_vec(), &values)?;
         let bias = if linears.iter().all(|x| x.bias.is_none()) {
             None
         } else if linears.iter().all(|x| x.bias.is_some()) {
@@ -63,7 +76,7 @@ mod linear {
                 "cannot pack projections with a mixture of present and absent biases".into(),
             ));
         };
-        Ok((quantized, bias))
+        Ok((weight_f16, scale, bias))
     }
 
     pub fn fp16_to_device(tensor: &Tensor, context: &Context) -> Result<Tensor> {
@@ -104,14 +117,64 @@ mod linear {
             let q = linear(&[1., 2., 3., 4.], [2, 2], Some(&[1., 2.]));
             let k = linear(&[5., 6.], [2, 1], Some(&[3.]));
             let v = linear(&[7., 8.], [2, 1], Some(&[4.]));
-            let (packed, bias) = pack_host_parts(&[&q, &k, &v]).unwrap();
-            assert_eq!(packed.values.shape().dims(), &[2, 4]);
-            assert_eq!(packed.values.dtype(), DType::F8E4M3);
+            let (packed, scale, bias) = pack_host_parts(&[&q, &k, &v]).unwrap();
+            assert_eq!(packed.shape().dims(), &[2, 4]);
+            assert_eq!(packed.dtype(), DType::F16);
+            assert_eq!(
+                packed.to_f32_vec().unwrap(),
+                vec![1., 2., 5., 7., 3., 4., 6., 8.]
+            );
+            assert_eq!(scale, 8.0 / E4M3_MAX);
             let bias = bias.unwrap();
             assert_eq!(bias.dtype(), DType::F16);
             assert_eq!(bias.to_f32_vec().unwrap(), vec![1., 2., 3., 4.]);
         }
 
+        #[test]
+        fn weight_scale_uses_values_before_fp16_rounding() {
+            let source = linear(&[1.0004, -0.25], [1, 2], None);
+            let (packed, scale, _) = pack_host_parts(&[&source]).unwrap();
+            assert_eq!(scale, 1.0004 / E4M3_MAX);
+            assert_eq!(packed.to_f32_vec().unwrap(), vec![1.0, -0.25]);
+            let zero = linear(&[0.0, 0.0], [1, 2], None);
+            assert_eq!(pack_host_parts(&[&zero]).unwrap().1, 1.0);
+        }
+
+        #[test]
+        #[ignore = "requires CUDA"]
+        fn gpu_weight_quantization_matches_legacy_bytes() {
+            use apxinf_core::Backend;
+
+            let context = Context::new(0).unwrap();
+            let legacy = apxinf_cuda::CudaBackend::new(0).unwrap();
+            for maximum in [448.0, 13.3, 0.0] {
+                let mut values = (0..512)
+                    .map(|index| (index as f32 / 511.0 - 0.5) * maximum)
+                    .collect::<Vec<_>>();
+                values.extend([maximum, 0.01513671875, 1.0004]);
+                if maximum == 0.0 {
+                    values.fill(0.0);
+                }
+                let source = linear(&values, [1, values.len()], None);
+                let (host, scale, _) = pack_host_parts(&[&source]).unwrap();
+                let input = legacy.to_device(&host).unwrap();
+                let expected = apxinf_cuda::kernels::quantization::quantize_f16_e4m3(
+                    legacy.context(),
+                    &input,
+                    scale,
+                )
+                .unwrap();
+                legacy.context().synchronize().unwrap();
+                let expected = legacy.to_cpu(&expected).unwrap();
+                let actual = Fp8StaticLinearWeights::from_host(&source, &context).unwrap();
+                context.synchronize().unwrap();
+                let actual = backend::to_cpu(&actual.weight).unwrap();
+                assert_eq!(actual.as_f8_e4m3().unwrap(), expected.as_f8_e4m3().unwrap());
+                if maximum == 448.0 {
+                    assert_eq!(actual.as_f8_e4m3().unwrap()[513], 0x08);
+                }
+            }
+        }
     }
 }
 pub use linear::*;

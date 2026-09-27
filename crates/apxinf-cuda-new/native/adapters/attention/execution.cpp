@@ -357,6 +357,8 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
         apxinf::attention::tuning_keys(normalized, *policy, runtime->device);
     const std::string& key = keys.key;
     std::lock_guard<std::mutex> lock(runtime->attention_mutex);
+    const std::string cache_dir = policy->cache_dir != nullptr
+        ? policy->cache_dir : runtime->default_cache_dir;
 
     Recipe recipe{};
     bool recipe_found = false;
@@ -369,8 +371,7 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
     } else {
       recipe_found = parse(
           apxinf::framework::read_recipe(
-              policy->cache_dir != nullptr ? policy->cache_dir : "",
-              key),
+              cache_dir, key),
           recipe);
     }
 
@@ -393,7 +394,7 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
     }
 
     bool persist = false;
-    if (execution == nullptr && policy->online_tune) {
+    if (execution == nullptr && runtime->allow_online_tune && policy->online_tune) {
       recipe = apxinf::attention::tune(normalized, *policy, *bindings,
                                        runtime->device, source);
       const auto* implementation =
@@ -435,9 +436,7 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
     if (persist) {
       runtime->attention_recipes[key] = recipe;
       const std::string encoded = serialize(recipe);
-      const std::string directory =
-          policy->cache_dir != nullptr ? policy->cache_dir : "";
-      apxinf::framework::write_recipe(directory, key, encoded);
+      apxinf::framework::write_recipe(cache_dir, key, encoded);
     }
     execution->summary =
         std::string(execution->implementation->name) +

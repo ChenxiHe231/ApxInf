@@ -58,6 +58,11 @@ bool fp8_f32_projection_forced() {
 }  // namespace
 
 uint32_t common_projection_dtype(const Spec& spec) {
+  if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU &&
+      spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
+      spec.output_dtype == APXINF_DTYPE_E4M3) {
+    return APXINF_DTYPE_F16;
+  }
   if (spec.a_dtype == APXINF_DTYPE_I8) {
     return APXINF_DTYPE_I32;
   }
@@ -173,6 +178,22 @@ cudaError_t launch_postprocess(const Spec& spec,
                                void* projection) {
   if (resources.projection == nullptr) {
     return cudaSuccess;
+  }
+  if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU &&
+      resources.projection_dtype == APXINF_DTYPE_F16 &&
+      spec.output_dtype == APXINF_DTYPE_E4M3 && spec.n % 16 == 0 &&
+      spec.m * (spec.n / 16) <= INT32_MAX &&
+      reinterpret_cast<uintptr_t>(projection) % 8 == 0 &&
+      reinterpret_cast<uintptr_t>(bindings.output) % 8 == 0) {
+    const int64_t groups = spec.m * (spec.n / 16);
+    const int blocks = static_cast<int>(
+        std::min<int64_t>((groups + 255) / 256, 4096));
+    geglu_quant_f16_e4m3_packed8_kernel<<<
+        blocks, 256, 0, static_cast<cudaStream_t>(bindings.stream)>>>(
+        static_cast<const half*>(projection),
+        static_cast<__nv_fp8_e4m3*>(bindings.output), spec.m, spec.n / 2,
+        1.0F / bindings.output_scale);
+    return cudaGetLastError();
   }
   if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU &&
       spec.quantization == APXINF_GEMM_QUANT_NONE &&

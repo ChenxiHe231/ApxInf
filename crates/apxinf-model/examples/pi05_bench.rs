@@ -14,6 +14,7 @@
 //! ```text
 //! pi05_bench <checkpoint-or-index|random> --model-variant {bf16,fp8_static,int8_dynamic}
 //!     [--calibration <json|uniform:SCALE>]
+//!     [--autotune]
 //!     [--views N] [--image-size N] [--action-horizon N] [--action-dim N]
 //!     [--num-flow-steps N] [--max-token-len N]  (views/H also work with checkpoints)
 //!     [--token-count T] [--iterations N] [--seed N]
@@ -577,6 +578,7 @@ fn reference_actions(
 /// in random mode (a checkpoint's weights are fixed to its own config).
 #[derive(Debug)]
 struct Args {
+    autotune: bool,
     source: String,
     model_variant: BenchVariant,
     calibration: Option<String>,
@@ -610,6 +612,7 @@ impl Args {
         let mut source: Option<String> = None;
         let mut model_variant: Option<BenchVariant> = None;
         let mut calibration = None;
+        let mut autotune = false;
         let mut views = None;
         let mut image_size = None;
         let mut action_horizon = None;
@@ -630,6 +633,7 @@ impl Args {
         while index < raw.len() {
             let argument = raw[index].as_str();
             match argument {
+                "--autotune" => autotune = true,
                 "--model-variant" => {
                     model_variant = Some(BenchVariant::parse(&expect_value(
                         raw,
@@ -703,6 +707,7 @@ impl Args {
             }
         }
         Ok(Self {
+            autotune,
             source,
             model_variant,
             calibration,
@@ -725,12 +730,31 @@ impl Args {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::Args;
+
+    #[test]
+    fn autotune_is_explicit_and_accepts_the_legacy_flag() {
+        let mut arguments: Vec<String> = ["pi05_bench", "random", "--model-variant", "bf16"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert!(!Args::parse(&arguments).unwrap().autotune);
+        arguments.push("--autotune".to_owned());
+        assert!(Args::parse(&arguments).unwrap().autotune);
+        arguments.remove(4);
+        arguments.insert(1, "--autotune".to_owned());
+        assert!(Args::parse(&arguments).unwrap().autotune);
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let raw = std::env::args().collect::<Vec<_>>();
     let args = Args::parse(&raw).map_err(|error| {
         format!(
             "{error}\nusage: {} <checkpoint-or-index|random> --model-variant {{bf16,fp8_static,int8_dynamic}} \
-             [--calibration <json|uniform:SCALE>] [--views N] \
+             [--calibration <json|uniform:SCALE>] [--autotune] [--views N] \
              [--image-size N] [--action-horizon N] [--action-dim N] [--num-flow-steps N] \
              [--max-token-len N] [--token-count T] [--iterations N] [--seed N] \
              [--image-input patches|nhwc|nchw] [--reference <json>] [--min-cosine C] \
@@ -820,7 +844,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.validate()?;
     let config = Arc::new(config);
 
-    let context = Arc::new(CudaContext::new(0).map_err(std::io::Error::other)?);
+    let context = Arc::new(
+        CudaContext::new_with_autotune(0, args.autotune).map_err(std::io::Error::other)?,
+    );
+    eprintln!(
+        "cuda-new: autotune={} recipe_cache={}",
+        args.autotune,
+        context.default_cache_dir()
+    );
     if model_variant == BenchVariant::Fp8Static {
         ModelVariantChoice::Fp8Static.ensure_supported(context.caps().sm)?;
     }

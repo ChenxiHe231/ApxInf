@@ -183,7 +183,7 @@ fn fp8_gemm_geglu(
     if weight_dims[1] % 2 != 0 {
         return Err(Error::Other("π0.5 FP8 GeGLU width must be even".into()));
     }
-    let fused_shape = matches!(dims[0], 522 | 533)
+    let fused_shape = matches!(dims[0], 522 | 533 | 778)
         && dims[1] == 2048
         && weight_dims == [2048, 32768];
     if fused_shape {

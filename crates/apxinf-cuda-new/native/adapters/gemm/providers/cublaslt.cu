@@ -1,6 +1,10 @@
 #include "vendor.h"
 #include "../../../kernels/custom/gemm.cuh"
 
+#ifdef APXINF_GEMM_CUTLASS
+#include "../../../kernels/cutlass/ops/gemm/gemm_e4m3_sm100.h"
+#endif
+
 namespace apxinf::gemm {
 namespace {
 
@@ -16,6 +20,7 @@ struct CublasLtState {
   bool has_algorithm = false;
   bool native_fp4 = false;
   bool direct_fp8_gelu = false;
+  bool split_geglu = false;
   void* c_buffer = nullptr;
   float* output_scale = nullptr;
   void* workspace = nullptr;
@@ -72,21 +77,30 @@ size_t common_requirement(const Spec& spec, bool native_fp8) {
 }
 
 void prepare_cublaslt_impl(Execution& state, bool native_fp8,
-                           bool direct_fp8_gelu, bool native_fp4 = false) {
+                           bool direct_fp8_gelu, bool split_geglu = false,
+                           bool native_fp4 = false) {
   auto resources = std::make_unique<CublasLtState>();
   const auto& spec = state.spec;
   resources->native_fp4 = native_fp4;
+  const int64_t projection_columns = split_geglu ? spec.n / 2 : spec.n;
+  const int64_t projection_stride = spec.n;
+  const int heuristic_rank =
+      split_geglu ? state.configuration / 3 : state.configuration;
   resources->common.projection_dtype =
       native_fp4 ? APXINF_DTYPE_BF16 : vendor::common_projection_dtype(spec);
   const size_t c_buffer_bytes =
-      direct_fp8_gelu ? static_cast<size_t>(spec.m * spec.n) * sizeof(half) : 0;
+      (direct_fp8_gelu || split_geglu)
+          ? static_cast<size_t>(spec.m * projection_stride) * sizeof(half)
+          : 0;
   const size_t fixed_bytes = native_fp4 ? 0 : direct_fp8_gelu
                                  ? c_buffer_bytes + sizeof(float)
-                                 : common_requirement(spec, native_fp8);
+                                 : split_geglu ? c_buffer_bytes
+                                               : common_requirement(spec, native_fp8);
   const size_t available_workspace = state.resource_limit - fixed_bytes;
   const cudaDataType_t projection_type =
-      direct_fp8_gelu ? CUDA_R_16F
-                      : projection_cuda_dtype(resources->common);
+      (direct_fp8_gelu || split_geglu)
+          ? CUDA_R_16F
+          : projection_cuda_dtype(resources->common);
   const cudaDataType_t output_type =
       direct_fp8_gelu ? CUDA_R_8F_E4M3 : projection_type;
   cudaDataType_t input_type =
@@ -179,17 +193,17 @@ void prepare_cublaslt_impl(Execution& state, bool native_fp8,
   }
   check_cublas(cublasLtMatrixLayoutCreate(
       &resources->a_layout, input_type,
-      transpose == CUBLAS_OP_T ? spec.k : spec.n,
-      transpose == CUBLAS_OP_T ? spec.n : spec.k,
+      transpose == CUBLAS_OP_T ? spec.k : projection_columns,
+      transpose == CUBLAS_OP_T ? projection_columns : spec.k,
       transpose == CUBLAS_OP_T ? spec.k : spec.n));
   check_cublas(cublasLtMatrixLayoutCreate(
       &resources->b_layout, input_type, spec.k, spec.m, spec.k));
-  check_cublas(cublasLtMatrixLayoutCreate(&resources->c_layout,
-                                          projection_type, spec.n, spec.m,
-                                          spec.n));
-  check_cublas(cublasLtMatrixLayoutCreate(&resources->d_layout,
-                                          output_type, spec.n, spec.m,
-                                          spec.n));
+  check_cublas(cublasLtMatrixLayoutCreate(
+      &resources->c_layout, projection_type, projection_columns, spec.m,
+      projection_stride));
+  check_cublas(cublasLtMatrixLayoutCreate(
+      &resources->d_layout, output_type, projection_columns, spec.m,
+      projection_stride));
 
   cublasLtMatmulPreference_t preference = nullptr;
   check_cublas(cublasLtMatmulPreferenceCreate(&preference));
@@ -209,14 +223,14 @@ void prepare_cublaslt_impl(Execution& state, bool native_fp8,
       resources->d_layout, preference, 8, candidates, &candidate_count);
   cublasLtMatmulPreferenceDestroy(preference);
   check_cublas(status);
-  if (state.configuration >= candidate_count ||
-      candidates[state.configuration].state != CUBLAS_STATUS_SUCCESS) {
+  if (heuristic_rank >= candidate_count ||
+      candidates[heuristic_rank].state != CUBLAS_STATUS_SUCCESS) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
                   "cuBLASLt heuristic is unavailable");
   }
-  resources->algorithm = candidates[state.configuration].algo;
+  resources->algorithm = candidates[heuristic_rank].algo;
   resources->has_algorithm = true;
-  resources->workspace_bytes = candidates[state.configuration].workspaceSize;
+  resources->workspace_bytes = candidates[heuristic_rank].workspaceSize;
 
   if (resources->workspace_bytes > available_workspace) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
@@ -236,6 +250,10 @@ void prepare_cublaslt_impl(Execution& state, bool native_fp8,
         resources->operation, CUBLASLT_MATMUL_DESC_D_SCALE_POINTER,
         &resources->output_scale, sizeof(resources->output_scale)));
     resources->direct_fp8_gelu = true;
+    resources->common.resource_bytes = fixed_bytes;
+  } else if (split_geglu) {
+    check_cuda(cudaMalloc(&resources->c_buffer, c_buffer_bytes));
+    resources->split_geglu = true;
     resources->common.resource_bytes = fixed_bytes;
   } else if (!native_fp4) {
     vendor::allocate_common_resources(spec, resources->common, native_fp8);
@@ -282,7 +300,19 @@ size_t cublaslt_native_fp4_resource_requirements(const Spec&) {
 }
 
 void prepare_cublaslt_native_fp4(Execution& state) {
-  prepare_cublaslt_impl(state, false, false, true);
+  prepare_cublaslt_impl(state, false, false, false, true);
+}
+
+size_t cublaslt_split_geglu_resource_requirements(const Spec& spec) {
+  return static_cast<size_t>(spec.m * spec.n) * sizeof(half);
+}
+
+void prepare_cublaslt_split_geglu(Execution& state) {
+  if (!(state.bindings.alpha > 0.0F)) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "split CUTLASS GeGLU requires positive alpha");
+  }
+  prepare_cublaslt_impl(state, true, false, true);
 }
 
 void destroy_cublaslt(Execution& state) noexcept {
@@ -319,7 +349,7 @@ cudaError_t launch_cublaslt(Execution& state) {
     activation = resources.common.unpack_a;
     weight = resources.common.unpack_b;
   }
-  void* projection = resources.direct_fp8_gelu
+  void* projection = (resources.direct_fp8_gelu || resources.split_geglu)
                          ? resources.c_buffer
                          : resources.common.projection != nullptr
                                ? resources.common.projection
@@ -346,9 +376,28 @@ cudaError_t launch_cublaslt(Execution& state) {
       resources.c_layout, output,
       resources.d_layout, &resources.algorithm, resources.workspace,
       resources.workspace_bytes, stream));
-  if (resources.direct_fp8_gelu) return cudaSuccess;
+  if (resources.direct_fp8_gelu || resources.split_geglu) return cudaSuccess;
   return vendor::launch_postprocess(spec, resources.common, bindings,
                                     projection);
+}
+
+cudaError_t launch_cublaslt_split_geglu(Execution& state) {
+#ifdef APXINF_GEMM_CUTLASS
+  check_cuda(launch_cublaslt(state));
+  const auto& spec = state.spec;
+  const auto& bindings = state.bindings;
+  const int status = apxinf::cuda_new::cutlass_ops::fp8_gemm_geglu_e4m3(
+      bindings.a, bindings.b, provider(state).c_buffer, bindings.output,
+      spec.m, spec.n / 2, spec.k, spec.n, bindings.alpha, bindings.output_scale,
+      state.configuration % 3, static_cast<cudaStream_t>(bindings.stream));
+  if (status != 0) {
+    throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                  "split CUTLASS GeGLU launch status " + std::to_string(status));
+  }
+  return cudaSuccess;
+#else
+  return cudaErrorNotSupported;
+#endif
 }
 
 }  // namespace apxinf::gemm
