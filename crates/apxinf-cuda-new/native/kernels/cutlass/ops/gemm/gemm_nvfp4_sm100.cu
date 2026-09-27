@@ -13,6 +13,8 @@
 #include "gemm_nvfp4_sm100.h"
 
 #include <cuda_bf16.h>
+#include <cuda_fp4.h>
+#include <cuda_fp8.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -263,45 +265,22 @@ __global__ void scatter_block_scales_kernel(const uint8_t* __restrict__ src,
   tensor(row, block * sf_vec, 0) = src[index];
 }
 
-// E2M1 magnitudes, indexed by the low three bits of the code.
+// E2M1 codes: bit 3 is the sign, bits 0-2 index the magnitude ladder.
+// Hardware convert gives IEEE round-to-nearest-even at the midpoints and
+// preserves the sign of -0.0f; the old comparison ladder rounded half-up
+// (vLLM parity defect D1, report 64).
 __device__ __forceinline__ uint8_t quantize_e2m1(float value) {
-  const uint8_t sign = value < 0.0f ? 0x8 : 0x0;
-  const float magnitude = fabsf(value);
-  // Round to nearest representable magnitude. The ladder is short enough that
-  // comparing against midpoints beats any arithmetic trick.
-  uint8_t code;
-  if (magnitude < 0.25f) code = 0;
-  else if (magnitude < 0.75f) code = 1;   // 0.5
-  else if (magnitude < 1.25f) code = 2;   // 1.0
-  else if (magnitude < 1.75f) code = 3;   // 1.5
-  else if (magnitude < 2.5f) code = 4;    // 2.0
-  else if (magnitude < 3.5f) code = 5;    // 3.0
-  else if (magnitude < 5.0f) code = 6;    // 4.0
-  else code = 7;                          // 6.0
-  return sign | code;
+  return __nv_cvt_float_to_fp4(value, __NV_E2M1, cudaRoundNearest);
 }
 
 // Encode a non-negative float as E4M3 (bias 7). Scale values are never
 // negative, so this matches the unsigned encoding the kernel reads.
+// SATFINITE saturates at 448 without producing NaN and, unlike the old
+// frexpf ladder, keeps subnormal scales (codes 1..8) instead of flushing
+// whole blocks to zero (vLLM parity defect D2, report 64).
 __device__ __forceinline__ uint8_t quantize_e4m3_nonnegative(float value) {
   if (!(value > 0.0f)) return 0;
-  if (value >= 448.0f) return 0x7e;
-  int exponent;
-  float mantissa = frexpf(value, &exponent);  // value = mantissa * 2^exponent
-  mantissa *= 2.0f;
-  exponent -= 1;                              // mantissa now in [1, 2)
-  int biased = exponent + 7;
-  if (biased <= 0) return 0;                  // underflows to zero
-  int fraction = __float2int_rn((mantissa - 1.0f) * 8.0f);
-  if (fraction > 7) {
-    fraction = 0;
-    ++biased;
-  }
-  if (biased > 15) {                          // saturate at the E4M3 maximum
-    biased = 15;
-    fraction = 6;
-  }
-  return static_cast<uint8_t>((biased << 3) | fraction);
+  return __nv_cvt_float_to_fp8(value, __NV_SATFINITE, __NV_E4M3);
 }
 
 __device__ __forceinline__ float dequantize_e4m3_nonnegative(uint8_t code) {
