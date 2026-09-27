@@ -9,7 +9,7 @@
 //! chunk scan's output and final state against `torch_chunk_gated_delta_rule`.
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda::{ops, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{ops, CudaBuffer, CudaContext};
 
 fn upload_bf16(ctx: &CudaContext, values: &[f32], dims: Vec<usize>) -> Tensor {
     let bytes: Vec<u8> = values

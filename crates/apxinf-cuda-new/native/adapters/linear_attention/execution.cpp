@@ -43,7 +43,7 @@ extern "C" apxinf_status_t apxinf_gdn_recurrent_step(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN recurrent step arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_recurrent_step(
+    check(apxinf::cuda_new::gdn_ops::gdn_recurrent_step(
               state, q, k, v, decay, beta, output, static_cast<int>(v_heads),
               static_cast<int>(k_heads), static_cast<int>(v_dim),
               static_cast<int>(k_dim), static_cast<cudaStream_t>(stream)),
@@ -61,7 +61,7 @@ extern "C" apxinf_status_t apxinf_gdn_gated_norm(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN gated norm arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_gated_norm(
+    check(apxinf::cuda_new::gdn_ops::gdn_gated_norm(
               input, gate, weight, output, static_cast<int>(heads),
               static_cast<int>(head_dim), epsilon,
               static_cast<cudaStream_t>(stream)),
@@ -78,7 +78,7 @@ extern "C" apxinf_status_t apxinf_gdn_causal_conv_step(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN conv step arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_causal_conv_step(
+    check(apxinf::cuda_new::gdn_ops::gdn_causal_conv_step(
               window, input, weight, output, static_cast<int>(channels),
               static_cast<int>(kernel_width),
               static_cast<cudaStream_t>(stream)),
@@ -94,7 +94,7 @@ extern "C" apxinf_status_t apxinf_gdn_widen_f16_to_bf16(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid FP16 widening arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_widen_f16_to_bf16(
+    check(apxinf::cuda_new::gdn_ops::gdn_widen_f16_to_bf16(
               input, output, static_cast<long long>(count),
               static_cast<cudaStream_t>(stream)),
           "FP16 widening");
@@ -113,7 +113,7 @@ extern "C" apxinf_status_t apxinf_gdn_prepare_flashinfer(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN FlashInfer preparation arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_prepare_flashinfer(
+    check(apxinf::cuda_new::gdn_ops::gdn_prepare_flashinfer(
               fused, q_out, k_out, v_out, g, alpha, static_cast<int>(tokens),
               static_cast<int>(row_width), static_cast<int>(k_heads),
               static_cast<int>(v_heads), static_cast<int>(dim), epsilon,
@@ -135,7 +135,7 @@ extern "C" apxinf_status_t apxinf_gdn_conv_prepare_flashinfer(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid fused GDN convolution preparation arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_conv_prepare_flashinfer(
+    check(apxinf::cuda_new::gdn_ops::gdn_conv_prepare_flashinfer(
               input, weight, window, q_out, k_out, v_out, decay, alpha,
               static_cast<int>(tokens), static_cast<int>(k_heads),
               static_cast<int>(v_heads), epsilon,
@@ -159,7 +159,7 @@ extern "C" apxinf_status_t apxinf_flashinfer_gdn_prefill(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid FlashInfer GDN prefill arguments");
     }
-    check(apxinf::cuda::flashinfer_gdn::prefill(
+    check(apxinf::cuda_new::flashinfer_gdn::prefill(
               q, k, v, out, gate_log, beta, cu_seqlens, state,
               tensor_map_workspace, static_cast<int>(tokens),
               static_cast<int>(q_heads), static_cast<int>(v_heads),
@@ -172,7 +172,7 @@ extern "C" apxinf_status_t apxinf_flashinfer_gdn_prefill(
 extern "C" int64_t apxinf_flashinfer_gdn_workspace_bytes(int64_t v_heads,
                                                          int64_t num_seqs) {
   if (v_heads <= 0 || num_seqs <= 0) return 0;
-  return static_cast<int64_t>(apxinf::cuda::flashinfer_gdn::
+  return static_cast<int64_t>(apxinf::cuda_new::flashinfer_gdn::
                                   tensor_map_workspace_bytes(
                                       static_cast<int>(v_heads),
                                       static_cast<int>(num_seqs)));
@@ -189,7 +189,7 @@ extern "C" apxinf_status_t apxinf_gdn_causal_conv_forward(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN conv forward arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_causal_conv_forward(
+    check(apxinf::cuda_new::gdn_ops::gdn_causal_conv_forward(
               input, weight, output, window, static_cast<int>(tokens),
               static_cast<int>(channels), static_cast<int>(kernel_width),
               static_cast<cudaStream_t>(stream)),
@@ -208,7 +208,7 @@ extern "C" apxinf_status_t apxinf_gdn_decay_and_beta_seq(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN sequence gate arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_decay_and_beta_seq(
+    check(apxinf::cuda_new::gdn_ops::gdn_decay_and_beta_seq(
               a, b, a_log, dt_bias, decay, beta, static_cast<int>(tokens),
               static_cast<int>(heads), static_cast<cudaStream_t>(stream)),
           "GDN sequence gates");
@@ -226,7 +226,7 @@ extern "C" apxinf_status_t apxinf_gdn_gated_norm_seq(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN sequence gated norm arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_gated_norm_seq(
+    check(apxinf::cuda_new::gdn_ops::gdn_gated_norm_seq(
               input, gate, weight, output, static_cast<int>(tokens),
               static_cast<int>(heads), static_cast<int>(head_dim), epsilon,
               static_cast<cudaStream_t>(stream)),
@@ -245,7 +245,7 @@ extern "C" apxinf_status_t apxinf_gdn_gated_norm_seq_f16(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN FP16 sequence gated norm arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_gated_norm_seq_f16(
+    check(apxinf::cuda_new::gdn_ops::gdn_gated_norm_seq_f16(
               input, gate, weight, output, static_cast<int>(tokens),
               static_cast<int>(heads), static_cast<int>(head_dim), epsilon,
               static_cast<cudaStream_t>(stream)),
@@ -261,7 +261,7 @@ extern "C" apxinf_status_t apxinf_gdn_l2_normalize_heads(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN normalization arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_l2_normalize_heads(
+    check(apxinf::cuda_new::gdn_ops::gdn_l2_normalize_heads(
               data, static_cast<int>(heads), static_cast<int>(head_dim),
               epsilon, static_cast<cudaStream_t>(stream)),
           "GDN head normalization");
@@ -278,7 +278,7 @@ extern "C" apxinf_status_t apxinf_gdn_decay_and_beta(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN gate arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_decay_and_beta(
+    check(apxinf::cuda_new::gdn_ops::gdn_decay_and_beta(
               a, b, a_log, dt_bias, decay, beta, static_cast<int>(heads),
               static_cast<cudaStream_t>(stream)),
           "GDN gates");
@@ -302,7 +302,7 @@ extern "C" apxinf_status_t apxinf_gdn_chunk_scan(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid GDN chunk scan arguments");
     }
-    check(apxinf::cuda::gdn_ops::gdn_chunk_scan(
+    check(apxinf::cuda_new::gdn_ops::gdn_chunk_scan(
               q, k, v, g, beta, out, state, static_cast<int>(seq_padded),
               static_cast<int>(v_heads), static_cast<int>(k_heads),
               static_cast<int>(chunk_size), static_cast<int>(k_dim),

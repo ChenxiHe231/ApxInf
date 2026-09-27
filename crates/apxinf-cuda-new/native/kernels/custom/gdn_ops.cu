@@ -28,7 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace apxinf::cuda::gdn_ops {
+namespace apxinf::cuda_new::gdn_ops {
 namespace {
 
 // One warp per state row, four rows per block, float4 loads.
@@ -1694,4 +1694,4 @@ int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
 #undef APXINF_GDN_LAUNCH
 }
 
-}  // namespace apxinf::cuda::gdn_ops
+}  // namespace apxinf::cuda_new::gdn_ops

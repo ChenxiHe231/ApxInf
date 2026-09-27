@@ -12,7 +12,7 @@
 // modes (scalar, vector, native-pair), plus a 13-element tail-path shape.
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda::{ops, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{ops, CudaBuffer, CudaContext};
 
 fn upload(ctx: &CudaContext, bytes: &[u8], count: usize, dtype: DType) -> Tensor {
     let buffer = CudaBuffer::alloc(bytes.len(), ctx.device_id()).unwrap();

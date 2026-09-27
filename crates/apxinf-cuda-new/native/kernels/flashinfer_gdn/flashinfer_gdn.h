@@ -4,7 +4,7 @@
 #include <cuda_runtime_api.h>
 #include <cstddef>
 
-namespace apxinf::cuda::flashinfer_gdn {
+namespace apxinf::cuda_new::flashinfer_gdn {
 
 // Chunked gated delta rule over a whole prompt, on the vendored FlashInfer
 // Cake kernel.
@@ -29,4 +29,4 @@ int prefill(const void* q, const void* k, const void* v, void* out,
 // Bytes of scratch `prefill` needs for its per-CTA TMA descriptor rewrites.
 size_t tensor_map_workspace_bytes(int v_heads, int num_seqs);
 
-}  // namespace apxinf::cuda::flashinfer_gdn
+}  // namespace apxinf::cuda_new::flashinfer_gdn

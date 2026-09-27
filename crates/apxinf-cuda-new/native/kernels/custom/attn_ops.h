@@ -3,7 +3,7 @@
 
 #include <cuda_runtime_api.h>
 
-namespace apxinf::cuda::attn_ops {
+namespace apxinf::cuda_new::attn_ops {
 
 // Partial rotary embedding over `[tokens, heads, head_dim]` BF16, in place.
 //
@@ -38,4 +38,4 @@ int split_query_and_gate(const void* fused, void* query, void* gate,
 int apply_output_gate(void* data, const void* gate, long long count,
                       cudaStream_t stream);
 
-}  // namespace apxinf::cuda::attn_ops
+}  // namespace apxinf::cuda_new::attn_ops

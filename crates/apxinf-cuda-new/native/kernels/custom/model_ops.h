@@ -4,7 +4,7 @@
 #include <cuda_runtime_api.h>
 #include <cstdint>
 
-namespace apxinf::cuda::model_ops {
+namespace apxinf::cuda_new::model_ops {
 
 // Gather rows from a BF16 embedding table: out[t, :] = table[ids[t], :].
 //
@@ -20,4 +20,4 @@ int embedding_gather(const void* table, const int32_t* ids, void* output,
 int argmax_bf16(const void* logits, int32_t* index, int count,
                 cudaStream_t stream);
 
-}  // namespace apxinf::cuda::model_ops
+}  // namespace apxinf::cuda_new::model_ops

@@ -6,7 +6,7 @@
 //! reference engine running this checkpoint.
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda::{ops, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{ops, CudaBuffer, CudaContext};
 
 const HEAD_DIM: usize = 256;
 const HEADS: usize = 24;

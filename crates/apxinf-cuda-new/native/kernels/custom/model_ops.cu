@@ -4,7 +4,7 @@
 
 #include <cuda_bf16.h>
 
-namespace apxinf::cuda::model_ops {
+namespace apxinf::cuda_new::model_ops {
 namespace {
 
 __global__ void embedding_gather_kernel(const __nv_bfloat16* __restrict__ table,
@@ -88,4 +88,4 @@ int argmax_bf16(const void* logits, int32_t* index, int count,
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
-}  // namespace apxinf::cuda::model_ops
+}  // namespace apxinf::cuda_new::model_ops

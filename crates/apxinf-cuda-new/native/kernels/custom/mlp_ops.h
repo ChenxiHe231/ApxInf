@@ -3,7 +3,7 @@
 
 #include <cuda_runtime_api.h>
 
-namespace apxinf::cuda::mlp_ops {
+namespace apxinf::cuda_new::mlp_ops {
 
 // y[r,c] = x[r,c] / sqrt(mean(x[r,:]^2) + epsilon) * weight[c]
 //
@@ -70,4 +70,4 @@ int nvfp4_gemv(const void* weight, const void* weight_scales,
                const void* activation, const void* activation_scales,
                void* output, int n, int k, float alpha, cudaStream_t stream);
 
-}  // namespace apxinf::cuda::mlp_ops
+}  // namespace apxinf::cuda_new::mlp_ops

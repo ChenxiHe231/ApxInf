@@ -38,7 +38,7 @@ extern "C" apxinf_status_t apxinf_attn_partial_rope(
         !extent(heads) || !extent(head_dim) || !extent(rotary_dim)) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid RoPE arguments");
     }
-    check(apxinf::cuda::attn_ops::partial_rope(
+    check(apxinf::cuda_new::attn_ops::partial_rope(
               data, positions, static_cast<int>(tokens),
               static_cast<int>(heads), static_cast<int>(head_dim),
               static_cast<int>(rotary_dim), theta,
@@ -56,7 +56,7 @@ extern "C" apxinf_status_t apxinf_attn_head_rms_norm(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid head RMSNorm arguments");
     }
-    check(apxinf::cuda::attn_ops::head_rms_norm(
+    check(apxinf::cuda_new::attn_ops::head_rms_norm(
               data, weight, static_cast<int>(rows), static_cast<int>(head_dim),
               epsilon, static_cast<cudaStream_t>(stream)),
           "head RMSNorm");
@@ -72,7 +72,7 @@ extern "C" apxinf_status_t apxinf_attn_split_query_and_gate(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid query/gate split arguments");
     }
-    check(apxinf::cuda::attn_ops::split_query_and_gate(
+    check(apxinf::cuda_new::attn_ops::split_query_and_gate(
               fused, query, gate, static_cast<int>(tokens),
               static_cast<int>(heads), static_cast<int>(head_dim),
               static_cast<cudaStream_t>(stream)),
@@ -88,7 +88,7 @@ extern "C" apxinf_status_t apxinf_attn_apply_output_gate(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid output gate arguments");
     }
-    check(apxinf::cuda::attn_ops::apply_output_gate(
+    check(apxinf::cuda_new::attn_ops::apply_output_gate(
               data, gate, count, static_cast<cudaStream_t>(stream)),
           "attention output gate");
   });

@@ -38,7 +38,7 @@ extern "C" apxinf_status_t apxinf_model_embedding_gather(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid embedding gather arguments");
     }
-    check(apxinf::cuda::model_ops::embedding_gather(
+    check(apxinf::cuda_new::model_ops::embedding_gather(
               table, static_cast<const int32_t*>(ids), output,
               static_cast<int>(tokens), static_cast<int>(hidden),
               static_cast<int>(vocab), static_cast<cudaStream_t>(stream)),
@@ -53,7 +53,7 @@ extern "C" apxinf_status_t apxinf_model_argmax_bf16(
     if (logits == nullptr || index == nullptr || !extent(count)) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid argmax arguments");
     }
-    check(apxinf::cuda::model_ops::argmax_bf16(
+    check(apxinf::cuda_new::model_ops::argmax_bf16(
               logits, static_cast<int32_t*>(index), static_cast<int>(count),
               static_cast<cudaStream_t>(stream)),
           "argmax");

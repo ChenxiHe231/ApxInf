@@ -23,7 +23,7 @@ extern "C" int apxinf_flashinfer_gdn_launch(
     long long state_stride, float scale, int num_seqs, int q_heads,
     int v_heads, int total_tiles, int grid_x, cudaStream_t stream);
 
-namespace apxinf::cuda::flashinfer_gdn {
+namespace apxinf::cuda_new::flashinfer_gdn {
 namespace {
 
 constexpr int kHeadDim = 128;
@@ -121,4 +121,4 @@ size_t tensor_map_workspace_bytes(int v_heads, int num_seqs) {
                            kOptionalTailBytes;
 }
 
-}  // namespace apxinf::cuda::flashinfer_gdn
+}  // namespace apxinf::cuda_new::flashinfer_gdn

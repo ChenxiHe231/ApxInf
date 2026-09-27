@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda::{ops, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{ops, CudaBuffer, CudaContext};
 
 fn checkpoint() -> HashMap<String, Tensor> {
     let path: PathBuf = std::env::var_os("APXINF_QWEN38_CHECKPOINT")

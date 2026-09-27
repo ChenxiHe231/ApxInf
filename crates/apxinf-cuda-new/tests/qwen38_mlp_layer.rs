@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda::{ops, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{ops, CudaBuffer, CudaContext};
 
 const HIDDEN: usize = 5120;
 const INTERMEDIATE: usize = 17408;

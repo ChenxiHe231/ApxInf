@@ -29,7 +29,7 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/util/packed_stride.hpp"
 
-namespace apxinf::cuda::cutlass_ops {
+namespace apxinf::cuda_new::cutlass_ops {
 
 struct Nvfp4GemmExecution {
   void* implementation = nullptr;
@@ -678,4 +678,4 @@ int nvfp4_quantize_swiglu(const void* src_bf16, void* dst_packed,
   return cudaGetLastError() == cudaSuccess ? 0 : -21;
 }
 
-}  // namespace apxinf::cuda::cutlass_ops
+}  // namespace apxinf::cuda_new::cutlass_ops

@@ -18,7 +18,7 @@
 use std::time::Instant;
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda::{ops, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{ops, CudaBuffer, CudaContext};
 
 fn device_tensor(ctx: &CudaContext, bytes: &[u8], dims: Vec<usize>, dtype: DType) -> Tensor {
     let buffer = CudaBuffer::alloc(bytes.len(), ctx.device_id()).unwrap();

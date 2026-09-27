@@ -80,7 +80,7 @@ void fill_params(FLASH_NAMESPACE::Flash_fwd_params& params, bool is_bf16,
 
 }  // namespace
 
-namespace apxinf::cuda::cutlass_ops {
+namespace apxinf::cuda_new::cutlass_ops {
 
 int fa2_bf16_decode_splitkv(const void* q, const void* k, const void* v,
                            void* output, void* workspace, int key_tokens,
@@ -202,4 +202,4 @@ int fa2_f16(
       query_heads, kv_heads, head_dim, softmax_scale, stream);
 }
 
-}  // namespace apxinf::cuda::cutlass_ops
+}  // namespace apxinf::cuda_new::cutlass_ops

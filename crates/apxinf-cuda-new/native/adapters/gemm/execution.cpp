@@ -429,7 +429,7 @@ extern "C" uint64_t apxinf_gemm_nvfp4_scale_buffer_bytes(int64_t rows,
                                                          uint32_t sf_vec_size) {
 #ifdef APXINF_GEMM_CUTLASS
   if (rows <= 0 || k <= 0 || rows > INT32_MAX || k > INT32_MAX) return 0;
-  return apxinf::cuda::cutlass_ops::nvfp4_scale_buffer_bytes(
+  return apxinf::cuda_new::cutlass_ops::nvfp4_scale_buffer_bytes(
       static_cast<int>(rows), static_cast<int>(k),
       static_cast<int>(sf_vec_size));
 #else
@@ -450,7 +450,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_pack_block_scales(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid NVFP4 block-scale packing arguments");
     }
-    const int status = apxinf::cuda::cutlass_ops::nvfp4_scatter_block_scales(
+    const int status = apxinf::cuda_new::cutlass_ops::nvfp4_scatter_block_scales(
         source_row_major, destination, static_cast<int>(rows),
         static_cast<int>(k), static_cast<int>(sf_vec_size),
         static_cast<cudaStream_t>(stream));
@@ -484,7 +484,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_activation(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid NVFP4 activation quantization arguments");
     }
-    const int status = apxinf::cuda::cutlass_ops::nvfp4_quantize_activation(
+    const int status = apxinf::cuda_new::cutlass_ops::nvfp4_quantize_activation(
         source_bf16, destination_packed, destination_scales,
         static_cast<int>(rows), static_cast<int>(k),
         static_cast<int>(sf_vec_size), input_scale, row_major_scales,
@@ -522,7 +522,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_rms_norm(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid fused RMSNorm quantization arguments");
     }
-    const int status = apxinf::cuda::cutlass_ops::nvfp4_quantize_rms_norm(
+    const int status = apxinf::cuda_new::cutlass_ops::nvfp4_quantize_rms_norm(
         source_bf16, norm_weight, destination_packed, destination_scales,
         static_cast<int>(rows), static_cast<int>(k),
         static_cast<int>(sf_vec_size), epsilon, input_scale, row_major_scales,
@@ -554,7 +554,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_swiglu(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid fused SwiGLU quantization arguments");
     }
-    const int status = apxinf::cuda::cutlass_ops::nvfp4_quantize_swiglu(
+    const int status = apxinf::cuda_new::cutlass_ops::nvfp4_quantize_swiglu(
         source_bf16, destination_packed, destination_scales,
         static_cast<int>(rows), static_cast<int>(k),
         static_cast<int>(sf_vec_size), input_scale, row_major_scales,

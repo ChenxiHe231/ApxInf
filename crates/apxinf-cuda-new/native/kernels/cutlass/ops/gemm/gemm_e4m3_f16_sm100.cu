@@ -32,7 +32,7 @@
 
 using namespace cute;
 
-namespace apxinf_cuda_cutlass_detail {
+namespace apxinf_cuda_new_cutlass_detail {
 
 struct GeGluScaleArguments {
   float alpha = 1.0f;
@@ -95,27 +95,27 @@ struct GeGluEVT : GeGluEVTBase {
 };
 
 struct GeGluOperation : cutlass::epilogue::fusion::FusionOperation {
-  using ElementOutput = apxinf_cuda_cutlass_detail::ElementOutput;
-  using ElementCompute = apxinf_cuda_cutlass_detail::ElementCompute;
-  using ElementSource = apxinf_cuda_cutlass_detail::ElementSource;
+  using ElementOutput = apxinf_cuda_new_cutlass_detail::ElementOutput;
+  using ElementCompute = apxinf_cuda_new_cutlass_detail::ElementCompute;
+  using ElementSource = apxinf_cuda_new_cutlass_detail::ElementSource;
   static constexpr bool IsSourceSupported = true;
 };
 
-}  // namespace apxinf_cuda_cutlass_detail
+}  // namespace apxinf_cuda_new_cutlass_detail
 
 namespace cutlass::epilogue::fusion {
 template <>
-struct FusionCallbacksTraits<apxinf_cuda_cutlass_detail::GeGluEVT> {
+struct FusionCallbacksTraits<apxinf_cuda_new_cutlass_detail::GeGluEVT> {
   using DispatchPolicy = void;
-  using Callbacks = apxinf_cuda_cutlass_detail::GeGluEVT;
-  using Operation = apxinf_cuda_cutlass_detail::GeGluOperation;
+  using Callbacks = apxinf_cuda_new_cutlass_detail::GeGluEVT;
+  using Operation = apxinf_cuda_new_cutlass_detail::GeGluOperation;
   using CtaTile_MNK = void;
   using EpilogueTile_MN = void;
-  using ElementCompute = apxinf_cuda_cutlass_detail::ElementCompute;
+  using ElementCompute = apxinf_cuda_new_cutlass_detail::ElementCompute;
 };
 }  // namespace cutlass::epilogue::fusion
 
-namespace apxinf::cuda::cutlass_ops {
+namespace apxinf::cuda_new::cutlass_ops {
 // OutputElement is a parameter because the ApxInf projection contract writes
 // BF16, not F16. Everything else -- tile, cluster, layouts, the scaled-acc
 // epilogue -- is identical, so the BF16 arm is the same kernel with a
@@ -299,7 +299,7 @@ struct Fp8GemmGeGlu {
       LayoutD,
       AlignmentD,
       cutlass::epilogue::collective::EpilogueScheduleAuto,
-      apxinf_cuda_cutlass_detail::GeGluEVT>::CollectiveOp;
+      apxinf_cuda_new_cutlass_detail::GeGluEVT>::CollectiveOp;
   using MainloopStages = std::conditional_t<
       Stages == 0,
       cutlass::gemm::collective::StageCountAutoCarveout<
@@ -640,4 +640,4 @@ int fp8_gemm_geglu_e4m3(
   }
 }
 
-}  // namespace apxinf::cuda::cutlass_ops
+}  // namespace apxinf::cuda_new::cutlass_ops

@@ -15,7 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 
-namespace apxinf::cuda::mlp_ops {
+namespace apxinf::cuda_new::mlp_ops {
 namespace {
 
 constexpr int kWarpSize = 32;
@@ -577,4 +577,4 @@ int add_bf16(const void* addend, void* accumulator, long long count,
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
-}  // namespace apxinf::cuda::mlp_ops
+}  // namespace apxinf::cuda_new::mlp_ops

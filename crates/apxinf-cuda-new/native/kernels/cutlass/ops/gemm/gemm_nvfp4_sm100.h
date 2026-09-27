@@ -4,7 +4,7 @@
 #include <cuda_runtime_api.h>
 #include <stddef.h>
 
-namespace apxinf::cuda::cutlass_ops {
+namespace apxinf::cuda_new::cutlass_ops {
 
 struct Nvfp4GemmExecution;
 
@@ -100,4 +100,4 @@ int nvfp4_quantize_swiglu(const void* src_bf16, void* dst_packed,
                           float input_scale, int row_major_scales,
                           cudaStream_t stream);
 
-}  // namespace apxinf::cuda::cutlass_ops
+}  // namespace apxinf::cuda_new::cutlass_ops

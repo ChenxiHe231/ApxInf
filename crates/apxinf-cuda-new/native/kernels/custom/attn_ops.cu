@@ -26,7 +26,7 @@
 
 #include <cstdint>
 
-namespace apxinf::cuda::attn_ops {
+namespace apxinf::cuda_new::attn_ops {
 namespace {
 
 // One block per (token, head). Only the first `rotary_dim` elements rotate;
@@ -192,4 +192,4 @@ int apply_output_gate(void* data, const void* gate, long long count,
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
-}  // namespace apxinf::cuda::attn_ops
+}  // namespace apxinf::cuda_new::attn_ops

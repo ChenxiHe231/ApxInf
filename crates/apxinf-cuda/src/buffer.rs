@@ -220,10 +220,22 @@ impl CudaBuffer {
     /// Allocate and zero-fill, outside any stream.
     pub fn alloc_zeros(num_bytes: usize, device: usize) -> Result<Self, String> {
         let buf = Self::alloc(num_bytes, device)?;
-        unsafe {
-            ffi::check_cuda(ffi::cudaMemset(buf.ptr, 0, num_bytes))?;
-        }
+        buf.zero()?;
         Ok(buf)
+    }
+
+    /// Zero this buffer in place, preserving its allocation and shared aliases.
+    ///
+    /// Selects the owning device and uses CUDA's default-stream memset semantics.
+    /// Callers must order accesses on non-blocking streams explicitly.
+    pub fn zero(&self) -> Result<(), String> {
+        // SAFETY: owner keeps the allocation alive, and len bounds this buffer's
+        // valid storage. Select its device before submitting the memset.
+        unsafe {
+            ffi::check_cuda(ffi::cudaSetDevice(self.device as i32))?;
+            ffi::check_cuda(ffi::cudaMemset(self.ptr, 0, self.len))?;
+        }
+        Ok(())
     }
 
     /// Allocate and zero-fill on `ctx`'s stream.
@@ -439,7 +451,13 @@ impl CudaBuffer {
             len: self.len,
             _prevent_leak: Some(Arc::new(self)),
         };
-        Tensor::from_raw_parts(shape, dtype, device, Storage::Gpu { device, handle })
+        // SAFETY: `handle` retains the allocation through `_prevent_leak`, its
+        // CUDA device matches `device`, and callers only construct views after
+        // validating their byte size (see `as_tensor`). Internal kernel output
+        // paths allocate the exact shape/dtype byte count before calling here.
+        unsafe {
+            Tensor::from_raw_parts_unchecked(shape, dtype, device, Storage::Gpu { device, handle })
+        }
     }
 
     /// Borrow this allocation as a tensor while retaining shared ownership.

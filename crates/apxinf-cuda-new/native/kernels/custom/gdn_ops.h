@@ -3,7 +3,7 @@
 
 #include <cuda_runtime_api.h>
 
-namespace apxinf::cuda::gdn_ops {
+namespace apxinf::cuda_new::gdn_ops {
 
 // Gated DeltaNet single-token recurrent step.
 //
@@ -121,4 +121,4 @@ int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
                    int num_chunks, int q_row_stride, int k_row_stride,
                    int v_row_stride, cudaStream_t stream);
 
-}  // namespace apxinf::cuda::gdn_ops
+}  // namespace apxinf::cuda_new::gdn_ops

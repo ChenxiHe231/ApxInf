@@ -41,7 +41,7 @@ extern "C" apxinf_status_t apxinf_rms_norm_bf16(const void* input,
         !valid_extent(rows) || !valid_extent(width) || !(epsilon >= 0.0F)) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid RMSNorm arguments");
     }
-    check(apxinf::cuda::mlp_ops::rms_norm_bf16(
+    check(apxinf::cuda_new::mlp_ops::rms_norm_bf16(
               input, weight, output, static_cast<int>(rows),
               static_cast<int>(width), epsilon,
               static_cast<cudaStream_t>(stream)),
@@ -58,7 +58,7 @@ extern "C" apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up,
         !valid_extent(width)) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid SwiGLU arguments");
     }
-    check(apxinf::cuda::mlp_ops::swiglu_bf16(
+    check(apxinf::cuda_new::mlp_ops::swiglu_bf16(
               fused_gate_up, output, static_cast<int>(rows),
               static_cast<int>(width), static_cast<cudaStream_t>(stream)),
           "SwiGLU");
@@ -72,7 +72,7 @@ extern "C" apxinf_status_t apxinf_add_bf16(const void* addend,
     if (addend == nullptr || accumulator == nullptr || count <= 0) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid add arguments");
     }
-    check(apxinf::cuda::mlp_ops::add_bf16(addend, accumulator, count,
+    check(apxinf::cuda_new::mlp_ops::add_bf16(addend, accumulator, count,
                                           static_cast<cudaStream_t>(stream)),
           "add");
   });
@@ -87,7 +87,7 @@ extern "C" apxinf_status_t apxinf_quantize_fp8_per_tensor(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid FP8 quantization arguments");
     }
-    check(apxinf::cuda::mlp_ops::quantize_fp8_per_tensor(
+    check(apxinf::cuda_new::mlp_ops::quantize_fp8_per_tensor(
               input, output, count, input_scale,
               static_cast<cudaStream_t>(stream)),
           "FP8 quantization");
@@ -104,7 +104,7 @@ extern "C" apxinf_status_t apxinf_fp8_gemv(const void* weight,
         !valid_extent(n) || !valid_extent(k)) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid FP8 GEMV arguments");
     }
-    check(apxinf::cuda::mlp_ops::fp8_gemv(weight, activation, output,
+    check(apxinf::cuda_new::mlp_ops::fp8_gemv(weight, activation, output,
                                           static_cast<int>(n),
                                           static_cast<int>(k), alpha,
                                           static_cast<cudaStream_t>(stream)),
@@ -123,7 +123,7 @@ extern "C" apxinf_status_t apxinf_nvfp4_gemv(
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid NVFP4 GEMV arguments");
     }
-    check(apxinf::cuda::mlp_ops::nvfp4_gemv(
+    check(apxinf::cuda_new::mlp_ops::nvfp4_gemv(
               weight, weight_scales, activation, activation_scales, output,
               static_cast<int>(n), static_cast<int>(k), alpha,
               static_cast<cudaStream_t>(stream)),

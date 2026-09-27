@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda::{capture, ops, CapturedGraph, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{capture, ops, CapturedGraph, CudaBuffer, CudaContext};
 
 unsafe extern "C" {
     fn cudaProfilerStart() -> i32;
