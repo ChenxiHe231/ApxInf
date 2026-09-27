@@ -132,12 +132,8 @@ int fa2(
               q, k, v, output, softmax_lse, batch, query_tokens,
               key_tokens, query_heads, kv_heads, head_dim, softmax_scale);
   params.is_causal = false;
-  if constexpr (std::is_same<Element, cutlass::half_t>::value) {
-    if (head_dim <= 128) {
-      FLASH_NAMESPACE::run_mha_fwd_<Element, 128, false>(params, stream);
-    } else {
-      FLASH_NAMESPACE::run_mha_fwd_<Element, 256, false>(params, stream);
-    }
+  if (head_dim <= 96) {
+    FLASH_NAMESPACE::run_mha_fwd_<Element, 96, false>(params, stream);
   } else if (head_dim <= 128) {
     FLASH_NAMESPACE::run_mha_fwd_<Element, 128, false>(params, stream);
   } else {
@@ -291,6 +287,17 @@ int fa2_f16(
   return fa2<cutlass::half_t>(
       q, k, v, output, softmax_lse, batch, query_tokens, key_tokens,
       query_heads, kv_heads, head_dim, softmax_scale, stream);
+}
+
+int fa2_f16_splitkv(
+    const void* q, const void* k, const void* v, void* output,
+    void* softmax_lse, void* softmax_lse_accum, void* o_accum, int batch,
+    int query_tokens, int key_tokens, int query_heads, int kv_heads,
+    int head_dim, float softmax_scale, int num_splits, cudaStream_t stream) {
+  return fa2_splitkv<cutlass::half_t, false>(
+      q, k, v, output, softmax_lse, softmax_lse_accum, o_accum, batch,
+      query_tokens, key_tokens, query_heads, kv_heads, head_dim, softmax_scale,
+      num_splits, stream);
 }
 
 int fa2_f16_packed_qkv(const void* q, const void* k, const void* v,

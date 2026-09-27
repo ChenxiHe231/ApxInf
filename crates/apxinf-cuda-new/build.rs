@@ -304,8 +304,10 @@ fn main() {
         fa2_sources.extend(
             [
                 "fa2_fwd_hdim96_f16.cu",
+                "fa2_fwd_hdim96_bf16.cu",
                 "fa2_fwd_hdim128_extra.cu",
                 "fa2_fwd_hdim256_extra.cu",
+                "fa2_fwd_split_hdim256_f16.cu",
             ]
             .map(|source| attention_kernel_root.join(source)),
         );
