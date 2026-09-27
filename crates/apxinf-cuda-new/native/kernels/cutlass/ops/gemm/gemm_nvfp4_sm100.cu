@@ -418,7 +418,12 @@ __global__ void quantize_swiglu_kernel(const __nv_bfloat16* __restrict__ src,
   for (int offset = 0; offset < sf_vec; ++offset) {
     const float gate = __bfloat162float(src[gate_base + offset]);
     const float up = __bfloat162float(src[up_base + offset]);
-    values[offset] = gate / (1.0f + __expf(-gate)) * up;
+    // Match the unfused reference semantics bf16(bf16(silu(gate)) * up): the
+    // SiLU output and the product each round through BF16 before quantization
+    // (vLLM parity defect D4, report 64 / Codex round 63).
+    const float activated =
+        __bfloat162float(__float2bfloat16(gate / (1.0f + __expf(-gate))));
+    values[offset] = __bfloat162float(__float2bfloat16(activated * up));
   }
   uint8_t code;
   emit_nvfp4_block(values, sf_vec, input_scale,
@@ -450,8 +455,15 @@ __global__ void quantize_swiglu_vector_kernel(
   for (int offset = 0; offset < 8; ++offset) {
     const float gate_low = __bfloat162float(gate_first_values[offset]);
     const float gate_high = __bfloat162float(gate_second_values[offset]);
-    values[offset] = gate_low / (1.0f + __expf(-gate_low)) * __bfloat162float(up_first_values[offset]);
-    values[offset + 8] = gate_high / (1.0f + __expf(-gate_high)) * __bfloat162float(up_second_values[offset]);
+    // Same BF16 rounding boundaries as quantize_swiglu_kernel above (D4).
+    const float activated_low =
+        __bfloat162float(__float2bfloat16(gate_low / (1.0f + __expf(-gate_low))));
+    const float activated_high =
+        __bfloat162float(__float2bfloat16(gate_high / (1.0f + __expf(-gate_high))));
+    values[offset] = __bfloat162float(__float2bfloat16(
+        activated_low * __bfloat162float(up_first_values[offset])));
+    values[offset + 8] = __bfloat162float(__float2bfloat16(
+        activated_high * __bfloat162float(up_second_values[offset])));
   }
   unsigned long long output;
   uint8_t code;

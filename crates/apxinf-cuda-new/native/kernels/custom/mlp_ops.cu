@@ -83,7 +83,11 @@ __global__ void swiglu_kernel(const __nv_bfloat16* __restrict__ fused,
   const long long base = (long long)row * 2 * width;
   const float gate = __bfloat162float(fused[base + column]);
   const float up = __bfloat162float(fused[base + width + column]);
-  output[index] = __float2bfloat16(silu(gate) * up);
+  // Reference semantics are bf16(bf16(silu(gate)) * up): the SiLU output
+  // materializes in BF16 before the multiply (vLLM parity defect D4,
+  // report 64 / Codex round 63 -- rounding only the product is not enough).
+  const float activated = __bfloat162float(__float2bfloat16(silu(gate)));
+  output[index] = __float2bfloat16(activated * up);
 }
 
 // Eight elements per thread through 16-byte vectors. One bf16 per thread
