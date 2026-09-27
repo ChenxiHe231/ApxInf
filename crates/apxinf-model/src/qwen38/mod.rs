@@ -19,6 +19,6 @@ mod core;
 mod model;
 
 #[cfg(feature = "cuda")]
-pub use config::Qwen38Config;
+pub use config::{Qwen38Config, VOCAB};
 #[cfg(feature = "cuda")]
 pub use model::Qwen38;

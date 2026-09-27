@@ -8,7 +8,7 @@
 
 pub(crate) const HIDDEN: usize = 5120;
 pub(crate) const INTERMEDIATE: usize = 17408;
-pub(crate) const VOCAB: usize = 248320;
+pub const VOCAB: usize = 248320;
 pub(crate) const LAYERS: usize = 64;
 pub(crate) const FULL_ATTENTION_INTERVAL: usize = 4;
 pub(crate) const BLOCK: u32 = 16;
