@@ -32,6 +32,7 @@ pub struct GemmPolicy {
     pub allow_fallback: bool,
     pub graph_safe: bool,
     pub deterministic: bool,
+    /// None uses the context's hardware/toolkit directory; Some("") disables disk caching.
     pub cache_dir: Option<String>,
 }
 

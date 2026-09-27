@@ -19,6 +19,14 @@ pub struct CudaContext {
 impl CudaContext {
     /// Create a context for the specified CUDA device.
     pub fn new(device_id: usize) -> Result<Self, String> {
+        Self::new_with_autotune(device_id, true)
+    }
+
+    /// Create a context with an immutable permission for online tuning.
+    ///
+    /// Tuning requires both this permission and the operator policy's
+    /// `online_tune`. Disabling it still permits reuse of persisted recipes.
+    pub fn new_with_autotune(device_id: usize, allow_online_tune: bool) -> Result<Self, String> {
         let device = i32::try_from(device_id)
             .map_err(|_| format!("CUDA device id {device_id} does not fit in i32"))?;
         unsafe {
@@ -28,10 +36,13 @@ impl CudaContext {
         let stream = Arc::new(CudaStream::new_on(device_id)?);
         let mut runtime = std::ptr::null_mut();
         unsafe {
-            crate::ffi::abi::status::check(crate::ffi::abi::runtime::apxinf_runtime_create(
-                device,
-                &mut runtime,
-            ))
+            crate::ffi::abi::status::check(
+                crate::ffi::abi::runtime::apxinf_runtime_create_with_autotune(
+                    device,
+                    u32::from(allow_online_tune),
+                    &mut runtime,
+                ),
+            )
             .map_err(|error| error.to_string())?;
         }
         let caps = match CudaDeviceCaps::query(runtime) {
@@ -52,6 +63,17 @@ impl CudaContext {
 
     pub fn device_id(&self) -> usize {
         self.device_id
+    }
+    /// Default recipe directory, relative to the process working directory.
+    /// An explicit operator `cache_dir` overrides this hardware/toolkit path.
+    pub fn default_cache_dir(&self) -> &str {
+        unsafe {
+            std::ffi::CStr::from_ptr(crate::ffi::abi::runtime::apxinf_runtime_default_cache_dir(
+                self.runtime,
+            ))
+        }
+        .to_str()
+        .expect("native default cache directory is ASCII")
     }
     pub fn stream(&self) -> &CudaStream {
         &self.stream

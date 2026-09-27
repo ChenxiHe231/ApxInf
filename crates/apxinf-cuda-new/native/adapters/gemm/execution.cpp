@@ -300,6 +300,8 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
         apxinf::gemm::tuning_keys(normalized_spec, *policy, runtime->device);
     const std::string& key = keys.key;
     std::lock_guard<std::mutex> lock(runtime->gemm_mutex);
+    const std::string cache_dir = policy->cache_dir != nullptr
+        ? policy->cache_dir : runtime->default_cache_dir;
 
     Recipe recipe{};
     bool recipe_found = false;
@@ -311,7 +313,7 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
       source = "memory-recipe";
     } else {
       const std::string serialized = apxinf::gemm::read_recipe(
-          policy->cache_dir != nullptr ? policy->cache_dir : "", key);
+          cache_dir, key);
       std::istringstream input(serialized);
     recipe_found = static_cast<bool>(
         input >> recipe.provider_id >> recipe.implementation_id >>
@@ -342,7 +344,7 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
 
     bool persist_recipe = false;
     if (execution == nullptr) {
-      if (policy->online_tune) {
+      if (runtime->allow_online_tune && policy->online_tune) {
         const Recipe tuned_recipe = apxinf::gemm::tune(
             normalized_spec, *policy, *bindings, runtime->device,
             source);
@@ -390,8 +392,7 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
                    << ' ' << recipe.implementation_version << ' '
                    << recipe.configuration;
         apxinf::gemm::write_recipe(
-            policy->cache_dir != nullptr ? policy->cache_dir : "", key,
-            serialized.str());
+            cache_dir, key, serialized.str());
       }
     }
 

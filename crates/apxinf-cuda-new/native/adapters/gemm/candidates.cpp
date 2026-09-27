@@ -166,6 +166,21 @@ bool supports_cutlass_fp8_geglu(const Spec& spec) {
          spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU;
 }
 
+bool supports_cutlass_fp8_split_geglu(const Spec& spec) {
+  return spec.m == 778 && spec.n == 32768 && spec.k == 2048 &&
+         spec.a_dtype == APXINF_DTYPE_E4M3 &&
+         spec.b_dtype == APXINF_DTYPE_E4M3 &&
+         spec.output_dtype == APXINF_DTYPE_E4M3 &&
+         spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
+         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU;
+}
+
+void split_geglu_configurations(const Spec&, std::vector<int>& configs) {
+  for (int configuration = 0; configuration < 24; ++configuration) {
+    configs.push_back(configuration);
+  }
+}
+
 bool supports_cutlass_bf16_geglu(const Spec& spec) {
   const bool exact_shape = (spec.m == 522 || spec.m == 533) &&
                            spec.n == 32768 && spec.k == 2048;
@@ -355,19 +370,29 @@ const ImplementationRegistry& registry(uint32_t semantic) {
 #endif
   };
   static const ImplementationRegistry gemm_geglu_entries = {
-      {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
+      {kProviderCublas, 1, 2, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
-      {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
+      {kProviderCublasLt, 1, 2, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
+      {kProviderCublasLt, 2, 1, "cublasLt-native-fp8+geglu",
+       kDeviceFeatureNativeFp8, true, false, false,
+       supports_native_fp8, cublaslt_alignment,
+       cublaslt_native_fp8_resource_requirements, cublaslt_configurations,
+       prepare_cublaslt_native_fp8, launch_cublaslt, destroy_cublaslt},
 #ifdef APXINF_GEMM_CUTLASS
       {kProviderCutlass, 2, 2, "cutlass-dual-geglu",
        kDeviceFeatureCutlassSm100, true, true, false,
        supports_cutlass_fp8_geglu, cutlass_geglu_alignment,
        cutlass_geglu_resource_requirements, one_configuration,
        prepare_cutlass_geglu, launch_cutlass_fp8_geglu, destroy_cutlass},
+      {kProviderCutlass, 5, 1, "cublasLt+cutlass-split-geglu",
+       kDeviceFeatureCutlassSm100, true, false, false,
+       supports_cutlass_fp8_split_geglu, cublaslt_alignment,
+       cublaslt_split_geglu_resource_requirements, split_geglu_configurations,
+       prepare_cublaslt_split_geglu, launch_cublaslt_split_geglu, destroy_cublaslt},
       {kProviderCutlass, 3, 2, "cutlass-bf16-dual-geglu",
        kDeviceFeatureCutlassSm100, true, true, false, supports_cutlass_bf16_geglu,
        cutlass_geglu_alignment, cutlass_geglu_resource_requirements,

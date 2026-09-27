@@ -50,12 +50,15 @@ pub struct LoadOptions {
     /// (except CPU backends, which currently require f32).
     pub text_weight_dtype: Option<DType>,
     pub calibration_path: Option<PathBuf>,
+    /// For cuda-new, override the recipe directory. None uses the shared
+    /// hardware/toolkit tuning directory; legacy JSON records are not loaded.
     pub tuning_path: Option<PathBuf>,
     /// Additional named model artifacts that are not embedded in the primary
     /// checkpoint. Model loaders must reject missing or unknown required
     /// assets instead of discovering them through process-global state.
     pub assets: BTreeMap<String, PathBuf>,
-    /// Enable online GEMM autotuning from real inference requests. When false,
+    /// Enable online operator autotuning (GEMM and, on cuda-new, Attention)
+    /// on recipe misses during preparation or first execution. When false,
     /// missing records resolve once to a safe inference fallback.
     pub autotune: bool,
     /// Explicit architecture config, overriding any on-disk `config.json`.
@@ -460,6 +463,22 @@ fn select_cuda_tuning_database_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cuda_recipe_tuning_is_explicit_and_independent_of_directory() {
+        let mut options = LoadOptions::default();
+        let recipe = cuda_recipe_options(&options).unwrap();
+        assert_eq!(recipe.cache_dir, None);
+        assert!(!recipe.online_tune);
+        options.autotune = true;
+        assert!(cuda_recipe_options(&options).unwrap().online_tune);
+        options.tuning_path = Some(PathBuf::from("custom-recipes"));
+        let recipe = cuda_recipe_options(&options).unwrap();
+        assert_eq!(recipe.cache_dir.as_deref(), Some("custom-recipes"));
+        assert!(recipe.online_tune);
+        options.autotune = false;
+        assert!(!cuda_recipe_options(&options).unwrap().online_tune);
+    }
 
     fn temporary_directory(label: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
