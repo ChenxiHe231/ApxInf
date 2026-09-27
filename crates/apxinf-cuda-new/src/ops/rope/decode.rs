@@ -116,6 +116,16 @@ pub(crate) fn normalize(ctx: &CudaContext, args: DecodeRopeArgs<'_>) -> Result<N
     {
         return Err(invalid("invalid dynamic decode RoPE shape contract"));
     }
+    // The decode cache-append kernels index the cache head-major
+    // ([kv_heads, capacity, head_dim]); the token-major contract shared with
+    // prefill `rope` and `kv_cache_attention` only coincides with that layout
+    // for a single KV head. Reject multi-head caches until the kernels write
+    // token-major.
+    if kv_heads != 1 {
+        return Err(invalid(
+            "dynamic decode RoPE currently requires kv_heads == 1 (MQA)",
+        ));
+    }
     if !args.theta.is_finite() || args.theta <= 0.0 {
         return Err(invalid(
             "dynamic decode RoPE theta must be finite and positive",

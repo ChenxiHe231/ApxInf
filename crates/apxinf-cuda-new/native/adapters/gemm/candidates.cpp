@@ -167,7 +167,11 @@ bool supports_cutlass_fp8_geglu(const Spec& spec) {
 }
 
 bool supports_cutlass_fp8_split_geglu(const Spec& spec) {
-  return spec.m == 778 && spec.n == 32768 && spec.k == 2048 &&
+  // Three-view language prefill rows: 768 patches + 10 (T10) or 21 (T21)
+  // suffix tokens. The provider is generic over M; the gate pins the tuned
+  // production shapes.
+  return (spec.m == 778 || spec.m == 789) && spec.n == 32768 &&
+         spec.k == 2048 &&
          spec.a_dtype == APXINF_DTYPE_E4M3 &&
          spec.b_dtype == APXINF_DTYPE_E4M3 &&
          spec.output_dtype == APXINF_DTYPE_E4M3 &&

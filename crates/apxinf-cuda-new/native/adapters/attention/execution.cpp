@@ -24,13 +24,8 @@ void validate_spec(const Spec& spec) {
       spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
       spec.dtype == APXINF_DTYPE_F16 &&
       spec.output_dtype == APXINF_DTYPE_E4M3;
-<<<<<<< HEAD
   if (spec.version != 4 ||
-      spec.semantic > APXINF_ATTENTION_SEMANTIC_SEGMENTED ||
-=======
-  if (spec.version != 3 ||
       spec.semantic > APXINF_ATTENTION_SEMANTIC_PACKED_QKV ||
->>>>>>> 7051409 (perf(pi05): fuse Thor vision QKV attention path)
       (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
       (!native_output && !static_e4m3_output) ||
       spec.mask > APXINF_ATTENTION_MASK_CAUSAL || spec.batch <= 0 ||

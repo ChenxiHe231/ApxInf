@@ -181,7 +181,11 @@ cudaError_t launch_quantized_f16(const apxinf_norm_spec_t& spec,
               rows, cols, bindings.eps, inverse_scale);
       break;
     case APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL_RMS:
-      if (rows == 10 && cols == 1024) {
+      // The 10x1024 specialization performs uint2 loads on norm_style and a
+      // uint32 store on normalized; gate on the actual pointer alignment.
+      if (rows == 10 && cols == 1024 &&
+          reinterpret_cast<uintptr_t>(norm_style) % 8 == 0 &&
+          reinterpret_cast<uintptr_t>(normalized) % 4 == 0) {
         kernels::ada_gate_residual_rms_norm_quant_f16_e4m3_10x1024
             <<<rows, kThreads, 0, stream>>>(
                 input, residual, gate_style, norm_style, hidden, normalized,
