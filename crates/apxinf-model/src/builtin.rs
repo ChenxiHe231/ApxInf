@@ -20,6 +20,11 @@ pub fn register_builtin_models() {
     registry::register("qwen_drive", load_qwen_drive);
     registry::register("qwen38", load_qwen38);
     registry::register("qwen3_8", load_qwen38);
+    // The NVFP4 checkpoint's config.json says model_type "qwen3_5" /
+    // "qwen3_5_text"; register both so AutoModel's detection works on the
+    // unmodified checkpoint directory.
+    registry::register("qwen3_5", load_qwen38);
+    registry::register("qwen3_5_text", load_qwen38);
 
     #[cfg(feature = "cuda")]
     crate::pi05::register_builtin();
