@@ -73,6 +73,7 @@ fn dtype_code(dtype: DType) -> u32 {
         DType::F8E4M3 => 3,
         DType::I8 => 4,
         DType::I32 => 5,
+        DType::E2M1Pair => 6,
     }
 }
 

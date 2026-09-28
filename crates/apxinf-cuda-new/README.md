@@ -5,6 +5,14 @@
 - Current public interfaces and mathematical semantics: [L3 operator catalog](cuda-operator.md)
 - Workflow for adding or extending a kernel: [Adding New Kernels](../../doc/adding-new-kernels.md)
 
+The direct PI05 RMSNorm interface is `ops::rms_norm(ctx, RmsNormArgs)`.
+The BF16 MLP helper remains available as
+`ops::mlp::rms_norm(ctx, input, weight, output, epsilon)`; it has a distinct
+signature and is used by the Qwen integration tests.
+GEMM Spec version 6 combines NVFP4 block-scale bindings with the
+`GEMM_BIAS_RESIDUAL` semantic. Version 5 specs are rejected rather than reused
+across these incompatible layouts.
+
 ## Operator Layers: L3 to L0
 
 L0-L3 here describe only the CUDA operators inside `apxinf-cuda-new`, not the model, policy, and serving layers in the repository root documentation.
