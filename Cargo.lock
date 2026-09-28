@@ -137,7 +137,6 @@ dependencies = [
  "apxinf-cuda",
  "apxinf-cuda-new",
  "apxinf-loader",
- "apxinf-tokenizer",
  "half",
  "once_cell",
  "serde",

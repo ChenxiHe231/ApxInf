@@ -8,8 +8,12 @@
 //!
 //! ```text
 //! cargo run -p apxinf-model --features cuda --release --example qwen38_bench -- \
-//!     <checkpoint-dir> [--prompt-len N] [--max-new N] [--repeats N]
+//!     <checkpoint-dir> [--prompt-len N] [--max-new N] [--repeats N] \
+//!     [--expect-md5 HEX]
 //! ```
+//!
+//! `--expect-md5` turns the run into the regression gate: the process exits
+//! nonzero unless every repeat's token digest equals the given baseline.
 //!
 //! The first generation warms autotuners and captures the decode graphs; it is
 //! reported with `"warmup": true` and excluded from the summary statistics.
@@ -54,6 +58,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prompt_len = arg_value(&args, "--prompt-len", 2048);
     let max_new = arg_value(&args, "--max-new", 128);
     let repeats = arg_value(&args, "--repeats", 3);
+    let expect_md5 = args
+        .iter()
+        .position(|arg| arg == "--expect-md5")
+        .and_then(|index| args.get(index + 1))
+        .cloned();
 
     let load_start = Instant::now();
     let mut model = AutoModel::load_model(Device::Cuda(0), checkpoint, &LoadOptions::default())?;
@@ -103,6 +112,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         digests.windows(2).all(|pair| pair[0] == pair[1]),
         "generation is not deterministic across repeats: {digests:?}"
     );
+    if let Some(expected) = expect_md5 {
+        assert_eq!(
+            digests[0], expected,
+            "generated tokens diverge from the baseline"
+        );
+    }
     let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len() as f64;
     println!(
         "{{\"summary\": {{\"ttft_ms_mean\": {:.2}, \"decode_ms_per_token_mean\": {:.3}, \
@@ -115,8 +130,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// Dependency-free md5, identical to the acceptance test's helper, so the
-// digest matches `md5sum` over the harness log line.
+// Dependency-free md5 so the digest matches `md5sum` over the kernel-harness
+// log line.
 fn md5_hex(data: &[u8]) -> String {
     const S: [u32; 64] = [
         7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
