@@ -27,9 +27,8 @@ covers the supported modes and limits; [per-device kernel policy, tactic stores 
 measurement protocol](qwen-drive-devices.md) cover Orin, Thor and the RTX 4090.
 
 Qwen3.8-27B-NVFP4 is a text LLM behind `LlmTrait` with the same
-`weights`/`model`/`model_runner` owners as single files. [Running real
-inference through the CLI, benchmarking and current limits](qwen38-nvfp4.md)
-cover Jetson Thor.
+`weights`/`model`/`model_runner` owners as single files.
+[CLI inference, benchmarking and limits](qwen38-nvfp4.md) cover Jetson Thor.
 
 ## Agent workflows
 
