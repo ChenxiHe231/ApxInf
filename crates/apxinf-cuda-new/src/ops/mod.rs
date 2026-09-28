@@ -30,7 +30,7 @@ pub use attn_ops::{
 };
 pub use gdn::{
     gdn_causal_conv_forward, gdn_causal_conv_step, gdn_decay_and_beta,
-    gdn_decay_and_beta_seq, gdn_gated_norm, gdn_gated_norm_seq, gdn_gated_norm_seq_f16,
+    gdn_decay_and_beta_seq, gdn_gated_norm, gdn_gated_norm_quantize, gdn_gated_norm_seq, gdn_gated_norm_seq_f16,
     flashinfer_gdn_prefill, flashinfer_gdn_workspace_bytes,
     convert_f16_to_bf16, gdn_prepare_flashinfer, gdn_conv_prepare_flashinfer,
     gdn_chunk_scan, gdn_chunk_scan_interleaved, gdn_l2_normalize_heads,

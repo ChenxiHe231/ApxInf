@@ -465,6 +465,7 @@ struct Scratch {
     gdn_readout: Tensor,
     gdn_gated: Tensor,
     gdn_fp8: Tensor,
+    fused_gdn_norm_quant: bool,
     token: Tensor,
     logits: Tensor,
     next_token: Tensor,
@@ -521,6 +522,9 @@ impl Scratch {
             gdn_readout: zeros(ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
             gdn_gated: zeros(ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
             gdn_fp8: zeros(ctx, vec![1, Z_WIDTH], DType::F8E4M3),
+            fused_gdn_norm_quant: std::env::var("APXINF_QWEN38_GDN_NORM_QUANTIZED")
+                .as_deref()
+                != Ok("0"),
             token: zeros(ctx, vec![1], DType::I32),
             logits: zeros(ctx, vec![1, VOCAB], DType::BF16),
             next_token: zeros(ctx, vec![1], DType::I32),
@@ -784,23 +788,43 @@ fn gdn_decode_layer(
         GDN_K_HEADS,
     )
     .unwrap();
-    ops::gdn_gated_norm(
-        ctx,
-        &scratch.gdn_readout,
-        &gdn_z_heads(ctx, &scratch.gdn_z),
-        &gdn.norm_weight,
-        &scratch.gdn_gated,
-        EPSILON,
-    )
-    .unwrap();
-    let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
-    fp8_projection(
-        ctx,
-        &gdn.out,
-        &flat,
-        &scratch.gdn_fp8,
-        &mut scratch.projected,
-    );
+    if scratch.fused_gdn_norm_quant {
+        ops::gdn_gated_norm_quantize(
+            ctx,
+            &view(&scratch.gdn_readout, vec![1, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
+            &view(&scratch.gdn_z, vec![1, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
+            &gdn.norm_weight,
+            &view(&scratch.gdn_gated, vec![1, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
+            &view(&scratch.gdn_fp8, vec![1, GDN_V_HEADS, GDN_HEAD_DIM], DType::F8E4M3),
+            EPSILON,
+            gdn.out.input_scale,
+        )
+        .unwrap();
+        fp8_projection_reuse_quantized(
+            ctx,
+            &gdn.out,
+            &scratch.gdn_fp8,
+            &mut scratch.projected,
+        );
+    } else {
+        ops::gdn_gated_norm(
+            ctx,
+            &scratch.gdn_readout,
+            &gdn_z_heads(ctx, &scratch.gdn_z),
+            &gdn.norm_weight,
+            &scratch.gdn_gated,
+            EPSILON,
+        )
+        .unwrap();
+        let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
+        fp8_projection(
+            ctx,
+            &gdn.out,
+            &flat,
+            &scratch.gdn_fp8,
+            &mut scratch.projected,
+        );
+    }
     ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
 }
 
@@ -1585,6 +1609,7 @@ struct PrefillScratch {
     gdn_readout: Tensor,
     gdn_gated: Tensor,
     gdn_fp8: Tensor,
+    fused_gdn_norm_quant: bool,
     tokens: Tensor,
     // Staging for the FlashInfer chunked scan, which takes q/k/v as separate
     // FP16 tensors and a linear-space decay. Allocated only when that path is
@@ -1643,6 +1668,9 @@ impl PrefillScratch {
             gdn_readout: zeros(ctx, vec![t, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
             gdn_gated: zeros(ctx, vec![t, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
             gdn_fp8: zeros(ctx, vec![t, Z_WIDTH], DType::F8E4M3),
+            fused_gdn_norm_quant: std::env::var("APXINF_QWEN38_GDN_NORM_QUANTIZED")
+                .as_deref()
+                != Ok("0"),
             tokens: zeros(ctx, vec![t], DType::I32),
             gdn_q16: flashinfer
                 .then(|| zeros(ctx, vec![t, GDN_K_HEADS, GDN_HEAD_DIM], DType::F16)),
@@ -2124,17 +2152,53 @@ fn prefill_step(
                     prefix(&scratch.gdn_readout, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16));
                 let z_heads = prefix(&scratch.gdn_z, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
                 let gated = prefix(&scratch.gdn_gated, vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16);
-                ops::gdn_gated_norm_seq(
-                    ctx, &readout_rows, &z_heads, &gdn.norm_weight, &gated, tokens,
-                    GDN_V_HEADS, GDN_HEAD_DIM, EPSILON,
-                )
-                .unwrap();
+                if scratch.fused_gdn_norm_quant {
+                    let quantized = prefix(
+                        &scratch.gdn_fp8,
+                        vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM],
+                        DType::F8E4M3,
+                    );
+                    ops::gdn_gated_norm_quantize(
+                        ctx,
+                        &readout_rows,
+                        &z_heads,
+                        &gdn.norm_weight,
+                        &gated,
+                        &quantized,
+                        EPSILON,
+                        gdn.out.input_scale,
+                    )
+                    .unwrap();
+                } else {
+                    ops::gdn_gated_norm_seq(
+                        ctx, &readout_rows, &z_heads, &gdn.norm_weight, &gated, tokens,
+                        GDN_V_HEADS, GDN_HEAD_DIM, EPSILON,
+                    )
+                    .unwrap();
+                }
 
                 stage("gated norm", &mut mark);
                 verify_finite_bf16(ctx, &format!("layer{layer_index}/gated"), &gated);
 
-                let flat = prefix(&scratch.gdn_gated, vec![tokens, Z_WIDTH], DType::BF16);
-                fp8_projection_rows(ctx, &gdn.out, &flat, &scratch.gdn_fp8, &mut scratch.projected, tokens);
+                if scratch.fused_gdn_norm_quant {
+                    fp8_projection_prequantized(
+                        ctx,
+                        &gdn.out,
+                        &scratch.gdn_fp8,
+                        &mut scratch.projected,
+                        tokens,
+                    );
+                } else {
+                    let flat = prefix(&scratch.gdn_gated, vec![tokens, Z_WIDTH], DType::BF16);
+                    fp8_projection_rows(
+                        ctx,
+                        &gdn.out,
+                        &flat,
+                        &scratch.gdn_fp8,
+                        &mut scratch.projected,
+                        tokens,
+                    );
+                }
                 stage("out proj", &mut mark);
 
                 let projected = prefix(&scratch.projected, vec![tokens, HIDDEN], DType::BF16);
