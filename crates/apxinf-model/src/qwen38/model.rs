@@ -696,7 +696,6 @@ pub(crate) struct PrefillScratch {
     pub(crate) tokens: Tensor,
     // Staging for the FlashInfer chunked scan, which takes q/k/v as separate
     // FP16 tensors and a linear-space decay. Allocated only when that path is
-    // selected; see `use_flashinfer_gdn`.
     gdn_q16: Option<Tensor>,
     gdn_k16: Option<Tensor>,
     gdn_v16: Option<Tensor>,
@@ -704,16 +703,6 @@ pub(crate) struct PrefillScratch {
     gdn_alpha: Option<Tensor>,
     cu_seqlens: Option<Tensor>,
     flashinfer_workspace: Option<Tensor>,
-}
-
-/// Whether prefill runs the vendored FlashInfer chunked scan. Set once at
-/// model load from [`super::config::Qwen38Config::flashinfer_gdn`]; default
-/// true (the reference scan stays available for precision comparison).
-pub(crate) static FLASHINFER_GDN: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(true);
-
-fn use_flashinfer_gdn() -> bool {
-    FLASHINFER_GDN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl PrefillScratch {
@@ -726,7 +715,10 @@ impl PrefillScratch {
         let scale_bytes =
             |rows: usize, k: usize| vec![ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
         let t = capacity;
-        let flashinfer = use_flashinfer_gdn();
+        // Prefill always runs the vendored FlashInfer chunked scan; the
+        // reference scan remains available in the kernel harness for
+        // precision comparison.
+        let flashinfer = true;
         PrefillScratch {
             capacity,
             hidden: zeros(ctx, vec![t, HIDDEN], DType::BF16),
