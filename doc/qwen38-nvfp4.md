@@ -67,9 +67,7 @@ cargo run -p apxinf-model --features cuda --release --example qwen38_bench -- \
 Deterministic prompt through the public entry (`AutoModel` →
 `generate_streaming`); JSON per repeat plus a summary. Repeat 0 is the
 warm-up and excluded from the means. The run asserts identical tokens
-across repeats and reports their md5; `--expect-md5 <hex>` additionally
-fails the run unless the digest equals the given baseline, which makes
-the same command the end-to-end regression gate.
+across repeats and reports their md5.
 
 Jetson AGX Thor, locked clocks (1575 MHz GPC):
 
@@ -82,7 +80,8 @@ Jetson AGX Thor, locked clocks (1575 MHz GPC):
 
 - Quantizer contract suites: `qwen38_fp8_quant_contract`,
   `qwen38_nvfp4_quant_contract` (`apxinf-cuda-new`).
-- End-to-end: `qwen38_bench --expect-md5 <baseline>` (see above).
+- End-to-end: the benchmark's `token_md5` is stable for a given checkpoint
+  and build; compare it across changes.
 
 ## Limitations
 
