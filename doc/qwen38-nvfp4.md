@@ -126,6 +126,3 @@ Measured on Jetson AGX Thor at locked clocks (1575 MHz GPC):
   at load (`max_seq_len`, minimum 4096).
 - Tuned for sm_110 (Thor). Other architectures build but the kernel
   selection was not validated there.
-- The independent whole-model logits comparison against vLLM is close but
-  not yet exact (mean KL ≈ 5e-3 over a 2048-token fixed prefix; top-1 match
-  126–127/129 positions); the remaining divergence is being localized.
