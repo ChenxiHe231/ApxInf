@@ -391,6 +391,7 @@ pub(crate) fn normalize_packed_qkv(
         key: key.ptr(),
         value: value.ptr(),
         offsets: std::ptr::null(),
+        decode_meta: std::ptr::null(),
         output: out.ptr(),
         stream: ctx.stream().handle(),
         scale: args.scale,
@@ -420,9 +421,11 @@ pub(crate) fn normalize_packed_qkv(
             max_segment_tokens: 0,
             offsets_hash: 0,
             scale_is_default: u32::from(args.scale == default_scale),
+            dynamic_decode: 0,
         },
         policy: args.policy,
         bindings,
         storage: vec![qkv, key, value, out],
+        resources: Vec::new(),
     })
 }
