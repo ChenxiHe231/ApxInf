@@ -1935,9 +1935,10 @@ pub(crate) fn reset_state(ctx: &CudaContext, gdn_states: &mut [GdnState], kv_cac
 }
 
 fn zero_tensor(tensor: &Tensor) {
-    let buf = CudaBuffer::from_tensor(tensor).unwrap();
-    let zeros = vec![0u8; buf.len()];
-    buf.copy_from_host(&zeros).unwrap();
+    // Device-side memset: reset_state clears ~427 MB (48 recurrent states +
+    // conv windows + KV caches), and a host staging copy of that size costs
+    // ~120 ms per generation on Thor.
+    CudaBuffer::from_tensor(tensor).unwrap().zero().unwrap();
 }
 
 
