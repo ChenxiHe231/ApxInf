@@ -216,6 +216,36 @@ fn load_bf16_transposed(
     upload(ctx, &transposed, vec![cols, rows], DType::BF16)
 }
 
+/// Merge two `[rows, cols]` BF16 projections while transposing them into the
+/// GEMM `[K, 2N]` layout. Decode can then produce both outputs with one launch.
+fn load_bf16_transposed_pair(
+    ctx: &CudaContext,
+    tensors: &HashMap<String, Tensor>,
+    first_name: &str,
+    second_name: &str,
+    rows: usize,
+    cols: usize,
+) -> Tensor {
+    let element = DType::BF16.size_in_bytes();
+    let first = cpu_bytes(&tensors[first_name]);
+    let second = cpu_bytes(&tensors[second_name]);
+    assert_eq!(first.len(), rows * cols * element, "invalid {first_name} shape");
+    assert_eq!(second.len(), rows * cols * element, "invalid {second_name} shape");
+    let mut transposed = vec![0u8; first.len() + second.len()];
+    for column in 0..cols {
+        for row in 0..rows {
+            let source = (row * cols + column) * element;
+            let first_destination = (column * 2 * rows + row) * element;
+            let second_destination = (column * 2 * rows + rows + row) * element;
+            transposed[first_destination..first_destination + element]
+                .copy_from_slice(&first[source..source + element]);
+            transposed[second_destination..second_destination + element]
+                .copy_from_slice(&second[source..source + element]);
+        }
+    }
+    upload(ctx, &transposed, vec![cols, 2 * rows], DType::BF16)
+}
+
 pub(crate) struct AttentionLayer {
     pub(crate) input_norm: Tensor,
     pub(crate) post_norm: Tensor,
@@ -237,6 +267,7 @@ pub(crate) struct GdnLayer {
     pub(crate) out: Fp8Weight,
     pub(crate) in_proj_a: Tensor,
     pub(crate) in_proj_b: Tensor,
+    pub(crate) in_proj_ab: Tensor,
     pub(crate) a_log: Tensor,
     pub(crate) dt_bias: Tensor,
     pub(crate) conv_weight: Tensor,
@@ -308,6 +339,14 @@ pub(crate) fn load_model(
                 // which requires b = [K, N].
                 in_proj_a: load_bf16_transposed(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_a.weight"), GDN_V_HEADS, HIDDEN),
                 in_proj_b: load_bf16_transposed(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_b.weight"), GDN_V_HEADS, HIDDEN),
+                in_proj_ab: load_bf16_transposed_pair(
+                    ctx,
+                    tensors,
+                    &format!("{prefix}.linear_attn.in_proj_a.weight"),
+                    &format!("{prefix}.linear_attn.in_proj_b.weight"),
+                    GDN_V_HEADS,
+                    HIDDEN,
+                ),
                 a_log: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.A_log"), vec![GDN_V_HEADS]),
                 dt_bias: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.dt_bias"), vec![GDN_V_HEADS]),
                 conv_weight: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.conv1d.weight"), vec![QKV_WIDTH, CONV_WIDTH]),

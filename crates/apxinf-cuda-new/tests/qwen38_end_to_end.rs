@@ -284,6 +284,34 @@ fn load_bf16_transposed(
     upload(ctx, &transposed, vec![cols, rows], DType::BF16)
 }
 
+fn load_bf16_transposed_pair(
+    ctx: &CudaContext,
+    tensors: &HashMap<String, Tensor>,
+    first_name: &str,
+    second_name: &str,
+    rows: usize,
+    cols: usize,
+) -> Tensor {
+    let element = DType::BF16.size_in_bytes();
+    let first = cpu_bytes(&tensors[first_name]);
+    let second = cpu_bytes(&tensors[second_name]);
+    assert_eq!(first.len(), rows * cols * element, "invalid {first_name} shape");
+    assert_eq!(second.len(), rows * cols * element, "invalid {second_name} shape");
+    let mut transposed = vec![0u8; first.len() + second.len()];
+    for column in 0..cols {
+        for row in 0..rows {
+            let source = (row * cols + column) * element;
+            let first_destination = (column * 2 * rows + row) * element;
+            let second_destination = (column * 2 * rows + rows + row) * element;
+            transposed[first_destination..first_destination + element]
+                .copy_from_slice(&first[source..source + element]);
+            transposed[second_destination..second_destination + element]
+                .copy_from_slice(&second[source..source + element]);
+        }
+    }
+    upload(ctx, &transposed, vec![cols, 2 * rows], DType::BF16)
+}
+
 struct AttentionLayer {
     input_norm: Tensor,
     post_norm: Tensor,
@@ -305,6 +333,7 @@ struct GdnLayer {
     out: Fp8Weight,
     in_proj_a: Tensor,
     in_proj_b: Tensor,
+    in_proj_ab: Tensor,
     a_log: Tensor,
     dt_bias: Tensor,
     conv_weight: Tensor,
@@ -376,6 +405,14 @@ fn load_model(
                 // which requires b = [K, N].
                 in_proj_a: load_bf16_transposed(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_a.weight"), GDN_V_HEADS, HIDDEN),
                 in_proj_b: load_bf16_transposed(ctx, tensors, &format!("{prefix}.linear_attn.in_proj_b.weight"), GDN_V_HEADS, HIDDEN),
+                in_proj_ab: load_bf16_transposed_pair(
+                    ctx,
+                    tensors,
+                    &format!("{prefix}.linear_attn.in_proj_a.weight"),
+                    &format!("{prefix}.linear_attn.in_proj_b.weight"),
+                    GDN_V_HEADS,
+                    HIDDEN,
+                ),
                 a_log: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.A_log"), vec![GDN_V_HEADS]),
                 dt_bias: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.dt_bias"), vec![GDN_V_HEADS]),
                 conv_weight: load_bf16(ctx, tensors, &format!("{prefix}.linear_attn.conv1d.weight"), vec![QKV_WIDTH, CONV_WIDTH]),
@@ -421,6 +458,8 @@ struct Scratch {
     gdn_z: Tensor,
     gdn_a: Tensor,
     gdn_b: Tensor,
+    gdn_ab: Tensor,
+    merged_gdn_ab: bool,
     gdn_decay: Tensor,
     gdn_beta: Tensor,
     gdn_readout: Tensor,
@@ -475,6 +514,8 @@ impl Scratch {
             gdn_z: zeros(ctx, vec![1, Z_WIDTH], DType::BF16),
             gdn_a: zeros(ctx, vec![GDN_V_HEADS], DType::BF16),
             gdn_b: zeros(ctx, vec![GDN_V_HEADS], DType::BF16),
+            gdn_ab: zeros(ctx, vec![2 * GDN_V_HEADS], DType::BF16),
+            merged_gdn_ab: std::env::var("APXINF_QWEN38_GDN_AB_MERGED").as_deref() != Ok("0"),
             gdn_decay: zeros(ctx, vec![GDN_V_HEADS], DType::F32),
             gdn_beta: zeros(ctx, vec![GDN_V_HEADS], DType::F32),
             gdn_readout: zeros(ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
@@ -710,12 +751,21 @@ fn gdn_decode_layer(
     let (q, k, v) = split_gdn_qkv(ctx, &scratch.gdn_conv);
     ops::gdn_l2_normalize_heads(ctx, &q, EPSILON).unwrap();
     ops::gdn_l2_normalize_heads(ctx, &k, EPSILON).unwrap();
-    bf16_matvec(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a);
-    bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
+    let (gdn_a, gdn_b) = if scratch.merged_gdn_ab {
+        bf16_matvec(ctx, &gdn.in_proj_ab, &scratch.normalized, &scratch.gdn_ab);
+        split_gdn_ab(&scratch.gdn_ab)
+    } else {
+        bf16_matvec(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a);
+        bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
+        (
+            view(&scratch.gdn_a, vec![GDN_V_HEADS], DType::BF16),
+            view(&scratch.gdn_b, vec![GDN_V_HEADS], DType::BF16),
+        )
+    };
     ops::gdn_decay_and_beta(
         ctx,
-        &scratch.gdn_a,
-        &scratch.gdn_b,
+        &gdn_a,
+        &gdn_b,
         &gdn.a_log,
         &gdn.dt_bias,
         &scratch.gdn_decay,
@@ -1478,6 +1528,22 @@ fn split_gdn_qkv(_ctx: &CudaContext, qkv: &Tensor) -> (Tensor, Tensor, Tensor) {
         .as_tensor(Shape::new(vec![GDN_V_HEADS, GDN_HEAD_DIM]), DType::BF16)
         .unwrap();
     (q, k, v)
+}
+
+fn split_gdn_ab(ab: &Tensor) -> (Tensor, Tensor) {
+    let buffer = CudaBuffer::from_tensor(ab).unwrap();
+    let bytes = GDN_V_HEADS * DType::BF16.size_in_bytes();
+    let a = buffer
+        .view(0, bytes)
+        .unwrap()
+        .as_tensor(Shape::new(vec![GDN_V_HEADS]), DType::BF16)
+        .unwrap();
+    let b = buffer
+        .view(bytes, bytes)
+        .unwrap()
+        .as_tensor(Shape::new(vec![GDN_V_HEADS]), DType::BF16)
+        .unwrap();
+    (a, b)
 }
 
 /// Working buffers for a whole prompt, sized to `seq_padded` rows.

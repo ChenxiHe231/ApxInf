@@ -42,6 +42,8 @@ pub(crate) struct Scratch {
     gdn_z: Tensor,
     gdn_a: Tensor,
     gdn_b: Tensor,
+    gdn_ab: Tensor,
+    merged_gdn_ab: bool,
     gdn_decay: Tensor,
     gdn_beta: Tensor,
     pub(crate) gdn_readout: Tensor,
@@ -100,6 +102,8 @@ impl Scratch {
             gdn_z: zeros(ctx, vec![1, Z_WIDTH], DType::BF16),
             gdn_a: zeros(ctx, vec![GDN_V_HEADS], DType::BF16),
             gdn_b: zeros(ctx, vec![GDN_V_HEADS], DType::BF16),
+            gdn_ab: zeros(ctx, vec![2 * GDN_V_HEADS], DType::BF16),
+            merged_gdn_ab: std::env::var("APXINF_QWEN38_GDN_AB_MERGED").as_deref() != Ok("0"),
             gdn_decay: zeros(ctx, vec![GDN_V_HEADS], DType::F32),
             gdn_beta: zeros(ctx, vec![GDN_V_HEADS], DType::F32),
             gdn_readout: zeros(ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM], DType::BF16),
@@ -335,12 +339,21 @@ pub(crate) fn gdn_decode_layer(
     let (q, k, v) = split_gdn_qkv(ctx, &scratch.gdn_conv);
     ops::gdn_l2_normalize_heads(ctx, &q, EPSILON).unwrap();
     ops::gdn_l2_normalize_heads(ctx, &k, EPSILON).unwrap();
-    bf16_matvec(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a);
-    bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
+    let (gdn_a, gdn_b) = if scratch.merged_gdn_ab {
+        bf16_matvec(ctx, &gdn.in_proj_ab, &scratch.normalized, &scratch.gdn_ab);
+        split_gdn_ab(&scratch.gdn_ab)
+    } else {
+        bf16_matvec(ctx, &gdn.in_proj_a, &scratch.normalized, &scratch.gdn_a);
+        bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
+        (
+            view(&scratch.gdn_a, vec![GDN_V_HEADS], DType::BF16),
+            view(&scratch.gdn_b, vec![GDN_V_HEADS], DType::BF16),
+        )
+    };
     ops::gdn_decay_and_beta(
         ctx,
-        &scratch.gdn_a,
-        &scratch.gdn_b,
+        &gdn_a,
+        &gdn_b,
         &gdn.a_log,
         &gdn.dt_bias,
         &scratch.gdn_decay,
@@ -1375,6 +1388,22 @@ pub(crate) fn bf16_matvec(ctx: &CudaContext, weight: &Tensor, input: &Tensor, ou
     let dims = weight.shape().dims().to_vec();
     let mut out = view(output, vec![1, dims[1]], DType::BF16);
     ops::gemm(ctx, ops::GemmArgs::new(input, weight, &mut out)).unwrap();
+}
+
+fn split_gdn_ab(ab: &Tensor) -> (Tensor, Tensor) {
+    let buffer = CudaBuffer::from_tensor(ab).unwrap();
+    let bytes = GDN_V_HEADS * DType::BF16.size_in_bytes();
+    let a = buffer
+        .view(0, bytes)
+        .unwrap()
+        .as_tensor(Shape::new(vec![GDN_V_HEADS]), DType::BF16)
+        .unwrap();
+    let b = buffer
+        .view(bytes, bytes)
+        .unwrap()
+        .as_tensor(Shape::new(vec![GDN_V_HEADS]), DType::BF16)
+        .unwrap();
+    (a, b)
 }
 
 /// A view of one token's slot in a KV cache, shaped for the projection that
