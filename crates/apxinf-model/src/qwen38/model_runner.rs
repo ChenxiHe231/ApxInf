@@ -34,11 +34,6 @@ pub(crate) fn capture_gdn_graphs(
                 nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
                 Ok(())
             },
-            || {
-                gdn_decode_layer(ctx, gdn, scratch, state);
-                nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
-                Ok(())
-            },
         )
         .unwrap();
         graphs[layer_index] = Some(phase);
@@ -148,10 +143,6 @@ pub(crate) fn capture_mlp_graphs(
         let phase = PreparedPhase::prepare_and_capture(
             ctx,
             ops::ExecutionSession::with_capacity(64 * 1024 * 1024, ctx.device_id()).unwrap(),
-            || {
-                nvfp4_mlp(ctx, gate_up, down, norm_weight, scratch);
-                Ok(())
-            },
             || {
                 nvfp4_mlp(ctx, gate_up, down, norm_weight, scratch);
                 Ok(())
