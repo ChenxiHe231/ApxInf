@@ -49,10 +49,22 @@ impl Qwen38 {
         let Device::Cuda(ordinal) = device else {
             return Err(Error::Other("qwen38 requires a CUDA device".into()));
         };
+        // Both numeric options are process-wide switches in the current
+        // backend: flashinfer_gdn is a module-level flag and split-KV is a
+        // getenv() read once by the FA2 launcher. A second instance with a
+        // different configuration would silently change the first instance's
+        // execution, so the first load pins the process configuration and a
+        // conflicting later load is refused explicitly.
+        // TODO(cuda-new): thread both through per-call arguments.
+        static PROCESS_CONFIG: std::sync::OnceLock<Qwen38Config> = std::sync::OnceLock::new();
+        let pinned = PROCESS_CONFIG.get_or_init(|| config);
+        if *pinned != config {
+            return Err(Error::Other(format!(
+                "qwen38 execution options are process-wide: an earlier instance \
+                 pinned {pinned:?}, and this load requested {config:?}"
+            )));
+        }
         model::FLASHINFER_GDN.store(config.flashinfer_gdn, std::sync::atomic::Ordering::Relaxed);
-        // The split-KV switch lives in the FA2 launcher, which reads it once
-        // per process; setting it before the first launch makes the config
-        // authoritative. TODO(cuda-new): thread through KvCacheAttentionArgs.
         std::env::set_var(
             "APXINF_FA2_DECODE_SPLITKV",
             if config.splitkv { "1" } else { "0" },
