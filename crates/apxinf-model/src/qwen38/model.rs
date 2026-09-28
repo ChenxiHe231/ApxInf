@@ -26,6 +26,7 @@ pub struct Qwen38 {
     model: core::Model,
     scratch: core::Scratch,
     prefill: Option<core::PrefillScratch>,
+    prefill_session: Option<ops::ExecutionSession>,
     gdn_states: Vec<core::GdnState>,
     kv_caches: Vec<core::KvCache>,
     mlp_graphs: Option<Vec<CapturedGraph>>,
@@ -78,6 +79,7 @@ impl Qwen38 {
             model,
             scratch,
             prefill: None,
+            prefill_session: None,
             gdn_states,
             kv_caches,
             mlp_graphs: None,
@@ -110,6 +112,9 @@ impl Qwen38 {
             .unwrap_or(false);
         if !enough {
             self.prefill = Some(core::PrefillScratch::new(&self.ctx, needed));
+            // Executions bind the scratch addresses, so a new scratch means
+            // the prepared session no longer matches.
+            self.prefill_session = None;
         }
     }
 
@@ -151,15 +156,48 @@ impl LlmTrait for Qwen38 {
             self.ensure_graphs();
             let prefill = self.prefill.as_mut().unwrap();
             core::write_tokens(&self.ctx, prefill, token_ids);
-            core::prefill_step(
-                &self.ctx,
-                &self.model,
-                prefill,
-                &mut self.gdn_states,
-                &mut self.kv_caches,
-                token_ids.len(),
-            );
-            core::prefill_logits(&self.ctx, &self.model, prefill, &self.scratch, token_ids.len());
+            // First pass on a fresh scratch prepares (tunes, allocates) inside
+            // a session arena; every later prefill replays those executions
+            // without allocation. Same-address rebinding is what makes the
+            // replay valid: scratch, weights, states and caches are stable
+            // between calls, and a scratch reallocation clears the session.
+            let count = token_ids.len();
+            let forward = |ctx: &CudaContext,
+                           model: &core::Model,
+                           prefill: &mut core::PrefillScratch,
+                           gdn_states: &mut Vec<core::GdnState>,
+                           kv_caches: &mut Vec<core::KvCache>,
+                           scratch: &core::Scratch| {
+                core::prefill_step(ctx, model, prefill, gdn_states, kv_caches, count);
+                core::prefill_logits(ctx, model, prefill, scratch, count);
+                Ok(())
+            };
+            if let Some(session) = self.prefill_session.as_ref() {
+                ops::with_session(session, || {
+                    forward(
+                        &self.ctx,
+                        &self.model,
+                        prefill,
+                        &mut self.gdn_states,
+                        &mut self.kv_caches,
+                        &self.scratch,
+                    )
+                })?;
+            } else {
+                let session =
+                    ops::ExecutionSession::with_capacity(64 * 1024 * 1024, self.ctx.device_id())?;
+                ops::prepare_with_session(&session, || {
+                    forward(
+                        &self.ctx,
+                        &self.model,
+                        prefill,
+                        &mut self.gdn_states,
+                        &mut self.kv_caches,
+                        &self.scratch,
+                    )
+                })?;
+                self.prefill_session = Some(session);
+            }
             self.ctx.synchronize().map_err(Error::Cuda)?;
             self.position = token_ids.len();
             return Ok(self.logits_view());
