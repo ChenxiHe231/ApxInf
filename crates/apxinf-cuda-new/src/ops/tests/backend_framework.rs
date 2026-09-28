@@ -99,6 +99,24 @@ fn graph_safe_autotune_captures_the_winner() {
     });
 }
 
+#[test]
+fn merged_gemm_contract_rejects_pre_merge_spec_version() {
+    let ctx = CudaContext::new(0).unwrap();
+    let activation = zeros_tensor(0, vec![1, 16], DType::BF16);
+    let weight = zeros_tensor(0, vec![16, 16], DType::BF16);
+    let mut output = zeros_tensor(0, vec![1, 16], DType::BF16);
+    let args = GemmArgs::new(&activation, &weight, &mut output);
+    let mut normalized =
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+    assert_eq!(normalized.spec.version, 6);
+    normalized.spec.version = 5;
+    let error = match super::execution::prepare(&ctx, normalized) {
+        Ok(_) => panic!("pre-merge GEMM spec must be rejected"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("invalid GEMM Spec"), "{error}");
+}
+
 fn hardware_fingerprint(
     uuid: [u8; 16],
     sms: i32,
@@ -482,6 +500,7 @@ fn gpu_e2e_bf16_fp8_candidates_reproduce_a_multi_tile_projection() {
     args.alpha = alpha;
     args.policy.online_tune = true;
     args.policy.allow_fallback = false;
+    args.policy.cache_dir = Some(String::new());
     let normalized =
         super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
     super::execution::validate_candidates(&ctx, &normalized, &expected).unwrap();

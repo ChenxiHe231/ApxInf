@@ -10,6 +10,31 @@ use super::*;
 use crate::CudaContext;
 use half::bf16;
 
+#[test]
+fn quantization_rejects_packed_fp4_input() {
+    use super::framework::zeros_tensor;
+    use apxinf_core::DType;
+
+    let ctx = CudaContext::new(0).unwrap();
+    let input = zeros_tensor(0, vec![1, 16], DType::E2M1Pair);
+    for (semantic, dtype) in [
+        (QuantizationSemantic::FixedScaleE4m3, DType::F8E4M3),
+        (QuantizationSemantic::RowwiseE4m3, DType::F8E4M3),
+        (QuantizationSemantic::CastF16ToBf16, DType::BF16),
+        (QuantizationSemantic::SliceColumnsBf16, DType::BF16),
+        (QuantizationSemantic::RowwiseI8, DType::I8),
+    ] {
+        let mut output = zeros_tensor(0, vec![1, 16], dtype);
+        let error = quantization(&ctx, QuantizationArgs::new(semantic, &input, &mut output))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("requires F16 or BF16")
+                || error.to_string().contains("dtype disagrees"),
+            "{semantic:?}: {error}"
+        );
+    }
+}
+
 fn u32_buffer(device: usize, values: &[u32]) -> crate::CudaBuffer {
     let bytes: Vec<_> = values
         .iter()
