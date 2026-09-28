@@ -74,10 +74,8 @@ impl Qwen38 {
             ("APXINF_FP8_NATIVE_PAIR", "1"),
             // Five-warp-group FlashInfer prepare reduction (report 11).
             ("APXINF_GDN_PREPARE_PARALLEL", "5"),
-            // Single split for FA2 decode when split-KV is off (report 47).
+            // Single split for the split-KV FA2 decode kernel (report 47).
             ("APXINF_FA2_DECODE_SPLITS", "1"),
-            // Split-KV FA2 decode attention (report 47).
-            ("APXINF_FA2_DECODE_SPLITKV", "1"),
         ] {
             if std::env::var_os(key).is_none() {
                 std::env::set_var(key, value);

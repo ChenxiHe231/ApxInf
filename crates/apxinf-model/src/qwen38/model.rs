@@ -695,7 +695,7 @@ pub(crate) struct PrefillScratch {
     gdn_fp8: Tensor,
     pub(crate) tokens: Tensor,
     // Staging for the FlashInfer chunked scan, which takes q/k/v as separate
-    // FP16 tensors and a linear-space decay. Allocated only when that path is
+    // FP16 tensors and a linear-space decay.
     gdn_q16: Option<Tensor>,
     gdn_k16: Option<Tensor>,
     gdn_v16: Option<Tensor>,
