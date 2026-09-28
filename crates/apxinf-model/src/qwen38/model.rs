@@ -9,7 +9,8 @@ use apxinf_cuda_new::{ops, CapturedGraph, CudaBuffer, CudaContext};
 use apxinf_loader::ModelConfig;
 
 use crate::accelerator::create_backend;
-use crate::llm_trait::LlmTrait;
+use crate::llm_trait::{LlmInput, LlmTrait};
+use crate::profiling::GenerationProfile;
 
 use super::config::{Qwen38Config, CHUNK, CONV_WIDTH, FULL_ATTENTION_INTERVAL, GDN_HEAD_DIM,
     GDN_V_HEADS, HEAD_DIM, KV_HEADS, LAYERS, QKV_WIDTH, VOCAB};
@@ -269,6 +270,75 @@ impl LlmTrait for Qwen38 {
 
     fn vocab_size(&self) -> usize {
         VOCAB
+    }
+
+    /// Greedy generation without leaving the device.
+    ///
+    /// The shared loop downloads a `[1, VOCAB]` logits row and re-argmaxes it
+    /// through the backend sampler on every step. This model already computes
+    /// the greedy token on device (`prefill_logits`/`decode_step` end in an
+    /// argmax into `scratch.next_token`), so the loop here reads back exactly
+    /// four bytes per token — the path the kernel harness validated. Sampling
+    /// requests other than greedy still come through
+    /// [`generate_streaming_with_options`][crate::llm_trait::generate_streaming_with_options],
+    /// which uses the logits row like any other model.
+    fn generate_streaming_dyn(
+        &mut self,
+        input: LlmInput<'_>,
+        max_new_tokens: usize,
+        on_token: &mut dyn FnMut(u32),
+        eos_token_id: Option<u32>,
+    ) -> Result<(Vec<u32>, GenerationProfile)> {
+        if input.image.is_some() {
+            return Err(Error::Other(
+                "this model does not support image input".into(),
+            ));
+        }
+        let prompt = input.token_ids;
+        if prompt.is_empty() {
+            return Err(Error::Other("generate_streaming: empty prompt".into()));
+        }
+        let mut profile = GenerationProfile::new();
+        if max_new_tokens == 0 {
+            profile.finalize(prompt.len(), 0);
+            return Ok((Vec::new(), profile));
+        }
+
+        self.reset();
+        // Prefill leaves the argmax of the last prompt position on device.
+        self.forward(prompt, 0)?;
+        let mut next = self.scratch.next_token_host();
+        profile.record_first_token();
+
+        let mut generated = Vec::with_capacity(max_new_tokens);
+        for index in 0..max_new_tokens {
+            if next < 0 || (next as usize) >= VOCAB {
+                return Err(Error::Other(format!(
+                    "device argmax produced token {next} outside the vocabulary"
+                )));
+            }
+            let token = next as u32;
+            generated.push(token);
+            on_token(token);
+            if eos_token_id == Some(token) || index + 1 == max_new_tokens {
+                break;
+            }
+            self.forward(&[token], (prompt.len() + index) as u32)?;
+            next = self.scratch.next_token_host();
+        }
+        self.position = prompt.len() + generated.len();
+        profile.finalize(prompt.len(), generated.len());
+        Ok((generated, profile))
+    }
+
+    fn generate_streaming(
+        &mut self,
+        input: LlmInput<'_>,
+        max_new_tokens: usize,
+        mut on_token: impl FnMut(u32),
+        eos_token_id: Option<u32>,
+    ) -> Result<(Vec<u32>, GenerationProfile)> {
+        self.generate_streaming_dyn(input, max_new_tokens, &mut on_token, eos_token_id)
     }
 }
 
