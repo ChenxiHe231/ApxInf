@@ -8,7 +8,7 @@
 use std::time::Instant;
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda_new::{ops, CapturedGraph, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{ops, CudaBuffer, CudaContext, PreparedPhase};
 
 use super::backend::{graph_tensor_bytes, prefix, view, zeros};
 use super::config::*;
@@ -464,8 +464,8 @@ pub(crate) fn decode_step_inner(
     gdn_states: &mut [GdnState],
     kv_caches: &mut [KvCache],
     position: usize,
-    mlp_graphs: Option<&[CapturedGraph]>,
-    gdn_graphs: Option<&[Option<CapturedGraph>]>,
+    mlp_graphs: Option<&[PreparedPhase]>,
+    gdn_graphs: Option<&[Option<PreparedPhase>]>,
 ) {
     ops::embedding_gather(ctx, &model.embedding, &scratch.token, &scratch.hidden).unwrap();
 
