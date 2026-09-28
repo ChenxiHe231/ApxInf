@@ -97,6 +97,18 @@ name = "apxinf-cuda"
 version = "0.1.0"
 dependencies = [
  "apxinf-core",
+ "bytemuck",
+ "cc",
+ "half",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "apxinf-cuda-new"
+version = "0.1.0"
+dependencies = [
+ "apxinf-core",
  "apxinf-loader",
  "apxinf-tokenizer",
  "half",
@@ -123,6 +135,7 @@ version = "0.1.0"
 dependencies = [
  "apxinf-core",
  "apxinf-cuda",
+ "apxinf-cuda-new",
  "apxinf-loader",
  "half",
  "once_cell",
