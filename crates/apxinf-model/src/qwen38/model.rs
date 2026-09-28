@@ -57,6 +57,38 @@ impl Qwen38 {
             "APXINF_FA2_DECODE_SPLITKV",
             if config.splitkv { "1" } else { "0" },
         );
+        // The remaining kernel-path selectors are getenv() switches inside the
+        // cuda-new native code. They are part of this model's validated
+        // execution (the acceptance md5 was produced with exactly these), so
+        // the module supplies them as defaults rather than depending on the
+        // caller's environment. An explicit environment value still wins, for
+        // kernel diagnostics — but that run leaves the validated
+        // configuration. TODO(cuda-new): promote to per-call arguments.
+        for (key, value) in [
+            // Tiled GDN prefill conv path, tile 64 (report 05/23).
+            ("APXINF_GDN_PREFILL_TILED", "1"),
+            ("APXINF_GDN_PREFILL_TILE", "64"),
+            // cuBLASLt native-NVFP4 candidates for the block-scaled GEMMs
+            // (report 06).
+            ("APXINF_GEMM_CUBLASLT_NVFP4", "1"),
+            // 16-byte vectorized elementwise kernels (report 08).
+            ("APXINF_QWEN38_VECTOR_ELEMENTWISE", "1"),
+            // Paired-channel conv decode kernel (report 23).
+            ("APXINF_GDN_CONV_PAIR", "1"),
+            // The shared-activation FP8 GEMV variant lost its A/B (report 25).
+            ("APXINF_FP8_GEMV_SHARED", "0"),
+            // Native fp8x2 pair quantization, part of the D3 contract
+            // (reports 30/62).
+            ("APXINF_FP8_NATIVE_PAIR", "1"),
+            // Five-warp-group FlashInfer prepare reduction (report 11).
+            ("APXINF_GDN_PREPARE_PARALLEL", "5"),
+            // Single split for FA2 decode when split-KV is off (report 47).
+            ("APXINF_FA2_DECODE_SPLITS", "1"),
+        ] {
+            if std::env::var_os(key).is_none() {
+                std::env::set_var(key, value);
+            }
+        }
 
         let ctx = CudaContext::new(ordinal).map_err(Error::Cuda)?;
         let backend = create_backend(device)?;
