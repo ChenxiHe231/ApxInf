@@ -36,7 +36,7 @@ pub(crate) fn is_full_attention(layer: usize) -> bool {
 
 /// Runtime options. Both defaults are the validated fast paths; the
 /// alternatives exist for precision comparison, not for performance.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Qwen38Config {
     /// Split-KV FA2 decode attention. Changes the FA2 reduction order, which
     /// since the quantizer fixes produces the same tokens as the non-split
