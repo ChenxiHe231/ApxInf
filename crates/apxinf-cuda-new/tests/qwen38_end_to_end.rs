@@ -410,6 +410,8 @@ struct Scratch {
     query: Tensor,
     query_gate: Tensor,
     attention_out: Tensor,
+    attention_workspace: Tensor,
+    direct_fa2_decode: bool,
     attention_fp8: Tensor,
     projected: Tensor,
     positions: Tensor,
@@ -457,6 +459,14 @@ impl Scratch {
             query: zeros(ctx, vec![1, HEADS, HEAD_DIM], DType::BF16),
             query_gate: zeros(ctx, vec![1, HEADS, HEAD_DIM], DType::BF16),
             attention_out: zeros(ctx, vec![1, HEADS * HEAD_DIM], DType::BF16),
+            attention_workspace: zeros(
+                ctx,
+                vec![ops::fa2_bf16_decode_splitkv_workspace_bytes().div_ceil(4)],
+                DType::F32,
+            ),
+            direct_fa2_decode: std::env::var("APXINF_QWEN38_DIRECT_FA2_DECODE")
+                .as_deref()
+                != Ok("0"),
             attention_fp8: zeros(ctx, vec![1, HEADS * HEAD_DIM], DType::F8E4M3),
             projected: zeros(ctx, vec![1, HIDDEN], DType::BF16),
             positions: zeros(ctx, vec![1], DType::I32),
@@ -1057,11 +1067,26 @@ fn decode_step_inner(
                 let values = cache_rows(&cache.values, valid, vec![1, valid, KV_HEADS, HEAD_DIM]);
                 let query_4d = view(&scratch.query, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
                 let mut out_4d = view(&scratch.attention_out, vec![1, 1, HEADS, HEAD_DIM], DType::BF16);
-                let mut args = ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
-                args.valid_key_tokens = valid;
-                args.query_start = position;
-            args.policy.cache_dir = attention_cache_dir();
-                ops::kv_cache_attention(ctx, args).unwrap();
+                if valid >= 128 && scratch.direct_fa2_decode {
+                    ops::fa2_bf16_decode_splitkv(
+                        ctx,
+                        &query_4d,
+                        &keys,
+                        &values,
+                        &out_4d,
+                        &scratch.attention_workspace,
+                        valid,
+                        1.0 / (HEAD_DIM as f32).sqrt(),
+                    )
+                    .unwrap();
+                } else {
+                    let mut args =
+                        ops::KvCacheAttentionArgs::new(&query_4d, &keys, &values, &mut out_4d);
+                    args.valid_key_tokens = valid;
+                    args.query_start = position;
+                    args.policy.cache_dir = attention_cache_dir();
+                    ops::kv_cache_attention(ctx, args).unwrap();
+                }
 
                 let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
                 ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
