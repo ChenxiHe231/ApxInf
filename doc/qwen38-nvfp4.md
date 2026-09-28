@@ -104,10 +104,6 @@ Measured on Jetson AGX Thor at locked clocks (1575 MHz GPC):
 | TTFT, 2048-token prompt | 534 ms |
 | Decode | 78.1 ms/token (12.8 tok/s) |
 
-For reference, vLLM v0.28 on the same device and checkpoint measures 683 ms
-TTFT and 74.9 ms/token under the matched benchmark
-(2048-token prompt, 128 fixed tokens, engine-level timing).
-
 ## Correctness gates
 
 - The NVFP4/FP8 quantizers are bit-compatible with vLLM's encodings

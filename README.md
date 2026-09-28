@@ -140,9 +140,6 @@ running real inference through the CLI.
 |---|---|---:|---:|---:|
 | Jetson AGX Thor | NVFP4/FP8 | 534 ms | 78.1 ms/token | 12.8 tok/s |
 
-For reference, vLLM v0.28 on the same device and checkpoint measures
-683 ms TTFT and 74.9 ms/token.
-
 Benchmark it with the dedicated example (JSON per repeat plus a summary;
 repeat 0 is the warm-up and excluded from the means):
 
