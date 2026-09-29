@@ -128,6 +128,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH");
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH_CUTLASS");
     println!("cargo:rerun-if-env-changed=APXINF_KERNEL_BUILD_ID");
+    println!("cargo:rerun-if-env-changed=APXINF_NVFP4_FUSED_FC1_AOT");
+    println!("cargo:rerun-if-env-changed=APXINF_CUTE_DSL_RUNTIME_AOT");
     println!("cargo:rerun-if-env-changed=CUDA_VISIBLE_DEVICES");
     println!("cargo:rerun-if-changed=build_support/cuda_arch.rs");
     println!("cargo:rerun-if-changed=build_support/attention_fingerprint.rs");
@@ -141,6 +143,34 @@ fn main() {
         .or_else(|_| env::var("CUDA_HOME"))
         .unwrap_or_else(|_| "/usr/local/cuda".into());
     let cpu_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let fused_fc1_aot = env::var_os("APXINF_NVFP4_FUSED_FC1_AOT").map(PathBuf::from);
+    let cute_dsl_runtime_aot = env::var_os("APXINF_CUTE_DSL_RUNTIME_AOT").map(PathBuf::from);
+    if let Some(path) = fused_fc1_aot.as_ref() {
+        assert_eq!(
+            cpu_arch, "aarch64",
+            "the current CuTe DSL fused-FC1 AOT host object targets aarch64"
+        );
+        assert!(
+            path.is_file(),
+            "fused-FC1 AOT object is missing: {}",
+            path.display()
+        );
+        println!("cargo:rerun-if-changed={}", path.display());
+        let runtime = cute_dsl_runtime_aot
+            .as_ref()
+            .expect("APXINF_CUTE_DSL_RUNTIME_AOT must name the CuTe DSL static runtime archive");
+        assert!(
+            runtime.is_file(),
+            "CuTe DSL runtime archive is missing: {}",
+            runtime.display()
+        );
+        println!("cargo:rerun-if-changed={}", runtime.display());
+    } else {
+        assert!(
+            cute_dsl_runtime_aot.is_none(),
+            "APXINF_CUTE_DSL_RUNTIME_AOT requires APXINF_NVFP4_FUSED_FC1_AOT"
+        );
+    }
     let library_directories = cuda_library_directories(&cuda, &cpu_arch);
     let bundled_nvcc = PathBuf::from(format!("{cuda}/bin/nvcc"));
     if library_directories.is_empty() || !bundled_nvcc.is_file() {
@@ -263,6 +293,9 @@ fn main() {
             ]
             .map(|source| operators.join(source)),
         );
+        if fused_fc1_aot.is_some() {
+            cutlass_sources.push(operators.join("gemm_nvfp4_swiglu_aot_sm100.cu"));
+        }
         cutlass_sources.push(adapters.join("attention/providers/cutlass.cu"));
         // Vendored FlashInfer Cake GDN prefill: plain CUDA C++, but it needs
         // the same compute_110a codegen as the CUTLASS group because it emits
@@ -395,6 +428,9 @@ fn main() {
             command.arg("-DAPXINF_GEMM_CUTLASS=1");
             command.arg("-DAPXINF_ATTENTION_CUTLASS=1");
         }
+        if fused_fc1_aot.is_some() {
+            command.arg("-DAPXINF_NVFP4_FUSED_FC1_AOT=1");
+        }
         if has_fa2 {
             command.arg("-DAPXINF_ATTENTION_FA2=1");
         }
@@ -460,6 +496,10 @@ fn main() {
         objects.push(object);
     }
 
+    if let Some(path) = fused_fc1_aot {
+        objects.push(path);
+    }
+
     let archive = out.join("libapxinf_gemm_native.a");
     let _ = std::fs::remove_file(&archive);
     let mut ar = Command::new("ar");
@@ -468,6 +508,21 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=apxinf_gemm_native");
+    if let Some(path) = cute_dsl_runtime_aot {
+        let parent = path
+            .parent()
+            .expect("CuTe DSL runtime archive needs a parent directory");
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("CuTe DSL runtime archive needs a UTF-8 file name");
+        let library = file_name
+            .strip_prefix("lib")
+            .and_then(|name| name.strip_suffix(".a"))
+            .expect("CuTe DSL runtime archive must be named lib<name>.a");
+        println!("cargo:rustc-link-search=native={}", parent.display());
+        println!("cargo:rustc-link-lib=static={library}");
+    }
     println!("cargo:rustc-link-lib=cublasLt");
     println!("cargo:rustc-link-lib=cublas");
     println!("cargo:rustc-link-lib=cudart");

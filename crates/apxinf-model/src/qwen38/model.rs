@@ -10,7 +10,7 @@ use std::time::Instant;
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda_new::{ops, CudaBuffer, CudaContext, PreparedPhase};
 
-use super::backend::{graph_tensor_bytes, prefix, view, zeros};
+use super::backend::{graph_tensor_bytes, prefix, upload, view, zeros};
 use super::config::*;
 use super::weights::{Fp8Weight, GdnLayer, Layer, Model, Nvfp4Weight};
 
@@ -770,6 +770,22 @@ pub(crate) struct PrefillScratch {
     gdn_alpha: Option<Tensor>,
     cu_seqlens: Option<Tensor>,
     flashinfer_workspace: Option<Tensor>,
+    fused_fc1: Option<FusedFc1Metadata>,
+}
+
+struct FusedFc1Metadata {
+    tile_groups: Tensor,
+    tile_limits: Tensor,
+    token_map: Tensor,
+    tile_count: Tensor,
+}
+
+fn device_i32(ctx: &CudaContext, values: &[i32]) -> Tensor {
+    let bytes = values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect::<Vec<_>>();
+    upload(ctx, &bytes, vec![values.len()], DType::I32)
 }
 
 impl PrefillScratch {
@@ -786,6 +802,17 @@ impl PrefillScratch {
         // reference scan remains available in the kernel harness for
         // precision comparison.
         let flashinfer = true;
+        let fused_fc1 = (t == 2048
+            && std::env::var("APXINF_QWEN38_FUSED_FC1").as_deref() == Ok("1"))
+        .then(|| {
+            let tiles = t / 128;
+            FusedFc1Metadata {
+                tile_groups: device_i32(ctx, &vec![0; tiles]),
+                tile_limits: device_i32(ctx, &vec![t as i32; tiles]),
+                token_map: device_i32(ctx, &(0..t as i32).collect::<Vec<_>>()),
+                tile_count: device_i32(ctx, &[tiles as i32]),
+            }
+        });
         PrefillScratch {
             capacity,
             hidden: zeros(ctx, vec![t, HIDDEN], DType::BF16),
@@ -833,6 +860,7 @@ impl PrefillScratch {
                 assert!(bytes > 0, "FlashInfer workspace query returned 0");
                 zeros(ctx, vec![bytes.div_ceil(4)], DType::F32)
             }),
+            fused_fc1,
         }
     }
 }
@@ -863,6 +891,9 @@ fn nvfp4_mlp_rows(
     scratch: &mut PrefillScratch,
     rows: usize,
 ) {
+    let fused_fc1 = rows == 2048
+        && gate_up.fused_fc1.is_some()
+        && scratch.fused_fc1.is_some();
     let hidden_rows = prefix(&scratch.hidden, vec![rows, HIDDEN], DType::BF16);
     verify_finite_bf16(ctx, "prefill MLP input", &hidden_rows);
     let activation = prefix(&scratch.nvfp4_activation, vec![rows, HIDDEN / 2], DType::E2M1Pair);
@@ -875,42 +906,67 @@ fn nvfp4_mlp_rows(
         EPSILON,
         gate_up.input_scale,
         BLOCK,
-        ops::ScaleLayout::GemmAtom,
+        if fused_fc1 {
+            ops::ScaleLayout::RowMajor
+        } else {
+            ops::ScaleLayout::GemmAtom
+        },
     )
     .unwrap();
 
-    let mut fused = prefix(&scratch.mlp_fused, vec![rows, 2 * INTERMEDIATE], DType::BF16);
     if std::env::var("APXINF_QWEN38_VERIFY_FINITE").as_deref() == Ok("1") {
         ctx.synchronize().unwrap();
         for (index, code) in graph_tensor_bytes(&scratch.nvfp4_scales).into_iter().enumerate() {
             assert!(code & 0x7f != 0x7f, "prefill MLP activation scale is E4M3 NaN: index={index} code={code:#x}");
         }
     }
-    let mut args = ops::GemmArgs::nvfp4(
-        &activation,
-        &scratch.nvfp4_scales,
-        &gate_up.packed,
-        &gate_up.scales,
-        BLOCK,
-        gate_up.alpha,
-        &mut fused,
-    );
-    args.policy.cache_dir = gemm_cache_dir();
-    ops::gemm(ctx, args).unwrap();
-
     let mlp_activation =
         prefix(&scratch.mlp_activation, vec![rows, INTERMEDIATE / 2], DType::E2M1Pair);
-    verify_finite_bf16(ctx, "prefill MLP gate-up", &fused);
-    ops::nvfp4_quantize_swiglu(
-        ctx,
-        &fused,
-        &mlp_activation,
-        &scratch.mlp_scales,
-        down.input_scale,
-        BLOCK,
-        ops::ScaleLayout::GemmAtom,
-    )
-    .unwrap();
+    if fused_fc1 {
+        let weight = gate_up.fused_fc1.as_ref().unwrap();
+        let metadata = scratch.fused_fc1.as_ref().unwrap();
+        ops::nvfp4_dense_swiglu_aot(
+            ctx,
+            &activation,
+            &scratch.nvfp4_scales,
+            &weight.packed,
+            &weight.scales,
+            &mlp_activation,
+            &scratch.mlp_scales,
+            &weight.alpha,
+            &weight.input_global_scale,
+            &weight.down_inverse_global_scale,
+            &metadata.tile_groups,
+            &metadata.tile_limits,
+            &metadata.token_map,
+            &metadata.tile_count,
+        )
+        .unwrap();
+    } else {
+        let mut fused = prefix(&scratch.mlp_fused, vec![rows, 2 * INTERMEDIATE], DType::BF16);
+        let mut args = ops::GemmArgs::nvfp4(
+            &activation,
+            &scratch.nvfp4_scales,
+            &gate_up.packed,
+            &gate_up.scales,
+            BLOCK,
+            gate_up.alpha,
+            &mut fused,
+        );
+        args.policy.cache_dir = gemm_cache_dir();
+        ops::gemm(ctx, args).unwrap();
+        verify_finite_bf16(ctx, "prefill MLP gate-up", &fused);
+        ops::nvfp4_quantize_swiglu(
+            ctx,
+            &fused,
+            &mlp_activation,
+            &scratch.mlp_scales,
+            down.input_scale,
+            BLOCK,
+            ops::ScaleLayout::GemmAtom,
+        )
+        .unwrap();
+    }
 
     let mut mlp_out = prefix(&scratch.mlp_out, vec![rows, HIDDEN], DType::BF16);
     let mut args = ops::GemmArgs::nvfp4(

@@ -41,7 +41,7 @@ pub use mlp::{
     add_into, fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, rms_norm, swiglu,
 };
 pub use gemm::{
-    gemm, gemm_bias, gemm_bias_gelu, gemm_geglu, nvfp4_pack_block_scales,
+    gemm, gemm_bias, gemm_bias_gelu, gemm_geglu, nvfp4_dense_swiglu_aot, nvfp4_pack_block_scales,
     nvfp4_quantize_activation, nvfp4_quantize_rms_norm, nvfp4_quantize_swiglu,
     nvfp4_scale_buffer_bytes, ScaleLayout, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs, GemmGegluArgs,
     GemmPolicy, GemmQuantization, WeightVersion,

@@ -25,6 +25,10 @@ fn scalar(tensors: &HashMap<String, Tensor>, name: &str) -> f32 {
     tensors[name].to_f32_vec().unwrap()[0]
 }
 
+fn device_f32(ctx: &CudaContext, value: f32) -> Tensor {
+    upload(ctx, &value.to_le_bytes(), vec![1], DType::F32)
+}
+
 /// An NVFP4 weight with its relaid-out scales and the alpha folding both
 /// per-tensor scales.
 pub(crate) struct Nvfp4Weight {
@@ -32,6 +36,15 @@ pub(crate) struct Nvfp4Weight {
     pub(crate) scales: Tensor,
     pub(crate) input_scale: f32,
     pub(crate) alpha: f32,
+    pub(crate) fused_fc1: Option<FusedFc1Weight>,
+}
+
+pub(crate) struct FusedFc1Weight {
+    pub(crate) packed: Tensor,
+    pub(crate) scales: Tensor,
+    pub(crate) alpha: Tensor,
+    pub(crate) input_global_scale: Tensor,
+    pub(crate) down_inverse_global_scale: Tensor,
 }
 
 fn relayout(ctx: &CudaContext, source: &Tensor, rows: usize, k: usize) -> Tensor {
@@ -67,6 +80,7 @@ fn load_nvfp4(
         scales: relayout(ctx, &checkpoint_scales, n, k),
         input_scale,
         alpha: input_scale * weight_scale_2,
+        fused_fc1: None,
     }
 }
 
@@ -111,11 +125,70 @@ fn load_fused_gate_up(
         DType::F8E4M3,
     );
 
+    let fused_fc1 = (std::env::var("APXINF_QWEN38_FUSED_FC1").as_deref() == Ok("1")).then(|| {
+        let gate_weight = cpu_bytes(&tensors[&format!("{prefix}.gate_proj.weight")]);
+        let up_weight = cpu_bytes(&tensors[&format!("{prefix}.up_proj.weight")]);
+        let bytes_per_row = HIDDEN / 2;
+        let mut interleaved_weight = vec![0u8; 2 * INTERMEDIATE * bytes_per_row];
+        for target_row in 0..2 * INTERMEDIATE {
+            let group_row = target_row % 128;
+            let source_row = target_row / 128 * 64 + group_row % 64;
+            let source = if group_row < 64 {
+                up_weight
+            } else {
+                gate_weight
+            };
+            let from = source_row * bytes_per_row;
+            let to = target_row * bytes_per_row;
+            interleaved_weight[to..to + bytes_per_row]
+                .copy_from_slice(&source[from..from + bytes_per_row]);
+        }
+
+        let gate_scales = cpu_bytes(&tensors[&format!("{prefix}.gate_proj.weight_scale")]);
+        let up_scales = cpu_bytes(&tensors[&format!("{prefix}.up_proj.weight_scale")]);
+        let scales_per_row = HIDDEN / BLOCK as usize;
+        let mut interleaved_scales = vec![0u8; 2 * INTERMEDIATE * scales_per_row];
+        for target_row in 0..2 * INTERMEDIATE {
+            let group_row = target_row % 128;
+            let source_row = target_row / 128 * 64 + group_row % 64;
+            let source = if group_row < 64 {
+                up_scales
+            } else {
+                gate_scales
+            };
+            let from = source_row * scales_per_row;
+            let to = target_row * scales_per_row;
+            interleaved_scales[to..to + scales_per_row]
+                .copy_from_slice(&source[from..from + scales_per_row]);
+        }
+        let packed = upload(
+            ctx,
+            &interleaved_weight,
+            vec![2 * INTERMEDIATE, HIDDEN / 2],
+            DType::E2M1Pair,
+        );
+        let checkpoint_scales = upload(
+            ctx,
+            &interleaved_scales,
+            vec![2 * INTERMEDIATE, scales_per_row],
+            DType::F8E4M3,
+        );
+        let down_input_scale = scalar(tensors, &format!("{prefix}.down_proj.input_scale"));
+        FusedFc1Weight {
+            packed,
+            scales: relayout(ctx, &checkpoint_scales, 2 * INTERMEDIATE, HIDDEN),
+            alpha: device_f32(ctx, input_scale * weight_scale_2),
+            input_global_scale: device_f32(ctx, 1.0),
+            down_inverse_global_scale: device_f32(ctx, 1.0 / down_input_scale),
+        }
+    });
+
     Nvfp4Weight {
         packed,
         scales: relayout(ctx, &checkpoint_scales, 2 * INTERMEDIATE, HIDDEN),
         input_scale,
         alpha: input_scale * weight_scale_2,
+        fused_fc1,
     }
 }
 
