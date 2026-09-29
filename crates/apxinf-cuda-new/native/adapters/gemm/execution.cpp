@@ -580,7 +580,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_dense_swiglu_aot(
     const void* tile_groups, const void* tile_limits,
     const void* token_map, const void* tile_count,
     int64_t rows, int64_t n, int64_t k, apxinf_cuda_stream_t stream) {
-#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_NVFP4_FUSED_FC1_AOT)
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN38_DENSE_SWIGLU_AOT)
   return apxinf::framework::abi_boundary([&] {
     if (activation == nullptr || weight == nullptr ||
         activation_scales == nullptr || weight_scales == nullptr ||

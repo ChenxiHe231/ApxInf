@@ -1,22 +1,16 @@
 // Copyright 2026 ApxInf contributors.
 //
-// Host adapter for the optional CuTe DSL AOT object selected with
-// APXINF_NVFP4_FUSED_FC1_AOT. Keeping the generated host object external
-// makes ordinary/x86 builds independent of an aarch64-only experiment while
-// preserving the exact kernel that passed the all-layer numerical contract.
+// Host adapter for the optional CuTe DSL AOT object selected from the shared
+// APXINF_CUDA_AOT_MANIFEST bundle. Generated objects stay outside the source
+// tree while their recipe, checksum and ABI are verified at build time.
 
 #include "gemm_nvfp4_sm100.h"
+#include "dense_swiglu.h"
 
 #include <cuda_runtime_api.h>
 
 #include <cstdlib>
 #include <mutex>
-
-extern "C" void _mlir_dense_swiglu_cuda_init(void** args);
-extern "C" void _mlir_dense_swiglu_cuda_load_to_device(void** args);
-extern "C" void
-_mlir_dense_swiglu__mlir_ciface_cutlass_single_b_wrapper_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_Ptrgmem_2048_128_34816_5120_1_128_16__CUstream0x0_5(
-    void** args, int32_t num_args);
 
 namespace apxinf::cuda_new::cutlass_ops {
 namespace {
