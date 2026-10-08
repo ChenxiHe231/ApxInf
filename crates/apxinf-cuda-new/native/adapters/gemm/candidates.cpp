@@ -99,7 +99,8 @@ AlignmentRequirements cublaslt_alignment(const Spec&) {
   return requirements;
 }
 
-#if defined(APXINF_GEMM_CUTLASS) || defined(APXINF_GEMM_CUTLASS_SM89)
+#if defined(APXINF_GEMM_CUTLASS) || defined(APXINF_GEMM_CUTLASS_SM89) || \
+    defined(APXINF_GEMM_CUTLASS_SM87_W8A8)
 AlignmentRequirements cutlass_fp8_alignment(const Spec&) {
   AlignmentRequirements requirements{};
   requirements.a = 16;
@@ -118,6 +119,30 @@ AlignmentRequirements cutlass_geglu_alignment(const Spec& spec) {
     requirements.output = 16;
   }
   return requirements;
+}
+#endif
+
+#ifdef APXINF_GEMM_CUTLASS_SM87_W8A8
+AlignmentRequirements cutlass_w8a8_alignment(const Spec&) {
+  AlignmentRequirements requirements{};
+  requirements.a = 16;
+  requirements.b = 16;
+  requirements.a_scales = alignof(float);
+  requirements.b_scales = alignof(float);
+  requirements.output = 16;
+  return requirements;
+}
+
+bool supports_cutlass_w8a8(const Spec& spec) {
+  return spec.semantic == APXINF_GEMM_SEMANTIC_GEMM &&
+         spec.a_dtype == APXINF_DTYPE_I8 &&
+         spec.b_dtype == APXINF_DTYPE_I8 &&
+         spec.accumulation_dtype == APXINF_DTYPE_I32 &&
+         spec.output_dtype == APXINF_DTYPE_BF16 &&
+         spec.quantization == APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL &&
+         spec.b_is_immutable != 0 &&
+         spec.k % 16 == 0 && spec.n % 8 == 0 &&
+         spec.alpha_is_unit != 0 && spec.output_scale_is_unit != 0;
 }
 #endif
 
@@ -371,6 +396,13 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_cutlass_nvfp4, cutlass_nvfp4_alignment,
        cutlass_nvfp4_resource_requirements, cutlass_nvfp4_configurations,
        prepare_cutlass_nvfp4, launch_cutlass_nvfp4, destroy_cutlass},
+#endif
+#ifdef APXINF_GEMM_CUTLASS_SM87_W8A8
+      {kProviderCutlass, 6, 1, "cutlass-w8a8-sm87",
+       kDeviceFeatureCutlassSm87W8A8, true, true, false,
+       supports_cutlass_w8a8, cutlass_w8a8_alignment,
+       cutlass_w8a8_resource_requirements, one_configuration,
+       prepare_cutlass_w8a8, launch_cutlass_w8a8, destroy_cutlass},
 #endif
   };
   static const ImplementationRegistry gemm_geglu_entries = {

@@ -63,6 +63,7 @@ pub const DEVICE_FEATURE_NATIVE_FP8: u64 = 1 << 0;
 pub const DEVICE_FEATURE_CUTLASS_SM100: u64 = 1 << 1;
 pub const DEVICE_FEATURE_FA2: u64 = 1 << 2;
 pub const DEVICE_FEATURE_CUTLASS_SM89_BF16_GEGLU: u64 = 1 << 3;
+pub const DEVICE_FEATURE_CUTLASS_SM87_W8A8: u64 = 1 << 4;
 
 pub fn is_cutlass_sm100_family(arch: &str) -> bool {
     matches!(
@@ -104,6 +105,9 @@ pub fn target_features(target: &ArchTarget) -> u64 {
     }
     if target.cutlass_arch == "sm_89" {
         features |= DEVICE_FEATURE_CUTLASS_SM89_BF16_GEGLU;
+    }
+    if target.cutlass_arch == "sm_87" {
+        features |= DEVICE_FEATURE_CUTLASS_SM87_W8A8;
     }
     features
 }
@@ -411,6 +415,11 @@ mod tests {
         ];
         assert!(supports_target(&targets, 87, 0));
         assert!(supports_target(&targets, 87, DEVICE_FEATURE_FA2));
+        assert!(supports_target(
+            &targets,
+            87,
+            DEVICE_FEATURE_CUTLASS_SM87_W8A8
+        ));
         assert!(!supports_target(&targets, 87, DEVICE_FEATURE_NATIVE_FP8));
         assert!(supports_target(
             &targets,
