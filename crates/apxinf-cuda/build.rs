@@ -150,6 +150,10 @@ fn is_fa2_sm80_family(arch: &str) -> bool {
     matches!(arch, "sm_80" | "sm_86" | "sm_87" | "sm_89")
 }
 
+fn is_pre_sm80(arch: &str) -> bool {
+    matches!(arch, "sm_70" | "sm_72" | "sm_75")
+}
+
 // Architectures that compile the vendored FlashAttention-2 BF16 forward
 // kernels. The sm80 family and Blackwell (sm_120/121, GB10/DGX Spark) all run
 // the same v2.7.4 instantiations; the -arch flag selects the real target.
@@ -634,6 +638,9 @@ fn main() {
                     };
                     if let Some(selected_arch) = selected_arch {
                         cmd.args([format!("-arch={selected_arch}")]);
+                    }
+                    if nvcc_arch.as_deref().is_some_and(is_pre_sm80) {
+                        cmd.arg("-DAPXINF_GDN_WMMA_UNSUPPORTED=1");
                     }
                     if entry.ends_with("cublaslt_adapter.cu")
                         && nvcc_arch.as_deref().is_some_and(is_cutlass_sm100_family)
