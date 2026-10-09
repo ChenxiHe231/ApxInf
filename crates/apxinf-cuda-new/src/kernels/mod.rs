@@ -34,12 +34,17 @@ pub fn new_workspace(capacity_bytes: usize, device: usize) -> Result<ExecutionSe
 }
 
 pub mod activation;
+pub mod attention;
+pub mod cache;
 pub mod elementwise;
 pub mod embedding;
 pub mod fused;
 pub mod gemm;
 pub mod norm;
 pub mod preprocess;
+pub mod quantization;
+pub mod rope;
+pub mod sampling;
 
 /// Prepare a fixed-shape traversal that may allocate and tune.
 pub fn prepare_with_workspace<T>(

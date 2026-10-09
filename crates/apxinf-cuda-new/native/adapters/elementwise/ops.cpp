@@ -98,3 +98,36 @@ extern "C" apxinf_status_t apxinf_elementwise_add_bias_bf16(
           "add-bias");
   });
 }
+
+extern "C" apxinf_status_t apxinf_elementwise_gather_rows_bf16(
+    const void* input, const void* indices, void* output, int64_t rows,
+    int64_t cols, apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || indices == nullptr || output == nullptr ||
+        rows <= 0 || cols <= 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid gather-rows arguments");
+    }
+    check(apxinf::cuda_new::elementwise_ops::gather_rows_bf16(
+              input, indices, output, rows, cols,
+              static_cast<cudaStream_t>(stream)),
+          "gather-rows");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_elementwise_bias_position_f32_bf16(
+    const void* projection, const void* bias, const void* position,
+    void* output, int64_t count, int32_t cols, int32_t tokens_per_view,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (projection == nullptr || position == nullptr || output == nullptr ||
+        count <= 0 || cols <= 0 || tokens_per_view <= 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid bias-position arguments");
+    }
+    check(apxinf::cuda_new::elementwise_ops::bias_position_f32_bf16(
+              projection, bias, position, output, count, cols, tokens_per_view,
+              static_cast<cudaStream_t>(stream)),
+          "bias-position");
+  });
+}
