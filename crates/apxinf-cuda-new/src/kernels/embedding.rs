@@ -1,22 +1,15 @@
-//! Legacy `kernels::embedding` names over cuda-new gather operators.
-//!
-//! The cuda-new `EmbeddingLookup` gather fuses the `sqrt(cols)` scaling that
-//! the legacy pipeline applied as a separate `elementwise::scale` step.
-//! The fused form is exposed as [`lookup_scaled`]; a bare unscaled `lookup`
-//! has no cuda-new operator yet and is deliberately absent so a port cannot
-//! silently double-scale.
+//! Legacy `kernels::embedding` names over cuda-new kernels.
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
 use crate::ffi::abi::{elementwise as abi, status};
-use crate::{ops, CudaBuffer, CudaContext};
+use crate::{CudaBuffer, CudaContext};
 
-/// Gather `seq_len` rows of `table` by u32 token ids and multiply by
-/// `sqrt(cols)` — the fused embedding step of the Gemma-style models.
-///
-/// Call sites that previously ran `embedding::lookup` followed by
-/// `elementwise::scale(sqrt(width))` collapse into this single call.
-pub fn lookup_scaled(
+/// `lookup`: gather `seq_len` rows of `table` by u32 token ids held in a
+/// device buffer — the unscaled legacy semantic. Callers that need the
+/// Gemma-style `sqrt(width)` scale apply it separately, exactly as they did
+/// against the legacy backend, so the rounding sequence is unchanged.
+pub fn lookup(
     ctx: &CudaContext,
     table: &Tensor,
     ids: &CudaBuffer,
@@ -31,12 +24,22 @@ pub fn lookup_scaled(
             "cuda-new embedding lookup currently supports BF16 tables".into(),
         ));
     }
-    let (vocab, cols) = (dims[0], dims[1]);
-    let mut output = ctx.allocate_output(Shape::new(vec![seq_len, cols]), DType::BF16)?;
-    let mut args = ops::GatherArgs::new(ops::GatherSemantic::EmbeddingLookup, table, &mut output);
-    args.ids = Some(ids);
-    args.vocab_size = vocab;
-    ops::gather(ctx, args)?;
+    let cols = dims[1];
+    let output = ctx.allocate_output(Shape::new(vec![seq_len, cols]), DType::BF16)?;
+    let table_buffer = CudaBuffer::from_tensor(table).map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    let rows = i64::try_from(seq_len).map_err(|_| Error::Other("lookup rows exceed i64".into()))?;
+    let cols_i64 = i64::try_from(cols).map_err(|_| Error::Other("lookup cols exceed i64".into()))?;
+    unsafe {
+        status::check(abi::apxinf_elementwise_gather_rows_bf16(
+            table_buffer.ptr(),
+            ids.ptr(),
+            output_buffer.ptr(),
+            rows,
+            cols_i64,
+            ctx.stream().handle(),
+        ))?;
+    }
     Ok(output)
 }
 
