@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use apxinf_core::{Backend, Device, Result};
-#[cfg(not(feature = "cuda"))]
-use apxinf_core::Error;
+use apxinf_core::{Backend, Device, Error, Result};
 
 pub(crate) fn create_backend(device: Device) -> Result<Arc<dyn Backend>> {
     match device {
@@ -14,6 +12,23 @@ pub(crate) fn create_backend(device: Device) -> Result<Arc<dyn Backend>> {
         #[cfg(not(feature = "cuda"))]
         Device::Cuda(_) => Err(Error::Other("CUDA support not compiled in".into())),
     }
+}
+
+/// Create a backend on the `apxinf-cuda-new` runtime.
+///
+/// Models written entirely against `dyn Backend` — llama and qwen3-vl — take
+/// this path. The returned backend satisfies the same portable trait as the
+/// legacy one, so those families need no code change to switch runtimes: the
+/// model composes unchanged and only the concrete backend differs.
+#[cfg(feature = "cuda")]
+pub(crate) fn create_cuda_new_backend(device: Device) -> Result<Arc<dyn Backend>> {
+    let Device::Cuda(id) = device else {
+        return Err(Error::Other(
+            "the cuda-new backend requires a CUDA device".into(),
+        ));
+    };
+    let ctx = Arc::new(apxinf_cuda_new::CudaContext::new(id).map_err(Error::Cuda)?);
+    Ok(Arc::new(apxinf_cuda_new::CudaNewBackend::new(ctx)))
 }
 
 #[cfg(feature = "cuda")]

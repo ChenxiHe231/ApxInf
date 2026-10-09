@@ -328,6 +328,19 @@ impl AutoModel {
         }
 
         register_builtin_models();
+        // The LLM/VLM families compose entirely through `dyn Backend`, so they
+        // migrate by receiving a cuda-new backend instead of the legacy one —
+        // no model-side code changes. Other families still take the legacy
+        // backend until their own migration stage.
+        #[cfg(feature = "cuda")]
+        let backend = if matches!(device, Device::Cuda(_))
+            && matches!(model_name, "llama" | "qwen3_vl" | "qwen3vl")
+        {
+            crate::accelerator::create_cuda_new_backend(device)?
+        } else {
+            create_backend(device)?
+        };
+        #[cfg(not(feature = "cuda"))]
         let backend = create_backend(device)?;
         #[cfg(feature = "cuda")]
         if let Some(cuda) = crate::accelerator::cuda::downcast(&*backend) {

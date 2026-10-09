@@ -286,6 +286,8 @@ fn main() {
         "attention/execution.cpp",
         "attention/providers/custom.cu",
         "elementwise/execution.cpp",
+        "elementwise/ops.cpp",
+        "cache/ops.cpp",
         "linear_attention/execution.cpp",
         "attn_helpers/execution.cpp",
         "reduction/execution.cpp",
@@ -299,6 +301,8 @@ fn main() {
     .map(|source| adapters.join(source))
     .to_vec();
     generic_sources.push(native.join("kernels/custom/mlp_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/elementwise_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/cache_ops.cu"));
     generic_sources.push(native.join("kernels/custom/gdn_ops.cu"));
     generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_tma.cpp"));
     generic_sources.push(native.join("kernels/custom/attn_ops.cu"));

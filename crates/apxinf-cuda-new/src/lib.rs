@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod buffer;
 pub mod context;
 pub mod device_caps;
@@ -8,6 +9,7 @@ pub mod stream;
 pub mod transfers;
 mod workspace;
 
+pub use backend::{CudaKvCache, CudaNewBackend};
 pub use buffer::{CudaBuffer, CudaDeviceAddress, HostMappedBuffer};
 pub use context::CudaContext;
 pub use device_caps::{CudaArchFamily, CudaDeviceCaps};

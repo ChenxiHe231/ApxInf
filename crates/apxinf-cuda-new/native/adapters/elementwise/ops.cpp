@@ -1,0 +1,100 @@
+// Out-of-place elementwise and activation kernels backing the portable
+// `apxinf_core::Backend` trait.
+//
+// One fixed implementation each and no persisted selection, so per
+// `doc/adding-new-kernels.md` section 6 they carry no candidate registry,
+// tuning key, or autotuner; they are direct C-ABI forwarders.
+
+#include "../../include/apxinf_cuda/elementwise.h"
+
+#include "../../framework/runtime_internal.h"
+#include "../../kernels/custom/elementwise_ops.h"
+
+#include <cstdint>
+#include <string>
+
+namespace {
+
+using apxinf::framework::Failure;
+using apxinf::framework::abi_boundary;
+
+void check(int status, const char* what) {
+  if (status != 0) {
+    throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                  std::string(what) + " failed with status " +
+                      std::to_string(status));
+  }
+}
+
+}  // namespace
+
+extern "C" apxinf_status_t apxinf_elementwise_activation_bf16(
+    const void* input, void* output, int64_t count, int32_t activation,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || output == nullptr || count <= 0 || activation < 0 ||
+        activation > 2) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid activation arguments");
+    }
+    check(apxinf::cuda_new::elementwise_ops::activation_bf16(
+              input, output, count, static_cast<int>(activation),
+              static_cast<cudaStream_t>(stream)),
+          "activation");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_elementwise_mul_bf16(
+    const void* a, const void* b, void* output, int64_t count,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (a == nullptr || b == nullptr || output == nullptr || count <= 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid mul arguments");
+    }
+    check(apxinf::cuda_new::elementwise_ops::mul_bf16(
+              a, b, output, count, static_cast<cudaStream_t>(stream)),
+          "mul");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_elementwise_add_bf16(
+    const void* a, const void* b, void* output, int64_t count,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (a == nullptr || b == nullptr || output == nullptr || count <= 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid add arguments");
+    }
+    check(apxinf::cuda_new::elementwise_ops::add_bf16(
+              a, b, output, count, static_cast<cudaStream_t>(stream)),
+          "add");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_elementwise_scale_bf16(
+    const void* input, void* output, int64_t count, float factor,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || output == nullptr || count <= 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid scale arguments");
+    }
+    check(apxinf::cuda_new::elementwise_ops::scale_bf16(
+              input, output, count, factor, static_cast<cudaStream_t>(stream)),
+          "scale");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_elementwise_add_bias_bf16(
+    const void* input, const void* bias, void* output, int64_t rows,
+    int64_t cols, apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || bias == nullptr || output == nullptr || rows <= 0 ||
+        cols <= 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid add-bias arguments");
+    }
+    check(apxinf::cuda_new::elementwise_ops::add_bias_bf16(
+              input, bias, output, rows, cols,
+              static_cast<cudaStream_t>(stream)),
+          "add-bias");
+  });
+}
