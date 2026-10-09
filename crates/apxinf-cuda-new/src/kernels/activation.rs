@@ -52,3 +52,53 @@ pub fn bias_gelu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>)
     ops::pointwise(ctx, args)?;
     Ok(output)
 }
+
+/// `swiglu_quantize_rows_bf16_e4m3`: SwiGLU over a packed gate/up projection
+/// followed by rowwise E4M3 quantization, zero-padded to `output_cols`.
+pub fn swiglu_quantize_rows_bf16_e4m3(
+    ctx: &CudaContext,
+    gate_up: &Tensor,
+    bias: Option<&Tensor>,
+    logical_inner: usize,
+    output_cols: usize,
+) -> Result<super::quantization::DynamicFp8Tensor> {
+    use crate::ffi::abi::{quant_fused as abi, status};
+    use crate::CudaBuffer;
+    let dims = gate_up.shape().dims();
+    if dims.len() != 2 || gate_up.dtype() != DType::BF16 {
+        return Err(Error::Other(
+            "fused SwiGLU quantization requires a rank-2 BF16 projection".into(),
+        ));
+    }
+    let (rows, input_cols) = (dims[0], dims[1]);
+    if logical_inner == 0 || input_cols < 2 * logical_inner || output_cols < logical_inner {
+        return Err(Error::Other(
+            "fused SwiGLU quantization shape mismatch".into(),
+        ));
+    }
+    let values = ctx.allocate_output(Shape::new(vec![rows, output_cols]), DType::F8E4M3)?;
+    let scales = ctx.allocate_output(Shape::new(vec![rows]), DType::F32)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
+    };
+    let gate_up_buffer = CudaBuffer::from_tensor(gate_up).map_err(Error::Cuda)?;
+    let bias_buffer = bias.map(CudaBuffer::from_tensor).transpose().map_err(Error::Cuda)?;
+    let values_buffer = CudaBuffer::from_tensor(&values).map_err(Error::Cuda)?;
+    let scales_buffer = CudaBuffer::from_tensor(&scales).map_err(Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_quant_swiglu_rows_bf16_e4m3(
+            gate_up_buffer.ptr(),
+            bias_buffer
+                .as_ref()
+                .map_or(std::ptr::null(), |buffer| buffer.ptr() as *const _),
+            values_buffer.ptr(),
+            scales_buffer.ptr(),
+            to_i32(rows, "rows")?,
+            to_i32(input_cols, "input cols")?,
+            to_i32(logical_inner, "inner")?,
+            to_i32(output_cols, "output cols")?,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(super::quantization::DynamicFp8Tensor { values, scales })
+}
