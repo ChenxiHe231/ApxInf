@@ -47,6 +47,15 @@ unsafe extern "C" {
         cols: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_elementwise_replace_rows_bf16(
+        base: *const c_void,
+        replacement: *const c_void,
+        row_map: *const c_void,
+        output: *mut c_void,
+        rows: i64,
+        cols: i64,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_elementwise_bias_position_f32_bf16(
         projection: *const c_void,
         bias: *const c_void,

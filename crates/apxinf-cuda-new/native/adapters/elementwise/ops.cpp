@@ -115,6 +115,22 @@ extern "C" apxinf_status_t apxinf_elementwise_gather_rows_bf16(
   });
 }
 
+extern "C" apxinf_status_t apxinf_elementwise_replace_rows_bf16(
+    const void* base, const void* replacement, const void* row_map,
+    void* output, int64_t rows, int64_t cols, apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (base == nullptr || replacement == nullptr || row_map == nullptr ||
+        output == nullptr || rows <= 0 || cols <= 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid replace-rows arguments");
+    }
+    check(apxinf::cuda_new::elementwise_ops::replace_rows_bf16(
+              base, replacement, row_map, output, rows, cols,
+              static_cast<cudaStream_t>(stream)),
+          "replace-rows");
+  });
+}
+
 extern "C" apxinf_status_t apxinf_elementwise_bias_position_f32_bf16(
     const void* projection, const void* bias, const void* position,
     void* output, int64_t count, int32_t cols, int32_t tokens_per_view,
