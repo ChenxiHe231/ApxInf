@@ -82,6 +82,35 @@ __global__ void add_bias_bf16_kernel(const __nv_bfloat16* __restrict__ input,
                                    __bfloat162float(bias[col]));
 }
 
+__global__ void gather_rows_bf16_kernel(const __nv_bfloat16* __restrict__ input,
+                                        const unsigned int* __restrict__ indices,
+                                        __nv_bfloat16* __restrict__ output,
+                                        long long rows, long long cols) {
+  const long long count = rows * cols;
+  long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  const long long stride = (long long)blockDim.x * gridDim.x;
+  for (; index < count; index += stride) {
+    const long long row = index / cols;
+    const long long col = index % cols;
+    output[index] = input[(long long)indices[row] * cols + col];
+  }
+}
+
+__global__ void bias_position_f32_bf16_kernel(
+    const float* __restrict__ projection, const float* __restrict__ bias,
+    const float* __restrict__ position, __nv_bfloat16* __restrict__ output,
+    long long count, int cols, int tokens_per_view) {
+  long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  const long long stride = (long long)blockDim.x * gridDim.x;
+  for (; index < count; index += stride) {
+    const int col = static_cast<int>(index % cols);
+    const int token = static_cast<int>((index / cols) % tokens_per_view);
+    float value = projection[index] + position[(long long)token * cols + col];
+    if (bias != nullptr) value += bias[col];
+    output[index] = __float2bfloat16(value);
+  }
+}
+
 long long block_count(long long work, long long per_thread) {
   const long long threads = work / per_thread + (work % per_thread != 0);
   return (threads + kThreads - 1) / kThreads;
@@ -149,6 +178,35 @@ int add_bias_bf16(const void* input, const void* bias, void* output,
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const __nv_bfloat16*>(bias),
       static_cast<__nv_bfloat16*>(output), cols);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int gather_rows_bf16(const void* input, const void* indices, void* output,
+                     long long rows, long long cols, cudaStream_t stream) {
+  if (input == nullptr || indices == nullptr || output == nullptr ||
+      rows <= 0 || cols <= 0) {
+    return -1;
+  }
+  gather_rows_bf16_kernel<<<static_cast<int>(block_count(rows * cols, 1)),
+                            kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const unsigned int*>(indices),
+      static_cast<__nv_bfloat16*>(output), rows, cols);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int bias_position_f32_bf16(const void* projection, const void* bias,
+                           const void* position, void* output, long long count,
+                           int cols, int tokens_per_view, cudaStream_t stream) {
+  if (projection == nullptr || position == nullptr || output == nullptr ||
+      count <= 0 || cols <= 0 || tokens_per_view <= 0) {
+    return -1;
+  }
+  bias_position_f32_bf16_kernel<<<static_cast<int>(block_count(count, 1)),
+                                  kThreads, 0, stream>>>(
+      static_cast<const float*>(projection), static_cast<const float*>(bias),
+      static_cast<const float*>(position),
+      static_cast<__nv_bfloat16*>(output), count, cols, tokens_per_view);
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 

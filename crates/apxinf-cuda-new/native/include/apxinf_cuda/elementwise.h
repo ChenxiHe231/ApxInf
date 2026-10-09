@@ -39,6 +39,18 @@ apxinf_status_t apxinf_elementwise_add_bias_bf16(const void* input,
                                                  int64_t rows, int64_t cols,
                                                  apxinf_cuda_stream_t stream);
 
+/* output[r, :] = input[indices[r], :], u32 row indices. */
+apxinf_status_t apxinf_elementwise_gather_rows_bf16(
+    const void* input, const void* indices, void* output, int64_t rows,
+    int64_t cols, apxinf_cuda_stream_t stream);
+
+/* BF16(projection + position + bias?) with F32 inputs; the vision
+   patch-embedding epilogue. */
+apxinf_status_t apxinf_elementwise_bias_position_f32_bf16(
+    const void* projection, const void* bias, const void* position,
+    void* output, int64_t count, int32_t cols, int32_t tokens_per_view,
+    apxinf_cuda_stream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

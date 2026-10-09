@@ -40,4 +40,15 @@ int scale_bf16(const void* input, void* output, long long count, float factor,
 int add_bias_bf16(const void* input, const void* bias, void* output,
                   long long rows, long long cols, cudaStream_t stream);
 
+// output[r, :] = input[indices[r], :]; gathers `rows` whole rows by u32 index.
+int gather_rows_bf16(const void* input, const void* indices, void* output,
+                     long long rows, long long cols, cudaStream_t stream);
+
+// output[i] = bf16(projection[i] + position[token(i), col(i)] + bias?[col(i)])
+// with F32 projection/position/bias and `tokens_per_view` tokens per view.
+// The legacy vision patch-embedding epilogue.
+int bias_position_f32_bf16(const void* projection, const void* bias,
+                           const void* position, void* output, long long count,
+                           int cols, int tokens_per_view, cudaStream_t stream);
+
 }  // namespace apxinf::cuda_new::elementwise_ops
