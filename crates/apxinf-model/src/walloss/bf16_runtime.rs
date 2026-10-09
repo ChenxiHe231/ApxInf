@@ -846,7 +846,9 @@ mod tests {
 
     #[test]
     fn native_rgb_preprocess_cuda_graph_replays_and_observes_updates() {
-        let backend = RuntimeBackend::new(0).unwrap();
+        let context =
+            std::sync::Arc::new(apxinf_cuda_new::CudaContext::new(0).map_err(Error::Cuda).unwrap());
+        let backend = RuntimeBackend::new(context);
         let byte_count = TEST_VIEWS * TEST_IMAGE_SIZE * TEST_IMAGE_SIZE * 3;
         let patch_rows = TEST_VIEWS * (TEST_IMAGE_SIZE / TEST_PATCH_SIZE).pow(2);
         let patch_width = 3 * TEST_TEMPORAL_PATCH_SIZE * TEST_PATCH_SIZE * TEST_PATCH_SIZE;
