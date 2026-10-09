@@ -151,3 +151,61 @@ pub fn bf16_geglu_fused(
     ops::gemm_geglu(ctx, ops::GemmGegluArgs { gemm })?;
     Ok(output)
 }
+
+/// Pre-quantized rowwise-dynamic FP8 weight. Unlike the legacy view, the
+/// value matrix is stored in cuda-new's canonical `[K, N]` orientation; the
+/// `[N, K]` legacy layout must be transposed at load time (a pure byte
+/// permutation with no numerical effect).
+#[derive(Clone, Copy)]
+pub struct DynamicFp8WeightView<'a> {
+    /// Contiguous `[K, N]` E4M3 matrix.
+    pub values_e4m3: &'a Tensor,
+    /// FP32 scale for each output channel, shape `[N]`.
+    pub channel_scales: &'a Tensor,
+}
+
+/// `gemm_fp8_dynamic_bf16`: rowwise-dynamic FP8 GEMM — per-row activation
+/// scales, per-channel weight scales, BF16 output.
+pub fn gemm_fp8_dynamic_bf16(
+    ctx: &CudaContext,
+    activation: &Tensor,
+    activation_scales: &Tensor,
+    weight: DynamicFp8WeightView<'_>,
+    bias: Option<&Tensor>,
+) -> Result<Tensor> {
+    let a_dims = activation.shape().dims();
+    let b_dims = weight.values_e4m3.shape().dims();
+    if activation.dtype() != DType::F8E4M3
+        || weight.values_e4m3.dtype() != DType::F8E4M3
+        || a_dims.len() != 2
+        || b_dims.len() != 2
+        || a_dims[1] != b_dims[0]
+    {
+        return Err(Error::Other(format!(
+            "dynamic FP8 GEMM shape mismatch: {a_dims:?} @ KN {b_dims:?}"
+        )));
+    }
+    let (m, n) = (a_dims[0], b_dims[1]);
+    if activation_scales.dtype() != DType::F32
+        || weight.channel_scales.dtype() != DType::F32
+        || activation_scales.shape().dims() != [m]
+        || weight.channel_scales.shape().dims() != [n]
+    {
+        return Err(Error::Other(
+            "dynamic FP8 GEMM scale vectors must be F32 [M] and [N]".into(),
+        ));
+    }
+    let mut output = ctx.allocate_output(Shape::new(vec![m, n]), DType::BF16)?;
+    let gemm = ops::GemmArgs::fp8(
+        activation,
+        activation_scales,
+        weight.values_e4m3,
+        weight.channel_scales,
+        &mut output,
+    );
+    match bias {
+        Some(bias) => ops::gemm_bias(ctx, ops::GemmBiasArgs { gemm, bias })?,
+        None => ops::gemm(ctx, gemm)?,
+    }
+    Ok(output)
+}

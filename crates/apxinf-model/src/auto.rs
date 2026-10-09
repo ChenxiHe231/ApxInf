@@ -337,7 +337,14 @@ impl AutoModel {
         let backend = if matches!(device, Device::Cuda(_))
             && matches!(
                 model_name,
-                "llama" | "qwen3_vl" | "qwen3vl" | "pi0fast" | "pi0_fast"
+                "llama"
+                    | "qwen3_vl"
+                    | "qwen3vl"
+                    | "pi0fast"
+                    | "pi0_fast"
+                    | "walloss"
+                    | "wall-oss"
+                    | "wall_oss_05"
             )
         {
             crate::accelerator::create_cuda_new_backend(device)?

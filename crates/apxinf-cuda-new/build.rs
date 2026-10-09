@@ -288,6 +288,9 @@ fn main() {
         "elementwise/execution.cpp",
         "elementwise/ops.cpp",
         "cache/ops.cpp",
+        "quant_fused/ops.cpp",
+        "vla_attn/ops.cpp",
+        "preprocess/ops.cpp",
         "linear_attention/execution.cpp",
         "attn_helpers/execution.cpp",
         "reduction/execution.cpp",
@@ -303,6 +306,9 @@ fn main() {
     generic_sources.push(native.join("kernels/custom/mlp_ops.cu"));
     generic_sources.push(native.join("kernels/custom/elementwise_ops.cu"));
     generic_sources.push(native.join("kernels/custom/cache_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/quant_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/vla_attn_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/preprocess_ops.cu"));
     generic_sources.push(native.join("kernels/custom/gdn_ops.cu"));
     generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_tma.cpp"));
     generic_sources.push(native.join("kernels/custom/attn_ops.cu"));

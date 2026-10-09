@@ -9,7 +9,6 @@ use apxinf_core::{
     Backend, DType, Device, Error, Graph, NormalGenerator, Result, SamplingBackend, Tensor,
 };
 
-use crate::accelerator::cuda::tuning;
 use crate::auto::{LoadOptions, LoadedModel, ModelPrecision};
 use crate::vla::{
     Action, ImageLayout, InferenceSpec, InitialLatent, PreparedInference, VisionObservation,
@@ -548,7 +547,7 @@ impl WallossBf16Runtime {
         let noise = self.backend.to_device(&noise_host)?;
         let normal_generator = self.backend.create_normal_generator(noise.clone())?;
         let workspace =
-            kernels::GraphWorkspace::new(BF16_WORKSPACE_BYTES, self.backend.context().device_id())?;
+            kernels::GraphWorkspace::with_capacity(BF16_WORKSPACE_BYTES, self.backend.context().device_id())?;
         Ok(WallossPreparedInference {
             spec,
             backend: Arc::clone(&self.backend),
@@ -626,7 +625,7 @@ pub(super) fn load_registered(
                 .into(),
         ));
     }
-    let backend = crate::accelerator::cuda::downcast_arc(backend)
+    let backend = crate::accelerator::downcast_cuda_new_arc(backend)
         .ok_or_else(|| Error::Other("walloss is only registered for CUDA".into()))?;
     let root = if path.is_dir() {
         path
@@ -641,18 +640,8 @@ pub(super) fn load_registered(
         .transpose()?
         .map(Arc::new);
     let host_weights = WallossWeights::from_safetensors(&mut config, path)?;
-    let dynamic_fp8 = matches!(options.precision, ModelPrecision::Fp8);
-    let tuning_path = options.tuning_path.clone().or_else(|| {
-        if dynamic_fp8 {
-            return None;
-        }
-        let candidate = root.join("tactics.json");
-        candidate.is_file().then_some(candidate)
-    });
-    if let Some(path) = tuning_path.as_deref() {
-        let database = tuning::TuningDb::from_json_file(path)?;
-        crate::accelerator::cuda::kernels::gemm::install_tuning_db(backend.context(), &database)?;
-    }
+    // cuda-new tunes GEMMs through its per-key recipe cache; the legacy
+    // tactics.json database no longer applies.
     let weights = match options.precision {
         ModelPrecision::Fp8 => WallossDeviceWeights::DynamicFp8(
             WallossDynamicFp8Weights::from_host(&host_weights, &*backend)?,
