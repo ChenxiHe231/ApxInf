@@ -405,7 +405,12 @@ mod tests {
     #[ignore = "requires CUDA and APXINF_WALLOSS_TEST_MODEL checkpoint"]
     fn long_prefix_preparation_has_sufficient_workspace() {
         let path = std::env::var("APXINF_WALLOSS_TEST_MODEL").expect("checkpoint is required");
-        let backend = Arc::new(RuntimeBackend::new(0).unwrap());
+        let context = Arc::new(
+            apxinf_cuda_new::CudaContext::new(0)
+                .map_err(Error::Cuda)
+                .unwrap(),
+        );
+        let backend = Arc::new(RuntimeBackend::new(context));
         let runner = super::super::super::load::load_model_runner(
             std::path::Path::new(&path),
             backend,
@@ -434,7 +439,12 @@ mod tests {
     #[ignore = "requires CUDA and APXINF_WALLOSS_TEST_MODEL checkpoint"]
     fn rejected_requests_preserve_cached_plan_and_actions() {
         let path = std::env::var("APXINF_WALLOSS_TEST_MODEL").expect("checkpoint is required");
-        let backend = Arc::new(RuntimeBackend::new(0).unwrap());
+        let context = Arc::new(
+            apxinf_cuda_new::CudaContext::new(0)
+                .map_err(Error::Cuda)
+                .unwrap(),
+        );
+        let backend = Arc::new(RuntimeBackend::new(context));
         let runner = super::super::super::load::load_model_runner(
             std::path::Path::new(&path),
             backend.clone(),
