@@ -178,6 +178,24 @@ impl CudaNewBackend {
     pub fn synchronize(&self) -> Result<()> {
         self.ctx.synchronize().map_err(Error::Cuda)
     }
+
+    /// Capture `operation` into a CUDA graph and return both. A failing
+    /// operation aborts the capture before propagating the error.
+    pub fn capture_graph<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T>,
+    ) -> Result<(Box<dyn Graph>, T)> {
+        use apxinf_core::Backend as _;
+        self.begin_capture()?;
+        let output = match operation() {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = self.end_capture();
+                return Err(error);
+            }
+        };
+        Ok((self.end_capture()?, output))
+    }
 }
 
 fn rank2(tensor: &Tensor, what: &str) -> Result<[usize; 2]> {

@@ -174,9 +174,9 @@ impl DirectPlan {
         // One arena is reused sequentially for Vision, Language and Action inside
         // the same graph. Only persistent visual features and shared KV cross phases.
         let bytes = 32usize * (1 << 30);
-        let workspace = kernels::GraphWorkspace::new(bytes, ctx.device_id())?;
+        let workspace = kernels::GraphWorkspace::with_capacity(bytes, ctx.device_id())?;
         let noise_workspace =
-            kernels::GraphWorkspace::new(inputs.noise.numel() * 4 + 256, ctx.device_id())?;
+            kernels::GraphWorkspace::with_capacity(inputs.noise.numel() * 4 + 256, ctx.device_id())?;
         let spec = sample.observation.inference_spec();
         let image_positions = sample
             .observation

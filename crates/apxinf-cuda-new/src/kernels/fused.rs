@@ -156,3 +156,80 @@ pub fn bias_residual_rms_quantize_rows_bf16_e4m3(
         normalized: super::quantization::DynamicFp8Tensor { values, scales },
     })
 }
+
+/// `adaln_gate_residual_rms_bf16`: weighted adaLN with unit-offset gate —
+/// `hidden = residual + proj * bf16(1 + gate)`, normalized =
+/// `rms(hidden) * weight * (1 + scale) + shift`. Direct port of the legacy
+/// fused kernel.
+#[allow(clippy::too_many_arguments)]
+pub fn adaln_gate_residual_rms_bf16(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    residual: &Tensor,
+    gate: &Tensor,
+    weight: &Tensor,
+    scale: &Tensor,
+    shift: &Tensor,
+    eps: f32,
+) -> Result<ResidualNormTensors> {
+    use crate::ffi::abi::vla_la as abi;
+    use crate::ffi::raw::cuda_runtime as raw;
+    use crate::CudaBuffer;
+    use apxinf_core::{Device, Error};
+    let dims = projection.shape().dims();
+    if dims.len() != 2 {
+        return Err(Error::Other(
+            "weighted AdaLN residual expects a 2D projection".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    if rows == 0
+        || cols == 0
+        || cols > 8192
+        || !eps.is_finite()
+        || eps <= 0.0
+        || projection.shape() != residual.shape()
+        || [gate, weight, scale, shift]
+            .iter()
+            .any(|t| t.shape().dims() != [cols])
+    {
+        return Err(Error::Other(
+            "weighted AdaLN residual shape/epsilon unsupported".into(),
+        ));
+    }
+    for t in [projection, residual, gate, weight, scale, shift] {
+        if t.dtype() != DType::BF16 || t.device() != Device::Cuda(ctx.device_id()) {
+            return Err(Error::Other(
+                "weighted AdaLN residual requires BF16 on the context device".into(),
+            ));
+        }
+    }
+    let m = i32::try_from(rows).map_err(|_| Error::Other("AdaLN row count overflow".into()))?;
+    let hidden = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let normalized = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let bufs: Vec<CudaBuffer> = [projection, residual, gate, weight, scale, shift]
+        .iter()
+        .map(|t| CudaBuffer::from_tensor(t).map_err(apxinf_core::Error::Cuda))
+        .collect::<Result<_>>()?;
+    let hidden_buffer = CudaBuffer::from_tensor(&hidden).map_err(apxinf_core::Error::Cuda)?;
+    let normalized_buffer =
+        CudaBuffer::from_tensor(&normalized).map_err(apxinf_core::Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_cn_adaln_gate_residual_rms_bf16(
+            bufs[0].ptr(),
+            bufs[1].ptr(),
+            bufs[2].ptr(),
+            bufs[3].ptr(),
+            bufs[4].ptr(),
+            bufs[5].ptr(),
+            hidden_buffer.ptr(),
+            normalized_buffer.ptr(),
+            m,
+            cols as i32,
+            eps,
+            ctx.stream().handle(),
+        ))
+        .map_err(apxinf_core::Error::Cuda)?;
+    }
+    Ok(ResidualNormTensors { hidden, normalized })
+}

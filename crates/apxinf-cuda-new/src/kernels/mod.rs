@@ -36,15 +36,49 @@ pub fn new_workspace(capacity_bytes: usize, device: usize) -> Result<ExecutionSe
 pub mod activation;
 pub mod attention;
 pub mod cache;
+pub(crate) mod contracts;
 pub mod elementwise;
 pub mod embedding;
+pub mod fixed_profile;
 pub mod fused;
+pub mod gdn_policy;
 pub mod gemm;
+pub mod linear_attention;
 pub mod norm;
+pub mod pillow_bicubic;
 pub mod preprocess;
 pub mod quantization;
 pub mod rope;
 pub mod sampling;
+
+/// Workspace- or driver-backed scratch; capturable inside a session.
+pub fn scratch_buffer(
+    ctx: &crate::CudaContext,
+    bytes: usize,
+) -> apxinf_core::Result<crate::CudaBuffer> {
+    crate::workspace::output_buffer(ctx, bytes)
+}
+
+/// Zeroed scratch. Inside a session the arena is reused, so the clear is
+/// explicit rather than implied by a fresh allocation.
+pub fn scratch_buffer_zeroed(
+    ctx: &crate::CudaContext,
+    bytes: usize,
+) -> apxinf_core::Result<crate::CudaBuffer> {
+    crate::workspace::output_buffer_zeroed(ctx, bytes)
+}
+
+/// Scratch for a `[groups, rows, cols]` region whose consumer writes every
+/// row a token maps to and leaves the padding rows alone. Only that padding
+/// is cleared.
+pub fn scratch_buffer_tail_zeroed(
+    ctx: &crate::CudaContext,
+    groups: usize,
+    group_bytes: usize,
+    used_bytes: usize,
+) -> apxinf_core::Result<crate::CudaBuffer> {
+    crate::workspace::output_buffer_tail_zeroed(ctx, groups, group_bytes, used_bytes)
+}
 
 /// Prepare a fixed-shape traversal that may allocate and tune.
 pub fn prepare_with_workspace<T>(

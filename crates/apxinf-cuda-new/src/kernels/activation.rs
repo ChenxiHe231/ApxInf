@@ -102,3 +102,34 @@ pub fn swiglu_quantize_rows_bf16_e4m3(
     }
     Ok(super::quantization::DynamicFp8Tensor { values, scales })
 }
+
+/// `swiglu_bf16_rounded`: SwiGLU whose SiLU intermediate rounds to BF16
+/// before the multiply — matching an unfused activation-then-multiply.
+pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
+    use crate::ffi::abi::vla_la as abi;
+    use crate::ffi::raw::cuda_runtime as raw;
+    use crate::CudaBuffer;
+    let dims = gate_up.shape().dims();
+    if dims.len() != 2 || gate_up.dtype() != DType::BF16 || dims[1] == 0 || dims[1] % 2 != 0 {
+        return Err(Error::Other(
+            "rounded SwiGLU expects nonempty BF16 [rows,2*inner]".into(),
+        ));
+    }
+    let (rows, inner) = (dims[0], dims[1] / 2);
+    let r = i32::try_from(rows).map_err(|_| Error::Other("SwiGLU rows overflow".into()))?;
+    let n = i32::try_from(inner).map_err(|_| Error::Other("SwiGLU inner overflow".into()))?;
+    let output = ctx.allocate_output(Shape::new(vec![rows, inner]), DType::BF16)?;
+    let input_buffer = CudaBuffer::from_tensor(gate_up).map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_cn_swiglu_bf16_rounded(
+            input_buffer.ptr(),
+            output_buffer.ptr(),
+            r,
+            n,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(output)
+}

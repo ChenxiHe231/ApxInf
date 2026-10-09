@@ -95,3 +95,48 @@ pub fn add_position_f32_bf16(
     }
     Ok(output)
 }
+
+/// `sinusoidal_bf16`: sin/cos positional features from F32 positions.
+pub fn sinusoidal_bf16(
+    ctx: &CudaContext,
+    positions: &Tensor,
+    dim: usize,
+    scale: f32,
+    frequency_step: f32,
+) -> Result<Tensor> {
+    use crate::ffi::abi::vla_la as abi;
+    use crate::ffi::raw::cuda_runtime as raw;
+    let shape = positions.shape().dims();
+    if shape.len() != 1
+        || shape[0] == 0
+        || dim == 0
+        || dim % 2 != 0
+        || !scale.is_finite()
+        || !frequency_step.is_finite()
+        || positions.dtype() != DType::F32
+        || positions.device() != apxinf_core::Device::Cuda(ctx.device_id())
+    {
+        return Err(Error::Other(
+            "invalid sinusoidal embedding shape, dtype, device or scale".into(),
+        ));
+    }
+    let rows =
+        i32::try_from(shape[0]).map_err(|_| Error::Other("embedding row count overflow".into()))?;
+    let width = i32::try_from(dim).map_err(|_| Error::Other("embedding width overflow".into()))?;
+    let output = ctx.allocate_output(Shape::new(vec![shape[0], dim]), DType::BF16)?;
+    let positions_buffer = CudaBuffer::from_tensor(positions).map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_cn_sinusoidal_embedding_bf16(
+            positions_buffer.ptr(),
+            output_buffer.ptr(),
+            rows,
+            width,
+            scale,
+            frequency_step,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(output)
+}
