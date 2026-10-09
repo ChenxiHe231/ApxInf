@@ -111,6 +111,48 @@ __global__ void bias_position_f32_bf16_kernel(
   }
 }
 
+// Ported bit-identically from the legacy selection kernel: the packed
+// (value, index) max keeps the higher index on ties.
+__global__ void argmax_remap_bf16_kernel(const __nv_bfloat16* __restrict__ logits,
+                                         unsigned int n,
+                                         const unsigned int* __restrict__ remap,
+                                         unsigned int* __restrict__ out) {
+  const unsigned int tid = threadIdx.x;
+  auto pack = [](float value, unsigned int index) -> unsigned long long {
+    unsigned int bits = __float_as_uint(value);
+    unsigned int ordered = (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+    return ((unsigned long long)ordered << 32) | (unsigned long long)index;
+  };
+  unsigned long long best = 0;
+  float best_value = -INFINITY;
+  unsigned int best_index = 0;
+  for (unsigned int i = tid; i < n; i += blockDim.x) {
+    const float value = __bfloat162float(logits[i]);
+    if (value > best_value) {
+      best_value = value;
+      best_index = i;
+    }
+  }
+  best = pack(best_value, best_index);
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    const unsigned long long other = __shfl_xor_sync(0xffffffff, best, offset);
+    if (other > best) best = other;
+  }
+  const unsigned int warp_id = tid / 32;
+  const unsigned int lane = tid % 32;
+  __shared__ unsigned long long warp_best[32];
+  if (lane == 0) warp_best[warp_id] = best;
+  __syncthreads();
+  if (warp_id == 0) {
+    unsigned long long value =
+        (tid < (blockDim.x + 31) / 32) ? warp_best[tid] : 0;
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      value = max(value, __shfl_xor_sync(0xffffffff, value, offset));
+    }
+    if (lane == 0) *out = remap[(unsigned int)value];  // low 32 bits = index
+  }
+}
+
 long long block_count(long long work, long long per_thread) {
   const long long threads = work / per_thread + (work % per_thread != 0);
   return (threads + kThreads - 1) / kThreads;
@@ -207,6 +249,18 @@ int bias_position_f32_bf16(const void* projection, const void* bias,
       static_cast<const float*>(projection), static_cast<const float*>(bias),
       static_cast<const float*>(position),
       static_cast<__nv_bfloat16*>(output), count, cols, tokens_per_view);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int argmax_remap_bf16(const void* logits, unsigned int n, const void* remap,
+                      void* out, cudaStream_t stream) {
+  if (logits == nullptr || remap == nullptr || out == nullptr || n == 0) {
+    return -1;
+  }
+  argmax_remap_bf16_kernel<<<1, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(logits), n,
+      static_cast<const unsigned int*>(remap),
+      static_cast<unsigned int*>(out));
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
