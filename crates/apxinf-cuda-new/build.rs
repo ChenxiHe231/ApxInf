@@ -181,6 +181,10 @@ fn run(command: &mut Command, action: &str) {
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(apxinf_nvfp4_gemm_swiglu)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_decode)");
+    // The sm110 AOT fast paths are not vendored into cuda-new; the cfg is
+    // declared so their `cfg!` guards compile and always take the generic
+    // route.
+    println!("cargo:rustc-check-cfg=cfg(apxinf_aot_sm110)");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH");
@@ -302,6 +306,7 @@ fn main() {
         "cache/ops.cpp",
         "quant_fused/ops.cpp",
         "vla_attn/ops.cpp",
+        "vla_la/ops.cu",
         "preprocess/ops.cpp",
         "linear_attention/execution.cpp",
         "attn_helpers/execution.cpp",

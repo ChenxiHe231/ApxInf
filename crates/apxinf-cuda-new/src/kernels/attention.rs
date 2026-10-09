@@ -372,3 +372,65 @@ pub fn segmented_mha_bf16(
     }
     Ok(output)
 }
+
+/// `noncausal_gqa_bf16`: grouped-query attention over the leading
+/// `key_tokens` keys with no causal mask (the joint vision/text form used by
+/// qwen_drive's full-attention layers).
+pub fn noncausal_gqa_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
+) -> Result<Tensor> {
+    let [_, kv_heads, _] = rank3(k, "GQA keys")?;
+    dense_attention(ctx, q, k, v, key_tokens, kv_heads, false)
+}
+
+// ── sm110 AOT fast-path stubs ───────────────────────────────────────────────
+//
+// The legacy crate carries hand-built FA4/AOT adapters for one fixed sm_110
+// scene shape. Those objects are not vendored into cuda-new; every call site
+// treats `Ok(None)` as "take the generic route", which is the tuned cuda-new
+// operator.
+
+/// FA4 D256 causal GQA, sm_110 fixed-shape AOT route. Not vendored: always
+/// defers to the generic attention operator.
+pub fn try_gqa_bf16_fa4_d256_sm110(
+    _ctx: &CudaContext,
+    _q: &Tensor,
+    _k: &Tensor,
+    _v: &Tensor,
+    _key_tokens: usize,
+) -> Result<Option<Tensor>> {
+    Ok(None)
+}
+
+/// FA4 D256 split-batch variant of the above. Not vendored.
+pub fn try_gqa_bf16_fa4_d256_splitbatch_sm110(
+    _ctx: &CudaContext,
+    _q: &Tensor,
+    _k: &Tensor,
+    _v: &Tensor,
+    _key_tokens: usize,
+) -> Result<Option<Tensor>> {
+    Ok(None)
+}
+
+/// Fused vision QKV RoPE + segmented FA4 with V passthrough, sm_110
+/// fixed-shape AOT route. Not vendored.
+#[allow(clippy::too_many_arguments)]
+pub fn try_vision_qkv_rope_segmented_fa4_skip_v(
+    _ctx: &CudaContext,
+    _qkv: &Tensor,
+    _position_ids: &crate::CudaBuffer,
+    _heads: usize,
+    _head_dim: usize,
+    _theta: f32,
+    _offsets: &crate::CudaBuffer,
+    _host_offsets: &[u32],
+    _segments: usize,
+    _fixed_groups: bool,
+) -> Result<Option<Tensor>> {
+    Ok(None)
+}
