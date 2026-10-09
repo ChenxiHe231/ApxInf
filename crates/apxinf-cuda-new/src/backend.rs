@@ -152,6 +152,32 @@ impl CudaNewBackend {
     pub fn context(&self) -> &CudaContext {
         &self.ctx
     }
+
+    /// Shared context handle, for models that own a `CudaContext` themselves
+    /// and sample through this backend (see qwen38).
+    pub fn shared_context(&self) -> &std::sync::Arc<CudaContext> {
+        &self.ctx
+    }
+
+    /// Device ordinal this backend targets.
+    pub fn device_id(&self) -> usize {
+        self.ctx.device_id()
+    }
+
+    /// Copy a host tensor onto this backend's device.
+    pub fn to_device(&self, tensor: &Tensor) -> Result<Tensor> {
+        crate::transfers::to_cuda(tensor, self.ctx.device_id())
+    }
+
+    /// Copy a device tensor back to the host.
+    pub fn to_cpu(&self, tensor: &Tensor) -> Result<Tensor> {
+        crate::transfers::to_cpu(tensor)
+    }
+
+    /// Block until all queued work completes.
+    pub fn synchronize(&self) -> Result<()> {
+        self.ctx.synchronize().map_err(Error::Cuda)
+    }
 }
 
 fn rank2(tensor: &Tensor, what: &str) -> Result<[usize; 2]> {

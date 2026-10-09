@@ -4,6 +4,7 @@ pub mod context;
 pub mod device_caps;
 mod ffi;
 mod graph;
+pub mod kernels;
 pub mod sampling;
 pub mod stream;
 pub mod transfers;
