@@ -44,6 +44,12 @@ int add_bias_bf16(const void* input, const void* bias, void* output,
 int gather_rows_bf16(const void* input, const void* indices, void* output,
                      long long rows, long long cols, cudaStream_t stream);
 
+// output[r, :] = row_map[r] == 0xffffffff ? base[r, :]
+//                                         : replacement[row_map[r], :].
+int replace_rows_bf16(const void* base, const void* replacement,
+                      const void* row_map, void* output, long long rows,
+                      long long cols, cudaStream_t stream);
+
 // output[i] = bf16(projection[i] + position[token(i), col(i)] + bias?[col(i)])
 // with F32 projection/position/bias and `tokens_per_view` tokens per view.
 // The legacy vision patch-embedding epilogue.

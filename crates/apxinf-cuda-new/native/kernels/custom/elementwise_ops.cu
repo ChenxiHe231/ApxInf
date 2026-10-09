@@ -96,6 +96,25 @@ __global__ void gather_rows_bf16_kernel(const __nv_bfloat16* __restrict__ input,
   }
 }
 
+__global__ void replace_rows_bf16_kernel(
+    const __nv_bfloat16* __restrict__ base,
+    const __nv_bfloat16* __restrict__ replacement,
+    const unsigned int* __restrict__ row_map,
+    __nv_bfloat16* __restrict__ output, long long rows, long long cols) {
+  const long long count = rows * cols;
+  long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  const long long stride = (long long)blockDim.x * gridDim.x;
+  for (; index < count; index += stride) {
+    const long long row = index / cols;
+    const long long col = index % cols;
+    const unsigned int replacement_row = row_map[row];
+    output[index] =
+        replacement_row == 0xffffffffu
+            ? base[index]
+            : replacement[(long long)replacement_row * cols + col];
+  }
+}
+
 __global__ void bias_position_f32_bf16_kernel(
     const float* __restrict__ projection, const float* __restrict__ bias,
     const float* __restrict__ position, __nv_bfloat16* __restrict__ output,
@@ -233,6 +252,22 @@ int gather_rows_bf16(const void* input, const void* indices, void* output,
                             kThreads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const unsigned int*>(indices),
+      static_cast<__nv_bfloat16*>(output), rows, cols);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int replace_rows_bf16(const void* base, const void* replacement,
+                      const void* row_map, void* output, long long rows,
+                      long long cols, cudaStream_t stream) {
+  if (base == nullptr || replacement == nullptr || row_map == nullptr ||
+      output == nullptr || rows <= 0 || cols <= 0) {
+    return -1;
+  }
+  replace_rows_bf16_kernel<<<static_cast<int>(block_count(rows * cols, 1)),
+                             kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(base),
+      static_cast<const __nv_bfloat16*>(replacement),
+      static_cast<const unsigned int*>(row_map),
       static_cast<__nv_bfloat16*>(output), rows, cols);
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }

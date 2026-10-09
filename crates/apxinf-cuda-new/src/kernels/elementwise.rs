@@ -5,6 +5,10 @@ use apxinf_core::{DType, Error, Result, Shape, Tensor};
 use crate::ffi::abi::{elementwise as abi, status};
 use crate::{ops, CudaBuffer, CudaContext};
 
+fn invalid(message: &str) -> Error {
+    Error::Other(message.into())
+}
+
 /// `add`: elementwise `a + b` into a fresh tensor.
 pub fn add(ctx: &CudaContext, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let output = ctx.allocate_output(Shape::new(a.shape().dims().to_vec()), DType::BF16)?;
@@ -63,5 +67,64 @@ pub fn gather_rows_bf16(
             ctx.stream().handle(),
         ))?;
     }
+    Ok(output)
+}
+
+/// `replace_rows_bf16`: `output[r] = row_map[r] == u32::MAX ? base[r]
+/// : replacement[row_map[r]]`.
+pub fn replace_rows_bf16(
+    ctx: &CudaContext,
+    base: &Tensor,
+    replacement: &Tensor,
+    row_map: &CudaBuffer,
+) -> Result<Tensor> {
+    let dims = base.shape().dims();
+    let replacement_dims = replacement.shape().dims();
+    if dims.len() != 2
+        || replacement_dims.len() != 2
+        || dims[1] != replacement_dims[1]
+        || base.dtype() != DType::BF16
+        || replacement.dtype() != DType::BF16
+    {
+        return Err(invalid("row replacement has incompatible shapes"));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let base_buffer = CudaBuffer::from_tensor(base).map_err(apxinf_core::Error::Cuda)?;
+    let replacement_buffer =
+        CudaBuffer::from_tensor(replacement).map_err(apxinf_core::Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(apxinf_core::Error::Cuda)?;
+    let rows_i64 =
+        i64::try_from(rows).map_err(|_| invalid("row replacement rows exceed i64"))?;
+    let cols_i64 =
+        i64::try_from(cols).map_err(|_| invalid("row replacement cols exceed i64"))?;
+    unsafe {
+        status::check(abi::apxinf_elementwise_replace_rows_bf16(
+            base_buffer.ptr(),
+            replacement_buffer.ptr(),
+            row_map.ptr(),
+            output_buffer.ptr(),
+            rows_i64,
+            cols_i64,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(output)
+}
+
+/// `euler_update_bf16`: `output = state + velocity * dt`, the flow-matching
+/// integration step.
+pub fn euler_update_bf16(
+    ctx: &CudaContext,
+    state: &Tensor,
+    velocity: &Tensor,
+    dt: f32,
+) -> Result<Tensor> {
+    let mut output = ctx.allocate_output(Shape::new(state.shape().dims().to_vec()), DType::BF16)?;
+    let mut args =
+        ops::PointwiseArgs::new(ops::PointwiseSemantic::EulerUpdate, state, &mut output);
+    args.secondary = Some(velocity);
+    args.dt = dt;
+    ops::pointwise(ctx, args)?;
     Ok(output)
 }
