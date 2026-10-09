@@ -15,5 +15,6 @@ pub(crate) mod quantization;
 pub(crate) mod rope;
 pub(crate) mod runtime;
 pub(crate) mod vla_attn;
+pub(crate) mod vla_la;
 pub(crate) mod status;
 pub(crate) mod types;
