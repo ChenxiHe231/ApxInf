@@ -2,7 +2,7 @@
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-use super::attention::QkvTensors;
+pub use super::attention::QkvTensors;
 use crate::{ops, CudaContext};
 
 fn split_impl(
