@@ -7,4 +7,4 @@ mod rope;
 pub use contracts::{RopeArgs, RopeSemantic};
 pub use decode::{decode_rope, DecodeRopeArgs};
 pub use multimodal::{multimodal_rope, split_qkv_axial_rope, AxialRopeArgs, MultimodalRopeArgs};
-pub use rope::rope;
+pub use rope::{apply_batched, apply_mrope, apply_vision_2d, rope};

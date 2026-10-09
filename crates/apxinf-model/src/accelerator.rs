@@ -42,6 +42,23 @@ pub(crate) mod hip {
     }
 }
 
+/// Create a backend on the `apxinf-cuda-new` runtime.
+///
+/// Models written entirely against `dyn Backend` — llama and qwen3-vl — take
+/// this path. The returned backend satisfies the same portable trait as the
+/// legacy one, so those families need no code change to switch runtimes: the
+/// model composes unchanged and only the concrete backend differs.
+#[cfg(feature = "cuda")]
+pub(crate) fn create_cuda_new_backend(device: Device) -> Result<Arc<dyn Backend>> {
+    let Device::Cuda(id) = device else {
+        return Err(Error::Other(
+            "the cuda-new backend requires a CUDA device".into(),
+        ));
+    };
+    let ctx = Arc::new(apxinf_cuda_new::CudaContext::new(id).map_err(Error::Cuda)?);
+    Ok(Arc::new(apxinf_cuda_new::CudaNewBackend::new(ctx)))
+}
+
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda {
     use std::sync::Arc;
