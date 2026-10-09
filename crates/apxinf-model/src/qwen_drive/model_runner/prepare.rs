@@ -400,7 +400,7 @@ impl PreparedInference for DirectPlan {
 mod tests {
     use super::*;
     use crate::{
-        qwen_drive::backend::RuntimeBackend,
+        qwen_drive::backend::{Context, RuntimeBackend},
         vla::{Observation, PlanningOptions, VisionObservation, VlaMetadata},
         LoadOptions, LoadedModel,
     };
@@ -478,7 +478,7 @@ mod tests {
             ..Default::default()
         };
         let request = VlaRequest::provided_with_metadata(&original, &noise, metadata);
-        let backend = Arc::new(RuntimeBackend::new(0).unwrap());
+        let backend = Arc::new(RuntimeBackend::new(Arc::new(Context::new(0).unwrap())));
         let loaded = crate::qwen_drive::load::load_registered(
             Path::new(&checkpoint),
             Device::Cuda(0),
