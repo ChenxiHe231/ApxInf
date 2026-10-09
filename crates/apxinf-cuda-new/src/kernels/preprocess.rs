@@ -42,3 +42,33 @@ pub fn rgb_u8_to_patches_bf16(
     );
     ops::gather(ctx, args)
 }
+
+/// `rgb_u8_to_patches_f32`: the F32-output variant of the patchification,
+/// used by pi0-fast whose vision tower keeps F32 until the first projection.
+pub fn rgb_u8_to_patches_f32(
+    ctx: &CudaContext,
+    images: &CudaBuffer,
+    patches: &Tensor,
+    views: usize,
+    image_size: usize,
+    patch_size: usize,
+    layout: ImageLayout,
+) -> Result<()> {
+    if patches.dtype() != DType::F32 {
+        return Err(Error::Other(
+            "rgb_u8_to_patches_f32 writes F32 patches".into(),
+        ));
+    }
+    let mut out = patches.clone();
+    let args = ops::GatherArgs::rgb_to_patches(
+        images,
+        &mut out,
+        ops::GatherPatchGeometry {
+            views,
+            image_size,
+            patch_size,
+            nhwc: layout == ImageLayout::Nhwc,
+        },
+    );
+    ops::gather(ctx, args)
+}
