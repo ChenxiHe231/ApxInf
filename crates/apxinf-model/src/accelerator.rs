@@ -31,6 +31,23 @@ pub(crate) fn create_cuda_new_backend(device: Device) -> Result<Arc<dyn Backend>
     Ok(Arc::new(apxinf_cuda_new::CudaNewBackend::new(ctx)))
 }
 
+/// Recover the concrete cuda-new backend from an `Arc<dyn Backend>`.
+///
+/// Mirrors `cuda::downcast_arc` for families whose executors call the
+/// cuda-new kernel seam directly (π0-FAST).
+#[cfg(feature = "cuda")]
+pub(crate) fn downcast_cuda_new_arc(
+    backend: Arc<dyn Backend>,
+) -> Option<Arc<apxinf_cuda_new::CudaNewBackend>> {
+    backend
+        .as_any()
+        .downcast_ref::<apxinf_cuda_new::CudaNewBackend>()?;
+    let raw = Arc::into_raw(backend);
+    // SAFETY: the exact type was checked above. This keeps the same Arc
+    // allocation and strong count while dropping only trait-object metadata.
+    Some(unsafe { Arc::from_raw(raw as *const apxinf_cuda_new::CudaNewBackend) })
+}
+
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda {
     use std::sync::Arc;

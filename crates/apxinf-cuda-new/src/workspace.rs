@@ -136,6 +136,17 @@ impl ExecutionSession {
         &self.inner.workspace
     }
 
+    /// Arena capacity in bytes. Convenience passthrough for callers that
+    /// treat the session as the legacy `GraphWorkspace`.
+    pub fn capacity(&self) -> usize {
+        self.inner.workspace.capacity()
+    }
+
+    /// Bytes handed out by the arena so far.
+    pub fn used(&self) -> usize {
+        self.inner.workspace.used()
+    }
+
     /// Traverse the real execution once before graph capture.
     ///
     /// This allocates deterministic workspace slices, prepares native resources,
