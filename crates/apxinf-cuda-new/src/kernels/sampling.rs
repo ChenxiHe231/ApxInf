@@ -1,26 +1,38 @@
-//! Legacy `kernels::sampling` names over cuda-new model helpers.
+//! Legacy `kernels::sampling` names over cuda-new device selection kernels.
 
-use apxinf_core::{DType, Error, Result, Shape, Tensor};
+use apxinf_core::{DType, Error, Result, Tensor};
 
-use crate::{ops, CudaBuffer, CudaContext};
+use crate::ffi::abi::{elementwise as abi, status};
+use crate::{CudaBuffer, CudaContext};
 
-/// `argmax_bf16_remapped_into`: device argmax over BF16 logits, then map the
-/// winning index through a `u32` remap table into `out`.
-///
-/// cuda-new's `argmax` writes the raw index; the remap step is a one-element
-/// gather the caller previously fused. Until a fused operator exists, this
-/// shim is absent on purpose — see the module doc for the failing-signal
-/// policy. The plain unmapped variant is provided for ports that can remap on
-/// the host.
-pub fn argmax_bf16_into(ctx: &CudaContext, logits: &Tensor, index: &CudaBuffer) -> Result<()> {
+/// `argmax_bf16_remapped_into`: device argmax over BF16 logits, mapping the
+/// winning index through a u32 remap table into `out`. Ported bit-identically
+/// from the legacy selection kernel, including its tie-break.
+pub fn argmax_bf16_remapped_into(
+    ctx: &CudaContext,
+    logits: &Tensor,
+    remap: &CudaBuffer,
+    out: &CudaBuffer,
+) -> Result<()> {
     if logits.dtype() != DType::BF16 {
         return Err(Error::Other(format!(
             "argmax expects BF16 logits, got {}",
             logits.dtype()
         )));
     }
-    let index_tensor = index
-        .as_tensor(Shape::new(vec![1]), DType::I32)
-        .map_err(Error::Cuda)?;
-    ops::argmax(ctx, logits, &index_tensor)
+    let n = logits.shape().numel();
+    let n = u32::try_from(n).map_err(|_| Error::Other("argmax logits exceed u32".into()))?;
+    if n == 0 {
+        return Err(Error::Other("argmax needs at least one logit".into()));
+    }
+    let logits_buffer = CudaBuffer::from_tensor(logits).map_err(Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_elementwise_argmax_remap_bf16(
+            logits_buffer.ptr(),
+            n,
+            remap.ptr(),
+            out.ptr(),
+            ctx.stream().handle(),
+        ))
+    }
 }
