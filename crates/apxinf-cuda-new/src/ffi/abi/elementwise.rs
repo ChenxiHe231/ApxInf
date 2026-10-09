@@ -57,4 +57,11 @@ unsafe extern "C" {
         tokens_per_view: i32,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_elementwise_argmax_remap_bf16(
+        logits: *const c_void,
+        n: u32,
+        remap: *const c_void,
+        out: *mut c_void,
+        stream: CudaStream,
+    ) -> i32;
 }

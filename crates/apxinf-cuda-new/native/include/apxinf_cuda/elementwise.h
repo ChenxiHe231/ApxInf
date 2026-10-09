@@ -51,6 +51,12 @@ apxinf_status_t apxinf_elementwise_bias_position_f32_bf16(
     void* output, int64_t count, int32_t cols, int32_t tokens_per_view,
     apxinf_cuda_stream_t stream);
 
+/* *out = remap[argmax(logits)], device argmax over BF16 logits with a u32
+   remap table. */
+apxinf_status_t apxinf_elementwise_argmax_remap_bf16(
+    const void* logits, uint32_t n, const void* remap, void* out,
+    apxinf_cuda_stream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

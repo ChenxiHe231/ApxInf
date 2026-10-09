@@ -51,4 +51,10 @@ int bias_position_f32_bf16(const void* projection, const void* bias,
                            const void* position, void* output, long long count,
                            int cols, int tokens_per_view, cudaStream_t stream);
 
+// *out = remap[argmax(logits)], single-block device argmax over BF16 logits
+// with a u32 remap table. Tie-break favors the higher index, matching the
+// legacy kernel bit for bit.
+int argmax_remap_bf16(const void* logits, unsigned int n, const void* remap,
+                      void* out, cudaStream_t stream);
+
 }  // namespace apxinf::cuda_new::elementwise_ops

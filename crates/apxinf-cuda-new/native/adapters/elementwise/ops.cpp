@@ -131,3 +131,17 @@ extern "C" apxinf_status_t apxinf_elementwise_bias_position_f32_bf16(
           "bias-position");
   });
 }
+
+extern "C" apxinf_status_t apxinf_elementwise_argmax_remap_bf16(
+    const void* logits, uint32_t n, const void* remap, void* out,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (logits == nullptr || remap == nullptr || out == nullptr || n == 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid argmax-remap arguments");
+    }
+    check(apxinf::cuda_new::elementwise_ops::argmax_remap_bf16(
+              logits, n, remap, out, static_cast<cudaStream_t>(stream)),
+          "argmax-remap");
+  });
+}
