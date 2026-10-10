@@ -4,10 +4,17 @@ use apxinf_core::{DType, Result, Shape, Tensor};
 
 use crate::{ops, CudaContext};
 
-/// `rms_bf16`: RMS-normalize a `[rows, cols]` BF16 activation.
+/// `rms_bf16`: RMS-normalize a `[rows, cols]` BF16 activation with a plain
+/// `[cols]` scale.
+///
+/// Routes to `ops::norm::rms_norm` (the plain `x/rms * weight` contract the
+/// legacy `kernels::norm::rms_bf16` implements). The `ops::mlp::rms_norm`
+/// operator is a different, Gemma/Qwen3.5-convention norm that applies
+/// `(1 + weight)` and must not be used here.
 pub fn rms_bf16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    let output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    ops::mlp::rms_norm(ctx, input, weight, &output, eps)?;
+    let mut output =
+        ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
+    ops::rms_norm(ctx, ops::RmsNormArgs::new(input, weight, &mut output, eps))?;
     Ok(output)
 }
 
