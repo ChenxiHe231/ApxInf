@@ -295,6 +295,7 @@ fn main() {
         "quant_fused/ops.cpp",
         "vla_attn/ops.cpp",
         "vla_la/ops.cu",
+        "gr00t/ops.cu",
         "preprocess/ops.cpp",
         "linear_attention/execution.cpp",
         "attn_helpers/execution.cpp",
