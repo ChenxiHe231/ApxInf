@@ -293,4 +293,79 @@ unsafe extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_dequantize_int32_bf16(
+        accumulators: *const c_void,
+        row_scales: *const c_void,
+        column_scales: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_quantize_rows_bf16_int8(
+        input: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_quantize_rows_bf16_int8_packed4(
+        input: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_bias_gelu_quantize_rows_bf16_int8(
+        input: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_adaptive_layer_norm_quantize_rows_bf16_int8(
+        input: *const c_void,
+        modulation: *const c_void,
+        output: *mut c_void,
+        quantized: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_layer_norm_quantize_rows_bf16_int8(
+        input: *const c_void,
+        weight: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        quantized: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_silu_mul_quantize_rows_bf16_int8(
+        gate: *const c_void,
+        up: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_silu_mul_quantize_rows_bf16_int8_packed4(
+        gate: *const c_void,
+        up: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
 }
