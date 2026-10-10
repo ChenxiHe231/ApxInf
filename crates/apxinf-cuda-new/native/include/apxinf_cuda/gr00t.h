@@ -144,6 +144,41 @@ cudaError_t apxinf_gr00t_concat_rows_quantize_bf16_e4m3(
     const void* first, const void* second, void* output, int32_t first_rows,
     int32_t second_rows, int32_t cols, float scale, cudaStream_t stream);
 
+
+cudaError_t apxinf_gr00t_dequantize_int32_bf16(
+    const void* accumulators, const void* row_scales, const void* column_scales,
+    void* output, int32_t rows, int32_t cols, cudaStream_t stream);
+
+
+cudaError_t apxinf_gr00t_quantize_rows_bf16_int8(
+    const void* input, void* output, void* scales, int32_t rows, int32_t cols,
+    cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_quantize_rows_bf16_int8_packed4(
+    const void* input, void* output, void* scales, int32_t rows, int32_t cols,
+    cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_bias_gelu_quantize_rows_bf16_int8(
+    const void* input, const void* bias, void* output, void* scales,
+    int32_t rows, int32_t cols, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_adaptive_layer_norm_quantize_rows_bf16_int8(
+    const void* input, const void* modulation, void* output, void* quantized,
+    void* scales, int32_t rows, int32_t cols, float eps, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_layer_norm_quantize_rows_bf16_int8(
+    const void* input, const void* weight, const void* bias, void* output,
+    void* quantized, void* scales, int32_t rows, int32_t cols, float eps,
+    cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_silu_mul_quantize_rows_bf16_int8(
+    const void* gate, const void* up, void* output, void* scales, int32_t rows,
+    int32_t cols, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_silu_mul_quantize_rows_bf16_int8_packed4(
+    const void* gate, const void* up, void* output, void* scales, int32_t rows,
+    int32_t cols, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif
