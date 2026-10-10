@@ -31,13 +31,35 @@ pub fn geglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
 }
 
 /// `swiglu_bf16`: `[rows, 2*cols]` gate/up projection to `[rows, cols]` SwiGLU.
+///
+/// Uses the legacy unrounded form (`silu` at full f32 before the multiply).
+/// `ops::mlp::swiglu` is the rounded variant (bf16(silu) first) that the
+/// qwen_drive checkpoint path needs; routing this name there would shift
+/// every result by up to 1 ULP.
 pub fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
+    use crate::ffi::abi::vla_la as abi;
+    use crate::ffi::raw::cuda_runtime as raw;
+    use crate::CudaBuffer;
     let dims = gate_up.shape().dims();
-    if dims.len() != 2 || dims[1] % 2 != 0 {
-        return Err(Error::Other("SwiGLU requires a [rows, 2*cols] input".into()));
+    if dims.len() != 2 || gate_up.dtype() != DType::BF16 || dims[1] % 2 != 0 {
+        return Err(Error::Other("SwiGLU requires a [rows, 2*cols] BF16 input".into()));
     }
-    let output = ctx.allocate_output(Shape::new(vec![dims[0], dims[1] / 2]), DType::BF16)?;
-    ops::mlp::swiglu(ctx, gate_up, &output)?;
+    let (rows, inner) = (dims[0], dims[1] / 2);
+    let r = i32::try_from(rows).map_err(|_| Error::Other("SwiGLU rows exceed i32".into()))?;
+    let n = i32::try_from(inner).map_err(|_| Error::Other("SwiGLU inner exceeds i32".into()))?;
+    let output = ctx.allocate_output(Shape::new(vec![rows, inner]), DType::BF16)?;
+    let input_buffer = CudaBuffer::from_tensor(gate_up).map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_cn_swiglu_bf16(
+            input_buffer.ptr(),
+            output_buffer.ptr(),
+            r,
+            n,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
     Ok(output)
 }
 
