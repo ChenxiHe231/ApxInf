@@ -75,6 +75,209 @@ pub fn bias_gelu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>)
     Ok(output)
 }
 
+/// `bias_silu_bf16`: broadcast bias then SiLU. A missing bias is a plain SiLU,
+/// matching the legacy `bias_activation(.., activation = 2)` contract.
+pub fn bias_silu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
+    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
+    let mut args =
+        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
+    args.bias = value;
+    args.activation = ops::PointwiseActivation::Silu;
+    ops::pointwise(ctx, args)?;
+    Ok(output)
+}
+
+/// `bias_relu_bf16`: broadcast bias then ReLU (`fmaxf(value, 0.0f)` after the
+/// bias add, matching the legacy `bias_relu_bf16_kernel`). A missing bias is a
+/// plain ReLU.
+pub fn bias_relu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
+    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
+    let mut args =
+        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
+    args.bias = value;
+    args.activation = ops::PointwiseActivation::Relu;
+    ops::pointwise(ctx, args)?;
+    Ok(output)
+}
+
+/// `silu_mul_bf16`: fused BF16 `BF16(SiLU(gate)) * up` over separate,
+/// equally-shaped inputs. Mirrors the legacy `silu_mul_separate_bf16` path,
+/// whose SiLU intermediate rounds to BF16 before the multiply.
+pub fn silu_mul_bf16(ctx: &CudaContext, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::raw::cuda_runtime as raw;
+    use crate::CudaBuffer;
+    if gate.dtype() != DType::BF16 || up.dtype() != DType::BF16 {
+        return Err(Error::Other("SiLU multiply requires BF16 inputs".into()));
+    }
+    if gate.shape() != up.shape() || gate.numel() == 0 {
+        return Err(Error::Other(
+            "SiLU multiply requires equal non-empty input shapes".into(),
+        ));
+    }
+    let count = u32::try_from(gate.numel())
+        .map_err(|_| Error::Other("SiLU multiply count exceeds u32".into()))?;
+    let output = ctx.allocate_output(Shape::new(gate.shape().dims().to_vec()), DType::BF16)?;
+    let gate_buffer = CudaBuffer::from_tensor(gate).map_err(Error::Cuda)?;
+    let up_buffer = CudaBuffer::from_tensor(up).map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_gr00t_silu_mul_separate_bf16(
+            gate_buffer.ptr(),
+            up_buffer.ptr(),
+            output_buffer.ptr(),
+            count,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(output)
+}
+
+/// `silu_mul_quant_bf16_e4m3`: fused `BF16(BF16(SiLU(gate)) * up) -> calibrated
+/// E4M3` over separate, equally-shaped inputs.
+pub fn silu_mul_quant_bf16_e4m3(
+    ctx: &CudaContext,
+    gate: &Tensor,
+    up: &Tensor,
+    scale: f32,
+) -> Result<Tensor> {
+    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::raw::cuda_runtime as raw;
+    use crate::CudaBuffer;
+    if gate.dtype() != DType::BF16 || up.dtype() != DType::BF16 {
+        return Err(Error::Other("silu_mul_quant requires BF16 inputs".into()));
+    }
+    if gate.shape() != up.shape() || gate.numel() == 0 || !(scale > 0.0) {
+        return Err(Error::Other(
+            "silu_mul_quant requires equal non-empty shapes and a positive scale".into(),
+        ));
+    }
+    let count = i64::try_from(gate.numel())
+        .map_err(|_| Error::Other("silu_mul_quant count exceeds i64".into()))?;
+    let output = ctx.allocate_output(Shape::new(gate.shape().dims().to_vec()), DType::F8E4M3)?;
+    let gate_buffer = CudaBuffer::from_tensor(gate).map_err(Error::Cuda)?;
+    let up_buffer = CudaBuffer::from_tensor(up).map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_gr00t_silu_mul_quant_bf16_e4m3(
+            gate_buffer.ptr(),
+            up_buffer.ptr(),
+            output_buffer.ptr(),
+            count,
+            scale,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(output)
+}
+
+/// `bias_gelu_quant_bf16_e4m3`: fused `BF16(bias + tanh-GELU(input)) ->
+/// calibrated E4M3` using packed-4 IO.
+pub fn bias_gelu_quant_bf16_e4m3(
+    ctx: &CudaContext,
+    input: &Tensor,
+    bias: &Tensor,
+    scale: f32,
+) -> Result<Tensor> {
+    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::raw::cuda_runtime as raw;
+    use crate::CudaBuffer;
+    let dims = input.shape().dims();
+    if dims.len() != 2 {
+        return Err(Error::Other(
+            "bias GELU quantization expects a rank-2 input".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    if input.dtype() != DType::BF16
+        || bias.dtype() != DType::BF16
+        || bias.shape().dims() != [cols]
+        || cols % 4 != 0
+        || !(scale > 0.0)
+    {
+        return Err(Error::Other(
+            "bias GELU quantization expects a BF16 matrix, matching bias, width divisible by 4, and positive scale".into(),
+        ));
+    }
+    let rows_i32 =
+        i32::try_from(rows).map_err(|_| Error::Other("bias GELU rows exceed i32".into()))?;
+    let cols_i32 =
+        i32::try_from(cols).map_err(|_| Error::Other("bias GELU cols exceed i32".into()))?;
+    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::F8E4M3)?;
+    let input_buffer = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
+    let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_gr00t_bias_gelu_quant_bf16_e4m3(
+            input_buffer.ptr(),
+            bias_buffer.ptr(),
+            output_buffer.ptr(),
+            rows_i32,
+            cols_i32,
+            scale,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(output)
+}
+
+/// `bias_gelu_bf16_packed8`: broadcast bias then tanh-GELU through a 16-byte
+/// packed-8 IO path. Requires a BF16 matrix with a width divisible by eight.
+pub fn bias_gelu_bf16_packed8(ctx: &CudaContext, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
+    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::raw::cuda_runtime as raw;
+    use crate::CudaBuffer;
+    let dims = input.shape().dims();
+    if dims.len() != 2 {
+        return Err(Error::Other("packed8 bias GELU expects a rank-2 input".into()));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    if input.dtype() != DType::BF16
+        || bias.dtype() != DType::BF16
+        || bias.shape().dims() != [cols]
+        || cols % 8 != 0
+    {
+        return Err(Error::Other(
+            "packed8 BF16 bias GELU has incompatible dtype or shape".into(),
+        ));
+    }
+    let rows_i32 =
+        i32::try_from(rows).map_err(|_| Error::Other("packed8 bias GELU rows exceed i32".into()))?;
+    let cols_i32 =
+        i32::try_from(cols).map_err(|_| Error::Other("packed8 bias GELU cols exceed i32".into()))?;
+    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let input_buffer = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
+    let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_gr00t_bias_gelu_bf16_packed8(
+            input_buffer.ptr(),
+            bias_buffer.ptr(),
+            output_buffer.ptr(),
+            rows_i32,
+            cols_i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(output)
+}
+
+/// `try_bias_activation_bf16_packed8`: the legacy packed-8 bias activation
+/// policy hook. cuda-new does not expose this fast path; the caller falls back
+/// to the generic `bias_gelu_bf16` / `bias_silu_bf16` contract.
+pub fn try_bias_activation_bf16_packed8(
+    _ctx: &CudaContext,
+    _input: &Tensor,
+    _bias: &Tensor,
+    _activation: i32,
+) -> Result<Option<Tensor>> {
+    Ok(None)
+}
+
 /// `swiglu_quantize_rows_bf16_e4m3`: SwiGLU over a packed gate/up projection
 /// followed by rowwise E4M3 quantization, zero-padded to `output_cols`.
 pub fn swiglu_quantize_rows_bf16_e4m3(
