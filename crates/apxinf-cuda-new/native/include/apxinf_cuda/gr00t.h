@@ -92,6 +92,44 @@ cudaError_t apxinf_gr00t_bias_residual_layer_norm_quant_bf16_e4m3(
     void* normalized, int rows, int cols, float eps, float scale,
     cudaStream_t stream);
 
+
+cudaError_t apxinf_gr00t_rope_mrope_bf16(
+    const void* input, void* output, uint32_t head_dim, uint32_t n_heads,
+    uint32_t seq_len, float theta, const void* pos_ids, uint32_t sec_h,
+    uint32_t sec_w, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_build_vision_rotation_table_f32(
+    const void* pos_ids, void* rotation_table, uint32_t head_dim,
+    uint32_t seq_len, float theta, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_rope_vision_2d_pair_bf16(
+    const void* q, const void* k, void* q_out, void* k_out, uint32_t head_dim,
+    uint32_t n_heads, uint32_t seq_len, float theta, const void* pos_ids,
+    cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_qk_rms_norm_mrope_bf16_with_threads(
+    const void* query_input, const void* query_weight, void* query_output,
+    const void* key_input, const void* key_weight, void* key_output,
+    uint32_t head_dim, uint32_t query_heads, uint32_t key_heads,
+    uint32_t seq_len, float eps, float theta, const void* pos_ids,
+    uint32_t sec_h, uint32_t sec_w, uint32_t block_threads,
+    cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_qkv_split_bias_vision_rope_bf16(
+    const void* qkv, const void* bias, void* q_out, void* k_out, void* v_out,
+    uint32_t head_dim, uint32_t n_heads, uint32_t seq_len, float theta,
+    const void* pos_ids, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_qkv_split_bias_vision_rope_precomputed_bf16(
+    const void* qkv, const void* bias, void* q_out, void* k_out, void* v_out,
+    uint32_t head_dim, uint32_t n_heads, uint32_t seq_len,
+    const void* rotation_table, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_qkv_split_bias_vision_rope_precomputed_vec2_bf16(
+    const void* qkv, const void* bias, void* q_out, void* k_out, void* v_out,
+    uint32_t head_dim, uint32_t n_heads, uint32_t seq_len,
+    const void* rotation_table, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif
