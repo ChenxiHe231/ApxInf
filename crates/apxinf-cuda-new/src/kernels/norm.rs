@@ -78,3 +78,203 @@ pub fn rms_quantize_rows_bf16_e4m3(
     }
     Ok(super::quantization::DynamicFp8Tensor { values, scales })
 }
+
+/// `adaptive_layer`: adaptive LayerNorm — `norm(x) * (1 + scale) + shift`,
+/// where `modulation` packs `[scale; shift]` as a `[2*cols]` vector.
+pub fn adaptive_layer(
+    ctx: &CudaContext,
+    input: &Tensor,
+    modulation: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    let dims = input.shape().dims();
+    let modulation_dims = modulation.shape().dims();
+    if dims.len() != 2
+        || input.dtype() != DType::BF16
+        || modulation.dtype() != DType::BF16
+        || modulation_dims != [dims[1] * 2]
+        || dims[0] == 0
+        || dims[1] == 0
+        || !eps.is_finite()
+        || eps <= 0.0
+    {
+        return Err(apxinf_core::Error::Other(
+            "adaptive LayerNorm expects aligned BF16 input/modulation and positive epsilon".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let to_u32 = |value: usize, what: &str| {
+        u32::try_from(value).map_err(|_| apxinf_core::Error::Other(format!("{what} exceeds u32")))
+    };
+    let input_buffer = CudaBuffer::from_tensor(input).map_err(apxinf_core::Error::Cuda)?;
+    let modulation_buffer = CudaBuffer::from_tensor(modulation).map_err(apxinf_core::Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(apxinf_core::Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_gr00t_adaptive_layer_norm_bf16(
+            input_buffer.ptr(),
+            modulation_buffer.ptr(),
+            output_buffer.ptr(),
+            to_u32(rows, "rows")?,
+            to_u32(cols, "cols")?,
+            eps,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(output)
+}
+
+/// `adaptive_layer_quant_bf16_e4m3`: adaptive LayerNorm plus a calibrated
+/// E4M3 view of the rounded normalized output. Returns `(bf16, e4m3)`.
+pub fn adaptive_layer_quant_bf16_e4m3(
+    ctx: &CudaContext,
+    input: &Tensor,
+    modulation: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<(Tensor, Tensor)> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    let dims = input.shape().dims();
+    let modulation_dims = modulation.shape().dims();
+    if dims.len() != 2
+        || input.dtype() != DType::BF16
+        || modulation.dtype() != DType::BF16
+        || modulation_dims != [dims[1] * 2]
+        || dims[0] == 0
+        || dims[1] == 0
+        || !eps.is_finite()
+        || eps <= 0.0
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return Err(apxinf_core::Error::Other(
+            "adaptive LayerNorm quantization expects aligned BF16 input/modulation and positive epsilon/scale".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let bf16 = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let fp8 = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::F8E4M3)?;
+    let to_u32 = |value: usize, what: &str| {
+        u32::try_from(value).map_err(|_| apxinf_core::Error::Other(format!("{what} exceeds u32")))
+    };
+    let input_buffer = CudaBuffer::from_tensor(input).map_err(apxinf_core::Error::Cuda)?;
+    let modulation_buffer = CudaBuffer::from_tensor(modulation).map_err(apxinf_core::Error::Cuda)?;
+    let bf16_buffer = CudaBuffer::from_tensor(&bf16).map_err(apxinf_core::Error::Cuda)?;
+    let fp8_buffer = CudaBuffer::from_tensor(&fp8).map_err(apxinf_core::Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_gr00t_adaptive_layer_norm_quant_bf16_e4m3(
+            input_buffer.ptr(),
+            modulation_buffer.ptr(),
+            bf16_buffer.ptr(),
+            fp8_buffer.ptr(),
+            to_u32(rows, "rows")?,
+            to_u32(cols, "cols")?,
+            eps,
+            scale,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok((bf16, fp8))
+}
+
+/// `rms_quant_bf16_e4m3`: RMS-normalize then apply a static E4M3 scale.
+pub fn rms_quant_bf16_e4m3(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<Tensor> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    let dims = input.shape().dims();
+    if dims.len() != 2
+        || input.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+        || weight.shape().dims() != [dims[1]]
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return Err(apxinf_core::Error::Other(
+            "static inference BF16 RMSNorm quantization has incompatible dtype, shape, or scale"
+                .into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::F8E4M3)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| apxinf_core::Error::Other(format!("{what} exceeds i32")))
+    };
+    let input_buffer = CudaBuffer::from_tensor(input).map_err(apxinf_core::Error::Cuda)?;
+    let weight_buffer = CudaBuffer::from_tensor(weight).map_err(apxinf_core::Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(apxinf_core::Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_gr00t_rms_norm_quant_bf16_e4m3(
+            input_buffer.ptr(),
+            weight_buffer.ptr(),
+            output_buffer.ptr(),
+            to_i32(rows, "rows")?,
+            to_i32(cols, "cols")?,
+            eps,
+            scale,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(output)
+}
+
+/// `layer_quant_bf16_e4m3`: LayerNorm then apply a static E4M3 scale.
+pub fn layer_quant_bf16_e4m3(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<Tensor> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    let dims = input.shape().dims();
+    if dims.len() != 2
+        || input.dtype() != DType::BF16
+        || weight.dtype() != DType::BF16
+        || bias.dtype() != DType::BF16
+        || weight.shape().dims() != [dims[1]]
+        || bias.shape().dims() != [dims[1]]
+        || !eps.is_finite()
+        || eps <= 0.0
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return Err(apxinf_core::Error::Other(
+            "static inference LayerNorm expects BF16 [rows,cols] and BF16 [cols] affine tensors"
+                .into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::F8E4M3)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| apxinf_core::Error::Other(format!("{what} exceeds i32")))
+    };
+    let input_buffer = CudaBuffer::from_tensor(input).map_err(apxinf_core::Error::Cuda)?;
+    let weight_buffer = CudaBuffer::from_tensor(weight).map_err(apxinf_core::Error::Cuda)?;
+    let bias_buffer = CudaBuffer::from_tensor(bias).map_err(apxinf_core::Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(apxinf_core::Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_gr00t_layer_norm_quant_bf16_e4m3(
+            input_buffer.ptr(),
+            weight_buffer.ptr(),
+            bias_buffer.ptr(),
+            output_buffer.ptr(),
+            to_i32(rows, "rows")?,
+            to_i32(cols, "cols")?,
+            eps,
+            scale,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(output)
+}
