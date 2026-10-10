@@ -346,6 +346,9 @@ impl AutoModel {
                     | "wall-oss"
                     | "wall_oss_05"
                     | "qwen_drive"
+                    | "gr00t"
+                    | "gr00t_n1_7"
+                    | "Gr00tN1d7"
             )
         {
             crate::accelerator::create_cuda_new_backend(device)?
