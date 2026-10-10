@@ -4,6 +4,7 @@ pub(crate) mod cache;
 pub(crate) mod elementwise;
 pub(crate) mod gdn;
 pub(crate) mod gemm;
+pub(crate) mod gr00t;
 pub(crate) mod model;
 pub(crate) mod mlp;
 pub(crate) mod gather;
