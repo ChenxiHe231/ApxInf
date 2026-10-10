@@ -76,6 +76,14 @@ struct ExecutionSessionInner {
     caches: RefCell<HashMap<TypeId, Box<dyn Any>>>,
     prepared_sequence: RefCell<Vec<usize>>,
     sequence_cursor: Cell<usize>,
+    /// Capture epoch the cursor was last reset for. A fresh capture restarts
+    /// consumption from the beginning; successive run calls within one capture
+    /// continue consuming the prepared sequence.
+    consumed_epoch: Cell<u64>,
+    /// Whether the previous traversal was a prepare. A prepare burst spans
+    /// consecutive prepares and accumulates; a prepare after a run starts a
+    /// fresh sequence.
+    last_was_prepare: Cell<bool>,
 }
 
 impl ExecutionSessionInner {
@@ -124,6 +132,8 @@ impl ExecutionSession {
                 caches: RefCell::new(HashMap::new()),
                 prepared_sequence: RefCell::new(Vec::new()),
                 sequence_cursor: Cell::new(0),
+                consumed_epoch: Cell::new(0),
+                last_was_prepare: Cell::new(false),
             }),
         }
     }
@@ -169,6 +179,7 @@ thread_local! {
     static ACTIVE_SESSION: Cell<*const ExecutionSessionInner> = const { Cell::new(std::ptr::null()) };
     static PREPARING: Cell<bool> = const { Cell::new(false) };
     static CAPTURE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static CAPTURE_EPOCH: Cell<u64> = const { Cell::new(0) };
     static CAPTURE_TARGET: Cell<Option<CaptureTarget>> = const { Cell::new(None) };
     static CAPTURED_RESOURCES: RefCell<Vec<Rc<dyn Any>>> = const { RefCell::new(Vec::new()) };
 }
@@ -204,9 +215,34 @@ fn with_session_phase<T>(
         }
         session.inner.workspace.reset();
         if prepare {
-            session.inner.prepared_sequence.borrow_mut().clear();
+            // A prepare burst may span several `prepare_with_workspace` calls
+            // (a model that wraps each phase separately), so accumulate across
+            // consecutive prepares. A prepare that follows a run starts a fresh
+            // sequence instead.
+            if !session.inner.last_was_prepare.replace(true) {
+                session.inner.prepared_sequence.borrow_mut().clear();
+                session.inner.sequence_cursor.set(0);
+            }
+        } else {
+            session.inner.last_was_prepare.set(false);
+            // The prepared sequence is built by a prepare burst that may span
+            // several `prepare_with_workspace` calls (a model that wraps each
+            // phase separately). Consumption mirrors that shape:
+            //  - a new capture restarts from the beginning;
+            //  - successive `with_session` calls inside one capture continue
+            //    consuming the same sequence (multi-phase capture);
+            //  - an eager traversal re-runs the whole prepared set from the
+            //    beginning on every call.
+            if !is_capturing() {
+                session.inner.sequence_cursor.set(0);
+            } else {
+                let epoch = CAPTURE_EPOCH.with(Cell::get);
+                if session.inner.consumed_epoch.get() != epoch {
+                    session.inner.sequence_cursor.set(0);
+                    session.inner.consumed_epoch.set(epoch);
+                }
+            }
         }
-        session.inner.sequence_cursor.set(0);
         let previous = active.replace(Rc::as_ptr(&session.inner));
         let previous_preparing = PREPARING.with(|preparing| preparing.replace(prepare));
         let _guard = ActiveSessionGuard {
@@ -214,16 +250,7 @@ fn with_session_phase<T>(
             preparing: previous_preparing,
         };
         retain_resource(&session.inner);
-        let result = operation();
-        if result.is_ok()
-            && !prepare
-            && session.inner.sequence_cursor.get() != session.inner.prepared_sequence.borrow().len()
-        {
-            return Err(Error::Other(
-                "execution session traversal ended before the prepared operator sequence".into(),
-            ));
-        }
-        result
+        operation()
     })
 }
 
@@ -259,6 +286,7 @@ pub(crate) fn is_preparing_session() -> bool {
 pub(crate) fn begin_capture_retention(device: usize, stream: usize) {
     CAPTURED_RESOURCES.with(|resources| resources.borrow_mut().clear());
     CAPTURE_TARGET.with(|target| target.set(Some(CaptureTarget { device, stream })));
+    CAPTURE_EPOCH.with(|epoch| epoch.set(epoch.get().wrapping_add(1)));
     CAPTURE_ACTIVE.with(|active| active.set(true));
 }
 
@@ -330,7 +358,11 @@ pub(crate) fn use_execution<T: Any>(resource: &Rc<T>) -> Result<()> {
         let sequence = inner.prepared_sequence.borrow();
         if sequence.get(cursor).copied() != Some(identity) {
             return Err(Error::Other(format!(
-                "execution session operator sequence mismatch at index {cursor}; prepare and capture must use identical operators and bindings"
+                "execution session operator sequence mismatch at index {cursor} \
+                 (prepared total {}); prepare and capture must use identical operators and bindings \
+                 [expected {:?}, got {identity:#x}]",
+                sequence.len(),
+                sequence.get(cursor).map(|value| format!("{value:#x}")),
             )));
         }
         inner.sequence_cursor.set(cursor + 1);
