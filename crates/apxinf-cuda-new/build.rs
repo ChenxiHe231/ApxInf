@@ -285,8 +285,18 @@ fn main() {
     // The AOT object is an external artifact: swapping bundles leaves the
     // sources, arch and toolkit untouched, so its fingerprint has to enter the
     // build id or the object cache serves the previously linked `.o`.
+    //
+    // `Bundle::fingerprint` is a serialized JSON document, so it carries quotes
+    // and cannot go into the build id verbatim -- the assert below rejects
+    // them. Fold it into a digest, the way `apxinf-cuda` does with the same
+    // field.
     if let Some(bundle) = &qwen38_aot {
-        id = format!("{id}-aot-{}", bundle.fingerprint);
+        let mut hash = 0x6c62272e07bb014262b821756295c58du128;
+        for byte in bundle.fingerprint.as_bytes() {
+            hash ^= u128::from(*byte);
+            hash = hash.wrapping_mul(0x0000000001000000000000000000013b);
+        }
+        id = format!("{id}-aot-{hash:032x}");
     }
     let attention_id = attention_fingerprint::build_id(
         &native,
