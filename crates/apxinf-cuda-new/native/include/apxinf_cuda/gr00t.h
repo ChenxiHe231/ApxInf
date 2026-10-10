@@ -130,6 +130,20 @@ cudaError_t apxinf_gr00t_qkv_split_bias_vision_rope_precomputed_vec2_bf16(
     uint32_t head_dim, uint32_t n_heads, uint32_t seq_len,
     const void* rotation_table, cudaStream_t stream);
 
+
+cudaError_t apxinf_gr00t_split_strided_qkv_bf16(
+    const void* qkv, void* q, void* k, void* v, int32_t tokens, int32_t hidden,
+    cudaStream_t stream);
+
+
+cudaError_t apxinf_gr00t_quantize_bf16_e4m3_packed8(
+    const void* input, void* output, int64_t count, float scale,
+    cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_concat_rows_quantize_bf16_e4m3(
+    const void* first, const void* second, void* output, int32_t first_rows,
+    int32_t second_rows, int32_t cols, float scale, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif
