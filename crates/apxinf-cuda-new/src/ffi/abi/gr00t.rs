@@ -59,4 +59,45 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_adaptive_layer_norm_bf16(
+        input: *const c_void,
+        modulation: *const c_void,
+        output: *mut c_void,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_adaptive_layer_norm_quant_bf16_e4m3(
+        input: *const c_void,
+        modulation: *const c_void,
+        output: *mut c_void,
+        quantized: *mut c_void,
+        rows: u32,
+        cols: u32,
+        eps: f32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_rms_norm_quant_bf16_e4m3(
+        input: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_layer_norm_quant_bf16_e4m3(
+        input: *const c_void,
+        weight: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
 }
