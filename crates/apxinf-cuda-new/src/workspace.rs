@@ -181,6 +181,10 @@ thread_local! {
     static CAPTURE_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static CAPTURE_EPOCH: Cell<u64> = const { Cell::new(0) };
     static CAPTURE_TARGET: Cell<Option<CaptureTarget>> = const { Cell::new(None) };
+    /// Session that consumed the prepared sequence during the active capture,
+    /// so its completion can be verified once at capture end rather than after
+    /// every traversal (a multi-phase model trips a per-call check).
+    static CAPTURE_SESSION: Cell<*const ExecutionSessionInner> = const { Cell::new(std::ptr::null()) };
     static CAPTURED_RESOURCES: RefCell<Vec<Rc<dyn Any>>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -241,6 +245,9 @@ fn with_session_phase<T>(
                     session.inner.sequence_cursor.set(0);
                     session.inner.consumed_epoch.set(epoch);
                 }
+                // Remember the consuming session so capture end can assert the
+                // whole prepared sequence was traversed.
+                CAPTURE_SESSION.with(|slot| slot.set(Rc::as_ptr(&session.inner)));
             }
         }
         let previous = active.replace(Rc::as_ptr(&session.inner));
@@ -287,13 +294,34 @@ pub(crate) fn begin_capture_retention(device: usize, stream: usize) {
     CAPTURED_RESOURCES.with(|resources| resources.borrow_mut().clear());
     CAPTURE_TARGET.with(|target| target.set(Some(CaptureTarget { device, stream })));
     CAPTURE_EPOCH.with(|epoch| epoch.set(epoch.get().wrapping_add(1)));
+    CAPTURE_SESSION.with(|slot| slot.set(std::ptr::null()));
     CAPTURE_ACTIVE.with(|active| active.set(true));
 }
 
-pub(crate) fn end_capture_retention() -> Vec<Rc<dyn Any>> {
+/// End the active capture. When `capture_ok` is true, verify that the session
+/// which consumed the prepared sequence traversed all of it: a captured graph
+/// that omitted a prepared operator would silently replay wrong results, and
+/// the per-operator mismatch check cannot see a sequence that ended early.
+/// A failed capture legitimately under-runs, so it skips the check.
+pub(crate) fn end_capture_retention(
+    capture_ok: bool,
+) -> Result<Vec<Rc<dyn Any>>> {
     CAPTURE_ACTIVE.with(|active| active.set(false));
     CAPTURE_TARGET.with(|target| target.set(None));
-    CAPTURED_RESOURCES.with(|resources| std::mem::take(&mut *resources.borrow_mut()))
+    let session = CAPTURE_SESSION.with(|slot| slot.replace(std::ptr::null()));
+    let retained = CAPTURED_RESOURCES.with(|resources| std::mem::take(&mut *resources.borrow_mut()));
+    if capture_ok && !session.is_null() {
+        let inner = unsafe { &*session };
+        let cursor = inner.sequence_cursor.get();
+        let total = inner.prepared_sequence.borrow().len();
+        if cursor != total {
+            return Err(Error::Other(format!(
+                "execution session traversal ended before the prepared operator sequence \
+                 (consumed {cursor} of {total})"
+            )));
+        }
+    }
+    Ok(retained)
 }
 
 pub(crate) fn is_capturing() -> bool {
