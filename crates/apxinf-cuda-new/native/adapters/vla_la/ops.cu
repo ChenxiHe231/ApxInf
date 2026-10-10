@@ -1316,3 +1316,25 @@ extern "C" cudaError_t apxinf_cn_swiglu_bf16_rounded(
   return cudaGetLastError();
 }
 
+
+// Unrounded SwiGLU (the `RoundSilu=false` legacy form): the SiLU output feeds
+// the multiply at full f32 precision. Distinct from the rounded variant above,
+// which qwen_drive's checkpoint path uses.
+extern "C" cudaError_t apxinf_cn_swiglu_bf16(
+    const void* gate_up, void* output, int rows, int inner, cudaStream_t stream) {
+  if (!gate_up || !output || rows <= 0 || inner <= 0) return cudaErrorInvalidValue;
+  const int64_t count = static_cast<int64_t>(rows) * inner;
+  const int blocks = static_cast<int>((count + 255) / 256 > 65535 ? 65535 : (count + 255) / 256);
+  if (swiglu_vec8_ok(gate_up, output, inner)) {
+    const int vblocks = static_cast<int>((count / 8 + 255) / 256 > 65535
+                                             ? 65535
+                                             : (count / 8 + 255) / 256);
+    swiglu_bf16_vec8_kernel<false><<<vblocks, 256, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(gate_up),
+        static_cast<__nv_bfloat16*>(output), rows, inner);
+    return cudaGetLastError();
+  }
+  swiglu_bf16_kernel<false><<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(gate_up), static_cast<__nv_bfloat16*>(output), rows, inner);
+  return cudaGetLastError();
+}

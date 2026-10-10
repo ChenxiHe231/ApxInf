@@ -209,8 +209,14 @@ fn rank2(tensor: &Tensor, what: &str) -> Result<[usize; 2]> {
 impl Backend for CudaNewBackend {
     fn rms_norm(&self, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         let [rows, width] = rank2(input, "rms_norm")?;
-        let output = self.ctx.allocate_output(Shape::new(vec![rows, width]), DType::BF16)?;
-        ops::mlp::rms_norm(&self.ctx, input, weight, &output, eps)?;
+        let mut output = self.ctx.allocate_output(Shape::new(vec![rows, width]), DType::BF16)?;
+        // Plain `x/rms * weight`, matching the legacy `CudaBackend::rms_norm`.
+        // `ops::mlp::rms_norm` is a separate Qwen3.5 zero-centered `(1 + weight)`
+        // norm and would be wrong for the LLM/VLM families that route here.
+        ops::rms_norm(
+            &self.ctx,
+            ops::RmsNormArgs::new(input, weight, &mut output, eps),
+        )?;
         Ok(output)
     }
 

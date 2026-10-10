@@ -475,4 +475,11 @@ unsafe extern "C" {
         inner: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub(crate) fn apxinf_cn_swiglu_bf16(
+        gate_up: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        inner: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
 }
