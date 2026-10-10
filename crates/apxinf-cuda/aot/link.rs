@@ -23,10 +23,21 @@ impl Bundle {
     /// The required set is the full recipe list in
     /// `<crate_root>/aot/manifest.json`, so adding a reviewed recipe cannot
     /// silently stop linking its object.
+    ///
+    /// Returns `None` when the bundle carries none of them. One bundle may
+    /// serve several model crates, so a bundle exported for another crate's
+    /// recipes is "no bundle" here rather than an error; a bundle holding only
+    /// some of them is still rejected by `load_required`.
     // `link.rs` is shared by two build scripts; only apxinf-cuda wants the
     // whole-recipe form, apxinf-cuda-new requests a single kernel by id.
     #[allow(dead_code)]
-    pub fn load(crate_root: &Path, manifest: &Path, target: &str, sm: &str, nvcc: &Path) -> Self {
+    pub fn load(
+        crate_root: &Path,
+        manifest: &Path,
+        target: &str,
+        sm: &str,
+        nvcc: &Path,
+    ) -> Option<Self> {
         let aot_root = crate_root.join("aot");
         let recipes = aot_root.join("manifest.json");
         let reviewed: serde_json::Value =
@@ -45,13 +56,6 @@ impl Bundle {
             .collect::<Vec<_>>();
         let required = ids.iter().map(String::as_str).collect::<Vec<_>>();
         Self::load_required(&aot_root, &recipes, manifest, &required, target, sm, nvcc)
-            .unwrap_or_else(|| {
-                panic!(
-                    "AOT bundle carries none of the {} reviewed kernels: {}",
-                    required.len(),
-                    required.join(", ")
-                )
-            })
     }
 
     /// Load the requested kernels from a shared artifact manifest.
