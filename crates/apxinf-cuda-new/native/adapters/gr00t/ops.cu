@@ -933,6 +933,85 @@ __global__ void qkv_split_bias_vision_rope_bf16_kernel(
         __bfloat162float(bias[2 * width + head_col + second]));
 }
 
+
+// Split a rank-2 packed [tokens, 3*hidden] BF16 projection (Q then K then V,
+// each hidden = heads * head_dim) into three contiguous [tokens, heads,
+// head_dim] tensors. Equivalent to the legacy FA2 strided-QKV reader, done
+// with an explicit copy so the generic attention op can consume it.
+__global__ void gr00t_split_strided_qkv_bf16_kernel(
+    const __nv_bfloat16* qkv, __nv_bfloat16* q, __nv_bfloat16* k,
+    __nv_bfloat16* v, int tokens, int hidden) {
+  const int64_t total = static_cast<int64_t>(tokens) * hidden;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (int64_t index =
+           static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < total; index += stride) {
+    const int64_t token = index / hidden;
+    const int col = static_cast<int>(index % hidden);
+    const __nv_bfloat16* row = qkv + token * 3 * hidden;
+    q[index] = row[col];
+    k[index] = row[hidden + col];
+    v[index] = row[2 * hidden + col];
+  }
+}
+
+
+// ── Quantization kernels (from legacy quantization.cuh / concat_quantization.cuh)
+
+struct alignas(16) Gr00tBf16Pack8 {
+  __nv_bfloat16 values[8];
+};
+struct alignas(8) Gr00tFp8Pack8 {
+  __nv_fp8_e4m3 values[8];
+};
+
+__global__ void gr00t_quantize_bf16_e4m3_kernel(
+    const __nv_bfloat16* input, __nv_fp8_e4m3* output, int64_t count,
+    float inverse_scale) {
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    float value = fminf(448.0f, fmaxf(-448.0f,
+        __bfloat162float(input[index]) * inverse_scale));
+    output[index] = static_cast<__nv_fp8_e4m3>(value);
+  }
+}
+
+__global__ void gr00t_quantize_bf16_e4m3_packed8_kernel(
+    const Gr00tBf16Pack8* input, Gr00tFp8Pack8* output, int64_t vector_count,
+    float inverse_scale) {
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < vector_count; index += stride) {
+    const Gr00tBf16Pack8 values = input[index];
+    Gr00tFp8Pack8 quantized;
+#pragma unroll
+    for (int item = 0; item < 8; ++item) {
+      float value = __bfloat162float(values.values[item]) * inverse_scale;
+      value = fminf(448.0f, fmaxf(-448.0f, value));
+      quantized.values[item] = static_cast<__nv_fp8_e4m3>(value);
+    }
+    output[index] = quantized;
+  }
+}
+
+// Copy `first` then `second` into `output`, quantizing every element to E4M3
+// with the same inverse scale. Row concatenation with a fused epilogue.
+__global__ void gr00t_concat_rows_quantize_bf16_e4m3_kernel(
+    const __nv_bfloat16* first, const __nv_bfloat16* second,
+    __nv_fp8_e4m3* output, int64_t first_count, int64_t total_count,
+    float inverse_scale) {
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < total_count; index += stride) {
+    const __nv_bfloat16 source =
+        index < first_count ? first[index] : second[index - first_count];
+    float value = __bfloat162float(source) * inverse_scale;
+    value = fminf(448.0f, fmaxf(-448.0f, value));
+    output[index] = static_cast<__nv_fp8_e4m3>(value);
+  }
+}
+
 }  // namespace
 
 extern "C" cudaError_t apxinf_gr00t_silu_mul_separate_bf16(
@@ -1390,5 +1469,73 @@ apxinf_gr00t_qkv_split_bias_vision_rope_precomputed_vec2_bf16(
       static_cast<__nv_bfloat16*>(q_out), static_cast<__nv_bfloat16*>(k_out),
       static_cast<__nv_bfloat16*>(v_out), head_dim, n_heads, seq_len,
       static_cast<const float2*>(rotation_table));
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_gr00t_split_strided_qkv_bf16(
+    const void* qkv, void* q, void* k, void* v, int tokens, int hidden,
+    cudaStream_t stream) {
+  if (qkv == nullptr || q == nullptr || k == nullptr || v == nullptr ||
+      tokens <= 0 || hidden <= 0)
+    return cudaErrorInvalidValue;
+  const int64_t total = static_cast<int64_t>(tokens) * hidden;
+  const int blocks =
+      static_cast<int>((total + kGr00tBlockSize - 1) / kGr00tBlockSize);
+  gr00t_split_strided_qkv_bf16_kernel<<<blocks, kGr00tBlockSize, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(qkv), static_cast<__nv_bfloat16*>(q),
+      static_cast<__nv_bfloat16*>(k), static_cast<__nv_bfloat16*>(v), tokens,
+      hidden);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_gr00t_quantize_bf16_e4m3_packed8(
+    const void* input, void* output, int64_t count, float scale,
+    cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0 || !(scale > 0.0f))
+    return cudaErrorInvalidValue;
+  constexpr int threads = 256;
+  const bool aligned =
+      (reinterpret_cast<uintptr_t>(input) % alignof(Gr00tBf16Pack8) == 0) &&
+      (reinterpret_cast<uintptr_t>(output) % alignof(Gr00tFp8Pack8) == 0);
+  if (!aligned || count < 8) {
+    int blocks = static_cast<int>((count + threads - 1) / threads);
+    blocks = blocks > 4096 ? 4096 : blocks;
+    gr00t_quantize_bf16_e4m3_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input),
+        static_cast<__nv_fp8_e4m3*>(output), count, 1.0f / scale);
+    return cudaGetLastError();
+  }
+  const int64_t vector_count = count / 8;
+  int blocks = static_cast<int>((vector_count + threads - 1) / threads);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  gr00t_quantize_bf16_e4m3_packed8_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const Gr00tBf16Pack8*>(input),
+      static_cast<Gr00tFp8Pack8*>(output), vector_count, 1.0f / scale);
+  const int64_t tail = count - vector_count * 8;
+  if (tail != 0) {
+    gr00t_quantize_bf16_e4m3_kernel<<<1, threads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(input) + vector_count * 8,
+        static_cast<__nv_fp8_e4m3*>(output) + vector_count * 8, tail,
+        1.0f / scale);
+  }
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_gr00t_concat_rows_quantize_bf16_e4m3(
+    const void* first, const void* second, void* output, int first_rows,
+    int second_rows, int cols, float scale, cudaStream_t stream) {
+  if (first == nullptr || second == nullptr || output == nullptr ||
+      first_rows <= 0 || second_rows <= 0 || cols <= 0 || !(scale > 0.0f))
+    return cudaErrorInvalidValue;
+  const int64_t first_count = static_cast<int64_t>(first_rows) * cols;
+  const int64_t total_count =
+      static_cast<int64_t>(first_rows + second_rows) * cols;
+  int blocks = static_cast<int>((total_count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  gr00t_concat_rows_quantize_bf16_e4m3_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(first),
+      static_cast<const __nv_bfloat16*>(second),
+      static_cast<__nv_fp8_e4m3*>(output), first_count, total_count,
+      1.0f / scale);
   return cudaGetLastError();
 }

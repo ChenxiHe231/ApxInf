@@ -11,7 +11,7 @@
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-use crate::{ops, CudaContext};
+use crate::{ops, CudaBuffer, CudaContext};
 
 /// Q/K/V triple produced by a packed-QKV split. Mirrors the legacy struct.
 pub struct QkvTensors {
@@ -431,6 +431,178 @@ pub fn try_vision_qkv_rope_segmented_fa4_skip_v(
     _host_offsets: &[u32],
     _segments: usize,
     _fixed_groups: bool,
+) -> Result<Option<Tensor>> {
+    Ok(None)
+}
+
+// ── gr00t attention surface ───────────────────────────────────────────────
+//
+// `noncausal` reshapes cuda-new's rank-3 attention output back to the flat
+// `[query_len, heads * head_dim]` the legacy helper returned. The
+// `_hdim96_bm64`, `segmented_*` and `try_*` entries are fixed-shape FA2
+// candidates that were not vendored into cuda-new; they return `Ok(None)` so
+// the call sites fall back to `noncausal` / `noncausal_strided_qkv`.
+
+/// `noncausal`: non-causal dense attention over `[tokens, heads, head_dim]`,
+/// flattened to `[tokens, heads * head_dim]`.
+pub fn noncausal(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    n_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    let q_dims = q.shape().dims();
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || q_dims.len() != 3
+        || q_dims[1] != n_heads
+        || q_dims[2] != head_dim
+        || n_heads == 0
+        || head_dim == 0
+    {
+        return Err(Error::Other("noncausal_sdpa: BF16 [query, heads, head_dim] expected".into()));
+    }
+    let key_tokens = k.shape().dims().first().copied().unwrap_or(0);
+    let hidden = n_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| Error::Other("noncausal_sdpa: hidden size overflow".into()))?;
+    let tokens = q_dims[0];
+    noncausal_gqa_bf16(ctx, q, k, v, key_tokens)?.reshape(vec![tokens, hidden])
+}
+
+/// `noncausal_strided_qkv`: non-causal attention over a rank-2 packed
+/// `[tokens, 3 * heads * head_dim]` projection, flattened to
+/// `[tokens, heads * head_dim]`.
+pub fn noncausal_strided_qkv(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    n_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::raw::cuda_runtime as raw;
+    let dims = qkv.shape().dims();
+    let hidden = n_heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| Error::Other("strided QKV attention hidden size overflow".into()))?;
+    if qkv.dtype() != DType::BF16
+        || dims.len() != 2
+        || n_heads == 0
+        || head_dim == 0
+        || dims[1] != 3 * hidden
+    {
+        return Err(Error::Other(format!(
+            "strided QKV attention expected CUDA BF16 [tokens,{}]",
+            3 * hidden
+        )));
+    }
+    let tokens = dims[0];
+    let shape = Shape::new(vec![tokens, n_heads, head_dim]);
+    let q = ctx.allocate_output(shape.clone(), DType::BF16)?;
+    let k = ctx.allocate_output(shape.clone(), DType::BF16)?;
+    let v = ctx.allocate_output(shape, DType::BF16)?;
+    let qkv_buffer = CudaBuffer::from_tensor(qkv).map_err(Error::Cuda)?;
+    let q_buffer = CudaBuffer::from_tensor(&q).map_err(Error::Cuda)?;
+    let k_buffer = CudaBuffer::from_tensor(&k).map_err(Error::Cuda)?;
+    let v_buffer = CudaBuffer::from_tensor(&v).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_gr00t_split_strided_qkv_bf16(
+            qkv_buffer.ptr(),
+            q_buffer.ptr(),
+            k_buffer.ptr(),
+            v_buffer.ptr(),
+            i32::try_from(tokens).map_err(|_| Error::Other("token count exceeds i32".into()))?,
+            i32::try_from(hidden).map_err(|_| Error::Other("hidden size exceeds i32".into()))?,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    noncausal_gqa_bf16(ctx, &q, &k, &v, tokens)?.reshape(vec![tokens, hidden])
+}
+
+/// `noncausal_hdim96_bm64`: fixed-shape sm87/sm110 FA2 candidate. Not
+/// vendored; callers fall back to `noncausal`.
+pub fn noncausal_hdim96_bm64(
+    _ctx: &CudaContext,
+    _q: &Tensor,
+    _k: &Tensor,
+    _v: &Tensor,
+    _n_heads: usize,
+    _head_dim: usize,
+) -> Result<Option<Tensor>> {
+    Ok(None)
+}
+
+/// `noncausal_strided_qkv_hdim96_bm64`: fixed-shape companion. Not vendored.
+pub fn noncausal_strided_qkv_hdim96_bm64(
+    _ctx: &CudaContext,
+    _qkv: &Tensor,
+    _n_heads: usize,
+    _head_dim: usize,
+) -> Result<Option<Tensor>> {
+    Ok(None)
+}
+
+/// `causal_gqa_prefill_bf16`: causal GQA prefill. Routes through cuda-new's
+/// tuned causal attention operator; the FA2 fixed-shape fast path is not
+/// vendored, so this always takes the generic route.
+pub fn causal_gqa_prefill_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+) -> Result<Option<Tensor>> {
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if [q, k, v].into_iter().any(|tensor| tensor.dtype() != DType::BF16)
+        || q_shape.len() != 3
+        || k_shape.len() != 3
+        || v.shape() != k.shape()
+        || q_shape[0] == 0
+        || q_shape[0] != k_shape[0]
+        || q_shape[1] == 0
+        || k_shape[1] == 0
+        || q_shape[1] % k_shape[1] != 0
+        || q_shape[2] == 0
+        || q_shape[2] > 256
+        || q_shape[2] != k_shape[2]
+    {
+        return Err(Error::Other("causal BF16 GQA prefill shape mismatch".into()));
+    }
+    let key_tokens = k_shape[0];
+    Ok(Some(causal_gqa_bf16(ctx, q, k, v, key_tokens)?))
+}
+
+/// `segmented_noncausal_contiguous_output_bf16`: fixed-shape FA2 segmented
+/// candidate. Not vendored; callers fall back to their per-segment path.
+#[allow(clippy::too_many_arguments)]
+pub fn segmented_noncausal_contiguous_output_bf16(
+    _ctx: &CudaContext,
+    _q: &Tensor,
+    _k: &Tensor,
+    _v: &Tensor,
+    _segment_lengths: &[usize],
+    _n_heads: usize,
+    _head_dim: usize,
+) -> Result<Option<Tensor>> {
+    Ok(None)
+}
+
+/// `try_noncausal_batched_equal`: equal-length batched FA2 candidate. Not
+/// vendored; callers fall back to `noncausal`.
+#[allow(clippy::too_many_arguments)]
+pub fn try_noncausal_batched_equal(
+    _ctx: &CudaContext,
+    _q: &Tensor,
+    _k: &Tensor,
+    _v: &Tensor,
+    _batches: usize,
+    _sequence_len: usize,
+    _n_heads: usize,
+    _head_dim: usize,
 ) -> Result<Option<Tensor>> {
     Ok(None)
 }

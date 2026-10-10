@@ -1,8 +1,8 @@
 //! Legacy `kernels::quantization` names over cuda-new quantization operators.
 
-use apxinf_core::{DType, Result, Shape, Tensor};
+use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-use crate::{ops, CudaContext};
+use crate::{ops, CudaBuffer, CudaContext};
 
 fn fixed_scale_e4m3(ctx: &CudaContext, input: &Tensor, scale: f32) -> Result<Tensor> {
     let mut out =
@@ -68,4 +68,85 @@ pub fn slice_columns_bf16(ctx: &CudaContext, input: &Tensor, cols: usize) -> Res
         ops::QuantizationArgs::new(ops::QuantizationSemantic::SliceColumnsBf16, input, &mut out);
     ops::quantization(ctx, args)?;
     Ok(out)
+}
+
+/// `quantize_bf16_e4m3_packed8`: elementwise BF16->E4M3 with a static scale,
+/// using the wide 8-element path when alignment allows.
+pub fn quantize_bf16_e4m3_packed8(ctx: &CudaContext, input: &Tensor, scale: f32) -> Result<Tensor> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::raw::cuda_runtime as raw;
+    if input.dtype() != DType::BF16 {
+        return Err(Error::DTypeMismatch {
+            expected: DType::BF16,
+            got: input.dtype(),
+        });
+    }
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(Error::Other(format!("invalid FP8 scale {scale}")));
+    }
+    let output = ctx.allocate_output(input.shape().clone(), DType::F8E4M3)?;
+    let input_buffer = crate::CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
+    let output_buffer = crate::CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_gr00t_quantize_bf16_e4m3_packed8(
+            input_buffer.ptr(),
+            output_buffer.ptr(),
+            i64::try_from(input.numel()).map_err(|_| Error::Other("count exceeds i64".into()))?,
+            scale,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(output)
+}
+
+/// `concat_rows_quantize_bf16_e4m3`: stack two equal-width BF16 matrices by
+/// rows and quantize the whole result to E4M3 with a shared scale.
+pub fn concat_rows_quantize_bf16_e4m3(
+    ctx: &CudaContext,
+    first: &Tensor,
+    second: &Tensor,
+    scale: f32,
+) -> Result<Tensor> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::raw::cuda_runtime as raw;
+    let first_dims = first.shape().dims();
+    let second_dims = second.shape().dims();
+    if first_dims.len() != 2
+        || second_dims.len() != 2
+        || first.dtype() != DType::BF16
+        || second.dtype() != DType::BF16
+        || first_dims[1] != second_dims[1]
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return Err(Error::Other(
+            "BF16 row concatenation quantization requires equal-width matrices and a positive scale"
+                .into(),
+        ));
+    }
+    let rows = first_dims[0]
+        .checked_add(second_dims[0])
+        .ok_or_else(|| Error::Other("row concatenation size overflow".into()))?;
+    let output = ctx.allocate_output(Shape::new(vec![rows, first_dims[1]]), DType::F8E4M3)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
+    };
+    let first_buffer = crate::CudaBuffer::from_tensor(first).map_err(Error::Cuda)?;
+    let second_buffer = crate::CudaBuffer::from_tensor(second).map_err(Error::Cuda)?;
+    let output_buffer = crate::CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_gr00t_concat_rows_quantize_bf16_e4m3(
+            first_buffer.ptr(),
+            second_buffer.ptr(),
+            output_buffer.ptr(),
+            to_i32(first_dims[0], "first rows")?,
+            to_i32(second_dims[0], "second rows")?,
+            to_i32(first_dims[1], "cols")?,
+            scale,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(output)
 }
