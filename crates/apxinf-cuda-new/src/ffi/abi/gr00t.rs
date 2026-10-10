@@ -267,4 +267,30 @@ unsafe extern "C" {
         rotation_table: *const c_void,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_split_strided_qkv_bf16(
+        qkv: *const c_void,
+        q: *mut c_void,
+        k: *mut c_void,
+        v: *mut c_void,
+        tokens: i32,
+        hidden: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_quantize_bf16_e4m3_packed8(
+        input: *const c_void,
+        output: *mut c_void,
+        count: i64,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_concat_rows_quantize_bf16_e4m3(
+        first: *const c_void,
+        second: *const c_void,
+        output: *mut c_void,
+        first_rows: i32,
+        second_rows: i32,
+        cols: i32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
 }
