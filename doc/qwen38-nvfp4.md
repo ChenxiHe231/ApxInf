@@ -36,7 +36,7 @@ switches for A/B comparison, but neither changes which product path runs. See
   from `config.json`.
 
 ```bash
-cargo build --features apxinf-model/cuda-new --release --bin apxinf
+cargo build --features cuda --release --bin apxinf
 ```
 
 ## Inference with the CLI
@@ -81,7 +81,7 @@ resident process reaches steady state from its second generation.
 ## Benchmarking
 
 ```bash
-cargo run -p apxinf-model --features cuda-new --release --example qwen38_bench -- \
+cargo run -p apxinf-model --features cuda --release --example qwen38_bench -- \
     <path-to-Qwen3.8-27B-NVFP4> --prompt-len 2048 --max-new 128 --repeats 3
 ```
 
