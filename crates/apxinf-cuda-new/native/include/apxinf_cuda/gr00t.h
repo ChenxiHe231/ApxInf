@@ -40,6 +40,23 @@ cudaError_t apxinf_gr00t_bias_qkv_in_place_bf16(
     const void* key_bias, const void* value_bias, int rows, int cols,
     cudaStream_t stream);
 
+
+cudaError_t apxinf_gr00t_adaptive_layer_norm_bf16(
+    const void* input, const void* modulation, void* output, uint32_t rows,
+    uint32_t cols, float eps, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_adaptive_layer_norm_quant_bf16_e4m3(
+    const void* input, const void* modulation, void* output, void* quantized,
+    uint32_t rows, uint32_t cols, float eps, float scale, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_rms_norm_quant_bf16_e4m3(
+    const void* input, const void* weight, void* output, int rows, int cols,
+    float eps, float scale, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_layer_norm_quant_bf16_e4m3(
+    const void* input, const void* weight, const void* bias, void* output,
+    int rows, int cols, float eps, float scale, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif
