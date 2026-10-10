@@ -9,12 +9,67 @@ use crate::stream::CudaStream;
 use crate::CudaDeviceCaps;
 
 /// Owns the stream and opaque native runtime used by GEMM executions.
+/// CUDA runtime and cuBLAS library versions, as the legacy context exposed
+/// them. Used by gr00t's fixed-shape M41 FP8 gate.
+#[derive(Clone, Debug)]
+pub struct CudaLibraryVersions {
+    pub cuda: String,
+    pub cublas: String,
+}
+
+impl CudaLibraryVersions {
+    fn query(cublas: &crate::cublas::CublasHandle) -> Result<Self, String> {
+        let mut cuda = 0;
+        unsafe {
+            crate::ffi::raw::cuda_runtime::check_cuda(
+                crate::ffi::raw::cuda_runtime::cudaRuntimeGetVersion(&mut cuda),
+            )?;
+        }
+        Ok(Self {
+            cuda: format_cuda_runtime_version(cuda)?,
+            cublas: format_cublas_version(cublas.version()?)?,
+        })
+    }
+}
+
+fn format_version(major: i32, minor: i32, patch: i32) -> String {
+    if patch == 0 {
+        format!("{major}.{minor}")
+    } else {
+        format!("{major}.{minor}.{patch}")
+    }
+}
+
+fn format_cuda_runtime_version(version: i32) -> Result<String, String> {
+    if version <= 0 {
+        return Err(format!("CUDA runtime returned invalid version {version}"));
+    }
+    Ok(format_version(
+        version / 1000,
+        (version % 1000) / 10,
+        version % 10,
+    ))
+}
+
+fn format_cublas_version(version: i32) -> Result<String, String> {
+    if version <= 0 {
+        return Err(format!("cuBLAS returned invalid version {version}"));
+    }
+    let (major, minor, patch) = if version >= 10_000 {
+        (version / 10_000, (version % 10_000) / 100, version % 100)
+    } else {
+        (version / 1000, (version % 1000) / 100, version % 100)
+    };
+    Ok(format_version(major, minor, patch))
+}
+
 pub struct CudaContext {
     device_id: usize,
     stream: Arc<CudaStream>,
     runtime: crate::ffi::abi::types::Runtime,
     caps: CudaDeviceCaps,
     cublas: crate::cublas::CublasHandle,
+    library_versions: CudaLibraryVersions,
     tuning: std::sync::RwLock<Arc<crate::tuning::TuningSession>>,
 }
 
@@ -63,6 +118,10 @@ impl CudaContext {
             stream,
             runtime,
             caps,
+            library_versions: CudaLibraryVersions::query(&cublas).unwrap_or(CudaLibraryVersions {
+                cuda: "0".into(),
+                cublas: "0".into(),
+            }),
             cublas,
             tuning: std::sync::RwLock::new(crate::tuning::default_session()),
         })
@@ -89,6 +148,10 @@ impl CudaContext {
     /// GEMM helpers that predate the tuned GEMM operator.
     pub fn cublas(&self) -> &crate::cublas::CublasHandle {
         &self.cublas
+    }
+    /// CUDA runtime and cuBLAS library versions.
+    pub fn library_versions(&self) -> &CudaLibraryVersions {
+        &self.library_versions
     }
     /// The installed tuning session (plan-invalidation identity; cuda-new
     /// operators tune through recipes, not through this session).
