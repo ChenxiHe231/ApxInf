@@ -233,3 +233,422 @@ pub fn adaln_gate_residual_rms_bf16(
     }
     Ok(ResidualNormTensors { hidden, normalized })
 }
+
+/// `bias_then_residual_bf16`: add the optional bias, round to BF16, then add
+/// the residual and round again. Distinct from `bias_residual_bf16`, which
+/// rounds only the final sum.
+pub fn bias_then_residual_bf16(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+) -> Result<Tensor> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    use apxinf_core::Error;
+    let dims = projection.shape().dims();
+    if dims.len() != 2
+        || projection.dtype() != DType::BF16
+        || residual.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || bias.is_some_and(|value| value.dtype() != DType::BF16 || value.shape().dims() != [dims[1]])
+    {
+        return Err(Error::Other(
+            "static inference BF16 bias-then-residual has incompatible dtype or shape".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
+    };
+    let projection_buffer = CudaBuffer::from_tensor(projection).map_err(Error::Cuda)?;
+    let residual_buffer = CudaBuffer::from_tensor(residual).map_err(Error::Cuda)?;
+    let bias_buffer = bias.map(CudaBuffer::from_tensor).transpose().map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_gr00t_bias_then_residual_bf16(
+            projection_buffer.ptr(),
+            bias_buffer
+                .as_ref()
+                .map_or(std::ptr::null(), |buffer| buffer.ptr() as *const _),
+            residual_buffer.ptr(),
+            output_buffer.ptr(),
+            to_i32(rows, "rows")?,
+            to_i32(cols, "cols")?,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(output)
+}
+
+/// `bias_residual_bf16_packed4`: packed-4 variant reading quads through
+/// aligned 8-byte accesses; requires a bias.
+pub fn bias_residual_bf16_packed4(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: &Tensor,
+    residual: &Tensor,
+) -> Result<Tensor> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    use apxinf_core::Error;
+    let dims = projection.shape().dims();
+    if dims.len() != 2
+        || projection.dtype() != DType::BF16
+        || bias.dtype() != DType::BF16
+        || residual.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || bias.shape().dims() != [dims[1]]
+    {
+        return Err(Error::Other(
+            "packed-4 BF16 bias-residual has incompatible dtype or shape".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
+    };
+    let projection_buffer = CudaBuffer::from_tensor(projection).map_err(Error::Cuda)?;
+    let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
+    let residual_buffer = CudaBuffer::from_tensor(residual).map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_gr00t_bias_residual_bf16_packed4(
+            projection_buffer.ptr(),
+            bias_buffer.ptr(),
+            residual_buffer.ptr(),
+            output_buffer.ptr(),
+            to_i32(rows, "rows")?,
+            to_i32(cols, "cols")?,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(output)
+}
+
+/// `bias_then_residual_bf16_packed4`: packed-4 companion of
+/// [`bias_then_residual_bf16`]; the bias is optional.
+pub fn bias_then_residual_bf16_packed4(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+) -> Result<Tensor> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    use apxinf_core::Error;
+    let dims = projection.shape().dims();
+    if dims.len() != 2
+        || projection.dtype() != DType::BF16
+        || residual.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || bias.is_some_and(|value| value.dtype() != DType::BF16 || value.shape().dims() != [dims[1]])
+    {
+        return Err(Error::Other(
+            "packed-4 BF16 bias-then-residual has incompatible dtype or shape".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
+    };
+    let projection_buffer = CudaBuffer::from_tensor(projection).map_err(Error::Cuda)?;
+    let residual_buffer = CudaBuffer::from_tensor(residual).map_err(Error::Cuda)?;
+    let bias_buffer = bias.map(CudaBuffer::from_tensor).transpose().map_err(Error::Cuda)?;
+    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_gr00t_bias_then_residual_bf16_packed4(
+            projection_buffer.ptr(),
+            bias_buffer
+                .as_ref()
+                .map_or(std::ptr::null(), |buffer| buffer.ptr() as *const _),
+            residual_buffer.ptr(),
+            output_buffer.ptr(),
+            to_i32(rows, "rows")?,
+            to_i32(cols, "cols")?,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(output)
+}
+
+/// `bias_residual_layer_bf16_cached_1024`: fused residual + LayerNorm at the
+/// fixed width 1024, with the row carried in registers across both reductions.
+#[allow(clippy::too_many_arguments)]
+pub fn bias_residual_layer_bf16_cached_1024(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    projection_bias: Option<&Tensor>,
+    residual: &Tensor,
+    norm_weight: &Tensor,
+    norm_bias: &Tensor,
+    eps: f32,
+) -> Result<ResidualNormTensors> {
+    residual_layer_cached(
+        ctx,
+        projection,
+        projection_bias,
+        residual,
+        norm_weight,
+        norm_bias,
+        eps,
+        1024,
+    )
+}
+
+/// `bias_then_residual_layer_bf16_cached_1536`: fused bias-then-residual +
+/// LayerNorm at the fixed width 1536. The projection bias is required.
+#[allow(clippy::too_many_arguments)]
+pub fn bias_then_residual_layer_bf16_cached_1536(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    projection_bias: &Tensor,
+    residual: &Tensor,
+    norm_weight: &Tensor,
+    norm_bias: &Tensor,
+    eps: f32,
+) -> Result<ResidualNormTensors> {
+    residual_layer_cached(
+        ctx,
+        projection,
+        Some(projection_bias),
+        residual,
+        norm_weight,
+        norm_bias,
+        eps,
+        1536,
+    )
+}
+
+/// `bias_then_residual_adaptive_layer_bf16_cached_1536`: fused bias-then-
+/// residual + adaptive LayerNorm at the fixed width 1536.
+#[allow(clippy::too_many_arguments)]
+pub fn bias_then_residual_adaptive_layer_bf16_cached_1536(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    projection_bias: &Tensor,
+    residual: &Tensor,
+    modulation: &Tensor,
+    eps: f32,
+) -> Result<ResidualNormTensors> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    use apxinf_core::Error;
+    let dims = projection.shape().dims();
+    if dims.len() != 2
+        || dims[1] != 1536
+        || projection.dtype() != DType::BF16
+        || projection_bias.dtype() != DType::BF16
+        || residual.dtype() != DType::BF16
+        || modulation.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || modulation.shape().dims() != [dims[1] * 2]
+    {
+        return Err(Error::Other(
+            "cached-1536 adaptive residual LayerNorm has incompatible dtype or shape".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let shape = Shape::new(vec![rows, cols]);
+    let hidden = ctx.allocate_output(shape.clone(), DType::BF16)?;
+    let normalized = ctx.allocate_output(shape, DType::BF16)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
+    };
+    let projection_buffer = CudaBuffer::from_tensor(projection).map_err(Error::Cuda)?;
+    let projection_bias_buffer = CudaBuffer::from_tensor(projection_bias).map_err(Error::Cuda)?;
+    let residual_buffer = CudaBuffer::from_tensor(residual).map_err(Error::Cuda)?;
+    let modulation_buffer = CudaBuffer::from_tensor(modulation).map_err(Error::Cuda)?;
+    let hidden_buffer = CudaBuffer::from_tensor(&hidden).map_err(Error::Cuda)?;
+    let normalized_buffer = CudaBuffer::from_tensor(&normalized).map_err(Error::Cuda)?;
+    unsafe {
+        status::check(
+            abi::apxinf_gr00t_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
+                projection_buffer.ptr(),
+                projection_bias_buffer.ptr(),
+                residual_buffer.ptr(),
+                modulation_buffer.ptr(),
+                hidden_buffer.ptr(),
+                normalized_buffer.ptr(),
+                to_i32(rows, "rows")?,
+                to_i32(cols, "cols")?,
+                eps,
+                ctx.stream().handle(),
+            ),
+        )?;
+    }
+    Ok(ResidualNormTensors { hidden, normalized })
+}
+
+/// `bias_residual_layer_quant_bf16_e4m3`: fused residual + LayerNorm whose
+/// `normalized` output is a calibrated E4M3 matrix.
+#[allow(clippy::too_many_arguments)]
+pub fn bias_residual_layer_quant_bf16_e4m3(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    projection_bias: Option<&Tensor>,
+    residual: &Tensor,
+    norm_weight: &Tensor,
+    norm_bias: &Tensor,
+    eps: f32,
+    scale: f32,
+) -> Result<ResidualNormTensors> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    use apxinf_core::Error;
+    let dims = projection.shape().dims();
+    if dims.len() != 2
+        || projection.dtype() != DType::BF16
+        || residual.dtype() != DType::BF16
+        || norm_weight.dtype() != DType::BF16
+        || norm_bias.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || norm_weight.shape().dims() != [dims[1]]
+        || norm_bias.shape().dims() != [dims[1]]
+        || !scale.is_finite()
+        || scale <= 0.0
+    {
+        return Err(Error::Other(
+            "quantized residual LayerNorm has incompatible dtype, shape, or scale".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let hidden = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
+    let normalized = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::F8E4M3)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
+    };
+    let projection_buffer = CudaBuffer::from_tensor(projection).map_err(Error::Cuda)?;
+    let residual_buffer = CudaBuffer::from_tensor(residual).map_err(Error::Cuda)?;
+    let norm_weight_buffer = CudaBuffer::from_tensor(norm_weight).map_err(Error::Cuda)?;
+    let norm_bias_buffer = CudaBuffer::from_tensor(norm_bias).map_err(Error::Cuda)?;
+    let bias_buffer = projection_bias
+        .map(CudaBuffer::from_tensor)
+        .transpose()
+        .map_err(Error::Cuda)?;
+    let hidden_buffer = CudaBuffer::from_tensor(&hidden).map_err(Error::Cuda)?;
+    let normalized_buffer = CudaBuffer::from_tensor(&normalized).map_err(Error::Cuda)?;
+    unsafe {
+        status::check(abi::apxinf_gr00t_bias_residual_layer_norm_quant_bf16_e4m3(
+            projection_buffer.ptr(),
+            bias_buffer
+                .as_ref()
+                .map_or(std::ptr::null(), |buffer| buffer.ptr() as *const _),
+            residual_buffer.ptr(),
+            norm_weight_buffer.ptr(),
+            norm_bias_buffer.ptr(),
+            hidden_buffer.ptr(),
+            normalized_buffer.ptr(),
+            to_i32(rows, "rows")?,
+            to_i32(cols, "cols")?,
+            eps,
+            scale,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(ResidualNormTensors { hidden, normalized })
+}
+
+/// Shared driver for the two residual-then-LayerNorm fixed-width kernels.
+#[allow(clippy::too_many_arguments)]
+fn residual_layer_cached(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    projection_bias: Option<&Tensor>,
+    residual: &Tensor,
+    norm_weight: &Tensor,
+    norm_bias: &Tensor,
+    eps: f32,
+    width: usize,
+) -> Result<ResidualNormTensors> {
+    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::CudaBuffer;
+    use apxinf_core::Error;
+    let dims = projection.shape().dims();
+    if dims.len() != 2
+        || dims[1] != width
+        || projection.dtype() != DType::BF16
+        || residual.dtype() != DType::BF16
+        || norm_weight.dtype() != DType::BF16
+        || norm_bias.dtype() != DType::BF16
+        || residual.shape() != projection.shape()
+        || norm_weight.shape().dims() != [dims[1]]
+        || norm_bias.shape().dims() != [dims[1]]
+    {
+        return Err(Error::Other(format!(
+            "cached-{width} residual LayerNorm has incompatible dtype or shape"
+        )));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let shape = Shape::new(vec![rows, cols]);
+    let hidden = ctx.allocate_output(shape.clone(), DType::BF16)?;
+    let normalized = ctx.allocate_output(shape, DType::BF16)?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
+    };
+    let projection_buffer = CudaBuffer::from_tensor(projection).map_err(Error::Cuda)?;
+    let residual_buffer = CudaBuffer::from_tensor(residual).map_err(Error::Cuda)?;
+    let norm_weight_buffer = CudaBuffer::from_tensor(norm_weight).map_err(Error::Cuda)?;
+    let norm_bias_buffer = CudaBuffer::from_tensor(norm_bias).map_err(Error::Cuda)?;
+    let bias_buffer = projection_bias
+        .map(CudaBuffer::from_tensor)
+        .transpose()
+        .map_err(Error::Cuda)?;
+    let hidden_buffer = CudaBuffer::from_tensor(&hidden).map_err(Error::Cuda)?;
+    let normalized_buffer = CudaBuffer::from_tensor(&normalized).map_err(Error::Cuda)?;
+    unsafe {
+        let code = if width == 1024 {
+            abi::apxinf_gr00t_bias_residual_layer_norm_bf16_cached_1024(
+                projection_buffer.ptr(),
+                bias_buffer
+                    .as_ref()
+                    .map_or(std::ptr::null(), |buffer| buffer.ptr() as *const _),
+                residual_buffer.ptr(),
+                norm_weight_buffer.ptr(),
+                norm_bias_buffer.ptr(),
+                hidden_buffer.ptr(),
+                normalized_buffer.ptr(),
+                to_i32(rows, "rows")?,
+                to_i32(cols, "cols")?,
+                eps,
+                ctx.stream().handle(),
+            )
+        } else {
+            abi::apxinf_gr00t_bias_then_residual_layer_norm_bf16_cached_1536(
+                projection_buffer.ptr(),
+                bias_buffer
+                    .as_ref()
+                    .map_or(std::ptr::null(), |buffer| buffer.ptr() as *const _),
+                residual_buffer.ptr(),
+                norm_weight_buffer.ptr(),
+                norm_bias_buffer.ptr(),
+                hidden_buffer.ptr(),
+                normalized_buffer.ptr(),
+                to_i32(rows, "rows")?,
+                to_i32(cols, "cols")?,
+                eps,
+                ctx.stream().handle(),
+            )
+        };
+        status::check(code)?;
+    }
+    Ok(ResidualNormTensors { hidden, normalized })
+}
+
+/// `try_fp8_bias_gelu_quant_e4m3_m41`: fixed-shape sm110 FP8 fusion. Not
+/// vendored into cuda-new; callers fall back to the generic route.
+#[allow(clippy::too_many_arguments)]
+pub fn try_fp8_bias_gelu_quant_e4m3_m41(
+    _ctx: &CudaContext,
+    _activation: &Tensor,
+    _weight: &Tensor,
+    _bias: &Tensor,
+    _activation_scale: f32,
+    _weight_scale: f32,
+    _output_scale: f32,
+) -> Result<Option<Tensor>> {
+    Ok(None)
+}

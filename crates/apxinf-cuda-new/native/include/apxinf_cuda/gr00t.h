@@ -57,6 +57,41 @@ cudaError_t apxinf_gr00t_layer_norm_quant_bf16_e4m3(
     const void* input, const void* weight, const void* bias, void* output,
     int rows, int cols, float eps, float scale, cudaStream_t stream);
 
+
+cudaError_t apxinf_gr00t_bias_then_residual_bf16(
+    const void* projection, const void* bias, const void* residual,
+    void* output, int rows, int cols, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_bias_residual_bf16_packed4(
+    const void* projection, const void* bias, const void* residual,
+    void* output, int rows, int cols, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_bias_then_residual_bf16_packed4(
+    const void* projection, const void* bias, const void* residual,
+    void* output, int rows, int cols, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_bias_residual_layer_norm_bf16_cached_1024(
+    const void* projection, const void* projection_bias, const void* residual,
+    const void* norm_weight, const void* norm_bias, void* hidden,
+    void* normalized, int rows, int cols, float eps, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_bias_then_residual_layer_norm_bf16_cached_1536(
+    const void* projection, const void* projection_bias, const void* residual,
+    const void* norm_weight, const void* norm_bias, void* hidden,
+    void* normalized, int rows, int cols, float eps, cudaStream_t stream);
+
+cudaError_t
+apxinf_gr00t_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
+    const void* projection, const void* projection_bias, const void* residual,
+    const void* modulation, void* hidden, void* normalized, int rows, int cols,
+    float eps, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_bias_residual_layer_norm_quant_bf16_e4m3(
+    const void* projection, const void* projection_bias, const void* residual,
+    const void* norm_weight, const void* norm_bias, void* hidden,
+    void* normalized, int rows, int cols, float eps, float scale,
+    cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

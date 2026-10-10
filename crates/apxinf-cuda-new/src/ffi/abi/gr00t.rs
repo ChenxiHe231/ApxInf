@@ -100,4 +100,83 @@ unsafe extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_bias_then_residual_bf16(
+        projection: *const c_void,
+        bias: *const c_void,
+        residual: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_bias_residual_bf16_packed4(
+        projection: *const c_void,
+        bias: *const c_void,
+        residual: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_bias_then_residual_bf16_packed4(
+        projection: *const c_void,
+        bias: *const c_void,
+        residual: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        cols: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_bias_residual_layer_norm_bf16_cached_1024(
+        projection: *const c_void,
+        projection_bias: *const c_void,
+        residual: *const c_void,
+        norm_weight: *const c_void,
+        norm_bias: *const c_void,
+        hidden: *mut c_void,
+        normalized: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_bias_then_residual_layer_norm_bf16_cached_1536(
+        projection: *const c_void,
+        projection_bias: *const c_void,
+        residual: *const c_void,
+        norm_weight: *const c_void,
+        norm_bias: *const c_void,
+        hidden: *mut c_void,
+        normalized: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
+        projection: *const c_void,
+        projection_bias: *const c_void,
+        residual: *const c_void,
+        modulation: *const c_void,
+        hidden: *mut c_void,
+        normalized: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_bias_residual_layer_norm_quant_bf16_e4m3(
+        projection: *const c_void,
+        projection_bias: *const c_void,
+        residual: *const c_void,
+        norm_weight: *const c_void,
+        norm_bias: *const c_void,
+        hidden: *mut c_void,
+        normalized: *mut c_void,
+        rows: i32,
+        cols: i32,
+        eps: f32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
 }
