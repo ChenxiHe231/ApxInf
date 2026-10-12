@@ -77,14 +77,87 @@ pub fn rgb_u8_to_patches_f32(
 /// batch by mean/std (float64 rescale, float32 normalization — the
 /// Transformers boundary) and patchify with temporal repetition and spatial
 /// merge reordering into
-/// `[views*(size/patch)^2, 3*temporal*patch^2]` BF16.
+/// `[views*(height/patch)*(width/patch), 3*temporal*patch^2]` BF16.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TemporalMergedDimensions {
+    expected_bytes: usize,
+    patch_rows: usize,
+    patch_width: usize,
+    views: i32,
+    image_height: i32,
+    image_width: i32,
+    patch_size: i32,
+    temporal_patch_size: i32,
+    merge_size: i32,
+}
+
+fn temporal_merged_dimensions(
+    views: usize,
+    image_height: usize,
+    image_width: usize,
+    patch_size: usize,
+    temporal_patch_size: usize,
+    merge_size: usize,
+) -> Result<TemporalMergedDimensions> {
+    if views == 0
+        || image_height == 0
+        || image_width == 0
+        || patch_size == 0
+        || temporal_patch_size == 0
+        || merge_size == 0
+    {
+        return Err(Error::Other(
+            "invalid temporal-merged BF16 image preprocessing dimensions".into(),
+        ));
+    }
+    let patch_merge = patch_size
+        .checked_mul(merge_size)
+        .ok_or_else(|| Error::Other("temporal-merged patch/merge size overflow".into()))?;
+    if image_height % patch_merge != 0 || image_width % patch_merge != 0 {
+        return Err(Error::Other(
+            "invalid temporal-merged BF16 image preprocessing dimensions".into(),
+        ));
+    }
+    let expected_bytes = views
+        .checked_mul(3)
+        .and_then(|value| value.checked_mul(image_height))
+        .and_then(|value| value.checked_mul(image_width))
+        .ok_or_else(|| Error::Other("temporal-merged raw image size overflow".into()))?;
+    let rows_per_view = (image_height / patch_size)
+        .checked_mul(image_width / patch_size)
+        .ok_or_else(|| Error::Other("temporal-merged patch row count overflow".into()))?;
+    let patch_rows = views
+        .checked_mul(rows_per_view)
+        .ok_or_else(|| Error::Other("temporal-merged patch row count overflow".into()))?;
+    let patch_width = 3usize
+        .checked_mul(temporal_patch_size)
+        .and_then(|value| value.checked_mul(patch_size))
+        .and_then(|value| value.checked_mul(patch_size))
+        .ok_or_else(|| Error::Other("temporal-merged patch width overflow".into()))?;
+    let to_i32 = |value: usize, what: &str| {
+        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
+    };
+    Ok(TemporalMergedDimensions {
+        expected_bytes,
+        patch_rows,
+        patch_width,
+        views: to_i32(views, "views")?,
+        image_height: to_i32(image_height, "image height")?,
+        image_width: to_i32(image_width, "image width")?,
+        patch_size: to_i32(patch_size, "patch size")?,
+        temporal_patch_size: to_i32(temporal_patch_size, "temporal patch size")?,
+        merge_size: to_i32(merge_size, "merge size")?,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn rgb_u8_to_normalized_temporal_merged_patches_bf16(
     ctx: &CudaContext,
     images: &CudaBuffer,
     patches: &Tensor,
     views: usize,
-    image_size: usize,
+    image_height: usize,
+    image_width: usize,
     patch_size: usize,
     temporal_patch_size: usize,
     merge_size: usize,
@@ -105,49 +178,45 @@ pub fn rgb_u8_to_normalized_temporal_merged_patches_bf16(
             "invalid temporal-merged BF16 image preprocessing parameters".into(),
         ));
     }
-    if views == 0
-        || image_size == 0
-        || patch_size == 0
-        || temporal_patch_size == 0
-        || merge_size == 0
-        || image_size % (patch_size * merge_size) != 0
-    {
-        return Err(Error::Other(
-            "invalid temporal-merged BF16 image preprocessing dimensions".into(),
-        ));
-    }
-    let grid_size = image_size / patch_size;
-    let patch_rows = views * grid_size * grid_size;
-    let patch_width = 3 * temporal_patch_size * patch_size * patch_size;
-    let expected_bytes = views * 3 * image_size * image_size;
-    if images.device() != ctx.device_id() || images.len() != expected_bytes {
+    let dimensions = temporal_merged_dimensions(
+        views,
+        image_height,
+        image_width,
+        patch_size,
+        temporal_patch_size,
+        merge_size,
+    )?;
+    if images.device() != ctx.device_id() || images.len() != dimensions.expected_bytes {
         return Err(Error::Other(format!(
-            "temporal-merged raw images must contain exactly {expected_bytes} bytes on CUDA {}, got {} bytes on CUDA {}",
+            "temporal-merged raw images must contain exactly {} bytes on CUDA {}, got {} bytes on CUDA {}",
+            dimensions.expected_bytes,
             ctx.device_id(),
             images.len(),
             images.device()
         )));
     }
-    if patches.dtype() != DType::BF16 || patches.shape().dims() != [patch_rows, patch_width] {
+    if patches.dtype() != DType::BF16
+        || patches.shape().dims() != [dimensions.patch_rows, dimensions.patch_width]
+    {
         return Err(Error::Other(format!(
-            "temporal-merged patches must be BF16 [{patch_rows}, {patch_width}], got {} {:?}",
+            "temporal-merged patches must be BF16 [{}, {}], got {} {:?}",
+            dimensions.patch_rows,
+            dimensions.patch_width,
             patches.dtype(),
             patches.shape().dims()
         )));
     }
-    let to_i32 = |value: usize, what: &str| {
-        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
-    };
     let patches_buffer = CudaBuffer::from_tensor(patches).map_err(Error::Cuda)?;
     unsafe {
         status::check(abi::apxinf_preprocess_temporal_merged_patches_bf16(
             images.ptr(),
             patches_buffer.ptr(),
-            to_i32(views, "views")?,
-            to_i32(image_size, "image size")?,
-            to_i32(patch_size, "patch size")?,
-            to_i32(temporal_patch_size, "temporal patch size")?,
-            to_i32(merge_size, "merge size")?,
+            dimensions.views,
+            dimensions.image_height,
+            dimensions.image_width,
+            dimensions.patch_size,
+            dimensions.temporal_patch_size,
+            dimensions.merge_size,
             match layout {
                 ImageLayout::Nhwc => 1,
                 ImageLayout::Nchw => 0,
@@ -161,6 +230,26 @@ pub fn rgb_u8_to_normalized_temporal_merged_patches_bf16(
             image_std[2],
             ctx.stream().handle(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod temporal_merged_tests {
+    use super::temporal_merged_dimensions;
+
+    #[test]
+    fn rectangular_temporal_merged_dimensions_match_the_packed_contract() {
+        let dimensions = temporal_merged_dimensions(2, 8, 12, 2, 2, 2).unwrap();
+        assert_eq!(dimensions.expected_bytes, 576);
+        assert_eq!(dimensions.patch_rows, 48);
+        assert_eq!(dimensions.patch_width, 24);
+        assert_eq!(dimensions.image_height, 8);
+        assert_eq!(dimensions.image_width, 12);
+    }
+
+    #[test]
+    fn temporal_merged_dimensions_reject_partial_merge_groups() {
+        assert!(temporal_merged_dimensions(1, 8, 10, 2, 2, 2).is_err());
     }
 }
 

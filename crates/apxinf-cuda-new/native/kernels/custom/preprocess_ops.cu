@@ -18,13 +18,13 @@ namespace {
 
 template <bool kNhwc>
 __global__ void rgb_u8_to_normalized_temporal_merged_patches_bf16_kernel(
-    const uint8_t* images, __nv_bfloat16* patches, int views, int image_size,
-    int patch_size, int temporal_patch_size, int merge_size,
+    const uint8_t* images, __nv_bfloat16* patches, int views, int image_height,
+    int image_width, int patch_size, int temporal_patch_size, int merge_size,
     double rescale_factor, float mean0, float mean1, float mean2, float std0,
     float std1, float std2) {
-  const int grid_size = image_size / patch_size;
-  const int groups_per_side = grid_size / merge_size;
-  const int rows_per_view = grid_size * grid_size;
+  const int grid_w = image_width / patch_size;
+  const int groups_w = grid_w / merge_size;
+  const int rows_per_view = (image_height / patch_size) * grid_w;
   const int patch_area = patch_size * patch_size;
   const int patch_width = 3 * temporal_patch_size * patch_area;
   const int64_t count =
@@ -43,8 +43,8 @@ __global__ void rgb_u8_to_normalized_temporal_merged_patches_bf16_kernel(
     row /= merge_size;
     const int merge_y = row % merge_size;
     row /= merge_size;
-    const int group_x = row % groups_per_side;
-    const int group_y = row / groups_per_side;
+    const int group_x = row % groups_w;
+    const int group_y = row / groups_w;
 
     const int dx = patch_element % patch_size;
     patch_element /= patch_size;
@@ -57,8 +57,8 @@ __global__ void rgb_u8_to_normalized_temporal_merged_patches_bf16_kernel(
     const int y = (group_y * merge_size + merge_y) * patch_size + dy;
     const int x = (group_x * merge_size + merge_x) * patch_size + dx;
     const int64_t input_index = kNhwc
-        ? ((static_cast<int64_t>(view) * image_size + y) * image_size + x) * 3 + channel
-        : ((static_cast<int64_t>(view) * 3 + channel) * image_size + y) * image_size + x;
+        ? ((static_cast<int64_t>(view) * image_height + y) * image_width + x) * 3 + channel
+        : ((static_cast<int64_t>(view) * 3 + channel) * image_height + y) * image_width + x;
 
     const float mean = channel == 0 ? mean0 : (channel == 1 ? mean1 : mean2);
     const float std = channel == 0 ? std0 : (channel == 1 ? std1 : std2);
@@ -76,25 +76,28 @@ __global__ void rgb_u8_to_normalized_temporal_merged_patches_bf16_kernel(
 }  // namespace
 
 int rgb_u8_to_normalized_temporal_merged_patches_bf16(
-    const void* images, void* patches, int views, int image_size,
-    int patch_size, int temporal_patch_size, int merge_size, bool nhwc,
-    double rescale_factor, const float mean[3], const float std[3],
+    const void* images, void* patches, int views, int image_height,
+    int image_width, int patch_size, int temporal_patch_size, int merge_size,
+    bool nhwc, double rescale_factor, const float mean[3], const float std[3],
     cudaStream_t stream) {
   if (images == nullptr || patches == nullptr || views <= 0 ||
-      image_size <= 0 || patch_size <= 0 || temporal_patch_size <= 0 ||
-      merge_size <= 0 || !(rescale_factor > 0.0)) {
+      image_height <= 0 || image_width <= 0 || patch_size <= 0 ||
+      temporal_patch_size <= 0 || merge_size <= 0 ||
+      !(rescale_factor > 0.0)) {
     return static_cast<int>(cudaErrorInvalidValue);
   }
 
   constexpr int64_t kMaxKernelInt = std::numeric_limits<int>::max();
   constexpr int64_t kMaxKernelIndex = std::numeric_limits<int64_t>::max();
   const int64_t patch_merge = static_cast<int64_t>(patch_size) * merge_size;
-  if (patch_merge > image_size || image_size % patch_merge != 0) {
+  if (patch_merge > image_height || image_height % patch_merge != 0 ||
+      patch_merge > image_width || image_width % patch_merge != 0) {
     return static_cast<int>(cudaErrorInvalidValue);
   }
 
-  const int64_t grid_size64 = image_size / patch_size;
-  const int64_t rows_per_view64 = grid_size64 * grid_size64;
+  const int64_t rows_per_view64 =
+      static_cast<int64_t>(image_height / patch_size) *
+      (image_width / patch_size);
   const int64_t patch_area64 = static_cast<int64_t>(patch_size) * patch_size;
   if (rows_per_view64 > kMaxKernelInt || patch_area64 > kMaxKernelInt) {
     return static_cast<int>(cudaErrorInvalidValue);
@@ -122,15 +125,15 @@ int rgb_u8_to_normalized_temporal_merged_patches_bf16(
     rgb_u8_to_normalized_temporal_merged_patches_bf16_kernel<true>
         <<<blocks, threads, 0, stream>>>(
             static_cast<const uint8_t*>(images),
-            static_cast<__nv_bfloat16*>(patches), views, image_size,
-            patch_size, temporal_patch_size, merge_size, rescale_factor,
+            static_cast<__nv_bfloat16*>(patches), views, image_height,
+            image_width, patch_size, temporal_patch_size, merge_size, rescale_factor,
             mean[0], mean[1], mean[2], std[0], std[1], std[2]);
   } else {
     rgb_u8_to_normalized_temporal_merged_patches_bf16_kernel<false>
         <<<blocks, threads, 0, stream>>>(
             static_cast<const uint8_t*>(images),
-            static_cast<__nv_bfloat16*>(patches), views, image_size,
-            patch_size, temporal_patch_size, merge_size, rescale_factor,
+            static_cast<__nv_bfloat16*>(patches), views, image_height,
+            image_width, patch_size, temporal_patch_size, merge_size, rescale_factor,
             mean[0], mean[1], mean[2], std[0], std[1], std[2]);
   }
   return static_cast<int>(cudaGetLastError());

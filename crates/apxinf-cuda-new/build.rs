@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[path = "../apxinf-cuda/build_support/nvcc_build.rs"]
+#[path = "build_support/nvcc_build.rs"]
 mod nvcc_build;
 #[path = "build_support/attention_fingerprint.rs"]
 mod attention_fingerprint;
