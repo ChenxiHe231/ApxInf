@@ -159,7 +159,7 @@ using apxinf::framework::Failure;
 
 }  // namespace
 
-extern "C" apxinf_status_t apxinf_model_argmax_bf16(
+extern "C" apxinf_status_t apxinf_sampling_argmax(
     const void* logits, void* index, int64_t count,
     apxinf_cuda_stream_t stream) {
   return apxinf::framework::abi_boundary([&] {

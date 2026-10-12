@@ -313,7 +313,7 @@ bool valid_extent(int64_t value) {
 
 }  // namespace
 
-extern "C" apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up,
+extern "C" apxinf_status_t apxinf_pointwise_swiglu(const void* fused_gate_up,
                                               void* output, int64_t rows,
                                               int64_t width,
                                               apxinf_cuda_stream_t stream) {
@@ -330,7 +330,7 @@ extern "C" apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up,
   });
 }
 
-extern "C" apxinf_status_t apxinf_new_add_bf16(const void* addend,
+extern "C" apxinf_status_t apxinf_pointwise_add_into(const void* addend,
                                            void* accumulator, int64_t count,
                                            apxinf_cuda_stream_t stream) {
   return apxinf::framework::abi_boundary([&] {

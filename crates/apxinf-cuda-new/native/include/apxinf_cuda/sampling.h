@@ -12,7 +12,7 @@ extern "C" {
    (doc/cuda-new-design.md section 5). The stateful samplers in this adapter
    use the apxinf_cuda_new_* prefix and are declared in src/ffi/raw/sampling.rs;
    that older naming is recorded debt, not a pattern to copy. */
-apxinf_status_t apxinf_model_argmax_bf16(const void* logits, void* index,
+apxinf_status_t apxinf_sampling_argmax(const void* logits, void* index,
                                          int64_t count,
                                          apxinf_cuda_stream_t stream);
 

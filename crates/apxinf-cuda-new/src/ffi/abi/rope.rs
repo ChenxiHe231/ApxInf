@@ -52,7 +52,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     /// The family's non-Spec member: rotates one tensor in place, where every
     /// [`Spec`] semantic fuses a QKV split and writes three outputs.
-    pub(crate) fn apxinf_attn_partial_rope(
+    pub(crate) fn apxinf_rope_partial(
         data: *mut c_void,
         positions: *const c_void,
         tokens: i64,

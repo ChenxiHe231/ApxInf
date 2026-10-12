@@ -45,7 +45,7 @@ unsafe extern "C" {
 
     /// The family's non-Spec members: BF16-only, one implementation each, so
     /// they take flat parameters instead of a [`Spec`].
-    pub(crate) fn apxinf_swiglu_bf16(
+    pub(crate) fn apxinf_pointwise_swiglu(
         fused_gate_up: *const c_void,
         output: *mut c_void,
         rows: i64,
@@ -53,7 +53,7 @@ unsafe extern "C" {
         stream: CudaStream,
     ) -> i32;
 
-    pub(crate) fn apxinf_new_add_bf16(
+    pub(crate) fn apxinf_pointwise_add_into(
         addend: *const c_void,
         accumulator: *mut c_void,
         count: i64,

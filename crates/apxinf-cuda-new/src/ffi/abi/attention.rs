@@ -92,7 +92,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     /// Qwen3.5's `attn_output_gate: true` pair. One implementation each and
     /// nothing to measure, so they bypass prepare/enqueue.
-    pub(crate) fn apxinf_attn_split_query_and_gate(
+    pub(crate) fn apxinf_attention_split_query_and_gate(
         fused: *const c_void,
         query: *mut c_void,
         gate: *mut c_void,
@@ -102,7 +102,7 @@ unsafe extern "C" {
         stream: CudaStream,
     ) -> i32;
 
-    pub(crate) fn apxinf_attn_apply_output_gate(
+    pub(crate) fn apxinf_attention_apply_output_gate(
         data: *mut c_void,
         gate: *const c_void,
         count: i64,

@@ -170,7 +170,7 @@ bool gather_extent(int64_t value) { return value > 0 && value <= INT32_MAX; }
 
 }  // namespace
 
-extern "C" apxinf_status_t apxinf_model_embedding_gather(
+extern "C" apxinf_status_t apxinf_gather_embedding(
     const void* table, const void* ids, void* output, int64_t tokens,
     int64_t hidden, int64_t vocab, apxinf_cuda_stream_t stream) {
   return apxinf::framework::abi_boundary([&] {

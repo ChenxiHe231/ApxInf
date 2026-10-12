@@ -25,7 +25,7 @@ pub fn argmax(ctx: &CudaContext, logits: &Tensor, index: &Tensor) -> Result<()> 
     let logits_buffer = tensor_storage(ctx, logits, DType::BF16, &dims)?;
     let index_buffer = tensor_storage(ctx, index, DType::I32, &[1])?;
     unsafe {
-        status::check(abi::apxinf_model_argmax_bf16(
+        status::check(abi::apxinf_sampling_argmax(
             logits_buffer.ptr(),
             index_buffer.ptr(),
             count as i64,

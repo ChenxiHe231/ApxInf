@@ -35,7 +35,7 @@ pub fn split_query_and_gate(
     let query_buffer = tensor_storage(ctx, query, DType::BF16, &dims)?;
     let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
     unsafe {
-        status::check(abi::apxinf_attn_split_query_and_gate(
+        status::check(abi::apxinf_attention_split_query_and_gate(
             fused_buffer.ptr(),
             query_buffer.ptr(),
             gate_buffer.ptr(),
@@ -65,7 +65,7 @@ pub fn apply_output_gate(ctx: &CudaContext, data: &Tensor, gate: &Tensor) -> Res
     let data_buffer = tensor_storage(ctx, data, DType::BF16, &dims)?;
     let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
     unsafe {
-        status::check(abi::apxinf_attn_apply_output_gate(
+        status::check(abi::apxinf_attention_apply_output_gate(
             data_buffer.ptr(),
             gate_buffer.ptr(),
             dims.iter().product::<usize>() as i64,
