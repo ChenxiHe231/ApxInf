@@ -401,9 +401,10 @@ fn main() {
         // tcgen05 and TMA. See native/kernels/flashinfer_gdn/README.md.
         cutlass_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_launch.cu"));
     } else {
-        // The descriptor-side wrapper is part of the stable ABI on every CUDA
-        // target, but the generated Cake kernel itself requires Blackwell.
-        // Keep non-Blackwell builds linkable and report unsupported at launch.
+        // No sm100 target: the kernel translation unit is absent, so link the
+        // unsupported-status stub in its place (a weak symbol is not enough —
+        // once the archive resolves the weak definition it never pulls the
+        // strong member, which turned the real kernel into the stub on Thor).
         generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_stub.cpp"));
     }
     let has_fa2 = selection.targets.iter().any(|target| target.sm() >= 80);
