@@ -6,16 +6,109 @@
 
 Contents:
 
-1. Layering (§1)
-2. Tunable operators (§2)
-3. Fixed operators (§3)
-4. Autotune and fallback (§4: Recipe vs Execution / selection–tuning–fallback decision graph / policy)
-5. Graph capture and sessions (§5: why graphs / thread-local flags / session / two passes / PreparedPhase / cross-position reuse)
-6. Naming conventions (§6)
+1. Choosing how to add an operator (§1) — **read this first**
+2. Layering (§2)
+3. Tunable operators (§3)
+4. Family operators (§4)
+5. Fixed operators (§5)
+6. Autotune and fallback (§6: Recipe vs Execution / selection–tuning–fallback decision graph / policy)
+7. Graph capture and sessions (§7: why graphs / thread-local flags / session / two passes / PreparedPhase / cross-position reuse)
+8. Naming conventions (§8)
 
 ---
 
-## 1. Layering: L3 → L0
+## 1. Choosing How to Add an Operator
+
+This section decides *which* of the three operator shapes a new operator takes.
+Getting it wrong is the single most expensive mistake in this crate, because the
+cost shows up later as a name that has to be multiplied rather than a field that
+can be added.
+
+### 1.1 "Many variants" means two different things
+
+| | Example | What varies | What it needs |
+|---|---|---|---|
+| **One semantic, many implementations** | `gemm` | cuBLAS / cuBLASLt / CUTLASS, dozens of tile configurations. Which is fastest is **not knowable without measuring**. | Candidate registry + autotune + persisted recipe (§3) |
+| **Many semantics, one implementation** | the norm family | `rms_norm` vs `rms_norm + residual` are **different math** with different results; each has exactly one sensible kernel. Nothing to select. | Spec fields, no selection machinery (§4) |
+
+These are orthogonal axes. GEMM and Attention have *both*: multiple competing
+implementations **and** a family of fused epilogue semantics. The norm family has
+only the second. An operator with neither is a fixed operator (§5).
+
+The failure mode is treating the second axis like the first: giving every
+combination of the same underlying stages its own name. That multiplies. See §8.3
+for the signals that it is already happening.
+
+### 1.2 Five questions, in order
+
+```text
+1. Are there multiple implementations whose relative speed requires measurement?
+     yes → tunable operator (§3): candidate registry + autotune + recipe
+     no  → skip the selection machinery; with one implementation the registry,
+           recipes, and tuning all degenerate to picking 1 out of 1
+
+2. Does it hold state across calls (handles, pre-packed weights, workspace)?
+     yes → prepare/enqueue/destroy triple + ExecutionSession (§7.3)
+     no  → single-shot launch
+
+3. Does it belong to the same mathematical family as an existing operator?
+     yes → add it to that family. DO NOT open a new file. (§1.3)
+     no  → new family: see §1.4 for which shape
+
+4. Does its output need to be quantized, because the consumer is a quantized
+   GEMM, an FP8 KV cache, or an e4m3 attention kernel?
+     yes → quantization is a FIELD on the Spec, not a new `*_quantize` name (§4.3)
+     no  → no epilogue axis
+
+5. Is there fusion BEFORE the main computation (before the reduction)?
+     yes → the presence/absence of the prologue picks the FUNCTION, because it
+           changes the signature shape — the number of outputs and their in-out
+           semantics. Details *inside* the prologue stay fields. (§4.2)
+     no  → one entry point
+```
+
+Question 3 is the one most often skipped, and skipping it is how a file named
+after a model instead of after a mathematical family gets created.
+
+### 1.3 Organize by mathematical semantic, never by model
+
+Files under `src/ops/` are named after **what the operator computes**, never after
+which model or which block of a model happens to call it.
+
+```text
+GOOD   norm/   rope/   gather/   pointwise/   quantization/   gemm/   attention/
+BAD    mlp.rs  attn_ops.rs  model.rs       ← named after a call site
+```
+
+A file named after a call site becomes a junk drawer: the next model's RMSNorm
+lands in it instead of in the norm family, and the same mathematical semantic ends
+up implemented twice. That is not a hypothetical — `ops::mlp::rms_norm` and
+`ops::rms_norm` coexisted for exactly this reason until they were merged, and
+`gdn_widen_f16_to_bf16` still duplicates `QuantizationSemantic::CastF16ToBf16`.
+
+Two organizing axes cannot both be used. When "by semantic" and "by model" are
+mixed, the same operator necessarily appears in both, and nothing in the build
+catches it.
+
+If a model needs a variant of an existing semantic, the variant is a field in that
+family's Spec. If it needs genuinely new math, it is a new semantic **in the family
+that owns that math**.
+
+### 1.4 The three shapes
+
+| Shape | When | ABI | Where |
+|---|---|---|---|
+| **Tunable** | measurement is required to choose an implementation | one `prepare`/`enqueue`/`destroy` triple per family | §3 |
+| **Family** (Spec-dispatched) | several related semantics, one implementation each, shared validation | one `launch(runtime, spec, bindings)` per family, Spec carries a `version` | §4 |
+| **Fixed** | a single isolated operator with no variants | flat parameters, one extern per operator | §5 |
+
+Default to **fixed** for a brand-new isolated operator — a Spec for something that
+will never gain a variant is pure overhead. Promote to **family** when the variants
+arrive; §5.1 gives the threshold.
+
+---
+
+## 2. Layering: L3 → L0
 
 ```text
 L3  Semantic layer (Rust)   src/ops/<op>.rs             defines WHAT to compute
@@ -60,7 +153,7 @@ scaling factors, and a policy. No backend library name (cuBLAS / CUTLASS / FA2) 
 in the signature. The policy expresses constraints only — whether on-line tuning is
 allowed, whether graph capture must be possible, whether bitwise reproducibility is
 required — never which implementation to use; that choice belongs to L1. `GemmPolicy`
-and `AttentionPolicy` share the same fields; defaults are in §4.3.
+and `AttentionPolicy` share the same fields; defaults are in §6.3.
 
 ### L3 → L2
 
@@ -124,27 +217,29 @@ function). Three kinds of L0 backends:
 | Vendor library | Calls the cuBLAS / cuBLASLt API; the library launches the kernel | `launch_cublas`, `launch_cublaslt` |
 
 All three enqueue asynchronously on the current stream, so all three are recordable by
-the graph capture of §5.
+the graph capture of §7.
 
 ---
 
-## 2. Tunable Operators (the GEMM and Attention Families)
+## 3. Tunable Operators (the GEMM and Attention Families)
 
 Multiple implementations are registered for the same semantic and selected by shape,
 precision, and hardware.
 
 ### Semantics and candidates (`native/adapters/*/candidates.cpp`)
 
-GEMM family — 4 semantics, each an independent tuning domain:
+GEMM family — 5 semantics, each an independent tuning domain:
 
 | Semantic | Candidates | Fallback |
 |---|---|---|
 | `gemm` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue` (8 configs), `cublasLt-native-fp8+custom-epilogue`, `cublasLt-native-nvfp4`, `cutlass-fp8`, `cutlass-nvfp4-blockscaled` (multiple tactics) | cublas |
 | `gemm_bias` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue` | cublas |
 | `gemm_bias_gelu` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue` | cublas |
+| `gemm_bias_residual` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue` | cublas |
 | `gemm_geglu` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue`, `cutlass-dual-geglu`, `cutlass-bf16-dual-geglu` | cublas |
 
-Attention family — 3 semantics:
+Attention family — 3 public semantics (plus `packed_qkv`, a storage layout for the
+dense semantic rather than a separate public operator):
 
 | Semantic | Candidates | Fallback |
 |---|---|---|
@@ -158,6 +253,22 @@ registered when the corresponding build target is enabled (e.g.
 Every candidate carries capability bits (`required_device_features`) describing the
 hardware features it needs; selection compares them against the current device's SM.
 Registry construction asserts that each semantic has exactly one fallback.
+
+> **Note — the epilogue axis applies here too, and is not yet factored out.**
+> The five GEMM semantics differ only in their epilogue: add bias, then GELU, then
+> a residual, or split `B` in half for GeGLU. The `A@B` body is identical. By §1.1
+> that is the *second* axis, so by §4.3 it should be a field rather than five
+> names — and the cost of not doing so is visible in `candidates.cpp`, where the
+> first two candidates are registered verbatim in all five tables, with the source
+> itself noting that they "happen to be the same vendor implementations".
+>
+> It is nonetheless left as-is deliberately. Unlike the norm family, a GEMM
+> epilogue participates in candidate `supports()` predicates and in the tuning key,
+> so collapsing the semantics is not a pure L3/L2 change. If it is done, the
+> vendored CUTLASS Epilogue Visitor Tree is the mechanism to use rather than a
+> hand-rolled field set. Until then, GEMM and Attention follow §3 as written; the
+> rules of §1 are not retroactive to them.
+
 
 ### Execution chain
 
@@ -176,11 +287,11 @@ fn execute(ctx, spec, bindings):
     if recipe := recipe_db.lookup(recipe_key):
         exec = recipe.candidate.prepare(spec, bindings)
     elif policy.online_tune:
-        recipe = autotune(candidates, spec)     # §4
+        recipe = autotune(candidates, spec)     # §6
         recipe_db.store(recipe_key, recipe)
         exec = recipe.candidate.prepare(spec, bindings)
     elif policy.allow_fallback:
-        exec = fallback(spec, bindings)         # §4
+        exec = fallback(spec, bindings)         # §6
     else:
         raise CACHE_MISS
     session_cache.put(exec_key, exec)
@@ -203,10 +314,164 @@ Core objects:
 
 ---
 
-## 3. Fixed Operators
+## 4. Family Operators (Spec-dispatched, one implementation per semantic)
 
-Single implementation, fixed provider; they skip L2 selection but still cross the L1
-C ABI (parameter validation, then a direct call to the host launch function):
+Several related semantics, each with exactly one kernel, sharing one ABI entry point
+and one validation path. No registry, no autotune, no recipe — per §1.2 question 1
+there is nothing to measure.
+
+```text
+# src/ops/norm/ → src/ffi/abi/norm.rs → native/adapters/norm.cu → kernels/custom/norm.cuh
+fn norm(ctx, NormArgs):
+    execute(ctx, normalize(ctx, args)?)      # fills Spec fields
+    → apxinf_norm_launch(runtime, spec, bindings)
+      → validate_spec / validate_bindings    # C++ re-validates, does not trust Rust
+      → dispatch on Spec FIELDS to a kernel
+```
+
+Current families: `norm/`, `pointwise/`, `quantization/`, `rope/`, `gather/`.
+
+What distinguishes this shape from a fixed operator (§5) is that **adding a variant
+adds a field, not a function**. Three properties follow, and they are the whole
+reason the shape exists:
+
+- `Spec` carries an explicit `version`; the C++ side rejects a mismatch outright.
+  So the struct can evolve. Flat-parameter ABIs cannot — changing a signature
+  breaks every caller, so the only available move is adding another function.
+- Changing the Spec forces every caller to recompile, so a missed call site is a
+  **compile error** rather than a silently stale path.
+- Validation is written once per family instead of once per entry point, so
+  "function A checks the dtype, function B forgot" cannot happen.
+
+Both sides validate independently. C++ does not trust the Rust layer: the adapter
+re-derives every binding predicate from the Spec field that decides it.
+
+### 4.1 Deriving predicates from fields, not from a semantic table
+
+The anti-pattern this replaced: nine semantic codes, each decoded through parallel
+hand-written predicate tables (`reads_weight`, `writes_hidden`, …) in *both* Rust
+and C++, which had to be kept in step by hand — and whose divergence produced no
+error anywhere.
+
+Each predicate must be derived from the single field that decides it:
+
+```text
+reads_weight     ⟸ affine_kind != none
+writes_hidden    ⟸ semantic == fused_add_norm
+reads_residual   ⟸ semantic != norm
+quantizes_output ⟸ quant_kind != none
+```
+
+One field decides one predicate, on both sides, so the two sides cannot drift.
+A combination with no kernel must raise `APXINF_STATUS_UNSUPPORTED` **naming the
+offending field values** — never fall through to an arithmetically different
+neighbour.
+
+### 4.2 Staged operators: prologue / core / affine / epilogue
+
+The norm family is the only family with fusion on both sides of its reduction, and
+it is worth stating the model explicitly because the two sides are expressed
+differently.
+
+```text
+prologue   add bias? add residual? gate? rounding order?   ← feeds INTO the reduction
+core       no statistic / RMS / mean-variance
+affine     weight / weight+1 / adaptive scale-shift
+epilogue   nothing / quantize to FP8 / quantize to NVFP4    ← consumes the result
+```
+
+**The epilogue is a field. The prologue picks the function.**
+
+The asymmetry is not a style choice. An epilogue is "compute, then append a stage" —
+the result is already in registers, so any epilogue can be bolted on without
+changing the signature; a nullable output pointer suffices. CUTLASS expresses this
+as a composable Epilogue Visitor Tree, and every mature engine parameterizes it.
+
+A prologue changes the **signature shape**: with a residual there are two outputs
+(the pre-norm sum, which the residual stream still needs, and the normalized
+tensor); without one there is a single output. Expressing that as `Option` would
+create parameters that are mandatory in some configurations and forbidden in
+others. No engine solves this — vLLM, FlashInfer, and ONNX Runtime all split on the
+function/op name (`rms_norm` vs `fused_add_rms_norm`; `LayerNormalization` vs
+`SkipLayerNormalization`) and keep only the prologue's *details* as parameters.
+
+So the norm family is three entry points, not nine:
+
+| Entry point | Outputs | Covers |
+|---|---|---|
+| `norm` | 1 | plain RMS / LayerNorm / adaptive, any affine, any epilogue |
+| `fused_add_norm` | 2 (hidden + normalized) | the same, with a residual prologue |
+| `residual_add` | 1 | prologue only, no normalization |
+
+and the axes inside them are fields: `NormKind`, `Affine { offset }`,
+`Option<QuantOut>`, `Option<bias>`, `Option<gate>`, `BiasOrder`.
+
+`BiasOrder` deserves a note: `bias → round → residual` and `bias → residual → round`
+differ only in an intermediate BF16 rounding. That is not an implementation detail
+here — this engine reproduces reference implementations bit-for-bit, so a rounding
+order is part of the contract. It is still a *field*, not a semantic.
+
+### 4.3 Quantization epilogues belong to a shared policy
+
+Per §1.2 question 4, an operator whose output feeds a quantized GEMM, an FP8 KV
+cache, or an e4m3 attention kernel needs a quantization epilogue — quantization is
+otherwise a full extra pass over the tensor.
+
+By that test the operators that need one are: `norm`, `pointwise` (swiglu/geglu),
+GDN's gated norm, and `apply_output_gate`. Operators whose output does not feed a
+quantized consumer — `gather`, `rope` (while the KV cache stays BF16), `argmax`,
+the cache operators — must **not** grow one speculatively.
+
+The epilogue must come from one shared policy rather than being reimplemented per
+family. Implementing it per family is what produced the current state: the same
+"saturate and cast to FP8/NVFP4" logic exists independently in `norm.cuh`, in
+`gemm_nvfp4_sm100.cu`, and in `gdn_ops.cu`. The visible symptom of that duplication
+is missing combinations — the norm family's e4m3 output supports only F16 inputs,
+and `pointwise`'s only its `Geglu` semantic, because each copy was written for one
+caller.
+
+### 4.4 Which axes are compile-time
+
+Default a new axis to **runtime** (a nullable pointer, one branch). Promote it to
+compile-time (a type parameter or `const` generic) only when one of the following
+holds:
+
+| Reason | Example |
+|---|---|
+| it changes the numerical result | RMS vs mean-variance statistic |
+| it changes vectorization width or memory layout | input dtype, quantized output dtype |
+| it changes the epilogue's access pattern | adaptive affine reads an extra tensor |
+| measurement shows the branch costs | — use the existing benchmarks, do not guess |
+
+`bias` presence, `gate` presence, and `BiasOrder` are runtime by this rule: norm is
+memory-bound, and a null-pointer test in the epilogue is free, while promoting four
+such axes would multiply instantiations by sixteen.
+
+Prune illegal combinations with a static assertion rather than letting the
+cartesian product exist:
+
+```cpp
+static_assert(!ADA_AFFINE || !HAS_WEIGHT, "adaptive scale/shift replaces weight");
+```
+
+### 4.5 The AOT instantiation list is derived, not written
+
+The combination space is bounded not by the cartesian product but by **the
+combinations the shipped models actually use**. These semantic codes are internal,
+not a published contract, so the set can be recomputed at any time — which is
+precisely what keeps this shape from degenerating into an append-only operator
+registry that can never be pruned.
+
+Build-time instantiation should therefore be derived from the model configurations
+being shipped, not hand-maintained.
+
+---
+
+## 5. Fixed Operators
+
+A single isolated operator with no variants. It skips L2 selection but still
+crosses the L1 C ABI (parameter validation, then a direct call to the host launch
+function):
 
 ```text
 # src/ops/gdn.rs → src/ffi/abi/gdn.rs → native/adapters/linear_attention/execution.cpp → gdn_ops.cu
@@ -215,14 +480,41 @@ fn gdn_prefill(ctx, q, k, v, state, ...):
     abi::apxinf_gdn_prefill(...)
 ```
 
-Why no selection machinery: with a single implementation, the registry, recipes, and
-tuning all degenerate to picking 1 out of 1.
+This is the right shape for a genuinely isolated operator: `argmax`, `concat_rows`,
+`reserve_prefix`. A Spec for something that will never gain a variant is overhead,
+and one more structure for a reader to load.
 
-### Catalog (L3 ↔ L1)
+### 5.1 When a fixed operator must be promoted to a family
+
+> **When the same mathematical semantic acquires its third signature variant, it
+> must be merged into a Spec-dispatched family (§6).**
+
+- first variant: normal
+- second: possibly temporary (a one-off F16 version); tolerated
+- third: confirms the difference is an **axis**, not a special case — continuing to
+  add functions is hand-expanding a cartesian product
+
+The threshold is deliberately countable, so the decision needs no judgement and no
+prediction about whether the operator "will" grow. Suffixes like `_seq`, `_f16`,
+`_v2`, `_interleaved` on an existing semantic are the signal.
+
+Promotion is mechanical and **does not change numerics**: N extern functions become
+one `launch(spec, bindings)`, N scattered validations become one `validate_spec`,
+call sites change signature, and **no kernel is touched**. The kernel count and the
+arithmetic are unaffected — this shape question only concerns L3/L2/ABI/L1.
+
+The GDN family is past this threshold: `gdn_gated_norm` / `_seq` / `_seq_f16` /
+`_quantize` are four entry points for one semantic, differing in three axes that
+should be fields (tokens, input dtype, quantized output). Two pairs have already
+collapsed in practice without the ABI following: `gdn_chunk_scan` and
+`_interleaved` call the **same** C function with different strides, and the Rust
+layer already selects between `_seq` and `_seq_f16` with an `if dtype`.
+
+### 5.2 Catalog (L3 ↔ L1)
 
 | L3 (`src/ops/`) | L1 ABI | Description |
 |---|---|---|
-| **gdn.rs** (↔ `abi/gdn.rs` ↔ `kernels/custom/gdn_ops.cu`) | | GDN linear attention |
+| **gdn.rs** (↔ `abi/gdn.rs` ↔ `kernels/custom/gdn_ops.cu`) | | GDN linear attention — past the §5.1 threshold |
 | `gdn_recurrent_step` | `apxinf_gdn_recurrent_step` | single-step decode recurrence |
 | `gdn_gated_norm` / `_seq` / `_seq_f16` | `apxinf_gdn_gated_norm*` | gated RMSNorm |
 | `gdn_gated_norm_quantize` | `apxinf_gdn_gated_norm_quantize` | gated norm + FP8 quantization |
@@ -232,31 +524,31 @@ tuning all degenerate to picking 1 out of 1.
 | `gdn_chunk_scan` / `_interleaved` | `apxinf_gdn_chunk_scan` | chunked scan (reference implementation) |
 | `gdn_prefill` | `apxinf_gdn_prefill` | batched prefill scan |
 | `gdn_prepare_prefill` / `gdn_conv_prepare` | `apxinf_gdn_*prepare*` | prefill input reordering |
-| `gdn_widen_f16_to_bf16` | `apxinf_gdn_widen_f16_to_bf16` | F16 → BF16 |
-| **attn_ops.rs** (↔ `abi/attn.rs` ↔ `kernels/custom/attn_ops.cu`) | | |
-| `partial_rope` | `apxinf_attn_partial_rope` | partial rotary position embedding |
-| `head_rms_norm` | `apxinf_attn_head_rms_norm` | per-head RMSNorm of q/k |
+| `gdn_widen_f16_to_bf16` | `apxinf_gdn_widen_f16_to_bf16` | F16 → BF16; duplicates `QuantizationSemantic::CastF16ToBf16` |
+| **attn_ops.rs** (↔ `abi/attn.rs` ↔ `kernels/custom/attn_ops.cu`) | | named after a call site, not a semantic (§1.3) |
+| `partial_rope` | `apxinf_attn_partial_rope` | partial rotary position embedding; belongs to `rope/` |
+| `head_rms_norm` | `apxinf_attn_head_rms_norm` | per-head RMSNorm of q/k; belongs to `norm/` |
 | `split_query_and_gate` | `apxinf_attn_split_query_and_gate` | q_proj output split |
-| `apply_output_gate` | `apxinf_attn_apply_output_gate` | sigmoid output gate |
+| `apply_output_gate` | `apxinf_attn_apply_output_gate` | sigmoid output gate; needs a quantization epilogue (§4.3) |
 | **attention/kv_cache_attention.rs** | | |
 | `decode_attention` | `apxinf_decode_attention` | single-token decode, allocation-free |
-| **norm/** (↔ `abi/norm.rs` ↔ `adapters/norm.cu` ↔ `kernels/custom/norm.cuh`, `norm_offset.cu`) | | |
-| `norm` / `fused_add_norm` / `residual_add` | `apxinf_norm_launch` | row-wise norm pipeline; Spec fields select the stage combination |
-| `norm` with `Affine::Weight { offset: true }` | `apxinf_norm_launch` | `(1 + weight)` RMSNorm; same ABI, but its own kernel in `norm_offset.cu` because its reduction order differs |
-| **mlp.rs** (↔ `abi/mlp.rs` ↔ `kernels/custom/mlp_ops.cu`) | | |
-| `swiglu` | `apxinf_swiglu_bf16` | SwiGLU |
-| `add_into` | `apxinf_new_add_bf16` | residual accumulation |
-| `quantize_fp8_per_tensor` | `apxinf_quantize_fp8_per_tensor` | per-tensor FP8 quantization |
-| `fp8_gemv` / `nvfp4_gemv` | `apxinf_fp8_gemv` / `apxinf_nvfp4_gemv` | M=1 projections |
-| **model.rs** (↔ `abi/model.rs` ↔ `kernels/custom/model_ops.cu`) | | |
-| `embedding_gather` | `apxinf_model_embedding_gather` | embedding row gather |
-| `argmax` | `apxinf_model_argmax_bf16` | greedy sampling |
+| **mlp.rs** (↔ `abi/mlp.rs` ↔ `kernels/custom/mlp_ops.cu`) | | named after a call site, not a semantic (§1.3) |
+| `swiglu` | `apxinf_swiglu_bf16` | SwiGLU; belongs to `pointwise/` |
+| `add_into` | `apxinf_new_add_bf16` | residual accumulation; belongs to `pointwise/` |
+| `quantize_fp8_per_tensor` | `apxinf_quantize_fp8_per_tensor` | per-tensor FP8 quantization; belongs to `quantization/` |
+| `fp8_gemv` / `nvfp4_gemv` | `apxinf_fp8_gemv` / `apxinf_nvfp4_gemv` | M=1 projections; these are GEMMs at M=1 |
+| **model.rs** (↔ `abi/model.rs` ↔ `kernels/custom/model_ops.cu`) | | named after a call site, not a semantic (§1.3) |
+| `embedding_gather` | `apxinf_model_embedding_gather` | embedding row gather; overlaps `GatherSemantic::EmbeddingLookup` |
+| `argmax` | `apxinf_model_argmax_bf16` | greedy sampling; correctly fixed — no variants expected |
 | **gemm/nvfp4_scales.rs** (↔ `abi/gemm.rs` ↔ `kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.cu`) | | |
-| `nvfp4_quantize_activation` / `_rms_norm` / `_swiglu` | `apxinf_gemm_nvfp4_quantize_*` | NVFP4 activation quantization |
+| `nvfp4_quantize_activation` / `_rms_norm` / `_swiglu` | `apxinf_gemm_nvfp4_quantize_*` | NVFP4 activation quantization; the `_rms_norm` / `_swiglu` forms are epilogues (§4.3) |
 | `nvfp4_pack_block_scales` | `apxinf_gemm_nvfp4_pack_block_scales` | block-scale layout |
 | `nvfp4_dense_swiglu_aot` | `apxinf_gemm_nvfp4_dense_swiglu_aot` | AOT fused FC1, specialized for M=2048 |
 
-### Host helpers (called by the model, no GPU work)
+The entries annotated "named after a call site" and "past the §5.1 threshold" are
+recorded debt, not precedent. New operators follow §1.3 and §5.1.
+
+### 5.3 Host helpers (called by the model, no GPU work)
 
 | Function | Location | Purpose |
 |---|---|---|
@@ -268,11 +560,22 @@ tuning all degenerate to picking 1 out of 1.
 
 Workspace queries cross the ABI to read L1 constants; they launch no kernels.
 
+### 5.4 Data-movement operators
+
+`concat_rows` and `reserve_prefix` (`src/ops/cache.rs`) are a fourth, smaller case:
+pure stream-ordered data movement with no kernel at all, issued from Rust via
+`cudaMemcpyAsync` / `cudaMemsetAsync`. They do not cross the C ABI because there is
+no L1 decision to make and no L0 to call. They are still graph-safe: under a
+session arena the addresses are fixed and nothing is allocated during capture.
+
+Creating a C ABI entry point for a memcpy buys nothing. This case needs no
+promotion path.
+
 ---
 
-## 4. Autotune and Fallback
+## 6. Autotune and Fallback
 
-### 4.1 Two objects to keep apart: Recipe and Execution
+### 6.1 Two objects to keep apart: Recipe and Execution
 
 | Object | What it is | Contains addresses? | Where it lives |
 |---|---|---|---|
@@ -287,9 +590,9 @@ the session cache stores Executions (keys contain pointers), the recipe cache st
 Recipes (keys do not). So the order is always: **tune to get a Recipe, then prepare it
 into an Execution**.
 
-### 4.2 From prepare to an Execution: selection / tuning / fallback
+### 6.2 From prepare to an Execution: selection / tuning / fallback
 
-`prepare`'s job is to produce an Execution (§4.1). The whole path — recipe lookup,
+`prepare`'s job is to produce an Execution (§6.1). The whole path — recipe lookup,
 measured tuning, fallback — is one decision process, shown below. The left half asks
 "can an existing Recipe be used directly"; the right half asks "how to choose one on
 the spot when there is none / it is unusable". Only two exits (`autotune` and
@@ -387,13 +690,13 @@ The winning Recipe goes into the recipe cache (in-process + on-disk `*.recipe`; 
 mixes in the kernel build ID, so source changes invalidate automatically). Each shape
 is measured exactly once.
 
-### 4.3 Policy defaults: the switches for tuning/fallback
+### 6.3 Policy defaults: the switches for tuning/fallback
 
 `GemmPolicy::default()` and `AttentionPolicy::default()` are identical. These fields
-are exactly the switches at the three branch points of the §4.2 decision graph
+are exactly the switches at the three branch points of the §6.2 decision graph
 (measure or not, fall back or not, candidate eligibility):
 
-| Field | Default | Meaning | Controls in the §4.2 graph |
+| Field | Default | Meaning | Controls in the §6.2 graph |
 |---|---|---|---|
 | `online_tune` | `true` | allow measured tuning: pick the fastest candidate the first time a shape appears | the `online_tune?` branch |
 | `allow_fallback` | `true` | when neither recipe nor tuning is available, allow the baseline implementation | the `allow_fallback?` branch |
@@ -404,20 +707,20 @@ are exactly the switches at the three branch points of the §4.2 decision graph
 The defaults are oriented toward "works on first run": `online_tune=true` measures and
 persists on the first occurrence of a shape, a seconds-scale delay. Serving paths
 cannot absorb that jitter, so entry points usually disable it explicitly (e.g.
-`pi05_bench.rs` behind a `--autotune` flag). Once disabled, only two paths of the §4.2
+`pi05_bench.rs` behind a `--autotune` flag). Once disabled, only two paths of the §6.2
 graph remain at runtime: warmup already wrote the shape's recipe into the cache (hit,
 prepare directly), or a miss falls back immediately.
 
 ---
 
-## 5. Graph Capture and Sessions
+## 7. Graph Capture and Sessions
 
 This chapter has a single core idea: **record an entire forward pass into one graph,
 then replay it with a single button press each time.** Everything else is a
-consequence. Two separate concerns: **building the graph** (§5.1–5.5) and **how long
-one graph stays usable** (§5.6).
+consequence. Two separate concerns: **building the graph** (§7.1–7.5) and **how long
+one graph stays usable** (§7.6).
 
-### 5.1 The problem
+### 7.1 The problem
 
 Decoding one token launches hundreds of kernels (GEMM, attention, norm, rope, …).
 Every launch has fixed host-side overhead. Yet this kernel sequence is **identical on
@@ -435,7 +738,7 @@ exec  = cudaGraphInstantiate(graph)    # compile to an executable graph (expensi
 # afterwards: cudaGraphLaunch(exec) replays the whole segment
 ```
 
-### 5.2 Thread-local flags decide between eager and recording
+### 7.2 Thread-local flags decide between eager and recording
 
 **During stream capture: no memory allocation, no tuning, no synchronization.** Any of
 these makes the capture fail outright.
@@ -464,7 +767,7 @@ Every `ops::gemm` call reads these two flags to decide what to do. They combine 
 The flags are non-null only inside that one `with_session_phase` call; an RAII guard
 restores them on exit.
 
-### 5.3 Session: the box holding handles and call order
+### 7.3 Session: the box holding handles and call order
 
 A session (`ExecutionSession`) is the box answering "where does everything used by
 this prepare/record live":
@@ -483,12 +786,12 @@ Session {
   `ExecutionKey` = problem description + addresses + stream + scalars; since the cache
   key contains addresses, reuse only works while the same scratch is not reallocated.
 - **order**: the prepare pass records each operator call in sequence; the replay pass
-  walks that record (the basis for the §5.4 sequence verification).
+  walks that record (the basis for the §7.4 sequence verification).
 
 The session and the forward pass must agree on both sequence and cache, and the
 session must be used on the same thread as the forward pass.
 
-### 5.4 Two passes: prepare pass and replay pass
+### 7.4 Two passes: prepare pass and replay pass
 
 ```text
 # First pass: prepare pass
@@ -516,7 +819,7 @@ cannot record a graph consistent with the first; the `order[cursor]` check enfor
 this. Input/output addresses are frozen at record time, so the model side must use
 **fixed-address** scratch tensors.
 
-### 5.5 PreparedPhase: binding session and graph together
+### 7.5 PreparedPhase: binding session and graph together
 
 "prepare → sync → stream capture + replay" is a fixed recipe, packaged into one object
 (`src/phase.rs`):
@@ -533,7 +836,7 @@ pub fn prepare_and_capture(ctx, session, mut operation) -> Result<Self> {
 pub fn replay(&self) -> Result<()> { self.graph.replay() }   // normal inference calls this
 ```
 
-### 5.6 Cross-position reuse: move the changing values out of the graph
+### 7.6 Cross-position reuse: move the changing values out of the graph
 
 Move the two changing numbers **out of the graph** into a fixed-address memory block
 read by the kernel at execution time:
@@ -556,7 +859,9 @@ the kernel reads this at run time, not a constant frozen in the graph
 
 ---
 
-## 6. Naming Conventions
+## 8. Naming Conventions
+
+### 8.1 By layer
 
 A name states only *what is computed*. Apply by layer:
 
@@ -567,11 +872,55 @@ A name states only *what is computed*. Apply by layer:
 | L0 kernel | the provider's own names; not governed by this convention | `cutlass_ops::fa2_bf16_decode_splitkv`, vendored `flashinfer_gdn::` |
 | Candidate names | may carry the provider (that is their identity) | `"cutlass-nvfp4-blockscaled"`, `"flash-attention-2"` |
 
-An L3 name may include: the operation (mandatory, e.g. `rms_norm`, `chunk_scan`);
-fused content (only when fusion changes the math, e.g. `gdn_gated_norm_quantize`);
-architecture-specific mathematical objects (e.g. `gdn_recurrent_step`). It must not
-include: provider, build method (`_aot`), or scheduling/layout (`_splitkv`,
-`_interleaved`) — the latter belong to Configuration and are expressed by the
-candidate's configuration number.
+L3 and L1 share the same semantic root. Files are named per §1.3 — after the
+mathematical family, never after a call site.
 
-L3 and L1 share the same semantic root.
+### 8.2 What an L3 name may and may not contain
+
+**May include:** the operation (mandatory, e.g. `rms_norm`, `chunk_scan`);
+architecture-specific mathematical objects (e.g. `gdn_recurrent_step`); the
+presence of a prologue, which legitimately selects the function per §4.2
+(`fused_add_norm`).
+
+**Must not include:**
+
+| Not allowed | Why | Belongs in |
+|---|---|---|
+| provider | implementation choice is L1's, not the model's | candidate identity |
+| build method (`_aot`) | same math, different build | build configuration |
+| scheduling / layout (`_splitkv`, `_interleaved`) | same math, different traversal | Configuration number, or a Spec field |
+| dtype (`_bf16`, `_f16_bf16`) | a dtype is an axis | Spec field |
+| vectorization width (`_packed4`) | an implementation detail of one kernel | kernel-internal dispatch |
+| quantization granularity (`_quantize_rows`) | an axis of the epilogue | Spec field (§4.3) |
+| **a shape (`_m41`, `_cached_1536`)** | the most damaging: it silently restricts validity | Spec field, or candidate `supports()` |
+
+Shapes in names deserve emphasis because the failure is invisible. A caller cannot
+see from `try_fp8_bias_gelu_quant_e4m3_m41` that it is only valid at M=41; calling
+it at another shape produces either a crash or wrong numbers, and nothing in the
+type system objects. If a shape specialization is genuinely faster, it is a
+*candidate with a `supports()` predicate* (§3) or a Spec-field-gated fast path
+(§4) — both of which fail loudly outside their domain.
+
+The same applies one level down: a candidate gated on exact production shapes
+(`m ∈ {522, 533, 778, 789}`) is a recorded compromise, not a pattern to copy. It
+stops being correct the moment the model changes, and the model layer cannot see it.
+
+### 8.3 Signals that a name is being multiplied
+
+These are mechanical, countable signals — no judgement required. Each means the
+variant axis should become a field (§5.1):
+
+| Signal | Example | Action |
+|---|---|---|
+| a third `_seq` / `_f16` / `_v2` / `_interleaved` suffix on one semantic | `gdn_gated_norm` / `_seq` / `_seq_f16` / `_quantize` | promote to a Spec family (§5.1) |
+| two entry points calling the **same** C function with different arguments | `gdn_chunk_scan` / `_interleaved` | the difference is already a field; make it one |
+| the Rust layer selecting between ABIs with an `if dtype` | `gdn_gated_norm_seq` vs `_seq_f16` | dtype is a Spec field |
+| a `*_quantize` twin of an existing operator | `gdn_gated_norm` / `_quantize` | quantization is an epilogue field (§4.3) |
+| the same math reachable through two ABIs | `ops::mlp::rms_norm` vs `ops::rms_norm` | merge; two paths mean the design can be bypassed |
+
+The last one is worth its own warning. When one mathematical semantic is reachable
+through two independent ABIs, the extra path is a bypass: work that should have
+gone through the dispatch layer can be routed around it, and the resulting code
+compiles, runs, and passes tests while leaving the dispatch layer unimplemented.
+One ABI per semantic makes that structurally impossible.
+
