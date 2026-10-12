@@ -454,7 +454,7 @@ pub(crate) fn decode_step(
     kv_caches: &mut [KvCache],
     position: usize,
 ) {
-    decode_step_inner(ctx, model, scratch, gdn_states, kv_caches, position, None, None);
+    decode_step_inner(ctx, model, scratch, gdn_states, kv_caches, position, None);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -465,8 +465,7 @@ pub(crate) fn decode_step_inner(
     gdn_states: &mut [GdnState],
     kv_caches: &mut [KvCache],
     position: usize,
-    mlp_graphs: Option<&[PreparedPhase]>,
-    gdn_graphs: Option<&[Option<PreparedPhase>]>,
+    decode_phases: Option<&[PreparedPhase]>,
 ) {
     ops::embedding_gather(ctx, &model.embedding, &scratch.token, &scratch.hidden).unwrap();
 
@@ -559,8 +558,8 @@ pub(crate) fn decode_step_inner(
                 fp8_projection(ctx, &attention.o, &scratch.attention_out, &scratch.attention_fp8, &mut scratch.projected);
                 ops::add_into(ctx, &scratch.projected, &scratch.hidden).unwrap();
 
-                if let Some(graphs) = mlp_graphs {
-                    graphs[layer_index].replay().unwrap();
+                if let Some(phases) = decode_phases {
+                    phases[layer_index].replay().unwrap();
                 } else {
                     nvfp4_mlp(ctx, &attention.gate_up, &attention.down, &attention.post_norm, scratch);
                 }
@@ -568,20 +567,15 @@ pub(crate) fn decode_step_inner(
             Layer::Gdn(gdn) => {
                 let state_index = gdn_index;
                 gdn_index += 1;
-                if let Some(graphs) = gdn_graphs {
-                    if let Some(graph) = &graphs[layer_index] {
-                        graph.replay().unwrap();
-                    } else {
-                        gdn_decode_layer(ctx, gdn, scratch, &mut gdn_states[state_index]);
-                        nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
-                    }
+                // One graph covers the whole layer: a GDN layer is
+                // position-independent -- its history lives in the recurrent
+                // state, not in a view sized by the current position -- so the
+                // mixer and the MLP capture together.
+                if let Some(phases) = decode_phases {
+                    phases[layer_index].replay().unwrap();
                 } else {
                     gdn_decode_layer(ctx, gdn, scratch, &mut gdn_states[state_index]);
-                    if let Some(graphs) = mlp_graphs {
-                        graphs[layer_index].replay().unwrap();
-                    } else {
-                        nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
-                    }
+                    nvfp4_mlp(ctx, &gdn.gate_up, &gdn.down, &gdn.post_norm, scratch);
                 }
             }
         }
