@@ -351,6 +351,8 @@ impl AutoModel {
                     | "gr00t"
                     | "gr00t_n1_7"
                     | "Gr00tN1d7"
+                    | "smolvla"
+                    | "smolvla_libero"
             )
         {
             crate::accelerator::create_cuda_new_backend(device)?
