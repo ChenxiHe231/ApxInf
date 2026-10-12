@@ -485,7 +485,7 @@ crosses the L1 C ABI (parameter validation, then a direct call to the host launc
 function):
 
 ```text
-# src/ops/gdn.rs → src/ffi/abi/gdn.rs → native/adapters/linear_attention/execution.cpp → gdn_ops.cu
+# src/ops/gdn.rs → src/ffi/abi/gdn.rs → native/adapters/gdn/execution.cpp → gdn_ops.cu
 fn gdn_prefill(ctx, q, k, v, state, ...):
     check_shapes(...)
     abi::apxinf_gdn_prefill(...)
@@ -537,26 +537,28 @@ layer already selects between `_seq` and `_seq_f16` with an `if dtype`.
 | `gdn_prepare_prefill` / `gdn_conv_prepare` | `apxinf_gdn_*prepare*` | prefill input reordering |
 | `gdn_widen_f16_to_bf16` | `apxinf_gdn_widen_f16_to_bf16` | F16 → BF16; duplicates `QuantizationSemantic::CastF16ToBf16` |
 | **rope/partial.rs** (↔ `abi/rope.rs` ↔ `kernels/custom/rope_partial.cu`) | | |
-| `partial_rope` | `apxinf_attn_partial_rope` | in-place partial rotary embedding; the Spec semantics fuse a QKV split and write three outputs, this rotates one tensor |
+| `partial_rope` | `apxinf_rope_partial` | in-place partial rotary embedding; the Spec semantics fuse a QKV split and write three outputs, this rotates one tensor |
 | `rotary_dim` | — | host helper (§5.3) |
 | **norm/head.rs** (↔ `abi/norm.rs` ↔ `kernels/custom/norm_head.cu`) | | |
-| `head_rms_norm` | `apxinf_attn_head_rms_norm` | per-head RMSNorm of q/k; in place, and the family's third reduction tree — see §4.1 |
+| `head_rms_norm` | `apxinf_norm_head_rms` | per-head RMSNorm of q/k; in place, and the family's third reduction tree — see §4.1 |
 | **attention/gates.rs** (↔ `abi/attention.rs` ↔ `kernels/custom/attention_gates.cu`) | | |
-| `split_query_and_gate` | `apxinf_attn_split_query_and_gate` | q_proj output split |
-| `apply_output_gate` | `apxinf_attn_apply_output_gate` | sigmoid output gate; needs a quantization epilogue (§4.3) |
+| `split_query_and_gate` | `apxinf_attention_split_query_and_gate` | q_proj output split |
+| `apply_output_gate` | `apxinf_attention_apply_output_gate` | sigmoid output gate; needs a quantization epilogue (§4.3) |
 | **attention/kv_cache_attention.rs** | | |
 | `decode_attention` | `apxinf_decode_attention` | single-token decode, allocation-free |
 | **pointwise/elementwise.rs** (↔ `abi/pointwise.rs` ↔ `kernels/custom/pointwise_ops.cu`) | | |
-| `swiglu` | `apxinf_swiglu_bf16` | SwiGLU; the SiLU-gated form, not `PointwiseSemantic::Geglu` |
-| `add_into` | `apxinf_new_add_bf16` | residual accumulation |
+| `swiglu` | `apxinf_pointwise_swiglu` | SwiGLU; the SiLU-gated form, not `PointwiseSemantic::Geglu` |
+| `add_into` | `apxinf_pointwise_add_into` | residual accumulation |
 | **quantization/per_tensor.rs** (↔ `abi/quantization.rs` ↔ `kernels/custom/quantization_ops.cu`) | | |
-| `quantize_fp8_per_tensor` | `apxinf_quantize_fp8_per_tensor` | per-tensor FP8; same arithmetic as `FixedScaleE4m3` but 8-wide where that is scalar, and differs on NaN — merging is a measurement |
+| `quantize_fp8_per_tensor` | `apxinf_quantization_fp8_per_tensor` | per-tensor FP8; same arithmetic as `FixedScaleE4m3` but 8-wide where that is scalar, and differs on NaN — merging is a measurement |
 | **gemm/gemv.rs** (↔ `abi/gemm.rs` ↔ `kernels/custom/gemv.cu`) | | |
-| `fp8_gemv` / `nvfp4_gemv` | `apxinf_fp8_gemv` / `apxinf_nvfp4_gemv` | M=1 projections; GEMMs, but one implementation each, so no registry |
+| `fp8_gemv` / `nvfp4_gemv` | `apxinf_gemm_fp8_gemv` / `apxinf_gemm_nvfp4_gemv` | M=1 projections; GEMMs, but one implementation each, so no registry |
 | **gather/embedding.rs** (↔ `abi/gather.rs` ↔ `kernels/custom/gather_embedding.cu`) | | |
-| `embedding_gather` | `apxinf_model_embedding_gather` | plain BF16 row gather; **not** `GatherSemantic::EmbeddingLookup`, which always applies Gemma's `sqrt(cols)` scale and indexes with `u32` |
+| `embedding_gather` | `apxinf_gather_embedding` | plain BF16 row gather; **not** `GatherSemantic::EmbeddingLookup`, which always applies Gemma's `sqrt(cols)` scale and indexes with `u32` |
 | **sampling.rs** (↔ `abi/sampling.rs` ↔ `kernels/custom/sampling_argmax.cu`) | | |
-| `argmax` | `apxinf_model_argmax_bf16` | greedy selection; correctly fixed — no variants expected |
+| `argmax` | `apxinf_sampling_argmax` | greedy selection; correctly fixed — no variants expected |
+| **crate-root `sampling.rs`** (↔ `raw/sampling.rs` ↔ `kernels/custom/sampling.cuh`) | | stateful samplers: workspace + device RNG |
+| `create_token_sampler` / `create_normal_generator` | `apxinf_sampling_sample_token` etc. | return `cudaError_t`, so they are declared through `raw/` rather than `abi/` — that split is the error convention, not an inconsistency |
 | **gemm/nvfp4_scales.rs** (↔ `abi/gemm.rs` ↔ `kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.cu`) | | |
 | `nvfp4_quantize_activation` / `_rms_norm` / `_swiglu` | `apxinf_gemm_nvfp4_quantize_*` | NVFP4 activation quantization; the `_rms_norm` / `_swiglu` forms are epilogues (§4.3) |
 | `nvfp4_pack_block_scales` | `apxinf_gemm_nvfp4_pack_block_scales` | block-scale layout |
