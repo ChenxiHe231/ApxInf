@@ -11,15 +11,67 @@ fn invalid(message: &str) -> Error {
     Error::Other(message.into())
 }
 
-/// `add`: elementwise `a + b` into a fresh tensor.
+/// `add`: elementwise `a + b` into a fresh tensor. Dispatches on dtype like
+/// the legacy helper: BF16 routes to the cuda-new operator, F16 takes the
+/// ported smolvla launcher (the Xavier FP16 path).
 pub fn add(ctx: &CudaContext, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    if a.dtype() == DType::F16 {
+        use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+        use crate::ffi::abi::smolvla as abi;
+        if b.dtype() != DType::F16 || b.shape() != a.shape() {
+            return Err(invalid("FP16 add requires matching FP16 tensors"));
+        }
+        let output = crate::workspace::output_buffer(ctx, a.size_in_bytes())?;
+        unsafe {
+            check_cuda(abi::apxinf_smolvla_add_f16(
+                gpu_ptr(a)?,
+                gpu_ptr(b)?,
+                output.ptr(),
+                u32::try_from(a.numel())
+                    .map_err(|_| invalid("FP16 add element count exceeds u32"))?,
+                ctx.stream().handle(),
+            ))?;
+        }
+        return Ok(make_gpu_tensor(
+            a.shape().clone(),
+            DType::F16,
+            ctx.device_id(),
+            output,
+        ));
+    }
     let output = ctx.allocate_output(Shape::new(a.shape().dims().to_vec()), DType::BF16)?;
     ops::elementwise_add(ctx, a, b, &output)?;
     Ok(output)
 }
 
-/// `scale`: elementwise `input * factor` into a fresh tensor.
+/// `scale`: elementwise `input * factor` into a fresh tensor. Dispatches on
+/// dtype like the legacy helper: BF16 routes to the cuda-new operator, F16
+/// takes the ported smolvla launcher (the Xavier FP16 path).
 pub fn scale(ctx: &CudaContext, input: &Tensor, factor: f32) -> Result<Tensor> {
+    if input.dtype() == DType::F16 {
+        use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+        use crate::ffi::abi::smolvla as abi;
+        if !factor.is_finite() {
+            return Err(invalid("scale factor must be finite"));
+        }
+        let output = crate::workspace::output_buffer(ctx, input.size_in_bytes())?;
+        unsafe {
+            check_cuda(abi::apxinf_smolvla_scale_f16(
+                gpu_ptr(input)?,
+                output.ptr(),
+                u32::try_from(input.numel())
+                    .map_err(|_| invalid("FP16 scale element count exceeds u32"))?,
+                factor,
+                ctx.stream().handle(),
+            ))?;
+        }
+        return Ok(make_gpu_tensor(
+            input.shape().clone(),
+            DType::F16,
+            ctx.device_id(),
+            output,
+        ));
+    }
     let output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
     ops::elementwise_scale(ctx, input, &output, factor)?;
     Ok(output)
@@ -469,4 +521,240 @@ pub fn bias_qkv_in_place_bf16(
         .map_err(Error::Cuda)?;
     }
     Ok((query, key, value))
+}
+
+// ── smolvla FP16 surface ────────────────────────────────────────────────────
+//
+// Ported verbatim from the legacy `kernels::elementwise` FP16 wrappers over
+// the `apxinf_smolvla_*` launchers (native/adapters/smolvla/ops.cu).
+
+/// `bias_f16`: broadcast-add an optional `[cols]` FP16 bias over rows.
+pub fn bias_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+    use super::contracts::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, optional_ptr};
+    use crate::ffi::abi::smolvla as abi;
+    let (rows, cols) = matrix_shape(input, "bias")?;
+    if input.dtype() != DType::F16
+        || bias.is_some_and(|x| x.dtype() != DType::F16 || x.shape().dims() != [cols])
+    {
+        return Err(invalid(
+            "static inference bias expects an FP16 matrix and matching bias",
+        ));
+    }
+    let output = f16_output(ctx, rows, cols)?;
+    unsafe {
+        check_cuda(abi::apxinf_smolvla_bias_f16(
+            gpu_ptr(input)?,
+            optional_ptr(bias)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, cols]),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+/// `concat_rows_f16`: stack two row-major FP16 matrices with equal columns.
+/// Routes to the dtype-generic cuda-new `concat_rows` layout semantic (two
+/// device copies), which is byte-exact.
+pub fn concat_rows_f16(ctx: &CudaContext, first: &Tensor, second: &Tensor) -> Result<Tensor> {
+    if first.dtype() != DType::F16 || second.dtype() != DType::F16 {
+        return Err(invalid(
+            "static inference row concatenation expects FP16 matrices",
+        ));
+    }
+    ops::concat_rows(ctx, first, second)
+}
+
+/// `concat_columns_f16`: concatenate equally tall FP16 matrices along their
+/// column dimension with a 2D strided device copy per input.
+pub fn concat_columns_f16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tensor> {
+    use super::contracts::output_tensor;
+    let first = tensors
+        .first()
+        .ok_or_else(|| invalid("column concatenation requires at least one tensor"))?;
+    let (rows, first_cols) = matrix_shape(first, "column concatenation")?;
+    if first.dtype() != DType::F16 || rows == 0 || first_cols == 0 {
+        return Err(invalid(
+            "column concatenation requires non-empty FP16 matrices",
+        ));
+    }
+    let expected_device = Device::Cuda(ctx.device_id());
+    let mut total_cols = 0usize;
+    for tensor in tensors {
+        let (tensor_rows, tensor_cols) = matrix_shape(tensor, "column concatenation")?;
+        if tensor.dtype() != DType::F16 || tensor_rows != rows || tensor_cols == 0 {
+            return Err(invalid(
+                "column concatenation requires equally tall, non-empty FP16 matrices",
+            ));
+        }
+        if tensor.device() != expected_device {
+            return Err(Error::DeviceMismatch {
+                expected: expected_device,
+                got: tensor.device(),
+            });
+        }
+        total_cols = total_cols
+            .checked_add(tensor_cols)
+            .ok_or_else(|| invalid("column concatenation width overflow"))?;
+    }
+    let row_bytes = total_cols
+        .checked_mul(DType::F16.size_in_bytes())
+        .ok_or_else(|| invalid("column concatenation row size overflow"))?;
+    let output = crate::workspace::output_buffer(
+        ctx,
+        rows.checked_mul(row_bytes)
+            .ok_or_else(|| invalid("column concatenation output size overflow"))?,
+    )?;
+    let mut column_offset = 0usize;
+    for tensor in tensors {
+        let tensor_cols = tensor.shape().dims()[1];
+        let tensor_row_bytes = tensor_cols * DType::F16.size_in_bytes();
+        crate::transfers::copy_tensor_2d_to_buffer(
+            ctx,
+            tensor,
+            &output,
+            column_offset * DType::F16.size_in_bytes(),
+            row_bytes,
+            tensor_row_bytes,
+            tensor_row_bytes,
+            rows,
+        )?;
+        column_offset += tensor_cols;
+    }
+    Ok(output_tensor(
+        ctx,
+        Shape::new(vec![rows, total_cols]),
+        DType::F16,
+        output,
+    ))
+}
+
+/// `euler_update_f16`: `output = state + velocity * dt` in FP16.
+pub fn euler_update_f16(
+    ctx: &CudaContext,
+    state: &Tensor,
+    velocity: &Tensor,
+    dt: f32,
+) -> Result<Tensor> {
+    use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+    use crate::ffi::abi::smolvla as abi;
+    if state.dtype() != DType::F16
+        || velocity.dtype() != DType::F16
+        || state.shape() != velocity.shape()
+    {
+        return Err(invalid(
+            "static inference Euler update expects matching FP16 tensors",
+        ));
+    }
+    let output = crate::workspace::output_buffer(ctx, state.size_in_bytes())?;
+    unsafe {
+        check_cuda(abi::apxinf_smolvla_euler_update_f16(
+            gpu_ptr(state)?,
+            gpu_ptr(velocity)?,
+            output.ptr(),
+            state.numel() as i64,
+            dt,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(make_gpu_tensor(
+        state.shape().clone(),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+// ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
+
+/// Allocation-free elementwise add into caller-owned decode storage.
+pub fn add_into(
+    ctx: &CudaContext,
+    dtype: DType,
+    a: &CudaBuffer,
+    b: &CudaBuffer,
+    output: &CudaBuffer,
+    count: usize,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_buffers};
+    use crate::ffi::abi::llm_decode as llmdec;
+    let bytes = checked_bytes(dtype, &[count], "decode add")?;
+    require_buffers(
+        ctx,
+        "decode add",
+        &[("A", a, bytes), ("B", b, bytes), ("output", output, bytes)],
+    )?;
+    let status = unsafe {
+        match dtype {
+            DType::F32 => llmdec::apxinf_llmdec_add_f32(
+                a.ptr(),
+                b.ptr(),
+                output.ptr(),
+                count as u32,
+                ctx.stream().handle(),
+            ),
+            DType::BF16 => llmdec::apxinf_llmdec_add_bf16(
+                a.ptr(),
+                b.ptr(),
+                output.ptr(),
+                count as u32,
+                ctx.stream().handle(),
+            ),
+            dtype => {
+                return Err(Error::Other(format!(
+                    "decode add does not support {dtype}"
+                )))
+            }
+        }
+    };
+    check_cuda(status)
+}
+
+/// Allocation-free elementwise multiply into caller-owned decode storage.
+pub fn mul_into(
+    ctx: &CudaContext,
+    dtype: DType,
+    a: &CudaBuffer,
+    b: &CudaBuffer,
+    output: &CudaBuffer,
+    count: usize,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_buffers};
+    use crate::ffi::abi::llm_decode as llmdec;
+    let bytes = checked_bytes(dtype, &[count], "decode multiply")?;
+    require_buffers(
+        ctx,
+        "decode multiply",
+        &[("A", a, bytes), ("B", b, bytes), ("output", output, bytes)],
+    )?;
+    let status = unsafe {
+        match dtype {
+            DType::F32 => llmdec::apxinf_llmdec_mul_f32(
+                a.ptr(),
+                b.ptr(),
+                output.ptr(),
+                count as u32,
+                ctx.stream().handle(),
+            ),
+            DType::BF16 => llmdec::apxinf_llmdec_mul_bf16(
+                a.ptr(),
+                b.ptr(),
+                output.ptr(),
+                count as u32,
+                ctx.stream().handle(),
+            ),
+            dtype => {
+                return Err(Error::Other(format!(
+                    "decode multiply does not support {dtype}"
+                )))
+            }
+        }
+    };
+    check_cuda(status)
 }

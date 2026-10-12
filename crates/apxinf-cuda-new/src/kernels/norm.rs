@@ -278,3 +278,191 @@ pub fn layer_quant_bf16_e4m3(
     }
     Ok(output)
 }
+
+// ── smolvla FP16 surface ────────────────────────────────────────────────────
+//
+// Ported verbatim from the legacy `kernels::norm` FP16 wrappers over the
+// `apxinf_smolvla_*` launchers (native/adapters/smolvla/ops.cu).
+
+/// `rms_f16`: RMS-normalize a `[rows, cols]` FP16 activation with a plain
+/// `[cols]` scale (the Xavier FP16 path).
+pub fn rms_f16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    use super::contracts::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
+    use crate::ffi::abi::smolvla as abi;
+    use apxinf_core::Error;
+    let (rows, cols) = matrix_shape(input, "RMSNorm")?;
+    if input.dtype() != DType::F16
+        || weight.dtype() != DType::F16
+        || weight.shape().dims() != [cols]
+    {
+        return Err(Error::Other(
+            "static inference FP16 RMSNorm shape mismatch".into(),
+        ));
+    }
+    let output = f16_output(ctx, rows, cols)?;
+    unsafe {
+        super::contracts::check_cuda(abi::apxinf_smolvla_rms_norm_f16(
+            gpu_ptr(input)?,
+            gpu_ptr(weight)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            eps,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, cols]),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+/// `layer_f16`: LayerNorm with FP16 weight and bias.
+pub fn layer_f16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    use super::contracts::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
+    use crate::ffi::abi::smolvla as abi;
+    use apxinf_core::Error;
+    let (rows, cols) = matrix_shape(input, "LayerNorm")?;
+    if [input, weight, bias]
+        .into_iter()
+        .any(|tensor| tensor.dtype() != DType::F16)
+        || weight.shape().dims() != [cols]
+        || bias.shape().dims() != [cols]
+    {
+        return Err(Error::Other(
+            "static inference FP16 LayerNorm shape mismatch".into(),
+        ));
+    }
+    let output = f16_output(ctx, rows, cols)?;
+    unsafe {
+        super::contracts::check_cuda(abi::apxinf_smolvla_layer_norm_f16(
+            gpu_ptr(input)?,
+            gpu_ptr(weight)?,
+            gpu_ptr(bias)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            eps,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, cols]),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+// ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
+
+/// RMS normalization into caller-owned storage.
+#[allow(clippy::too_many_arguments)]
+pub fn rms_into(
+    ctx: &CudaContext,
+    dtype: DType,
+    input: &crate::CudaBuffer,
+    weight: &crate::CudaBuffer,
+    output: &crate::CudaBuffer,
+    cols: usize,
+    rows: usize,
+    eps: f32,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_buffers, require_finite};
+    use crate::ffi::abi::llm_decode as abi;
+    use apxinf_core::Error;
+    require_finite("RMSNorm", &[eps])?;
+    if eps <= 0.0 {
+        return Err(Error::Other("RMSNorm epsilon must be positive".into()));
+    }
+    let matrix = checked_bytes(dtype, &[rows, cols], "RMSNorm")?;
+    let weight_size = checked_bytes(dtype, &[cols], "RMSNorm")?;
+    require_buffers(
+        ctx,
+        "RMSNorm",
+        &[
+            ("input", input, matrix),
+            ("weight", weight, weight_size),
+            ("output", output, matrix),
+        ],
+    )?;
+    let status = unsafe {
+        match dtype {
+            DType::F32 => abi::apxinf_llmdec_rms_norm_f32(
+                input.ptr(),
+                weight.ptr(),
+                output.ptr(),
+                cols as u32,
+                rows as u32,
+                eps,
+                ctx.stream().handle(),
+            ),
+            DType::BF16 => abi::apxinf_llmdec_rms_norm_bf16(
+                input.ptr(),
+                weight.ptr(),
+                output.ptr(),
+                cols as u32,
+                rows as u32,
+                eps,
+                ctx.stream().handle(),
+            ),
+            dtype => {
+                return Err(Error::Other(format!(
+                    "decode RMSNorm does not support {dtype}"
+                )))
+            }
+        }
+    };
+    check_cuda(status)
+}
+
+/// Fused residual add and BF16 RMS normalization into caller-owned storage.
+/// Writes `residual + delta` back into `residual` and the normed result into
+/// `output`, exactly like the legacy `rms_norm_add_bf16`.
+#[allow(clippy::too_many_arguments)]
+pub fn residual_add_rms_bf16_into(
+    ctx: &CudaContext,
+    residual: &crate::CudaBuffer,
+    delta: &crate::CudaBuffer,
+    weight: &crate::CudaBuffer,
+    output: &crate::CudaBuffer,
+    cols: usize,
+    rows: usize,
+    eps: f32,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_buffers, require_finite};
+    use crate::ffi::abi::llm_decode as abi;
+    require_finite("residual RMSNorm", &[eps])?;
+    let matrix = checked_bytes(DType::BF16, &[rows, cols], "residual RMSNorm")?;
+    let weight_size = checked_bytes(DType::BF16, &[cols], "residual RMSNorm")?;
+    require_buffers(
+        ctx,
+        "residual RMSNorm",
+        &[
+            ("residual", residual, matrix),
+            ("delta", delta, matrix),
+            ("weight", weight, weight_size),
+            ("output", output, matrix),
+        ],
+    )?;
+    check_cuda(unsafe {
+        abi::apxinf_llmdec_rms_norm_add_bf16(
+            residual.ptr(),
+            delta.ptr(),
+            weight.ptr(),
+            output.ptr(),
+            cols as u32,
+            rows as u32,
+            eps,
+            ctx.stream().handle(),
+        )
+    })
+}

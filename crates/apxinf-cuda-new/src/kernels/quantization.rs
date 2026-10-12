@@ -150,3 +150,48 @@ pub fn concat_rows_quantize_bf16_e4m3(
     }
     Ok(output)
 }
+
+/// `slice_columns_f16`: keep the leading `output_cols` columns of an FP16
+/// matrix. Ported from the legacy wrapper, which uses a strided 2D device
+/// copy rather than a kernel.
+pub fn slice_columns_f16(ctx: &CudaContext, input: &Tensor, output_cols: usize) -> Result<Tensor> {
+    use super::contracts::make_gpu_tensor;
+    if input.dtype() != DType::F16 {
+        return Err(Error::DTypeMismatch {
+            expected: DType::F16,
+            got: input.dtype(),
+        });
+    }
+    let shape = input.shape().dims();
+    if shape.len() != 2 || shape[0] == 0 || output_cols == 0 || output_cols > shape[1] {
+        return Err(Error::Other(format!(
+            "FP16 column slice expects [rows,input_cols] with 0 < output_cols <= input_cols, got {shape:?} -> {output_cols}"
+        )));
+    }
+    if output_cols == shape[1] {
+        return Ok(input.clone());
+    }
+    let (rows, input_cols) = (shape[0], shape[1]);
+    let output = crate::workspace::output_buffer(
+        ctx,
+        rows.checked_mul(output_cols)
+            .and_then(|elements| elements.checked_mul(DType::F16.size_in_bytes()))
+            .ok_or_else(|| Error::Other("FP16 column slice size overflow".into()))?,
+    )?;
+    crate::transfers::copy_tensor_2d_to_buffer(
+        ctx,
+        input,
+        &output,
+        0,
+        output_cols * DType::F16.size_in_bytes(),
+        input_cols * DType::F16.size_in_bytes(),
+        output_cols * DType::F16.size_in_bytes(),
+        rows,
+    )?;
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, output_cols]),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
