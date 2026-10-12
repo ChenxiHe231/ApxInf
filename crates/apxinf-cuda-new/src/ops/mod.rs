@@ -1,7 +1,6 @@
 //! Semantic CUDA APIs with selection and native state behind L1.
 
 mod attention;
-mod attn_ops;
 mod cache;
 mod gather;
 mod gdn;
@@ -26,12 +25,10 @@ pub(crate) use gemm::gemm_execution as execution;
 
 pub use crate::workspace::{ExecutionSession, GraphWorkspace};
 pub use attention::{
-    attention, decode_attention, decode_attention_workspace_bytes, kv_cache_attention,
-    packed_qkv_attention, segmented_attention, AttentionArgs, AttentionMask, AttentionPolicy,
-    KvCacheAttentionArgs, KvCacheDecodeMeta, PackedQkvAttentionArgs, SegmentedAttentionArgs,
-};
-pub use attn_ops::{
-    apply_output_gate, head_rms_norm, partial_rope, rotary_dim, split_query_and_gate,
+    apply_output_gate, attention, decode_attention, decode_attention_workspace_bytes,
+    kv_cache_attention, packed_qkv_attention, segmented_attention, split_query_and_gate,
+    AttentionArgs, AttentionMask, AttentionPolicy, KvCacheAttentionArgs, KvCacheDecodeMeta,
+    PackedQkvAttentionArgs, SegmentedAttentionArgs,
 };
 pub use cache::{concat_rows, reserve_prefix};
 pub use gather::{gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry};
@@ -51,8 +48,8 @@ pub use gemm::{
 };
 pub use model::{argmax, embedding_gather};
 pub use norm::{
-    fused_add_norm, norm, residual_add, Affine, BiasOrder, FusedAddNormArgs, NormArgs, NormKind,
-    QuantOut, ResidualAddArgs,
+    fused_add_norm, head_rms_norm, norm, residual_add, Affine, BiasOrder, FusedAddNormArgs,
+    NormArgs, NormKind, QuantOut, ResidualAddArgs,
 };
 pub use pointwise::{
     add_into, pointwise, swiglu, PointwiseActivation, PointwiseArgs, PointwiseSemantic,
@@ -60,7 +57,9 @@ pub use pointwise::{
 pub use quantization::{
     quantization, quantize_fp8_per_tensor, QuantizationArgs, QuantizationSemantic,
 };
-pub use rope::{decode_rope, rope, DecodeRopeArgs, RopeArgs, RopeSemantic};
+pub use rope::{
+    decode_rope, partial_rope, rope, rotary_dim, DecodeRopeArgs, RopeArgs, RopeSemantic,
+};
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
 pub fn prepare_with_session<T>(

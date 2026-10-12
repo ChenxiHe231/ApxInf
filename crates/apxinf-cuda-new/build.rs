@@ -333,7 +333,6 @@ fn main() {
         "attention/execution.cpp",
         "attention/providers/custom.cu",
         "linear_attention/execution.cpp",
-        "attn_helpers/execution.cpp",
         "reduction/execution.cpp",
         "sampling.cu",
         "norm.cu",
@@ -350,7 +349,9 @@ fn main() {
     generic_sources.push(native.join("kernels/custom/norm_offset.cu"));
     generic_sources.push(native.join("kernels/custom/gdn_ops.cu"));
     generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_tma.cpp"));
-    generic_sources.push(native.join("kernels/custom/attn_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/rope_partial.cu"));
+    generic_sources.push(native.join("kernels/custom/norm_head.cu"));
+    generic_sources.push(native.join("kernels/custom/attention_gates.cu"));
     generic_sources.push(native.join("kernels/custom/model_ops.cu"));
     generic_sources.push(native.join("tests/framework_backend.cu"));
     let cutlass_root = native.join("kernels/cutlass");

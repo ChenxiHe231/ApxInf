@@ -1,6 +1,7 @@
 #include "../include/apxinf_cuda/norm.h"
 #include "../framework/runtime_internal.h"
 #include "../kernels/custom/norm.cuh"
+#include "../kernels/custom/norm_head.h"
 #include "../kernels/custom/norm_offset.h"
 
 #include <climits>
@@ -462,5 +463,37 @@ extern "C" apxinf_status_t apxinf_norm_launch(
                   : (spec->dtype == APXINF_DTYPE_BF16
                          ? launch<__nv_bfloat16>(*spec, *bindings)
                          : launch<__half>(*spec, *bindings)));
+  });
+}
+
+// The family's per-head member. It writes its input in place and reduces over
+// the last axis of a [tokens, heads, head_dim] activation, neither of which the
+// [rows, cols] Spec can express, so it forwards straight to
+// kernels/custom/norm_head.cu. That is also the family's third reduction tree;
+// see norm_head.cu for why it is not rebuilt on the other two.
+
+namespace {
+
+bool norm_extent(int64_t value) { return value > 0 && value <= INT32_MAX; }
+
+}  // namespace
+
+extern "C" apxinf_status_t apxinf_attn_head_rms_norm(
+    void* data, const void* weight, int64_t rows, int64_t head_dim,
+    float epsilon, apxinf_cuda_stream_t stream) {
+  return apxinf::framework::abi_boundary([&] {
+    if (data == nullptr || weight == nullptr || !norm_extent(rows) ||
+        !norm_extent(head_dim)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid head RMSNorm arguments");
+    }
+    const int status = apxinf::cuda_new::norm_head::head_rms_norm(
+        data, weight, static_cast<int>(rows), static_cast<int>(head_dim),
+        epsilon, static_cast<cudaStream_t>(stream));
+    if (status != 0) {
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                    "head RMSNorm failed with status " +
+                        std::to_string(status));
+    }
   });
 }
