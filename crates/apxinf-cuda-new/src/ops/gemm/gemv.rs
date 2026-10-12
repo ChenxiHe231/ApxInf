@@ -50,7 +50,7 @@ pub fn fp8_gemv(
     }
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
     unsafe {
-        status::check(abi::apxinf_fp8_gemv(
+        status::check(abi::apxinf_gemm_fp8_gemv(
             weight_buffer.ptr(),
             activation_buffer.ptr(),
             output_buffer.ptr(),
@@ -106,7 +106,7 @@ pub fn nvfp4_gemv(
     }
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
     unsafe {
-        status::check(abi::apxinf_nvfp4_gemv(
+        status::check(abi::apxinf_gemm_nvfp4_gemv(
             weight_buffer.ptr(),
             weight_scale_buffer.ptr(),
             activation_buffer.ptr(),

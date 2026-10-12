@@ -15,7 +15,7 @@ apxinf_status_t apxinf_rope_launch(
    outputs. Kernel in kernels/custom/rope_partial.cu, which also records the
    two scope limits -- the mRoPE collapse is text-only, and the rotate-half
    pairing convention is part of the contract. */
-apxinf_status_t apxinf_attn_partial_rope(void* data, const void* positions,
+apxinf_status_t apxinf_rope_partial(void* data, const void* positions,
                                          int64_t tokens, int64_t heads,
                                          int64_t head_dim, int64_t rotary_dim,
                                          float theta,

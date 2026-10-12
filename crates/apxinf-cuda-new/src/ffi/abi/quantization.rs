@@ -42,7 +42,7 @@ unsafe extern "C" {
     /// arithmetic through [`Spec`], but its BF16 path is scalar where this one
     /// is 8-wide and the two differ on NaN input, so they are not yet
     /// interchangeable.
-    pub(crate) fn apxinf_quantize_fp8_per_tensor(
+    pub(crate) fn apxinf_quantization_fp8_per_tensor(
         input: *const c_void,
         output: *mut c_void,
         count: i64,

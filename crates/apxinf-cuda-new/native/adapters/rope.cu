@@ -221,7 +221,7 @@ bool rope_extent(int64_t value) { return value > 0 && value <= INT32_MAX; }
 
 }  // namespace
 
-extern "C" apxinf_status_t apxinf_attn_partial_rope(
+extern "C" apxinf_status_t apxinf_rope_partial(
     void* data, const void* positions, int64_t tokens, int64_t heads,
     int64_t head_dim, int64_t rotary_dim, float theta,
     apxinf_cuda_stream_t stream) {

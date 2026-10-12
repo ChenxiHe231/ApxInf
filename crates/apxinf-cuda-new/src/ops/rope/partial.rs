@@ -50,7 +50,7 @@ pub fn partial_rope(
     let data_buffer = tensor_storage(ctx, data, DType::BF16, &dims)?;
     let position_buffer = tensor_storage(ctx, positions, DType::I32, &[tokens])?;
     unsafe {
-        status::check(abi::apxinf_attn_partial_rope(
+        status::check(abi::apxinf_rope_partial(
             data_buffer.ptr(),
             position_buffer.ptr(),
             tokens as i64,

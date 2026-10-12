@@ -482,7 +482,7 @@ bool norm_extent(int64_t value) { return value > 0 && value <= INT32_MAX; }
 
 }  // namespace
 
-extern "C" apxinf_status_t apxinf_attn_head_rms_norm(
+extern "C" apxinf_status_t apxinf_norm_head_rms(
     void* data, const void* weight, int64_t rows, int64_t head_dim,
     float epsilon, apxinf_cuda_stream_t stream) {
   return apxinf::framework::abi_boundary([&] {

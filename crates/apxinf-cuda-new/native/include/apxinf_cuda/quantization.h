@@ -17,7 +17,7 @@ apxinf_status_t apxinf_quantization_launch(
    arithmetic, but its BF16 path is scalar where this one is 8-wide, and the two
    differ on NaN input. Kernel in kernels/custom/quantization_ops.cu; merging
    them is a measured change, not a rename. */
-apxinf_status_t apxinf_quantize_fp8_per_tensor(const void* input, void* output,
+apxinf_status_t apxinf_quantization_fp8_per_tensor(const void* input, void* output,
                                                int64_t count,
                                                float input_scale,
                                                apxinf_cuda_stream_t stream);

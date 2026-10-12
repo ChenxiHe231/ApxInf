@@ -35,7 +35,7 @@ pub fn swiglu(ctx: &CudaContext, fused: &Tensor, output: &Tensor) -> Result<()> 
     let fused_buffer = tensor_storage(ctx, fused, DType::BF16, &fused_dims)?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
     unsafe {
-        status::check(abi::apxinf_swiglu_bf16(
+        status::check(abi::apxinf_pointwise_swiglu(
             fused_buffer.ptr(),
             output_buffer.ptr(),
             output_dims[0] as i64,
@@ -54,7 +54,7 @@ pub fn add_into(ctx: &CudaContext, addend: &Tensor, accumulator: &Tensor) -> Res
     let addend_buffer = tensor_storage(ctx, addend, DType::BF16, &dims)?;
     let accumulator_buffer = tensor_storage(ctx, accumulator, DType::BF16, &dims)?;
     unsafe {
-        status::check(abi::apxinf_new_add_bf16(
+        status::check(abi::apxinf_pointwise_add_into(
             addend_buffer.ptr(),
             accumulator_buffer.ptr(),
             dims.iter().product::<usize>() as i64,

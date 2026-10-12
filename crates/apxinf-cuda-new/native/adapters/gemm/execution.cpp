@@ -651,7 +651,7 @@ extern "C" uint64_t apxinf_gemm_execution_weight_prepack_count(
 // implementation each, nothing to measure between, so there is no Recipe or
 // Execution to carry. They forward straight to kernels/custom/gemv.cu.
 
-extern "C" apxinf_status_t apxinf_fp8_gemv(const void* weight,
+extern "C" apxinf_status_t apxinf_gemm_fp8_gemv(const void* weight,
                                            const void* activation,
                                            void* output, int64_t n, int64_t k,
                                            float alpha,
@@ -671,7 +671,7 @@ extern "C" apxinf_status_t apxinf_fp8_gemv(const void* weight,
   });
 }
 
-extern "C" apxinf_status_t apxinf_nvfp4_gemv(
+extern "C" apxinf_status_t apxinf_gemm_nvfp4_gemv(
     const void* weight, const void* weight_scales, const void* activation,
     const void* activation_scales, void* output, int64_t n, int64_t k,
     float alpha, apxinf_cuda_stream_t stream) {

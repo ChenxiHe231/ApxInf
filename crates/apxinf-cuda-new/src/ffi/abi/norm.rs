@@ -95,7 +95,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     /// Per-head RMSNorm in place. Not a [`Spec`] pipeline: it writes its input
     /// in place and reduces over the last axis of a three-rank activation.
-    pub(crate) fn apxinf_attn_head_rms_norm(
+    pub(crate) fn apxinf_norm_head_rms(
         data: *mut c_void,
         weight: *const c_void,
         rows: i64,

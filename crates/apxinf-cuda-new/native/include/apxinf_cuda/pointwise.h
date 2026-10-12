@@ -17,12 +17,12 @@ apxinf_status_t apxinf_pointwise_launch(
 /* SwiGLU over a fused [rows, 2*width] gate/up projection, gate first. This is
    the SiLU-gated form; the GEGLU semantic of apxinf_pointwise_launch is the
    GELU one and is not interchangeable. */
-apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up, void* output,
+apxinf_status_t apxinf_pointwise_swiglu(const void* fused_gate_up, void* output,
                                    int64_t rows, int64_t width,
                                    apxinf_cuda_stream_t stream);
 
 /* accumulator += addend, elementwise. Residual connections. */
-apxinf_status_t apxinf_new_add_bf16(const void* addend, void* accumulator,
+apxinf_status_t apxinf_pointwise_add_into(const void* addend, void* accumulator,
                                 int64_t count, apxinf_cuda_stream_t stream);
 
 #ifdef __cplusplus

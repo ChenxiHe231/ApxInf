@@ -35,7 +35,7 @@ pub fn head_rms_norm(
     let data_buffer = tensor_storage(ctx, data, DType::BF16, &dims)?;
     let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[dims[1]])?;
     unsafe {
-        status::check(abi::apxinf_attn_head_rms_norm(
+        status::check(abi::apxinf_norm_head_rms(
             data_buffer.ptr(),
             weight_buffer.ptr(),
             dims[0] as i64,

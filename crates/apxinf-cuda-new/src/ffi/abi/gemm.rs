@@ -134,7 +134,7 @@ unsafe extern "C" {
 
     /// The M=1 projections. One implementation each and nothing to measure
     /// between, so they bypass prepare/enqueue and take flat parameters.
-    pub(crate) fn apxinf_fp8_gemv(
+    pub(crate) fn apxinf_gemm_fp8_gemv(
         weight: *const c_void,
         activation: *const c_void,
         output: *mut c_void,
@@ -144,7 +144,7 @@ unsafe extern "C" {
         stream: CudaStream,
     ) -> i32;
 
-    pub(crate) fn apxinf_nvfp4_gemv(
+    pub(crate) fn apxinf_gemm_nvfp4_gemv(
         weight: *const c_void,
         weight_scales: *const c_void,
         activation: *const c_void,

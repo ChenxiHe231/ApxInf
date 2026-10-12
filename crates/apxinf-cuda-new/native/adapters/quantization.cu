@@ -321,7 +321,7 @@ extern "C" apxinf_status_t apxinf_quantization_launch(
 // BF16 path is scalar where this one is 8-wide, and the two differ on NaN
 // input, so they are not yet interchangeable.
 
-extern "C" apxinf_status_t apxinf_quantize_fp8_per_tensor(
+extern "C" apxinf_status_t apxinf_quantization_fp8_per_tensor(
     const void* input, void* output, int64_t count, float input_scale,
     apxinf_cuda_stream_t stream) {
   return apxinf::framework::abi_boundary([&] {

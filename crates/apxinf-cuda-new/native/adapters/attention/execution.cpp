@@ -600,7 +600,7 @@ bool gate_extent(int64_t value) { return value > 0 && value <= INT32_MAX; }
 
 }  // namespace
 
-extern "C" apxinf_status_t apxinf_attn_split_query_and_gate(
+extern "C" apxinf_status_t apxinf_attention_split_query_and_gate(
     const void* fused, void* query, void* gate, int64_t tokens, int64_t heads,
     int64_t head_dim, apxinf_cuda_stream_t stream) {
   return apxinf::framework::abi_boundary([&] {
@@ -621,7 +621,7 @@ extern "C" apxinf_status_t apxinf_attn_split_query_and_gate(
   });
 }
 
-extern "C" apxinf_status_t apxinf_attn_apply_output_gate(
+extern "C" apxinf_status_t apxinf_attention_apply_output_gate(
     void* data, const void* gate, int64_t count,
     apxinf_cuda_stream_t stream) {
   return apxinf::framework::abi_boundary([&] {

@@ -18,7 +18,7 @@ apxinf_status_t apxinf_gather_launch(
    The index dtype differs (int32 vs uint32) and so does out-of-range handling
    (clamp to row 0 vs write zeros). Kernel in
    kernels/custom/gather_embedding.cu. */
-apxinf_status_t apxinf_model_embedding_gather(const void* table,
+apxinf_status_t apxinf_gather_embedding(const void* table,
                                               const void* ids, void* output,
                                               int64_t tokens, int64_t hidden,
                                               int64_t vocab,

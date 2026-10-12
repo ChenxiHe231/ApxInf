@@ -43,7 +43,7 @@ pub fn embedding_gather(
     let id_buffer = tensor_storage(ctx, ids, DType::I32, &[tokens])?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
     unsafe {
-        status::check(abi::apxinf_model_embedding_gather(
+        status::check(abi::apxinf_gather_embedding(
             table_buffer.ptr(),
             id_buffer.ptr(),
             output_buffer.ptr(),

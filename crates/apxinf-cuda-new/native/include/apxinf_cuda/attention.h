@@ -32,12 +32,12 @@ int64_t apxinf_decode_attention_workspace_bytes(void);
 // before o_proj. One implementation each and nothing to measure, so they take
 // flat parameters rather than joining prepare/enqueue.
 // Kernels in kernels/custom/attention_gates.cu.
-apxinf_status_t apxinf_attn_split_query_and_gate(
+apxinf_status_t apxinf_attention_split_query_and_gate(
     const void* fused, void* query, void* gate, int64_t tokens, int64_t heads,
     int64_t head_dim, apxinf_cuda_stream_t stream);
 
 // data *= sigmoid(gate). Not silu: see kernels/custom/attention_gates.h.
-apxinf_status_t apxinf_attn_apply_output_gate(void* data, const void* gate,
+apxinf_status_t apxinf_attention_apply_output_gate(void* data, const void* gate,
                                               int64_t count,
                                               apxinf_cuda_stream_t stream);
 apxinf_status_t apxinf_decode_attention(

@@ -44,7 +44,7 @@ pub fn quantize_fp8_per_tensor(
     let source = tensor_storage(ctx, input, DType::BF16, &dims)?;
     let destination = tensor_storage(ctx, output, DType::F8E4M3, &dims)?;
     unsafe {
-        status::check(abi::apxinf_quantize_fp8_per_tensor(
+        status::check(abi::apxinf_quantization_fp8_per_tensor(
             source.ptr(),
             destination.ptr(),
             dims.iter().product::<usize>() as i64,
