@@ -358,3 +358,188 @@ pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor
     }
     Ok(output)
 }
+
+// ── smolvla FP16 surface ────────────────────────────────────────────────────
+//
+// Ported verbatim from the legacy `kernels::activation` FP16 wrappers over the
+// `apxinf_smolvla_*` launchers (native/adapters/smolvla/ops.cu).
+
+/// `swiglu_f16`: FP16 SwiGLU over packed `[rows, 2*inner]` gate/up halves.
+pub fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
+    use super::contracts::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
+    use crate::ffi::abi::smolvla as abi;
+    let (rows, twice_inner) = matrix_shape(gate_up, "SwiGLU")?;
+    if gate_up.dtype() != DType::F16 || twice_inner % 2 != 0 {
+        return Err(Error::Other(
+            "static inference FP16 SwiGLU expects [rows,2*inner]".into(),
+        ));
+    }
+    let inner = twice_inner / 2;
+    let output = f16_output(ctx, rows, inner)?;
+    unsafe {
+        check_cuda(abi::apxinf_smolvla_swiglu_f16(
+            gpu_ptr(gate_up)?,
+            output.ptr(),
+            rows as i32,
+            inner as i32,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, inner]),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+/// `bias_gelu_f16`: optional-bias tanh-GELU over an FP16 matrix.
+pub fn bias_gelu_f16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    value: Option<&Tensor>,
+) -> Result<Tensor> {
+    use super::contracts::{
+        check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
+    };
+    use crate::ffi::abi::smolvla as abi;
+    let (rows, cols) = matrix_shape(input, "bias GELU")?;
+    if input.dtype() != DType::F16
+        || value.is_some_and(|bias| bias.dtype() != DType::F16 || bias.shape().dims() != [cols])
+    {
+        return Err(Error::Other(
+            "static inference FP16 bias GELU has incompatible dtype or shape".into(),
+        ));
+    }
+    let output = f16_output(ctx, rows, cols)?;
+    unsafe {
+        check_cuda(abi::apxinf_smolvla_bias_gelu_f16(
+            gpu_ptr(input)?,
+            optional_ptr(value)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, cols]),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+/// `bias_silu_f16`: optional-bias SiLU over an FP16 matrix.
+pub fn bias_silu_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+    use super::contracts::{
+        check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
+    };
+    use crate::ffi::abi::smolvla as abi;
+    let (rows, cols) = matrix_shape(input, "bias SiLU")?;
+    if input.dtype() != DType::F16
+        || bias.is_some_and(|x| x.dtype() != DType::F16 || x.shape().dims() != [cols])
+    {
+        return Err(Error::Other(
+            "static inference bias SiLU expects an FP16 matrix and matching bias".into(),
+        ));
+    }
+    let output = f16_output(ctx, rows, cols)?;
+    unsafe {
+        check_cuda(abi::apxinf_smolvla_bias_silu_f16(
+            gpu_ptr(input)?,
+            optional_ptr(bias)?,
+            output.ptr(),
+            rows as i32,
+            cols as i32,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(make_gpu_tensor(
+        Shape::new(vec![rows, cols]),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+// ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
+//
+// Direct launchers over the llm_decode adapter: no allocation, no resource
+// creation, writes into caller-owned decode workspace buffers. Arithmetic is
+// the legacy kernel's, copied verbatim into native/adapters/llm_decode.
+
+/// Allocation-free SiLU into caller-owned decode storage.
+pub fn silu_into(
+    ctx: &CudaContext,
+    dtype: DType,
+    input: &crate::CudaBuffer,
+    output: &crate::CudaBuffer,
+    count: usize,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_buffers};
+    use crate::ffi::abi::llm_decode as abi;
+    let bytes = checked_bytes(dtype, &[count], "decode SiLU")?;
+    require_buffers(
+        ctx,
+        "decode SiLU",
+        &[("input", input, bytes), ("output", output, bytes)],
+    )?;
+    let status = unsafe {
+        match dtype {
+            DType::F32 => abi::apxinf_llmdec_silu_f32(
+                input.ptr(),
+                output.ptr(),
+                count as u32,
+                ctx.stream().handle(),
+            ),
+            DType::BF16 => abi::apxinf_llmdec_silu_bf16(
+                input.ptr(),
+                output.ptr(),
+                count as u32,
+                ctx.stream().handle(),
+            ),
+            dtype => {
+                return Err(Error::Other(format!(
+                    "decode SiLU does not support {dtype}"
+                )))
+            }
+        }
+    };
+    check_cuda(status)
+}
+
+/// Fused BF16 SiLU(gate) * up into caller-owned decode storage.
+pub fn silu_mul_bf16_into(
+    ctx: &CudaContext,
+    gate_up: &crate::CudaBuffer,
+    output: &crate::CudaBuffer,
+    intermediate: usize,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_buffers};
+    use crate::ffi::abi::llm_decode as abi;
+    require_buffers(
+        ctx,
+        "decode SiLU multiply",
+        &[
+            (
+                "gate_up",
+                gate_up,
+                checked_bytes(DType::BF16, &[2, intermediate], "decode SiLU multiply")?,
+            ),
+            (
+                "output",
+                output,
+                checked_bytes(DType::BF16, &[intermediate], "decode SiLU multiply")?,
+            ),
+        ],
+    )?;
+    check_cuda(unsafe {
+        abi::apxinf_llmdec_silu_mul_bf16(
+            gate_up.ptr(),
+            output.ptr(),
+            intermediate as u32,
+            ctx.stream().handle(),
+        )
+    })
+}

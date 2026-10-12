@@ -538,3 +538,274 @@ fn vision_split_common(
 fn to_u32(value: usize, what: &str) -> Result<u32> {
     u32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds u32")))
 }
+
+// ── smolvla RoPE surface ────────────────────────────────────────────────────
+
+/// `apply_batched`: standalone half-split RoPE over `[seq, n_heads, head_dim]`.
+/// Legacy signature kept (it dispatched on dtype); cuda-new carries the BF16
+/// operator, which is what SmolVLA's BF16 cross-attention path uses.
+pub fn apply_batched(
+    ctx: &CudaContext,
+    input: &Tensor,
+    n_heads: usize,
+    head_dim: usize,
+    rope_theta: f32,
+    pos_offset: u32,
+) -> Result<Tensor> {
+    match input.dtype() {
+        DType::BF16 => {
+            ops::rope_apply_batched(ctx, input, n_heads, head_dim, rope_theta, pos_offset)
+        }
+        dtype => Err(Error::Other(format!(
+            "CUDA rope_batched does not support {dtype}"
+        ))),
+    }
+}
+
+/// `apply_half_split_f16`: the half-split RoPE convention used by SmolVLA
+/// FP16 cross-attention. Ported verbatim from the legacy wrapper over the
+/// `apxinf_smolvla_rope_half_split_f16` launcher.
+pub fn apply_half_split_f16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    n_heads: usize,
+    head_dim: usize,
+    rope_theta: f32,
+    pos_offset: u32,
+) -> Result<Tensor> {
+    use crate::ffi::abi::smolvla as abi;
+    let dims = input.shape().dims();
+    let seq_len = if dims.len() == 2 { 1 } else { dims[0] };
+    let out_buf = crate::workspace::output_buffer(ctx, input.size_in_bytes())?;
+
+    require_finite("RoPE", &[rope_theta])?;
+    if input.dtype() != DType::F16
+        || head_dim % 2 != 0
+        || rope_theta <= 0.0
+        || dims != [seq_len, n_heads, head_dim]
+    {
+        return Err(Error::Other(
+            "half-split FP16 RoPE received invalid shape or dtype".into(),
+        ));
+    }
+
+    unsafe {
+        super::contracts::check_cuda(abi::apxinf_smolvla_rope_half_split_f16(
+            gpu_ptr(input)?,
+            out_buf.ptr(),
+            head_dim as u32,
+            n_heads as u32,
+            seq_len as u32,
+            rope_theta,
+            pos_offset,
+            ctx.stream().handle(),
+        ))?;
+    }
+
+    Ok(make_gpu_tensor(
+        input.shape().clone(),
+        input.dtype(),
+        ctx.device_id(),
+        out_buf,
+    ))
+}
+
+/// `split_qkv_apply_f16`: split a packed FP16 GQA projection and rotate Q/K
+/// into fresh per-call buffers. The cuda-new RoPE operator carries the same
+/// dtype-templated split kernel, so this routes through it with F16 outputs.
+#[allow(clippy::too_many_arguments)]
+pub fn split_qkv_apply_f16(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    q_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    theta: f32,
+    position_offset: usize,
+) -> Result<QkvTensors> {
+    let dims = qkv.shape().dims();
+    if dims.len() != 2 || qkv.dtype() != DType::F16 {
+        return Err(Error::Other(
+            "packed FP16 QKV must be a rank-2 FP16 tensor".into(),
+        ));
+    }
+    let tokens = dims[0];
+    let mut q = ctx.allocate_output(Shape::new(vec![tokens, q_heads, head_dim]), DType::F16)?;
+    let kv_shape = Shape::new(vec![tokens, kv_heads, head_dim]);
+    let mut k = ctx.allocate_output(kv_shape.clone(), DType::F16)?;
+    let mut v = ctx.allocate_output(kv_shape, DType::F16)?;
+    ops::rope(
+        ctx,
+        ops::RopeArgs {
+            semantic: ops::RopeSemantic::SplitQkvRope,
+            qkv,
+            bias,
+            q: &mut q,
+            k: &mut k,
+            v: &mut v,
+            q_heads,
+            kv_heads,
+            head_dim,
+            theta,
+            position_offset,
+            kv_output_offset: 0,
+        },
+    )?;
+    Ok(QkvTensors { q, k, v })
+}
+
+// ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
+
+/// Apply RoPE into caller-owned storage using a device-resident position.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_into(
+    ctx: &CudaContext,
+    dtype: DType,
+    input: &crate::CudaBuffer,
+    output: &crate::CudaBuffer,
+    head_dim: usize,
+    heads: usize,
+    theta: f32,
+    position: crate::CudaDeviceAddress,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
+    use crate::ffi::abi::llm_decode as abi;
+    require_finite("RoPE", &[theta])?;
+    if head_dim % 2 != 0 || theta <= 0.0 {
+        return Err(Error::Other(
+            "RoPE requires an even head dimension and positive theta".into(),
+        ));
+    }
+    let bytes = checked_bytes(dtype, &[heads, head_dim], "RoPE")?;
+    require_buffers(
+        ctx,
+        "RoPE",
+        &[("input", input, bytes), ("output", output, bytes)],
+    )?;
+    require_address(ctx, "RoPE", "position", position, 4)?;
+    let status = unsafe {
+        match dtype {
+            DType::F32 => abi::apxinf_llmdec_rope_decode_f32(
+                input.ptr(),
+                output.ptr(),
+                head_dim as u32,
+                heads as u32,
+                theta,
+                position.ptr(),
+                ctx.stream().handle(),
+            ),
+            DType::BF16 => abi::apxinf_llmdec_rope_decode_bf16(
+                input.ptr(),
+                output.ptr(),
+                head_dim as u32,
+                heads as u32,
+                theta,
+                position.ptr(),
+                ctx.stream().handle(),
+            ),
+            dtype => {
+                return Err(Error::Other(format!(
+                    "decode RoPE does not support {dtype}"
+                )))
+            }
+        }
+    };
+    check_cuda(status)
+}
+
+/// Apply multimodal RoPE into caller-owned BF16 storage. `positions` is a
+/// `[3]` u32 device buffer of per-token (t, h, w) axes.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_mrope_bf16_into(
+    ctx: &CudaContext,
+    input: &crate::CudaBuffer,
+    output: &crate::CudaBuffer,
+    head_dim: usize,
+    heads: usize,
+    theta: f32,
+    positions: crate::CudaDeviceAddress,
+    section_h: usize,
+    section_w: usize,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
+    use crate::ffi::abi::llm_decode as abi;
+    require_finite("MRoPE", &[theta])?;
+    if head_dim % 2 != 0 || section_h + section_w > head_dim / 2 || theta <= 0.0 {
+        return Err(Error::Other(
+            "MRoPE received invalid head/section dimensions or theta".into(),
+        ));
+    }
+    let bytes = checked_bytes(DType::BF16, &[heads, head_dim], "MRoPE")?;
+    require_buffers(
+        ctx,
+        "MRoPE",
+        &[("input", input, bytes), ("output", output, bytes)],
+    )?;
+    require_address(ctx, "MRoPE", "positions", positions, 12)?;
+    check_cuda(unsafe {
+        abi::apxinf_llmdec_rope_mrope_decode_bf16(
+            input.ptr(),
+            output.ptr(),
+            head_dim as u32,
+            heads as u32,
+            theta,
+            positions.ptr(),
+            section_h as u32,
+            section_w as u32,
+            ctx.stream().handle(),
+        )
+    })
+}
+
+/// Apply BF16 RoPE to K and write it directly into a head-major
+/// `[kv_heads, max_seq_len, head_dim]` KV cache at the device-resident
+/// position.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_k_write_cache_bf16(
+    ctx: &CudaContext,
+    input: &crate::CudaBuffer,
+    cache: &crate::CudaBuffer,
+    head_dim: usize,
+    kv_heads: usize,
+    max_seq_len: usize,
+    theta: f32,
+    position: crate::CudaDeviceAddress,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
+    use crate::ffi::abi::llm_decode as abi;
+    require_finite("RoPE K write", &[theta])?;
+    require_buffers(
+        ctx,
+        "RoPE K write",
+        &[
+            (
+                "input",
+                input,
+                checked_bytes(DType::BF16, &[kv_heads, head_dim], "RoPE K write")?,
+            ),
+            (
+                "cache",
+                cache,
+                checked_bytes(
+                    DType::BF16,
+                    &[kv_heads, max_seq_len, head_dim],
+                    "RoPE K write",
+                )?,
+            ),
+        ],
+    )?;
+    require_address(ctx, "RoPE K write", "position", position, 4)?;
+    check_cuda(unsafe {
+        abi::apxinf_llmdec_rope_k_write_bf16(
+            input.ptr(),
+            cache.ptr(),
+            head_dim as u32,
+            kv_heads as u32,
+            max_seq_len as u32,
+            theta,
+            position.ptr(),
+            ctx.stream().handle(),
+        )
+    })
+}

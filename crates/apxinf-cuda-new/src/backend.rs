@@ -228,10 +228,10 @@ impl Backend for CudaNewBackend {
     }
 
     fn add(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        let dims = a.shape().clone();
-        let output = self.ctx.allocate_output(dims, DType::BF16)?;
-        ops::elementwise_add(&self.ctx, a, b, &output)?;
-        Ok(output)
+        // Dtype-dispatching like the legacy backend: smolvla's Xavier FP16
+        // path adds residuals through `Backend::add`. BF16 keeps the exact
+        // cuda-new operator route it had before.
+        crate::kernels::elementwise::add(&self.ctx, a, b)
     }
 
     fn mul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {

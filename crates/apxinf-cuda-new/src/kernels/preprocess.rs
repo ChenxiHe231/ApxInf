@@ -259,3 +259,134 @@ pub fn rgb_u8_to_temporal2_merge2_rect_bf16(
     }
     Ok(())
 }
+
+/// `rgb_u8_to_patches_f16`: the FP16-output variant of the patchification
+/// (SmolVLA's Xavier FP16 path). The gather kernel is dtype-templated with
+/// identical addressing and normalization arithmetic.
+pub fn rgb_u8_to_patches_f16(
+    ctx: &CudaContext,
+    images: &CudaBuffer,
+    patches: &Tensor,
+    views: usize,
+    image_size: usize,
+    patch_size: usize,
+    layout: ImageLayout,
+) -> Result<()> {
+    if patches.dtype() != DType::F16 {
+        return Err(Error::Other(
+            "rgb_u8_to_patches_f16 writes FP16 patches".into(),
+        ));
+    }
+    let mut out = patches.clone();
+    let args = ops::GatherArgs::rgb_to_patches(
+        images,
+        &mut out,
+        ops::GatherPatchGeometry {
+            views,
+            image_size,
+            patch_size,
+            nhwc: layout == ImageLayout::Nhwc,
+        },
+    );
+    ops::gather(ctx, args)
+}
+
+// ── smolvla pixel shuffle ───────────────────────────────────────────────────
+//
+// Ported verbatim from the legacy `kernels::preprocess` wrappers over the
+// `apxinf_smolvla_*` launchers (native/adapters/smolvla/ops.cu).
+
+/// `pixel_shuffle_4_bf16`: SmolVLA's 4x4 pixel shuffle over per-view token
+/// grids, `[views*T, W] -> [views*T/16, W*16]`.
+pub fn pixel_shuffle_4_bf16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    tokens_per_view: usize,
+) -> Result<Tensor> {
+    use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+    use crate::ffi::abi::smolvla as abi;
+    let input_shape = input.shape().dims();
+    if input.dtype() != DType::BF16
+        || input_shape.len() != 2
+        || tokens_per_view == 0
+        || input_shape[0] % tokens_per_view != 0
+        || tokens_per_view % 16 != 0
+    {
+        return Err(Error::Other(
+            "BF16 pixel-shuffle-4 input/token shape mismatch".into(),
+        ));
+    }
+    let views = input_shape[0] / tokens_per_view;
+    let output_rows = views * tokens_per_view / 16;
+    let output_columns = input_shape[1]
+        .checked_mul(16)
+        .ok_or_else(|| Error::Other("BF16 pixel-shuffle output width overflow".into()))?;
+    let output_elements = output_rows
+        .checked_mul(output_columns)
+        .ok_or_else(|| Error::Other("BF16 pixel-shuffle output size overflow".into()))?;
+    let output =
+        crate::workspace::output_buffer(ctx, output_elements * DType::BF16.size_in_bytes())?;
+    unsafe {
+        check_cuda(abi::apxinf_smolvla_pixel_shuffle_4_bf16(
+            gpu_ptr(input)?,
+            output.ptr(),
+            views as i32,
+            tokens_per_view as i32,
+            input_shape[1] as i32,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(make_gpu_tensor(
+        apxinf_core::Shape::new(vec![output_rows, output_columns]),
+        DType::BF16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+/// `pixel_shuffle_4_f16`: the FP16 variant of the 4x4 pixel shuffle.
+pub fn pixel_shuffle_4_f16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    tokens_per_view: usize,
+) -> Result<Tensor> {
+    use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+    use crate::ffi::abi::smolvla as abi;
+    let input_shape = input.shape().dims();
+    if input.dtype() != DType::F16
+        || input_shape.len() != 2
+        || tokens_per_view == 0
+        || input_shape[0] % tokens_per_view != 0
+        || tokens_per_view % 16 != 0
+    {
+        return Err(Error::Other(
+            "FP16 pixel-shuffle-4 input/token shape mismatch".into(),
+        ));
+    }
+    let views = input_shape[0] / tokens_per_view;
+    let output_rows = views * tokens_per_view / 16;
+    let output_columns = input_shape[1]
+        .checked_mul(16)
+        .ok_or_else(|| Error::Other("FP16 pixel-shuffle output width overflow".into()))?;
+    let output_elements = output_rows
+        .checked_mul(output_columns)
+        .ok_or_else(|| Error::Other("FP16 pixel-shuffle output size overflow".into()))?;
+    let output =
+        crate::workspace::output_buffer(ctx, output_elements * DType::F16.size_in_bytes())?;
+    unsafe {
+        check_cuda(abi::apxinf_smolvla_pixel_shuffle_4_f16(
+            gpu_ptr(input)?,
+            output.ptr(),
+            views as i32,
+            tokens_per_view as i32,
+            input_shape[1] as i32,
+            ctx.stream().handle(),
+        ))?;
+    }
+    Ok(make_gpu_tensor(
+        apxinf_core::Shape::new(vec![output_rows, output_columns]),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
