@@ -13,9 +13,9 @@ namespace apxinf::cuda_new::preprocess_ops {
 // by (view, merge group, merge offset). `nhwc` selects the input layout.
 // Rescaling happens in float64 then rounds to float32, matching Transformers.
 int rgb_u8_to_normalized_temporal_merged_patches_bf16(
-    const void* images, void* patches, int views, int image_size,
-    int patch_size, int temporal_patch_size, int merge_size, bool nhwc,
-    double rescale_factor, const float mean[3], const float std[3],
+    const void* images, void* patches, int views, int image_height,
+    int image_width, int patch_size, int temporal_patch_size, int merge_size,
+    bool nhwc, double rescale_factor, const float mean[3], const float std[3],
     cudaStream_t stream);
 
 }  // namespace apxinf::cuda_new::preprocess_ops
