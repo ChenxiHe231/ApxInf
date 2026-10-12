@@ -242,32 +242,121 @@ fn execute(ctx: &CudaContext, args: RawArgs<'_>) -> Result<()> {
     launch::execute(ctx, normalize(ctx, args)?)
 }
 
+// Args -> RawArgs is kept as its own function per entry point so a test can
+// assert the Spec fields a given Args produces without launching anything.
+// This mapping is the whole content of the field model: a bug here silently
+// routes an operator to an arithmetically different kernel, which is exactly
+// what the nine fused semantics used to do by falling through.
+
+fn norm_raw_args(args: NormArgs<'_>) -> RawArgs<'_> {
+    let stage = stage(&args.kind, &args.affine);
+    let output_scale = quant_scale(&args.post);
+    RawArgs {
+        fields: Fields {
+            semantic: abi::SEMANTIC_NORM,
+            norm_kind: stage.norm_kind,
+            affine_kind: stage.affine_kind,
+            has_gate: false,
+            bias_order: abi::BIAS_ORDER_SINGLE_ROUND,
+        },
+        input: args.input,
+        bias: None,
+        residual: None,
+        weight: stage.weight,
+        norm_bias: stage.norm_bias,
+        norm_style: stage.norm_style,
+        gate_style: None,
+        hidden: None,
+        normalized: Some(args.out),
+        eps: args.eps,
+        output_scale,
+    }
+}
+
+fn fused_add_norm_raw_args(args: FusedAddNormArgs<'_>) -> RawArgs<'_> {
+    let stage = stage(&args.kind, &args.affine);
+    let output_scale = quant_scale(&args.post);
+    let has_gate = args.gate.is_some();
+    RawArgs {
+        fields: Fields {
+            semantic: abi::SEMANTIC_FUSED_ADD_NORM,
+            norm_kind: stage.norm_kind,
+            affine_kind: stage.affine_kind,
+            has_gate,
+            bias_order: abi::BIAS_ORDER_SINGLE_ROUND,
+        },
+        input: args.input,
+        bias: args.bias,
+        residual: Some(args.residual),
+        weight: stage.weight,
+        norm_bias: stage.norm_bias,
+        norm_style: stage.norm_style,
+        gate_style: args.gate,
+        hidden: Some(args.hidden),
+        normalized: Some(args.normalized),
+        eps: args.eps,
+        output_scale,
+    }
+}
+
+fn residual_add_raw_args(args: ResidualAddArgs<'_>) -> RawArgs<'_> {
+    let bias_order = match args.order {
+        BiasOrder::SingleRound => abi::BIAS_ORDER_SINGLE_ROUND,
+        BiasOrder::RoundAfterBias => abi::BIAS_ORDER_ROUND_AFTER_BIAS,
+    };
+    let has_gate = args.gate.is_some();
+    RawArgs {
+        fields: Fields {
+            semantic: abi::SEMANTIC_RESIDUAL_ADD,
+            norm_kind: abi::NORM_KIND_NONE,
+            affine_kind: abi::AFFINE_NONE,
+            has_gate,
+            bias_order,
+        },
+        input: args.input,
+        bias: args.bias,
+        residual: Some(args.residual),
+        weight: None,
+        norm_bias: None,
+        norm_style: None,
+        gate_style: args.gate,
+        hidden: Some(args.out),
+        normalized: None,
+        // The combine forms take no epsilon; the ABI validates it as a
+        // positive float whether or not a reduction consumes it.
+        eps: 1e-6,
+        output_scale: 1.0,
+    }
+}
+
+/// The `Spec` a `NormArgs` produces, without launching. Test-only hook for the
+/// field-mapping table in `l3_behavior`.
+#[cfg(test)]
+pub(crate) fn norm_spec(ctx: &CudaContext, args: NormArgs<'_>) -> Result<abi::Spec> {
+    Ok(normalize(ctx, norm_raw_args(args))?.spec)
+}
+
+/// The `Spec` a `FusedAddNormArgs` produces, without launching.
+#[cfg(test)]
+pub(crate) fn fused_add_norm_spec(
+    ctx: &CudaContext,
+    args: FusedAddNormArgs<'_>,
+) -> Result<abi::Spec> {
+    Ok(normalize(ctx, fused_add_norm_raw_args(args))?.spec)
+}
+
+/// The `Spec` a `ResidualAddArgs` produces, without launching.
+#[cfg(test)]
+pub(crate) fn residual_add_spec(
+    ctx: &CudaContext,
+    args: ResidualAddArgs<'_>,
+) -> Result<abi::Spec> {
+    Ok(normalize(ctx, residual_add_raw_args(args))?.spec)
+}
+
 /// Row-wise normalization of a `[rows, cols]` activation.
 pub fn norm(ctx: &CudaContext, args: NormArgs<'_>) -> Result<()> {
-    let stage = stage(&args.kind, &args.affine);
-    execute(
-        ctx,
-        RawArgs {
-            fields: Fields {
-                semantic: abi::SEMANTIC_NORM,
-                norm_kind: stage.norm_kind,
-                affine_kind: stage.affine_kind,
-                has_gate: false,
-                bias_order: abi::BIAS_ORDER_SINGLE_ROUND,
-            },
-            input: args.input,
-            bias: None,
-            residual: None,
-            weight: stage.weight,
-            norm_bias: stage.norm_bias,
-            norm_style: stage.norm_style,
-            gate_style: None,
-            hidden: None,
-            normalized: Some(args.out),
-            eps: args.eps,
-            output_scale: quant_scale(&args.post),
-        },
-    )
+    execute(ctx, norm_raw_args(args))
 }
 
 /// Residual combine plus normalization in one launch, writing the combined
@@ -278,30 +367,7 @@ pub fn fused_add_norm(ctx: &CudaContext, args: FusedAddNormArgs<'_>) -> Result<(
             "a fused add takes either a bias or a gate, not both",
         ));
     }
-    let stage = stage(&args.kind, &args.affine);
-    execute(
-        ctx,
-        RawArgs {
-            fields: Fields {
-                semantic: abi::SEMANTIC_FUSED_ADD_NORM,
-                norm_kind: stage.norm_kind,
-                affine_kind: stage.affine_kind,
-                has_gate: args.gate.is_some(),
-                bias_order: abi::BIAS_ORDER_SINGLE_ROUND,
-            },
-            input: args.input,
-            bias: args.bias,
-            residual: Some(args.residual),
-            weight: stage.weight,
-            norm_bias: stage.norm_bias,
-            norm_style: stage.norm_style,
-            gate_style: args.gate,
-            hidden: Some(args.hidden),
-            normalized: Some(args.normalized),
-            eps: args.eps,
-            output_scale: quant_scale(&args.post),
-        },
-    )
+    execute(ctx, fused_add_norm_raw_args(args))
 }
 
 /// Bias or gate combine plus residual, with no normalization.
@@ -311,33 +377,5 @@ pub fn residual_add(ctx: &CudaContext, args: ResidualAddArgs<'_>) -> Result<()> 
             "a residual add takes either a bias or a gate, not both",
         ));
     }
-    let bias_order = match args.order {
-        BiasOrder::SingleRound => abi::BIAS_ORDER_SINGLE_ROUND,
-        BiasOrder::RoundAfterBias => abi::BIAS_ORDER_ROUND_AFTER_BIAS,
-    };
-    execute(
-        ctx,
-        RawArgs {
-            fields: Fields {
-                semantic: abi::SEMANTIC_RESIDUAL_ADD,
-                norm_kind: abi::NORM_KIND_NONE,
-                affine_kind: abi::AFFINE_NONE,
-                has_gate: args.gate.is_some(),
-                bias_order,
-            },
-            input: args.input,
-            bias: args.bias,
-            residual: Some(args.residual),
-            weight: None,
-            norm_bias: None,
-            norm_style: None,
-            gate_style: args.gate,
-            hidden: Some(args.out),
-            normalized: None,
-            // The combine forms take no epsilon; the ABI validates it as a
-            // positive float whether or not a reduction consumes it.
-            eps: 1e-6,
-            output_scale: 1.0,
-        },
-    )
+    execute(ctx, residual_add_raw_args(args))
 }
