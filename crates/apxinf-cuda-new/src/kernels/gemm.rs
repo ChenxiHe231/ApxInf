@@ -1018,3 +1018,36 @@ pub fn try_gemm_quantized_w8a8_bias_gelu_quantized(
 ) -> Result<Option<(Tensor, W8A8Activation)>> {
     Ok(None)
 }
+
+// ── Decode fast-path `write` surface (caller-owned buffers, graph-safe) ───
+
+/// Row-major `A[M,K] @ B[K,N]` into caller-owned storage through raw cuBLAS.
+/// No allocation, no tuned-operator session requirement — this is the same
+/// direct `ctx.cublas().gemm(..)` dispatch the legacy decode graph used.
+#[allow(clippy::too_many_arguments)]
+pub fn write(
+    ctx: &CudaContext,
+    dtype: DType,
+    m: usize,
+    n: usize,
+    k: usize,
+    alpha: f32,
+    a: &CudaBuffer,
+    b: &CudaBuffer,
+    beta: f32,
+    output: &CudaBuffer,
+) -> Result<()> {
+    require_finite("GEMM", &[alpha, beta])?;
+    require_buffers(
+        ctx,
+        "GEMM",
+        &[
+            ("A", a, checked_bytes(dtype, &[m, k], "GEMM")?),
+            ("B", b, checked_bytes(dtype, &[k, n], "GEMM")?),
+            ("output", output, checked_bytes(dtype, &[m, n], "GEMM")?),
+        ],
+    )?;
+    ctx.cublas()
+        .gemm(dtype, m, n, k, alpha, a, b, beta, output)
+        .map_err(Error::Cuda)
+}

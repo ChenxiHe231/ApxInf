@@ -343,6 +343,7 @@ fn main() {
         "vla_attn/ops.cpp",
         "vla_la/ops.cu",
         "gr00t/ops.cu",
+        "llm_decode/ops.cu",
         "smolvla/ops.cu",
         "preprocess/ops.cpp",
         "linear_attention/execution.cpp",
