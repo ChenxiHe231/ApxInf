@@ -9,12 +9,12 @@ extern "C" {
 
 /* Elementwise and reduction operators used by transformer MLP blocks.
    Each has a single implementation and no tuned selection, so they are plain
-   entry points rather than registry-backed operators. */
+   entry points rather than registry-backed operators.
 
-apxinf_status_t apxinf_new_rms_norm_bf16(const void* input, const void* weight,
-                                     void* output, int64_t rows, int64_t width,
-                                     float epsilon,
-                                     apxinf_cuda_stream_t stream);
+   The BF16 `(1 + weight)` RMSNorm that used to be entry point here is now the
+   WEIGHT_OFFSET affine of the norm family, reached through
+   apxinf_norm_launch(); its kernel moved unchanged to
+   kernels/custom/norm_offset.cu. */
 
 /* SwiGLU over a fused [rows, 2*width] gate/up projection, gate first. */
 apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up, void* output,

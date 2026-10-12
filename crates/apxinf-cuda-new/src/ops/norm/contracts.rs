@@ -3,28 +3,10 @@ use apxinf_core::{DType, Device, Error, Result, Tensor};
 use crate::ffi::abi::norm as abi;
 use crate::{CudaBuffer, CudaContext};
 
-/// Which row-wise operation the bindings describe. See `norm_types.h` for the
-/// binding table; every variant here is one combination of the native Spec's
-/// pipeline fields, produced by [`Semantic::fields`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Semantic {
-    Rms,
-    Layer,
-    AdaptiveRms,
-    BiasResidual,
-    BiasResidualRms,
-    BiasResidualLayer,
-    AdaGateResidual,
-    AdaGateResidualRms,
-    /// Adds the optional bias, rounds that intermediate to BF16, then adds the
-    /// residual and rounds again. This is deliberately distinct from
-    /// [`Self::BiasResidual`], which rounds only the final sum.
-    BiasThenResidual,
-}
-
 /// The stage fields of one native Norm Spec, minus the quantization kind,
 /// which follows from the output tensor's dtype rather than from the pipeline
-/// shape. Mirrors the field group in `norm_types.h`.
+/// shape. Mirrors the field group in `norm_types.h`, and the predicates below
+/// mirror the ones the native adapter derives from the same fields.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Fields {
     pub semantic: u32,
@@ -32,86 +14,6 @@ pub(crate) struct Fields {
     pub affine_kind: u32,
     pub has_gate: bool,
     pub bias_order: u32,
-}
-
-impl Semantic {
-    /// The field combination each legacy semantic expands to. The native
-    /// adapter maps exactly these combinations onto the kernels the
-    /// corresponding semantic code used to select.
-    fn fields(self) -> Fields {
-        let (semantic, norm_kind, affine_kind, has_gate, bias_order) = match self {
-            Self::Rms => (
-                abi::SEMANTIC_NORM,
-                abi::NORM_KIND_RMS,
-                abi::AFFINE_WEIGHT,
-                false,
-                abi::BIAS_ORDER_SINGLE_ROUND,
-            ),
-            Self::Layer => (
-                abi::SEMANTIC_NORM,
-                abi::NORM_KIND_LAYER,
-                abi::AFFINE_WEIGHT,
-                false,
-                abi::BIAS_ORDER_SINGLE_ROUND,
-            ),
-            Self::AdaptiveRms => (
-                abi::SEMANTIC_NORM,
-                abi::NORM_KIND_RMS,
-                abi::AFFINE_ADA_SCALE_SHIFT,
-                false,
-                abi::BIAS_ORDER_SINGLE_ROUND,
-            ),
-            Self::BiasResidual => (
-                abi::SEMANTIC_RESIDUAL_ADD,
-                abi::NORM_KIND_NONE,
-                abi::AFFINE_NONE,
-                false,
-                abi::BIAS_ORDER_SINGLE_ROUND,
-            ),
-            Self::BiasResidualRms => (
-                abi::SEMANTIC_FUSED_ADD_NORM,
-                abi::NORM_KIND_RMS,
-                abi::AFFINE_WEIGHT,
-                false,
-                abi::BIAS_ORDER_SINGLE_ROUND,
-            ),
-            Self::BiasResidualLayer => (
-                abi::SEMANTIC_FUSED_ADD_NORM,
-                abi::NORM_KIND_LAYER,
-                abi::AFFINE_WEIGHT,
-                false,
-                abi::BIAS_ORDER_SINGLE_ROUND,
-            ),
-            Self::AdaGateResidual => (
-                abi::SEMANTIC_RESIDUAL_ADD,
-                abi::NORM_KIND_NONE,
-                abi::AFFINE_NONE,
-                true,
-                abi::BIAS_ORDER_SINGLE_ROUND,
-            ),
-            Self::AdaGateResidualRms => (
-                abi::SEMANTIC_FUSED_ADD_NORM,
-                abi::NORM_KIND_RMS,
-                abi::AFFINE_ADA_SCALE_SHIFT,
-                true,
-                abi::BIAS_ORDER_SINGLE_ROUND,
-            ),
-            Self::BiasThenResidual => (
-                abi::SEMANTIC_RESIDUAL_ADD,
-                abi::NORM_KIND_NONE,
-                abi::AFFINE_NONE,
-                false,
-                abi::BIAS_ORDER_ROUND_AFTER_BIAS,
-            ),
-        };
-        Fields {
-            semantic,
-            norm_kind,
-            affine_kind,
-            has_gate,
-            bias_order,
-        }
-    }
 }
 
 impl Fields {
@@ -159,7 +61,7 @@ impl Fields {
 /// `norm_style` is `[2 * cols]` (scale then shift) and `gate_style` is
 /// `[3 * cols]` whose third segment is the gate; they are not interchangeable.
 pub(crate) struct RawArgs<'a> {
-    pub(crate) semantic: Semantic,
+    pub(crate) fields: Fields,
     pub(crate) input: &'a Tensor,
     pub(crate) bias: Option<&'a Tensor>,
     pub(crate) residual: Option<&'a Tensor>,
@@ -233,7 +135,7 @@ fn tensor_storage(
 }
 
 pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normalized> {
-    let fields = args.semantic.fields();
+    let fields = args.fields;
     let dims = args.input.shape().dims();
     if dims.len() != 2 {
         return Err(invalid("Norm input must be rank 2 [rows, cols]"));

@@ -5,12 +5,9 @@
 
 namespace apxinf::cuda_new::mlp_ops {
 
-// y[r,c] = x[r,c] / sqrt(mean(x[r,:]^2) + epsilon) * weight[c]
-//
-// Reduction accumulates in f32: summing thousands of squared BF16 values in
-// BF16 drops the small terms outright.
-int rms_norm_bf16(const void* input, const void* weight, void* output,
-                  int rows, int width, float epsilon, cudaStream_t stream);
+// The `(1 + weight)` RMSNorm this file used to carry now lives in
+// kernels/custom/norm_offset.{h,cu} and is reached through the norm family's
+// apxinf_norm_launch. It moved byte for byte; see norm_offset.cu.
 
 // y[r,c] = silu(fused[r,c]) * fused[r,width+c]
 //

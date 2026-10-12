@@ -240,8 +240,10 @@ tuning all degenerate to picking 1 out of 1.
 | `apply_output_gate` | `apxinf_attn_apply_output_gate` | sigmoid output gate |
 | **attention/kv_cache_attention.rs** | | |
 | `decode_attention` | `apxinf_decode_attention` | single-token decode, allocation-free |
+| **norm/** (↔ `abi/norm.rs` ↔ `adapters/norm.cu` ↔ `kernels/custom/norm.cuh`, `norm_offset.cu`) | | |
+| `norm` / `fused_add_norm` / `residual_add` | `apxinf_norm_launch` | row-wise norm pipeline; Spec fields select the stage combination |
+| `norm` with `Affine::Weight { offset: true }` | `apxinf_norm_launch` | `(1 + weight)` RMSNorm; same ABI, but its own kernel in `norm_offset.cu` because its reduction order differs |
 | **mlp.rs** (↔ `abi/mlp.rs` ↔ `kernels/custom/mlp_ops.cu`) | | |
-| `rms_norm` | `apxinf_new_rms_norm_bf16` | RMSNorm |
 | `swiglu` | `apxinf_swiglu_bf16` | SwiGLU |
 | `add_into` | `apxinf_new_add_bf16` | residual accumulation |
 | `quantize_fp8_per_tensor` | `apxinf_quantize_fp8_per_tensor` | per-tensor FP8 quantization |

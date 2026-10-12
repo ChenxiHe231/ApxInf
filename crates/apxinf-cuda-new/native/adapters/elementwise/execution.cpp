@@ -1,8 +1,11 @@
-// Elementwise / MLP kernels: RMSNorm, SwiGLU, residual add, FP8 quantize, FP8 GEMV, NVFP4 GEMV.
+// Elementwise / MLP kernels: SwiGLU, residual add, FP8 quantize, FP8 GEMV, NVFP4 GEMV.
 //
 // These ops have a single fixed implementation and no persisted selection,
 // so per doc/adding-new-kernels.md §6 they carry no candidate registry,
 // tuning key, or autotuner; they are direct C-ABI forwarders.
+//
+// The BF16 `(1 + weight)` RMSNorm this file used to forward is now the norm
+// family's WEIGHT_OFFSET affine behind apxinf_norm_launch().
 
 #include "../../include/apxinf_cuda/mlp.h"
 
@@ -30,24 +33,6 @@ bool valid_extent(int64_t value) {
 }
 
 }  // namespace
-
-extern "C" apxinf_status_t apxinf_new_rms_norm_bf16(const void* input,
-                                                const void* weight,
-                                                void* output, int64_t rows,
-                                                int64_t width, float epsilon,
-                                                apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (input == nullptr || weight == nullptr || output == nullptr ||
-        !valid_extent(rows) || !valid_extent(width) || !(epsilon >= 0.0F)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid RMSNorm arguments");
-    }
-    check(apxinf::cuda_new::mlp_ops::rms_norm_bf16(
-              input, weight, output, static_cast<int>(rows),
-              static_cast<int>(width), epsilon,
-              static_cast<cudaStream_t>(stream)),
-          "RMSNorm");
-  });
-}
 
 extern "C" apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up,
                                               void* output, int64_t rows,

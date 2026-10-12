@@ -18,8 +18,12 @@ pub(crate) const NORM_KIND_LAYER: u32 = 2;
 
 pub(crate) const AFFINE_NONE: u32 = 0;
 pub(crate) const AFFINE_WEIGHT: u32 = 1;
-/// `(1 + weight)` scaling. Reserved: no kernel in `norm.cuh` implements it, so
-/// the native adapter rejects it instead of silently using [`AFFINE_WEIGHT`].
+/// `(1 + weight)` scaling. Served by its own kernel in
+/// `kernels/custom/norm_offset.cu`, not by a flag on the `norm.cuh` family:
+/// its reduction order differs, so the two are not bit-comparable beyond the
+/// `1 +`. Valid only with [`SEMANTIC_NORM`] + [`NORM_KIND_RMS`] + BF16 +
+/// [`QUANT_NONE`]; the native adapter reports `UNSUPPORTED` for anything else
+/// instead of silently using [`AFFINE_WEIGHT`].
 pub(crate) const AFFINE_WEIGHT_OFFSET: u32 = 2;
 pub(crate) const AFFINE_ADA_SCALE_SHIFT: u32 = 3;
 

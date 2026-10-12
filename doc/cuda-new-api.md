@@ -40,7 +40,7 @@ Only three calling shapes exist:
 | Category | Shape | Synchronization |
 |---|---|---|
 | Tunable operators (§3) | `ops::gemm(ctx, Args)` — an Args struct + policy | synchronous under eager; enqueue-only under session/capture |
-| Fixed operators (§4) | `ops::rms_norm(ctx, tensors, scalars…)` — flat parameters | asynchronous enqueue; the caller synchronizes |
+| Fixed operators (§4) | `ops::swiglu(ctx, fused, output)` — flat parameters, or an Args struct for the norm family (§4.3) | asynchronous enqueue; the caller synchronizes |
 | Host helpers (§4.6) | pure arithmetic / constant queries, no GPU | immediate |
 
 All tensor parameters must live on the current `CudaContext` device, be contiguous
@@ -231,10 +231,33 @@ split_query_and_gate(ctx, fused, query, gate)              // q_proj output spli
 apply_output_gate(ctx, data, gate)                         // sigmoid output gate, in place
 ```
 
-### 4.3 `ops::` MLP building blocks (`mlp.rs`)
+### 4.3 `ops::` norm family (`norm/`) and MLP building blocks (`mlp.rs`)
+
+The norm family is three entry points whose Args describe the row-wise
+pipeline as data, so one call shape covers RMS/LayerNorm, adaptive
+conditioning, residual combines and fused E4M3 output:
 
 ```rust
-rms_norm(ctx, input, weight, output, epsilon)
+norm(ctx, NormArgs { input, out, kind, affine, eps, post })
+fused_add_norm(ctx, FusedAddNormArgs { input, residual, bias, gate,
+                                       hidden, normalized, kind, affine, eps, post })
+residual_add(ctx, ResidualAddArgs { input, residual, bias, gate, order, out })
+
+enum NormKind { Rms, Layer { bias } }
+enum Affine   { Weight { weight, offset }, AdaScaleShift { style } }
+enum QuantOut { E4m3 { scale } }                           // F16 input only
+enum BiasOrder { SingleRound, RoundAfterBias }             // BF16 only
+```
+
+`Affine::Weight { offset: true }` is the Qwen3.8 `(1 + weight)` RMSNorm. It
+shares the family's ABI but not its kernels: its block size follows `cols` and
+its reduction tree differs from `norm.cuh`, so the two `offset` settings are
+not interchangeable beyond the `1 +`. It is valid only on `norm` with
+`NormKind::Rms`, BF16 in and out and no `post`; every other combination --
+including any `fused_add_norm` form -- returns
+`APXINF_STATUS_UNSUPPORTED` naming the fields, never an approximation.
+
+```rust
 swiglu(ctx, fused, output)                                 // fused=[.., 2N] → [.., N]
 add_into(ctx, addend, accumulator)                         // accumulator += addend
 quantize_fp8_per_tensor(ctx, input, output, input_scale)
