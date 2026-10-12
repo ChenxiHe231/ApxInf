@@ -1280,3 +1280,628 @@ fn f32_tensor_new(ctx: &NewContext, dims: Vec<usize>, values: &[f32]) -> Tensor 
     buffer.copy_from_host(&bytes).unwrap();
     buffer.as_tensor(Shape::new(dims), DType::F32).unwrap()
 }
+
+// ── Workstream D: smolvla parity ─────────────────────────────────────────────
+//
+// SmolVLA drives the legacy-named shim through two dtype faces: the BF16 path
+// (Thor/Orin) and the Xavier FP16 path. The FP16 surface was ported verbatim
+// into native/adapters/smolvla/ops.cu, so it must agree bit-for-bit, including
+// the cuBLAS-composed GQA whose GEMM geometry and softmax kernel are the exact
+// legacy code. BF16 attention wrappers recompose over cuda-new's tuned dense
+// attention operator, so they are compared on the tolerance basis.
+
+fn f16_tensor_legacy(ctx: &LegacyContext, dims: Vec<usize>, values: &[f32]) -> Tensor {
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|value| half::f16::from_f32(*value).to_bits().to_ne_bytes())
+        .collect();
+    let buffer = LegacyBuffer::alloc(bytes.len(), ctx.device_id()).unwrap();
+    buffer.copy_from_host(&bytes).unwrap();
+    buffer.as_tensor(Shape::new(dims), DType::F16).unwrap()
+}
+
+fn f16_tensor_new(ctx: &NewContext, dims: Vec<usize>, values: &[f32]) -> Tensor {
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|value| half::f16::from_f32(*value).to_bits().to_ne_bytes())
+        .collect();
+    let buffer = NewBuffer::alloc(bytes.len(), ctx.device_id()).unwrap();
+    buffer.copy_from_host(&bytes).unwrap();
+    buffer.as_tensor(Shape::new(dims), DType::F16).unwrap()
+}
+
+fn decode_f16(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(2)
+        .map(|pair| half::f16::from_bits(u16::from_ne_bytes([pair[0], pair[1]])).to_f32())
+        .collect()
+}
+
+fn host_f16_new(tensor: &Tensor) -> Vec<f32> {
+    let buffer = NewBuffer::from_tensor(tensor).unwrap();
+    let mut bytes = vec![0_u8; buffer.len()];
+    buffer.copy_to_host(&mut bytes).unwrap();
+    decode_f16(&bytes)
+}
+
+fn host_f16_legacy(tensor: &Tensor) -> Vec<f32> {
+    let buffer = LegacyBuffer::from_tensor(tensor).unwrap();
+    let mut bytes = vec![0_u8; buffer.len()];
+    buffer.copy_to_host(&mut bytes).unwrap();
+    decode_f16(&bytes)
+}
+
+#[test]
+#[ignore = "requires a CUDA device"]
+fn parity_smolvla_f16_pointwise_bit_exact() {
+    let (legacy, new) = contexts();
+    let mut rng = Lcg::new(0x50C4);
+    let (rows, cols) = (48_usize, 512_usize);
+    let input = rng.values(rows * cols);
+    let bias = rng.values(cols);
+    let weight = rng.positive(cols);
+    let li = f16_tensor_legacy(&legacy, vec![rows, cols], &input);
+    let ni = f16_tensor_new(&new, vec![rows, cols], &input);
+    let lb = f16_tensor_legacy(&legacy, vec![cols], &bias);
+    let nb = f16_tensor_new(&new, vec![cols], &bias);
+    let lw = f16_tensor_legacy(&legacy, vec![cols], &weight);
+    let nw = f16_tensor_new(&new, vec![cols], &weight);
+
+    let l = apxinf_cuda::kernels::norm::rms_f16(&legacy, &li, &lw, 1e-6).unwrap();
+    let n = apxinf_cuda_new::kernels::norm::rms_f16(&new, &ni, &nw, 1e-6).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact("norm::rms_f16", &host_f16_new(&n), &host_f16_legacy(&l));
+
+    let l = apxinf_cuda::kernels::norm::layer_f16(&legacy, &li, &lw, &lb, 1e-6).unwrap();
+    let n = apxinf_cuda_new::kernels::norm::layer_f16(&new, &ni, &nw, &nb, 1e-6).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact("norm::layer_f16", &host_f16_new(&n), &host_f16_legacy(&l));
+
+    let l = apxinf_cuda::kernels::activation::bias_gelu_f16(&legacy, &li, Some(&lb)).unwrap();
+    let n = apxinf_cuda_new::kernels::activation::bias_gelu_f16(&new, &ni, Some(&nb)).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "activation::bias_gelu_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    let l = apxinf_cuda::kernels::activation::bias_silu_f16(&legacy, &li, Some(&lb)).unwrap();
+    let n = apxinf_cuda_new::kernels::activation::bias_silu_f16(&new, &ni, Some(&nb)).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "activation::bias_silu_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    let l = apxinf_cuda::kernels::elementwise::bias_f16(&legacy, &li, Some(&lb)).unwrap();
+    let n = apxinf_cuda_new::kernels::elementwise::bias_f16(&new, &ni, Some(&nb)).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "elementwise::bias_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    // SwiGLU over packed [rows, 2*inner].
+    let gate_up = rng.values(rows * cols * 2);
+    let lg = f16_tensor_legacy(&legacy, vec![rows, 2 * cols], &gate_up);
+    let ng = f16_tensor_new(&new, vec![rows, 2 * cols], &gate_up);
+    let l = apxinf_cuda::kernels::activation::swiglu_f16(&legacy, &lg).unwrap();
+    let n = apxinf_cuda_new::kernels::activation::swiglu_f16(&new, &ng).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "activation::swiglu_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    // Euler update, residual add, scale, row/column concat, column slice.
+    let velocity = rng.values(rows * cols);
+    let lv = f16_tensor_legacy(&legacy, vec![rows, cols], &velocity);
+    let nv = f16_tensor_new(&new, vec![rows, cols], &velocity);
+    let l = apxinf_cuda::kernels::elementwise::euler_update_f16(&legacy, &li, &lv, -0.1).unwrap();
+    let n = apxinf_cuda_new::kernels::elementwise::euler_update_f16(&new, &ni, &nv, -0.1).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "elementwise::euler_update_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    let l = apxinf_cuda::kernels::elementwise::add(&legacy, &li, &lv).unwrap();
+    let n = apxinf_cuda_new::kernels::elementwise::add(&new, &ni, &nv).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "elementwise::add (f16)",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    let l = apxinf_cuda::kernels::elementwise::scale(&legacy, &li, 1.7).unwrap();
+    let n = apxinf_cuda_new::kernels::elementwise::scale(&new, &ni, 1.7).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "elementwise::scale (f16)",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    let l = apxinf_cuda::kernels::elementwise::concat_rows_f16(&legacy, &li, &lv).unwrap();
+    let n = apxinf_cuda_new::kernels::elementwise::concat_rows_f16(&new, &ni, &nv).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "elementwise::concat_rows_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    let l = apxinf_cuda::kernels::elementwise::concat_columns_f16(&legacy, &[&li, &lv]).unwrap();
+    let n = apxinf_cuda_new::kernels::elementwise::concat_columns_f16(&new, &[&ni, &nv]).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "elementwise::concat_columns_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    let l = apxinf_cuda::kernels::quantization::slice_columns_f16(&legacy, &li, 100).unwrap();
+    let n = apxinf_cuda_new::kernels::quantization::slice_columns_f16(&new, &ni, 100).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "quantization::slice_columns_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+}
+
+#[test]
+#[ignore = "requires a CUDA device"]
+fn parity_smolvla_embedding_and_preprocess_bit_exact() {
+    let (legacy, new) = contexts();
+    let mut rng = Lcg::new(0x50C5);
+
+    // Scaled embedding lookups, BF16 and F16.
+    let (vocab, width, tokens) = (96_usize, 192_usize, 10_usize);
+    let table = rng.values(vocab * width);
+    let ids: Vec<u32> = (0..tokens).map(|t| ((t * 17) % vocab) as u32).collect();
+    let lids = LegacyBuffer::alloc(ids.len() * 4, legacy.device_id()).unwrap();
+    lids.copy_from_host(bytemuck_u32(&ids)).unwrap();
+    let nids = NewBuffer::alloc(ids.len() * 4, new.device_id()).unwrap();
+    nids.copy_from_host(bytemuck_u32(&ids)).unwrap();
+
+    let lt = bf16_tensor_legacy(&legacy, vec![vocab, width], &table);
+    let nt = bf16_tensor_new(&new, vec![vocab, width], &table);
+    let l = apxinf_cuda::kernels::embedding::lookup_bf16(&legacy, &lt, &lids, tokens).unwrap();
+    let n = apxinf_cuda_new::kernels::embedding::lookup_bf16(&new, &nt, &nids, tokens).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "embedding::lookup_bf16",
+        &host_bf16_new(&n),
+        &host_bf16_legacy(&l),
+    );
+
+    let lt = f16_tensor_legacy(&legacy, vec![vocab, width], &table);
+    let nt = f16_tensor_new(&new, vec![vocab, width], &table);
+    let l = apxinf_cuda::kernels::embedding::lookup_f16(&legacy, &lt, &lids, tokens).unwrap();
+    let n = apxinf_cuda_new::kernels::embedding::lookup_f16(&new, &nt, &nids, tokens).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "embedding::lookup_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    // add_position, BF16 and F16 ([views * tokens_per_view, cols]).
+    let (views, tokens_per_view, cols) = (2_usize, 16_usize, 96_usize);
+    let rows = views * tokens_per_view;
+    let projection = rng.values(rows * cols);
+    let position = rng.values(tokens_per_view * cols);
+    let bias = rng.values(cols);
+    let lp = bf16_tensor_legacy(&legacy, vec![rows, cols], &projection);
+    let np = bf16_tensor_new(&new, vec![rows, cols], &projection);
+    let lpos = bf16_tensor_legacy(&legacy, vec![tokens_per_view, cols], &position);
+    let npos = bf16_tensor_new(&new, vec![tokens_per_view, cols], &position);
+    let lb = bf16_tensor_legacy(&legacy, vec![cols], &bias);
+    let nb = bf16_tensor_new(&new, vec![cols], &bias);
+    let l = apxinf_cuda::kernels::embedding::add_position_bf16(
+        &legacy,
+        &lp,
+        Some(&lb),
+        &lpos,
+        tokens_per_view,
+    )
+    .unwrap();
+    let n = apxinf_cuda_new::kernels::embedding::add_position_bf16(
+        &new,
+        &np,
+        Some(&nb),
+        &npos,
+        tokens_per_view,
+    )
+    .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "embedding::add_position_bf16",
+        &host_bf16_new(&n),
+        &host_bf16_legacy(&l),
+    );
+
+    let lp = f16_tensor_legacy(&legacy, vec![rows, cols], &projection);
+    let np = f16_tensor_new(&new, vec![rows, cols], &projection);
+    let lpos = f16_tensor_legacy(&legacy, vec![tokens_per_view, cols], &position);
+    let npos = f16_tensor_new(&new, vec![tokens_per_view, cols], &position);
+    let lb = f16_tensor_legacy(&legacy, vec![cols], &bias);
+    let nb = f16_tensor_new(&new, vec![cols], &bias);
+    let l = apxinf_cuda::kernels::embedding::add_position_f16(
+        &legacy,
+        &lp,
+        Some(&lb),
+        &lpos,
+        tokens_per_view,
+    )
+    .unwrap();
+    let n = apxinf_cuda_new::kernels::embedding::add_position_f16(
+        &new,
+        &np,
+        Some(&nb),
+        &npos,
+        tokens_per_view,
+    )
+    .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "embedding::add_position_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    // RGB preprocessing, F16 output (the BF16 face is covered by walloss).
+    let (views, image_size, patch_size) = (2_usize, 64_usize, 16_usize);
+    let image_bytes: Vec<u8> = (0..views * 3 * image_size * image_size)
+        .map(|index| (index * 31 % 256) as u8)
+        .collect();
+    let limg = LegacyBuffer::alloc(image_bytes.len(), legacy.device_id()).unwrap();
+    limg.copy_from_host(&image_bytes).unwrap();
+    let nimg = NewBuffer::alloc(image_bytes.len(), new.device_id()).unwrap();
+    nimg.copy_from_host(&image_bytes).unwrap();
+    let side = image_size / patch_size;
+    let patch_rows = views * side * side;
+    let patch_cols = 3 * patch_size * patch_size;
+    let lpatch = f16_tensor_legacy(&legacy, vec![patch_rows, patch_cols], &vec![0.0; patch_rows * patch_cols]);
+    let npatch = f16_tensor_new(&new, vec![patch_rows, patch_cols], &vec![0.0; patch_rows * patch_cols]);
+    apxinf_cuda::kernels::preprocess::rgb_u8_to_patches_f16(
+        &legacy,
+        &limg,
+        &lpatch,
+        views,
+        image_size,
+        patch_size,
+        apxinf_cuda::kernels::preprocess::ImageLayout::Nhwc,
+    )
+    .unwrap();
+    apxinf_cuda_new::kernels::preprocess::rgb_u8_to_patches_f16(
+        &new,
+        &nimg,
+        &npatch,
+        views,
+        image_size,
+        patch_size,
+        apxinf_cuda_new::kernels::preprocess::ImageLayout::Nhwc,
+    )
+    .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "preprocess::rgb_u8_to_patches_f16",
+        &host_f16_new(&npatch),
+        &host_f16_legacy(&lpatch),
+    );
+
+    // Pixel shuffle, BF16 and F16.
+    let tokens_per_view = 64_usize; // 8x8 grid, divisible by 16.
+    let width = 48_usize;
+    let shuffle_input = rng.values(views * tokens_per_view * width);
+    let li = bf16_tensor_legacy(&legacy, vec![views * tokens_per_view, width], &shuffle_input);
+    let ni = bf16_tensor_new(&new, vec![views * tokens_per_view, width], &shuffle_input);
+    let l =
+        apxinf_cuda::kernels::preprocess::pixel_shuffle_4_bf16(&legacy, &li, tokens_per_view)
+            .unwrap();
+    let n =
+        apxinf_cuda_new::kernels::preprocess::pixel_shuffle_4_bf16(&new, &ni, tokens_per_view)
+            .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "preprocess::pixel_shuffle_4_bf16",
+        &host_bf16_new(&n),
+        &host_bf16_legacy(&l),
+    );
+
+    let li = f16_tensor_legacy(&legacy, vec![views * tokens_per_view, width], &shuffle_input);
+    let ni = f16_tensor_new(&new, vec![views * tokens_per_view, width], &shuffle_input);
+    let l = apxinf_cuda::kernels::preprocess::pixel_shuffle_4_f16(&legacy, &li, tokens_per_view)
+        .unwrap();
+    let n = apxinf_cuda_new::kernels::preprocess::pixel_shuffle_4_f16(&new, &ni, tokens_per_view)
+        .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "preprocess::pixel_shuffle_4_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+}
+
+#[test]
+#[ignore = "requires a CUDA device"]
+fn parity_smolvla_rope_and_attention() {
+    let (legacy, new) = contexts();
+    let mut rng = Lcg::new(0x50C6);
+    let (tokens, q_heads, kv_heads, head_dim) = (12_usize, 8_usize, 4_usize, 64_usize);
+    let theta = 10_000.0_f32;
+    let fused_width = (q_heads + 2 * kv_heads) * head_dim;
+
+    // F16 packed QKV split + RoPE.
+    let packed = rng.values(tokens * fused_width);
+    let bias = rng.values(fused_width);
+    let lqkv = f16_tensor_legacy(&legacy, vec![tokens, fused_width], &packed);
+    let nqkv = f16_tensor_new(&new, vec![tokens, fused_width], &packed);
+    let lb = f16_tensor_legacy(&legacy, vec![fused_width], &bias);
+    let nb = f16_tensor_new(&new, vec![fused_width], &bias);
+    let l = apxinf_cuda::kernels::rope::split_qkv_apply_f16(
+        &legacy,
+        &lqkv,
+        Some(&lb),
+        q_heads,
+        kv_heads,
+        head_dim,
+        theta,
+        3,
+    )
+    .unwrap();
+    let n = apxinf_cuda_new::kernels::rope::split_qkv_apply_f16(
+        &new,
+        &nqkv,
+        Some(&nb),
+        q_heads,
+        kv_heads,
+        head_dim,
+        theta,
+        3,
+    )
+    .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "rope::split_qkv_apply_f16 (q)",
+        &host_f16_new(&n.q),
+        &host_f16_legacy(&l.q),
+    );
+    assert_bit_exact(
+        "rope::split_qkv_apply_f16 (k)",
+        &host_f16_new(&n.k),
+        &host_f16_legacy(&l.k),
+    );
+    assert_bit_exact(
+        "rope::split_qkv_apply_f16 (v)",
+        &host_f16_new(&n.v),
+        &host_f16_legacy(&l.v),
+    );
+
+    // F16 vision split (no rotation).
+    let vis_width = 3 * q_heads * head_dim;
+    let vis_packed = rng.values(tokens * vis_width);
+    let vis_bias = rng.values(vis_width);
+    let lqkv = f16_tensor_legacy(&legacy, vec![tokens, vis_width], &vis_packed);
+    let nqkv = f16_tensor_new(&new, vec![tokens, vis_width], &vis_packed);
+    let lvb = f16_tensor_legacy(&legacy, vec![vis_width], &vis_bias);
+    let nvb = f16_tensor_new(&new, vec![vis_width], &vis_bias);
+    let l = apxinf_cuda::kernels::attention::split_qkv_bias_f16(
+        &legacy,
+        &lqkv,
+        Some(&lvb),
+        q_heads,
+        head_dim,
+    )
+    .unwrap();
+    let n = apxinf_cuda_new::kernels::attention::split_qkv_bias_f16(
+        &new,
+        &nqkv,
+        Some(&nvb),
+        q_heads,
+        head_dim,
+    )
+    .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "attention::split_qkv_bias_f16 (q)",
+        &host_f16_new(&n.q),
+        &host_f16_legacy(&l.q),
+    );
+    assert_bit_exact(
+        "attention::split_qkv_bias_f16 (k)",
+        &host_f16_new(&n.k),
+        &host_f16_legacy(&l.k),
+    );
+    assert_bit_exact(
+        "attention::split_qkv_bias_f16 (v)",
+        &host_f16_new(&n.v),
+        &host_f16_legacy(&l.v),
+    );
+
+    // F16 half-split RoPE (cross-attention queries).
+    let q_values = rng.values(tokens * q_heads * head_dim);
+    let lq = f16_tensor_legacy(&legacy, vec![tokens, q_heads, head_dim], &q_values);
+    let nq = f16_tensor_new(&new, vec![tokens, q_heads, head_dim], &q_values);
+    let l = apxinf_cuda::kernels::rope::apply_half_split_f16(
+        &legacy, &lq, q_heads, head_dim, theta, 0,
+    )
+    .unwrap();
+    let n = apxinf_cuda_new::kernels::rope::apply_half_split_f16(
+        &new, &nq, q_heads, head_dim, theta, 0,
+    )
+    .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "rope::apply_half_split_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    // BF16 batched RoPE (cross-attention queries, Thor path).
+    let lq = bf16_tensor_legacy(&legacy, vec![tokens, q_heads, head_dim], &q_values);
+    let nq = bf16_tensor_new(&new, vec![tokens, q_heads, head_dim], &q_values);
+    let l =
+        apxinf_cuda::kernels::rope::apply_batched(&legacy, &lq, q_heads, head_dim, theta, 0)
+            .unwrap();
+    let n =
+        apxinf_cuda_new::kernels::rope::apply_batched(&new, &nq, q_heads, head_dim, theta, 0)
+            .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "rope::apply_batched (bf16)",
+        &host_bf16_new(&n),
+        &host_bf16_legacy(&l),
+    );
+
+    // F16 cuBLAS GQA: full, suffix-causal, prefix, and the per-view MHA. The
+    // launcher is the verbatim legacy cuBLAS composition, so outputs are
+    // bit-exact.
+    let kv_values = rng.values(tokens * kv_heads * head_dim);
+    let v_values = rng.values(tokens * kv_heads * head_dim);
+    let lq = f16_tensor_legacy(&legacy, vec![tokens, q_heads, head_dim], &q_values);
+    let nq = f16_tensor_new(&new, vec![tokens, q_heads, head_dim], &q_values);
+    let lk = f16_tensor_legacy(&legacy, vec![tokens, kv_heads, head_dim], &kv_values);
+    let nk = f16_tensor_new(&new, vec![tokens, kv_heads, head_dim], &kv_values);
+    let lv = f16_tensor_legacy(&legacy, vec![tokens, kv_heads, head_dim], &v_values);
+    let nv = f16_tensor_new(&new, vec![tokens, kv_heads, head_dim], &v_values);
+
+    let l = apxinf_cuda::kernels::attention::full_gqa_f16(&legacy, &lq, &lk, &lv, tokens).unwrap();
+    let n = apxinf_cuda_new::kernels::attention::full_gqa_f16(&new, &nq, &nk, &nv, tokens).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "attention::full_gqa_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    let suffix = 4_usize;
+    let offset = tokens - suffix;
+    let suffix_q_values = rng.values(suffix * q_heads * head_dim);
+    let lsq = f16_tensor_legacy(&legacy, vec![suffix, q_heads, head_dim], &suffix_q_values);
+    let nsq = f16_tensor_new(&new, vec![suffix, q_heads, head_dim], &suffix_q_values);
+    let l = apxinf_cuda::kernels::attention::suffix_causal_gqa_f16(
+        &legacy, &lsq, &lk, &lv, tokens, offset,
+    )
+    .unwrap();
+    let n = apxinf_cuda_new::kernels::attention::suffix_causal_gqa_f16(
+        &new, &nsq, &nk, &nv, tokens, offset,
+    )
+    .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "attention::suffix_causal_gqa_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    let shared = 8_usize;
+    let l = apxinf_cuda::kernels::attention::prefix_gqa_f16(&legacy, &lq, &lk, &lv, shared)
+        .unwrap();
+    let n =
+        apxinf_cuda_new::kernels::attention::prefix_gqa_f16(&new, &nq, &nk, &nv, shared).unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "attention::prefix_gqa_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    // vision_mha_f16: equal-shaped Q/K/V per view.
+    let mha_k = rng.values(tokens * q_heads * head_dim);
+    let mha_v = rng.values(tokens * q_heads * head_dim);
+    let lk = f16_tensor_legacy(&legacy, vec![tokens, q_heads, head_dim], &mha_k);
+    let nk = f16_tensor_new(&new, vec![tokens, q_heads, head_dim], &mha_k);
+    let lv = f16_tensor_legacy(&legacy, vec![tokens, q_heads, head_dim], &mha_v);
+    let nv = f16_tensor_new(&new, vec![tokens, q_heads, head_dim], &mha_v);
+    let l =
+        apxinf_cuda::kernels::attention::vision_mha_f16(&legacy, &lq, &lk, &lv, tokens / 2)
+            .unwrap();
+    let n = apxinf_cuda_new::kernels::attention::vision_mha_f16(&new, &nq, &nk, &nv, tokens / 2)
+        .unwrap();
+    new.synchronize().unwrap();
+    assert_bit_exact(
+        "attention::vision_mha_f16",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+    );
+
+    // BF16 attention wrappers recompose over cuda-new's tuned dense attention,
+    // so compare on the tolerance basis used by the other families.
+    let lq = bf16_tensor_legacy(&legacy, vec![tokens, q_heads, head_dim], &q_values);
+    let nq = bf16_tensor_new(&new, vec![tokens, q_heads, head_dim], &q_values);
+    let lk = bf16_tensor_legacy(&legacy, vec![tokens, kv_heads, head_dim], &kv_values);
+    let nk = bf16_tensor_new(&new, vec![tokens, kv_heads, head_dim], &kv_values);
+    let lv = bf16_tensor_legacy(&legacy, vec![tokens, kv_heads, head_dim], &v_values);
+    let nv = bf16_tensor_new(&new, vec![tokens, kv_heads, head_dim], &v_values);
+
+    let l = apxinf_cuda::kernels::attention::full_gqa_bf16(&legacy, &lq, &lk, &lv, tokens).unwrap();
+    let n =
+        apxinf_cuda_new::kernels::attention::full_gqa_bf16(&new, &nq, &nk, &nv, tokens).unwrap();
+    new.synchronize().unwrap();
+    assert_close(
+        "attention::full_gqa_bf16",
+        &host_bf16_new(&n),
+        &host_bf16_legacy(&l),
+        1e-2,
+        1e-3,
+    );
+
+    let l = apxinf_cuda::kernels::attention::prefix_gqa_bf16(&legacy, &lq, &lk, &lv, shared)
+        .unwrap();
+    let n =
+        apxinf_cuda_new::kernels::attention::prefix_gqa_bf16(&new, &nq, &nk, &nv, shared).unwrap();
+    new.synchronize().unwrap();
+    assert_close(
+        "attention::prefix_gqa_bf16",
+        &host_bf16_new(&n),
+        &host_bf16_legacy(&l),
+        1e-2,
+        1e-3,
+    );
+
+    let lk = bf16_tensor_legacy(&legacy, vec![tokens, q_heads, head_dim], &mha_k);
+    let nk = bf16_tensor_new(&new, vec![tokens, q_heads, head_dim], &mha_k);
+    let lv = bf16_tensor_legacy(&legacy, vec![tokens, q_heads, head_dim], &mha_v);
+    let nv = bf16_tensor_new(&new, vec![tokens, q_heads, head_dim], &mha_v);
+    let l =
+        apxinf_cuda::kernels::attention::vision_mha_bf16(&legacy, &lq, &lk, &lv, tokens / 2)
+            .unwrap();
+    let n = apxinf_cuda_new::kernels::attention::vision_mha_bf16(&new, &nq, &nk, &nv, tokens / 2)
+        .unwrap();
+    new.synchronize().unwrap();
+    assert_close(
+        "attention::vision_mha_bf16",
+        &host_bf16_new(&n),
+        &host_bf16_legacy(&l),
+        1e-2,
+        1e-3,
+    );
+
+    // F16 GEMM through the dtype-generic matmul: raw cuBLAS on both sides.
+    let (m, kk, nn) = (24_usize, 128_usize, 96_usize);
+    let x = rng.values(m * kk);
+    let w = rng.values(kk * nn);
+    let lx = f16_tensor_legacy(&legacy, vec![m, kk], &x);
+    let nx = f16_tensor_new(&new, vec![m, kk], &x);
+    let lw = f16_tensor_legacy(&legacy, vec![kk, nn], &w);
+    let nw = f16_tensor_new(&new, vec![kk, nn], &w);
+    let l = apxinf_cuda::kernels::gemm::matmul(&legacy, &lx, &lw).unwrap();
+    let n = apxinf_cuda_new::kernels::gemm::matmul(&new, &nx, &nw).unwrap();
+    new.synchronize().unwrap();
+    assert_close(
+        "gemm::matmul (f16)",
+        &host_f16_new(&n),
+        &host_f16_legacy(&l),
+        1e-2,
+        1e-3,
+    );
+}
