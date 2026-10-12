@@ -5,11 +5,11 @@ mod cache;
 mod gather;
 mod gdn;
 mod gemm;
-mod model;
 mod norm;
 mod pointwise;
 mod quantization;
 mod rope;
+mod sampling;
 
 // Keep these crate-private aliases while graph/workspace and unit tests still
 // refer to the GEMM implementation through `crate::ops`.
@@ -33,7 +33,10 @@ pub use attention::{
     PackedQkvAttentionArgs, SegmentedAttentionArgs,
 };
 pub use cache::{concat_rows, reserve_prefix};
-pub use gather::{gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry};
+pub use gather::{
+    embedding_gather, gather, GatherArgs, GatherSemantic,
+    PatchGeometry as GatherPatchGeometry,
+};
 pub use gdn::{
     gdn_causal_conv_forward, gdn_causal_conv_step, gdn_decay_and_beta,
     gdn_decay_and_beta_seq, gdn_gated_norm, gdn_gated_norm_quantize, gdn_gated_norm_seq, gdn_gated_norm_seq_f16,
@@ -48,7 +51,6 @@ pub use gemm::{
     nvfp4_quantize_swiglu, nvfp4_scale_buffer_bytes, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs,
     GemmBiasResidualArgs, GemmGegluArgs, GemmPolicy, GemmQuantization, ScaleLayout, WeightVersion,
 };
-pub use model::{argmax, embedding_gather};
 pub use norm::{
     fused_add_norm, head_rms_norm, norm, residual_add, Affine, BiasOrder, FusedAddNormArgs,
     NormArgs, NormKind, QuantOut, ResidualAddArgs,
@@ -62,6 +64,7 @@ pub use quantization::{
 pub use rope::{
     decode_rope, partial_rope, rope, rotary_dim, DecodeRopeArgs, RopeArgs, RopeSemantic,
 };
+pub use sampling::argmax;
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
 pub fn prepare_with_session<T>(

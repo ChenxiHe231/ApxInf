@@ -1,12 +1,16 @@
 // Copyright 2026 apxinf contributors.
 // Stable C ABI and launch policy for categorical sampling and device RNG.
 
+#include "../include/apxinf_cuda/sampling.h"
+#include "../framework/runtime_internal.h"
+#include "../kernels/custom/sampling_argmax.h"
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include "../kernels/custom/sampling.cuh"
 
@@ -144,4 +148,31 @@ extern "C" cudaError_t apxinf_cuda_new_fill_standard_normal(
       return cudaErrorInvalidValue;
   }
   return cudaGetLastError();
+}
+
+// Greedy selection. No state, no workspace, no RNG, so it is a flat entry
+// point rather than one of this file's prepare/sample pairs.
+
+namespace {
+
+using apxinf::framework::Failure;
+
+}  // namespace
+
+extern "C" apxinf_status_t apxinf_model_argmax_bf16(
+    const void* logits, void* index, int64_t count,
+    apxinf_cuda_stream_t stream) {
+  return apxinf::framework::abi_boundary([&] {
+    if (logits == nullptr || index == nullptr || count <= 0 ||
+        count > INT32_MAX) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid argmax arguments");
+    }
+    const int status = apxinf::cuda_new::sampling_argmax::argmax_bf16(
+        logits, static_cast<int32_t*>(index), static_cast<int>(count),
+        static_cast<cudaStream_t>(stream));
+    if (status != 0) {
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                    "argmax failed with status " + std::to_string(status));
+    }
+  });
 }
