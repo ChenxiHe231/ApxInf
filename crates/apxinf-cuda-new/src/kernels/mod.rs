@@ -96,11 +96,15 @@ pub fn with_workspace<T>(
     session.run(operation)
 }
 
-/// Run an eager traversal (no capture). cuda-new executes eagerly whenever no
-/// capture is active, so this is the same call as `with_workspace`.
+/// Bind the arena for an eager (never captured) traversal.
+///
+/// Mirrors the legacy contract: native execution resources stay installable,
+/// so GEMM plan resolution and tuning behave exactly as they do without a
+/// workspace, and the prepared operator sequence is untouched. Capture must
+/// keep using [`with_workspace`].
 pub fn with_workspace_eager<T>(
     session: &ExecutionSession,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    session.run(operation)
+    session.eager(operation)
 }

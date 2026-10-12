@@ -173,11 +173,24 @@ impl ExecutionSession {
     pub fn run<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
         with_session(self, operation)
     }
+
+    /// Execute an eager (never captured) traversal over the session arena.
+    ///
+    /// Native resources stay installable exactly as they are without a
+    /// session, and the prepared operator sequence is neither recorded nor
+    /// consumed — mirroring the legacy `with_workspace_eager` contract for
+    /// models that reuse one arena across plain eager inferences.
+    pub fn eager<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        eager_with_session(self, operation)
+    }
 }
 
 thread_local! {
     static ACTIVE_SESSION: Cell<*const ExecutionSessionInner> = const { Cell::new(std::ptr::null()) };
     static PREPARING: Cell<bool> = const { Cell::new(false) };
+    /// Eager traversal: native resources stay installable and the prepared
+    /// operator sequence is neither recorded nor consumed.
+    static EAGER: Cell<bool> = const { Cell::new(false) };
     static CAPTURE_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static CAPTURE_EPOCH: Cell<u64> = const { Cell::new(0) };
     static CAPTURE_TARGET: Cell<Option<CaptureTarget>> = const { Cell::new(None) };
@@ -197,18 +210,21 @@ struct CaptureTarget {
 struct ActiveSessionGuard {
     session: *const ExecutionSessionInner,
     preparing: bool,
+    eager: bool,
 }
 
 impl Drop for ActiveSessionGuard {
     fn drop(&mut self) {
         ACTIVE_SESSION.with(|active| active.set(self.session));
         PREPARING.with(|preparing| preparing.set(self.preparing));
+        EAGER.with(|eager| eager.set(self.eager));
     }
 }
 
 fn with_session_phase<T>(
     session: &ExecutionSession,
     prepare: bool,
+    eager: bool,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     ACTIVE_SESSION.with(|active| {
@@ -218,7 +234,11 @@ fn with_session_phase<T>(
             ));
         }
         session.inner.workspace.reset();
-        if prepare {
+        if eager {
+            // Eager traversals only borrow the arena; they leave the prepared
+            // sequence and its burst tracking untouched so a later
+            // prepare/capture pair still sees a consistent sequence.
+        } else if prepare {
             // A prepare burst may span several `prepare_with_workspace` calls
             // (a model that wraps each phase separately), so accumulate across
             // consecutive prepares. A prepare that follows a run starts a fresh
@@ -252,9 +272,11 @@ fn with_session_phase<T>(
         }
         let previous = active.replace(Rc::as_ptr(&session.inner));
         let previous_preparing = PREPARING.with(|preparing| preparing.replace(prepare));
+        let previous_eager = EAGER.with(|current| current.replace(eager));
         let _guard = ActiveSessionGuard {
             session: previous,
             preparing: previous_preparing,
+            eager: previous_eager,
         };
         retain_resource(&session.inner);
         operation()
@@ -265,21 +287,40 @@ pub(crate) fn prepare_with_session<T>(
     session: &ExecutionSession,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    with_session_phase(session, true, operation)
+    with_session_phase(session, true, false, operation)
 }
 
 pub(crate) fn with_session<T>(
     session: &ExecutionSession,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    with_session_phase(session, false, operation)
+    with_session_phase(session, false, false, operation)
+}
+
+/// Bind a session arena for an eager (never captured) traversal. Native
+/// resources stay installable exactly as they are without a session; the
+/// prepared operator sequence is untouched. Capture must keep using
+/// [`with_session`]: an eager traversal cannot tell that it is recording, and
+/// CUDA forbids allocating or re-planning inside a capture.
+pub(crate) fn eager_with_session<T>(
+    session: &ExecutionSession,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if is_capturing() {
+        return Err(Error::Other(
+            "eager session traversal is not allowed during CUDA graph capture".into(),
+        ));
+    }
+    with_session_phase(session, false, true, operation)
 }
 
 /// Native resources may be created only outside capture. A non-preparation
 /// traversal with an active session must hit the execution cache.
 pub(crate) fn may_prepare_native_resources() -> bool {
     !is_capturing()
-        && (PREPARING.with(Cell::get) || ACTIVE_SESSION.with(|active| active.get().is_null()))
+        && (PREPARING.with(Cell::get)
+            || EAGER.with(Cell::get)
+            || ACTIVE_SESSION.with(|active| active.get().is_null()))
 }
 
 pub(crate) fn has_active_session() -> bool {
@@ -378,6 +419,11 @@ pub(crate) fn use_execution<T: Any>(resource: &Rc<T>) -> Result<()> {
             return Ok(());
         }
         let inner = unsafe { &*inner };
+        if EAGER.with(Cell::get) {
+            // Eager traversals neither record nor consume the prepared
+            // sequence; the cached execution is simply reused.
+            return Ok(());
+        }
         if PREPARING.with(Cell::get) {
             inner.prepared_sequence.borrow_mut().push(identity);
             return Ok(());
