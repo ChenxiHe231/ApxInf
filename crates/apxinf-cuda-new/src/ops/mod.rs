@@ -6,7 +6,6 @@ mod cache;
 mod gather;
 mod gdn;
 mod gemm;
-pub mod mlp;
 mod model;
 mod norm;
 mod pointwise;
@@ -45,19 +44,22 @@ pub use gdn::{
     gdn_recurrent_step, gdn_state_elements,
 };
 pub use gemm::{
-    gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu, nvfp4_dense_swiglu_aot,
-    nvfp4_pack_block_scales, nvfp4_quantize_activation, nvfp4_quantize_rms_norm,
+    fp8_gemv, gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu, nvfp4_dense_swiglu_aot,
+    nvfp4_gemv, nvfp4_pack_block_scales, nvfp4_quantize_activation, nvfp4_quantize_rms_norm,
     nvfp4_quantize_swiglu, nvfp4_scale_buffer_bytes, GemmArgs, GemmBiasArgs, GemmBiasGeluArgs,
     GemmBiasResidualArgs, GemmGegluArgs, GemmPolicy, GemmQuantization, ScaleLayout, WeightVersion,
 };
-pub use mlp::{add_into, fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu};
 pub use model::{argmax, embedding_gather};
 pub use norm::{
     fused_add_norm, norm, residual_add, Affine, BiasOrder, FusedAddNormArgs, NormArgs, NormKind,
     QuantOut, ResidualAddArgs,
 };
-pub use pointwise::{pointwise, PointwiseActivation, PointwiseArgs, PointwiseSemantic};
-pub use quantization::{quantization, QuantizationArgs, QuantizationSemantic};
+pub use pointwise::{
+    add_into, pointwise, swiglu, PointwiseActivation, PointwiseArgs, PointwiseSemantic,
+};
+pub use quantization::{
+    quantization, quantize_fp8_per_tensor, QuantizationArgs, QuantizationSemantic,
+};
 pub use rope::{decode_rope, rope, DecodeRopeArgs, RopeArgs, RopeSemantic};
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
