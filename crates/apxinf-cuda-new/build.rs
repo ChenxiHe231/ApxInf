@@ -333,7 +333,6 @@ fn main() {
         "attention/execution.cpp",
         "attention/providers/custom.cu",
         "linear_attention/execution.cpp",
-        "reduction/execution.cpp",
         "sampling.cu",
         "norm.cu",
         "pointwise.cu",
@@ -352,7 +351,8 @@ fn main() {
     generic_sources.push(native.join("kernels/custom/rope_partial.cu"));
     generic_sources.push(native.join("kernels/custom/norm_head.cu"));
     generic_sources.push(native.join("kernels/custom/attention_gates.cu"));
-    generic_sources.push(native.join("kernels/custom/model_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/gather_embedding.cu"));
+    generic_sources.push(native.join("kernels/custom/sampling_argmax.cu"));
     generic_sources.push(native.join("tests/framework_backend.cu"));
     let cutlass_root = native.join("kernels/cutlass");
     let fa2_root = native.join("kernels/fa2");

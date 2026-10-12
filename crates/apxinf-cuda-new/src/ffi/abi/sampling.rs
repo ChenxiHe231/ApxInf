@@ -3,15 +3,9 @@ use std::ffi::c_void;
 use super::types::CudaStream;
 
 unsafe extern "C" {
-    pub(crate) fn apxinf_model_embedding_gather(
-        table: *const c_void,
-        ids: *const c_void,
-        output: *mut c_void,
-        tokens: i64,
-        hidden: i64,
-        vocab: i64,
-        stream: CudaStream,
-    ) -> i32;
+    /// Greedy selection. The stateful samplers in the same adapter use the
+    /// older `apxinf_cuda_new_*` prefix and are declared in
+    /// `ffi/raw/sampling.rs`; that inconsistency is recorded debt.
     pub(crate) fn apxinf_model_argmax_bf16(
         logits: *const c_void,
         index: *mut c_void,
