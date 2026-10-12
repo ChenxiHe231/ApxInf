@@ -7,10 +7,14 @@ Preparation and graph capture have different owners. GEMM and Attention may own 
 - Current public interfaces and mathematical semantics: [L3 operator catalog](cuda-operator.md)
 - Workflow for adding or extending a kernel: [Adding New Kernels](../../doc/adding-new-kernels.md)
 
-The direct PI05 RMSNorm interface is `ops::rms_norm(ctx, RmsNormArgs)`.
-The BF16 MLP helper remains available as
-`ops::mlp::rms_norm(ctx, input, weight, output, epsilon)`; it has a distinct
-signature and is used by the Qwen integration tests.
+The norm family has three L3 entry points -- `ops::norm`,
+`ops::fused_add_norm` and `ops::residual_add` -- whose Args carry the
+pipeline stages (`NormKind`, `Affine`, bias/gate, `QuantOut`) as data.
+`Affine::Weight { offset: true }` is the Qwen3.8 `(1 + weight)` RMSNorm; it
+goes through the same `apxinf_norm_launch` ABI but keeps its own kernel
+(`kernels/custom/norm_offset.cu`) because that kernel's reduction order differs
+from the shared norm kernels, so the two `offset` settings are not
+interchangeable beyond the `1 +`.
 GEMM Spec version 6 combines NVFP4 block-scale bindings with the
 `GEMM_BIAS_RESIDUAL` semantic. Version 5 specs are rejected rather than reused
 across these incompatible layouts.

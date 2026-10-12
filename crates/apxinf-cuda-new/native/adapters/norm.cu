@@ -1,6 +1,7 @@
 #include "../include/apxinf_cuda/norm.h"
 #include "../framework/runtime_internal.h"
 #include "../kernels/custom/norm.cuh"
+#include "../kernels/custom/norm_offset.h"
 
 #include <climits>
 #include <cmath>
@@ -12,6 +13,7 @@ namespace {
 
 using apxinf::framework::Failure;
 namespace kernels = apxinf::norm::kernels;
+namespace offset_kernels = apxinf::cuda_new::norm_offset;
 
 constexpr int kThreads = 256;
 constexpr int kMaxElementwiseBlocks = 4096;
@@ -262,6 +264,34 @@ bool gated(const apxinf_norm_spec_t& spec) {
          spec.bias_order == APXINF_NORM_BIAS_ORDER_SINGLE_ROUND;
 }
 
+// The `(1 + weight)` affine. Its kernel lives in kernels/custom/norm_offset.cu
+// rather than norm.cuh, and launches from there, because it reduces over a
+// width-derived block of up to 1024 threads through its own warp tree instead
+// of norm.cuh's fixed 256 threads and `block_sum_parallel_unsafe`. Routing it
+// through `launch<T>` below would mean rebuilding it on those helpers, which
+// would reorder the summation and move the Qwen3.8 output bits -- so it gets
+// its own launch path, and exactly one field combination.
+cudaError_t launch_weight_offset(const apxinf_norm_spec_t& spec,
+                                 const apxinf_norm_bindings_t& bindings) {
+  // One kernel, one shape: pure normalization, RMS reduction, BF16 in and out,
+  // no fused quantization. It writes the storage dtype directly, so a
+  // quantized output has nowhere to go.
+  if (spec.semantic != APXINF_NORM_SEMANTIC_NORM ||
+      spec.norm_kind != APXINF_NORM_KIND_RMS ||
+      spec.dtype != APXINF_DTYPE_BF16 ||
+      spec.quant_kind != APXINF_NORM_QUANT_NONE) {
+    unsupported(spec);
+  }
+  // The moved host function calls cudaGetLastError() itself, which clears the
+  // error, so the caller's own check would see success. Map its status here.
+  const int status = offset_kernels::rms_norm_bf16(
+      bindings.input, bindings.weight, bindings.normalized,
+      static_cast<int>(spec.rows), static_cast<int>(spec.cols), bindings.eps,
+      static_cast<cudaStream_t>(bindings.stream));
+  if (status == 0) return cudaSuccess;
+  return status == -1 ? cudaErrorInvalidValue : cudaErrorLaunchFailure;
+}
+
 cudaError_t launch_quantized_f16(const apxinf_norm_spec_t& spec,
                                  const apxinf_norm_bindings_t& bindings) {
   const auto* input = static_cast<const half*>(bindings.input);
@@ -421,11 +451,16 @@ extern "C" apxinf_status_t apxinf_norm_launch(
     validate_spec(*spec);
     validate_bindings(*spec, *bindings);
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    // weight_offset is checked first: it is the one affine whose kernel is not
+    // a member of the norm.cuh family, so neither the quantized nor the
+    // templated dispatch below has a branch for it.
     apxinf::framework::check_cuda(
-        spec->quant_kind == APXINF_NORM_QUANT_E4M3
-            ? launch_quantized_f16(*spec, *bindings)
-            : (spec->dtype == APXINF_DTYPE_BF16
-                   ? launch<__nv_bfloat16>(*spec, *bindings)
-                   : launch<__half>(*spec, *bindings)));
+        spec->affine_kind == APXINF_NORM_AFFINE_WEIGHT_OFFSET
+            ? launch_weight_offset(*spec, *bindings)
+            : spec->quant_kind == APXINF_NORM_QUANT_E4M3
+                  ? launch_quantized_f16(*spec, *bindings)
+                  : (spec->dtype == APXINF_DTYPE_BF16
+                         ? launch<__nv_bfloat16>(*spec, *bindings)
+                         : launch<__half>(*spec, *bindings)));
   });
 }

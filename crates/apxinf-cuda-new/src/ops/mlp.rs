@@ -10,37 +10,6 @@ use crate::ffi::abi::{mlp as abi, status};
 use crate::ops::gemm::contracts::{invalid, tensor_storage};
 use crate::CudaContext;
 
-/// `y[r,c] = x[r,c] / sqrt(mean(x[r,:]^2) + epsilon) * weight[c]`
-///
-/// The reduction runs in f32 regardless of the BF16 storage.
-pub fn rms_norm(
-    ctx: &CudaContext,
-    input: &Tensor,
-    weight: &Tensor,
-    output: &Tensor,
-    epsilon: f32,
-) -> Result<()> {
-    let dims = input.shape().dims().to_vec();
-    if dims.len() != 2 {
-        return Err(invalid("RMSNorm requires a rank-2 tensor"));
-    }
-    let (rows, width) = (dims[0], dims[1]);
-    let input_buffer = tensor_storage(ctx, input, DType::BF16, &dims)?;
-    let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[width])?;
-    let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
-    unsafe {
-        status::check(abi::apxinf_new_rms_norm_bf16(
-            input_buffer.ptr(),
-            weight_buffer.ptr(),
-            output_buffer.ptr(),
-            rows as i64,
-            width as i64,
-            epsilon,
-            ctx.stream().handle(),
-        ))
-    }
-}
-
 /// `y[r,c] = silu(fused[r,c]) * fused[r,width+c]`
 ///
 /// `fused` is `[rows, 2*width]` with gate first, the layout one fused gate/up

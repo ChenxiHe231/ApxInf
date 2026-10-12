@@ -66,10 +66,13 @@ typedef enum {
   APXINF_NORM_AFFINE_NONE = 0,
   /* normalized * weight[col] */
   APXINF_NORM_AFFINE_WEIGHT = 1,
-  /* normalized * (1 + weight[col]).  Reserved: no kernel here implements it,
-     so the adapter reports UNSUPPORTED rather than falling back to WEIGHT.
-     The Qwen3.8 form of this lives in the separate mlp ABI, whose reduction
-     tree differs and therefore is not bit-comparable with these kernels. */
+  /* normalized * (1 + weight[col]).  Not a flag on WEIGHT: it is served by a
+     kernel of its own in kernels/custom/norm_offset.cu, whose block size
+     follows `cols` and whose reduction tree differs from the norm.cuh family,
+     so the two are not bit-comparable beyond the `1 +`.  That kernel covers
+     exactly one combination -- semantic NORM, KIND_RMS, BF16 dtype,
+     QUANT_NONE -- and the adapter reports UNSUPPORTED for the rest rather
+     than falling back to WEIGHT. */
   APXINF_NORM_AFFINE_WEIGHT_OFFSET = 2,
   /* normalized * (1 + norm_style[col]) + norm_style[cols + col] */
   APXINF_NORM_AFFINE_ADA_SCALE_SHIFT = 3,

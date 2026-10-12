@@ -53,11 +53,8 @@ pub use gemm::{
 pub use mlp::{add_into, fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu};
 pub use model::{argmax, embedding_gather};
 pub use norm::{
-    ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,
-    bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, layer_norm, rms_norm,
-    AdaGateResidualArgs, AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, BiasResidualArgs,
-    BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, BiasThenResidualArgs, LayerNormArgs,
-    RmsNormArgs,
+    fused_add_norm, norm, residual_add, Affine, BiasOrder, FusedAddNormArgs, NormArgs, NormKind,
+    QuantOut, ResidualAddArgs,
 };
 pub use pointwise::{pointwise, PointwiseActivation, PointwiseArgs, PointwiseSemantic};
 pub use quantization::{quantization, QuantizationArgs, QuantizationSemantic};
