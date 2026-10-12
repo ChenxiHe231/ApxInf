@@ -368,27 +368,168 @@ fn fused_add_norm_maps_the_three_fused_semantics() {
 /// The nine field tuples must be pairwise distinct. If two collided, the
 /// mapping would not be a bijection onto the old nine semantics and one of them
 /// would be unreachable.
+///
+/// The tuples are collected from the production mapping, not written down here.
+/// An earlier version of this test asserted that nine hard-coded tuples differ
+/// from each other, which is a property of the literals in the test file: it
+/// passed under every mutation of `stage()` and so tested nothing.
 #[test]
 fn the_nine_field_tuples_are_pairwise_distinct() {
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
 
-    // (semantic, norm_kind, affine_kind, has_gate, bias_order)
-    let tuples = [
-        (abi::SEMANTIC_NORM, abi::NORM_KIND_RMS, abi::AFFINE_WEIGHT, 0, abi::BIAS_ORDER_SINGLE_ROUND),
-        (abi::SEMANTIC_NORM, abi::NORM_KIND_LAYER, abi::AFFINE_WEIGHT, 0, abi::BIAS_ORDER_SINGLE_ROUND),
-        (abi::SEMANTIC_NORM, abi::NORM_KIND_RMS, abi::AFFINE_ADA_SCALE_SHIFT, 0, abi::BIAS_ORDER_SINGLE_ROUND),
-        (abi::SEMANTIC_RESIDUAL_ADD, abi::NORM_KIND_NONE, abi::AFFINE_NONE, 0, abi::BIAS_ORDER_SINGLE_ROUND),
-        (abi::SEMANTIC_RESIDUAL_ADD, abi::NORM_KIND_NONE, abi::AFFINE_NONE, 0, abi::BIAS_ORDER_ROUND_AFTER_BIAS),
-        (abi::SEMANTIC_RESIDUAL_ADD, abi::NORM_KIND_NONE, abi::AFFINE_NONE, 1, abi::BIAS_ORDER_SINGLE_ROUND),
-        (abi::SEMANTIC_FUSED_ADD_NORM, abi::NORM_KIND_RMS, abi::AFFINE_WEIGHT, 0, abi::BIAS_ORDER_SINGLE_ROUND),
-        (abi::SEMANTIC_FUSED_ADD_NORM, abi::NORM_KIND_LAYER, abi::AFFINE_WEIGHT, 0, abi::BIAS_ORDER_SINGLE_ROUND),
-        (abi::SEMANTIC_FUSED_ADD_NORM, abi::NORM_KIND_RMS, abi::AFFINE_ADA_SCALE_SHIFT, 1, abi::BIAS_ORDER_SINGLE_ROUND),
-    ];
-    let distinct: BTreeSet<_> = tuples.iter().collect();
+    let ctx = CudaContext::new(0).unwrap();
+    let input = bf16(vec![ROWS, COLS]);
+    let residual = bf16(vec![ROWS, COLS]);
+    let bias = bf16(vec![COLS]);
+    let weight = bf16(vec![COLS]);
+    let norm_bias = bf16(vec![COLS]);
+    let style = bf16(vec![2 * COLS]);
+    let gate = bf16(vec![3 * COLS]);
+
+    // Collect what the production mapping actually produces for each of the
+    // nine shapes the old semantics covered.
+    let mut seen: BTreeMap<(u32, u32, u32, u32, u32), &str> = BTreeMap::new();
+    let mut record = |spec: &abi::Spec, label: &'static str| {
+        let key = (
+            spec.semantic,
+            spec.norm_kind,
+            spec.affine_kind,
+            spec.has_gate,
+            spec.bias_order,
+        );
+        if let Some(previous) = seen.insert(key, label) {
+            panic!("{label} and {previous} produce the same field tuple {key:?}");
+        }
+    };
+
+    // norm: Rms / Layer / AdaptiveRms
+    let mut out = bf16(vec![ROWS, COLS]);
+    let spec = norm_spec(
+        &ctx,
+        NormArgs::new(
+            &input,
+            &mut out,
+            NormKind::Rms,
+            Affine::Weight {
+                weight: &weight,
+                offset: false,
+            },
+            1e-6,
+        ),
+    )
+    .unwrap();
+    record(&spec, "Rms");
+
+    let mut out = bf16(vec![ROWS, COLS]);
+    let spec = norm_spec(
+        &ctx,
+        NormArgs::new(
+            &input,
+            &mut out,
+            NormKind::Layer { bias: &norm_bias },
+            Affine::Weight {
+                weight: &weight,
+                offset: false,
+            },
+            1e-6,
+        ),
+    )
+    .unwrap();
+    record(&spec, "Layer");
+
+    let mut out = bf16(vec![ROWS, COLS]);
+    let spec = norm_spec(
+        &ctx,
+        NormArgs::new(
+            &input,
+            &mut out,
+            NormKind::Rms,
+            Affine::AdaScaleShift { style: &style },
+            1e-6,
+        ),
+    )
+    .unwrap();
+    record(&spec, "AdaptiveRms");
+
+    // residual_add: BiasResidual / BiasThenResidual / AdaGateResidual
+    let mut out = bf16(vec![ROWS, COLS]);
+    let spec = residual_add_spec(
+        &ctx,
+        ResidualAddArgs::new(&input, Some(&bias), &residual, &mut out),
+    )
+    .unwrap();
+    record(&spec, "BiasResidual");
+
+    let mut out = bf16(vec![ROWS, COLS]);
+    let mut args = ResidualAddArgs::new(&input, Some(&bias), &residual, &mut out);
+    args.order = BiasOrder::RoundAfterBias;
+    let spec = residual_add_spec(&ctx, args).unwrap();
+    record(&spec, "BiasThenResidual");
+
+    let mut out = bf16(vec![ROWS, COLS]);
+    let spec = residual_add_spec(
+        &ctx,
+        ResidualAddArgs::gated(&input, &residual, &gate, &mut out),
+    )
+    .unwrap();
+    record(&spec, "AdaGateResidual");
+
+    // fused_add_norm: BiasResidualRms / BiasResidualLayer / AdaGateResidualRms
+    let mut hidden = bf16(vec![ROWS, COLS]);
+    let mut normalized = bf16(vec![ROWS, COLS]);
+    let mut args = FusedAddNormArgs::new(
+        &input,
+        &residual,
+        &mut hidden,
+        &mut normalized,
+        NormKind::Rms,
+        Affine::Weight {
+            weight: &weight,
+            offset: false,
+        },
+        1e-6,
+    );
+    args.bias = Some(&bias);
+    let spec = fused_add_norm_spec(&ctx, args).unwrap();
+    record(&spec, "BiasResidualRms");
+
+    let mut hidden = bf16(vec![ROWS, COLS]);
+    let mut normalized = bf16(vec![ROWS, COLS]);
+    let mut args = FusedAddNormArgs::new(
+        &input,
+        &residual,
+        &mut hidden,
+        &mut normalized,
+        NormKind::Layer { bias: &norm_bias },
+        Affine::Weight {
+            weight: &weight,
+            offset: false,
+        },
+        1e-6,
+    );
+    args.bias = Some(&bias);
+    let spec = fused_add_norm_spec(&ctx, args).unwrap();
+    record(&spec, "BiasResidualLayer");
+
+    let mut hidden = bf16(vec![ROWS, COLS]);
+    let mut normalized = bf16(vec![ROWS, COLS]);
+    let mut args = FusedAddNormArgs::new(
+        &input,
+        &residual,
+        &mut hidden,
+        &mut normalized,
+        NormKind::Rms,
+        Affine::AdaScaleShift { style: &style },
+        1e-6,
+    );
+    args.gate = Some(&gate);
+    let spec = fused_add_norm_spec(&ctx, args).unwrap();
+    record(&spec, "AdaGateResidualRms");
+
     assert_eq!(
-        distinct.len(),
-        tuples.len(),
-        "two of the nine field tuples collide, so one old semantic is unreachable"
+        seen.len(),
+        9,
+        "the nine old semantics must map onto nine distinct field tuples, got {seen:?}"
     );
 }
 
