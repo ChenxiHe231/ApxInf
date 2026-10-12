@@ -91,3 +91,16 @@ unsafe extern "C" {
         bindings: *const Bindings,
     ) -> i32;
 }
+
+unsafe extern "C" {
+    /// Per-head RMSNorm in place. Not a [`Spec`] pipeline: it writes its input
+    /// in place and reduces over the last axis of a three-rank activation.
+    pub(crate) fn apxinf_attn_head_rms_norm(
+        data: *mut c_void,
+        weight: *const c_void,
+        rows: i64,
+        head_dim: i64,
+        epsilon: f32,
+        stream: CudaStream,
+    ) -> i32;
+}
