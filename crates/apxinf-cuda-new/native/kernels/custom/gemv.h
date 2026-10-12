@@ -3,33 +3,14 @@
 
 #include <cuda_runtime_api.h>
 
-namespace apxinf::cuda_new::mlp_ops {
+namespace apxinf::cuda_new::gemv {
 
-// The `(1 + weight)` RMSNorm this file used to carry now lives in
-// kernels/custom/norm_offset.{h,cu} and is reached through the norm family's
-// apxinf_norm_launch. It moved byte for byte; see norm_offset.cu.
-
-// y[r,c] = silu(fused[r,c]) * fused[r,width+c]
+// Single-token projections: GEMMs at M=1, specialized for the decode path.
 //
-// `fused_gate_up` is [rows, 2*width] with gate first, which is what one fused
-// gate/up GEMM produces. This is SwiGLU, not the GELU-based `gemm_geglu`.
-int swiglu_bf16(const void* fused_gate_up, void* output, int rows, int width,
-                cudaStream_t stream);
-
-// accumulator += addend, elementwise. Residual connections.
-int add_bf16(const void* addend, void* accumulator, long long count,
-             cudaStream_t stream);
-
-// Quantize BF16 to E4M3 against a single per-tensor scale.
-//
-// This is the activation side of the FP8 projections in a ModelOpt checkpoint,
-// whose weight_scale and input_scale are scalars rather than the [M]/[N]
-// vectors the scaled-FP8 GEMM contract expects. Quantizing against
-// input_scale lets the projection run as unit-scale FP8 with
-// `alpha = weight_scale * input_scale`, so no new quantization contract is
-// needed for attention or GDN.
-int quantize_fp8_per_tensor(const void* input, void* output, long long count,
-                            float input_scale, cudaStream_t stream);
+// These are not members of the tunable GEMM family in adapters/gemm/ -- they
+// have one implementation each and no candidate registry -- but the math is a
+// GEMM, so they live beside it rather than in a drawer named after the MLP that
+// calls them (doc/cuda-new-design.md section 1.3).
 
 // y[n] = alpha * sum_k weight[n, k] * activation[k], E4M3 operands, BF16 out.
 //
@@ -67,4 +48,4 @@ int nvfp4_gemv(const void* weight, const void* weight_scales,
                const void* activation, const void* activation_scales,
                void* output, int n, int k, float alpha, cudaStream_t stream);
 
-}  // namespace apxinf::cuda_new::mlp_ops
+}  // namespace apxinf::cuda_new::gemv
