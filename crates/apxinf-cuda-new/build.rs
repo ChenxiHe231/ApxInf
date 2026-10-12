@@ -332,7 +332,7 @@ fn main() {
         "attention/autotune.cpp",
         "attention/execution.cpp",
         "attention/providers/custom.cu",
-        "linear_attention/execution.cpp",
+        "gdn/execution.cpp",
         "sampling.cu",
         "norm.cu",
         "pointwise.cu",
