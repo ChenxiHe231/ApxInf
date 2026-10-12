@@ -9,6 +9,7 @@ mod ffi;
 mod graph;
 pub mod kernels;
 pub mod phase;
+pub mod profiler;
 pub mod sampling;
 pub mod stream;
 pub mod transfers;

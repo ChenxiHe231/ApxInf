@@ -606,3 +606,477 @@ pub fn try_noncausal_batched_equal(
 ) -> Result<Option<Tensor>> {
     Ok(None)
 }
+
+// ── smolvla attention surface ───────────────────────────────────────────────
+//
+// BF16 entries reuse the tuned cuda-new dense-attention operator — the same
+// route `mqa_bf16`/`mha_bf16`/`causal_gqa_bf16` take — with the legacy
+// composition (row views over the shared prefix, per-view MHA) kept intact.
+// FP16 entries are the cuBLAS-composed Xavier kernels, ported verbatim into
+// native/adapters/smolvla/ops.cu.
+
+use apxinf_core::Device;
+
+use super::contracts::{gpu_ptr, make_gpu_tensor, matrix_shape};
+
+fn row_view(
+    ctx: &CudaContext,
+    input: &Tensor,
+    start_row: usize,
+    end_row: usize,
+    dtype: DType,
+) -> Result<Tensor> {
+    let shape = input.shape().dims();
+    if input.dtype() != dtype
+        || input.device() != Device::Cuda(ctx.device_id())
+        || shape.len() != 3
+        || start_row >= end_row
+        || end_row > shape[0]
+    {
+        return Err(Error::Other(format!(
+            "{dtype} attention row view expects a 3-D CUDA tensor with a non-empty row range"
+        )));
+    }
+    let row_elements = shape[1]
+        .checked_mul(shape[2])
+        .ok_or_else(|| Error::Other("attention row view element count overflow".into()))?;
+    let bytes = end_row
+        .checked_sub(start_row)
+        .and_then(|rows| rows.checked_mul(row_elements))
+        .and_then(|elements| elements.checked_mul(dtype.size_in_bytes()))
+        .ok_or_else(|| Error::Other("attention row view byte size overflow".into()))?;
+    let offset = start_row
+        .checked_mul(row_elements)
+        .and_then(|elements| elements.checked_mul(dtype.size_in_bytes()))
+        .ok_or_else(|| Error::Other("attention row view offset overflow".into()))?;
+    let buffer = CudaBuffer::from_tensor(input)
+        .and_then(|buffer| buffer.view(offset, bytes))
+        .map_err(Error::Cuda)?;
+    buffer
+        .as_tensor(
+            Shape::new(vec![end_row - start_row, shape[1], shape[2]]),
+            dtype,
+        )
+        .map_err(Error::Cuda)
+}
+
+/// `full_gqa_bf16`: non-causal BF16 GQA for prefix-only cross attention.
+pub fn full_gqa_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
+) -> Result<Tensor> {
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.shape() != k.shape()
+        || q_shape.len() != 3
+        || k_shape.len() != 3
+        || q_shape[1] == 0
+        || q_shape[1] % k_shape[1] != 0
+        || q_shape[2] != k_shape[2]
+        || key_tokens == 0
+        || key_tokens != k_shape[0]
+    {
+        return Err(Error::Other("non-causal BF16 GQA shape mismatch".into()));
+    }
+    noncausal_gqa_bf16(ctx, q, k, v, key_tokens)
+}
+
+/// `prefix_gqa_bf16`: two-block non-causal BF16 GQA used by SmolVLA's prefix.
+///
+/// The shared prefix (vision and language) attends only to itself, while the
+/// trailing state tokens attend to both blocks. This mirrors LeRobot's
+/// prefix-LM attention without materializing a full 2-D mask.
+pub fn prefix_gqa_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    shared_tokens: usize,
+) -> Result<Tensor> {
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if q_shape.len() != 3 || k_shape.len() != 3 {
+        return Err(Error::Other(
+            "prefix BF16 GQA requires rank-3 Q/K tensors".into(),
+        ));
+    }
+    let key_tokens = k_shape[0];
+    if shared_tokens == 0 || shared_tokens >= key_tokens || q_shape[0] != key_tokens {
+        return Err(Error::Other(
+            "prefix BF16 GQA requires 0 < shared tokens < key tokens".into(),
+        ));
+    }
+    let shared_q = row_view(ctx, q, 0, shared_tokens, DType::BF16)?;
+    let shared_k = row_view(ctx, k, 0, shared_tokens, DType::BF16)?;
+    let shared_v = row_view(ctx, v, 0, shared_tokens, DType::BF16)?;
+    let state_q = row_view(ctx, q, shared_tokens, key_tokens, DType::BF16)?;
+    let shared_output = full_gqa_bf16(ctx, &shared_q, &shared_k, &shared_v, shared_tokens)?;
+    let state_output = full_gqa_bf16(ctx, &state_q, k, v, key_tokens)?;
+    let head_width = q_shape[1] * q_shape[2];
+    let shared_rows = shared_output.reshape(vec![shared_tokens, head_width])?;
+    let state_rows = state_output.reshape(vec![key_tokens - shared_tokens, head_width])?;
+    super::elementwise::concat_rows_bf16(ctx, &shared_rows, &state_rows)?
+        .reshape(vec![key_tokens, q_shape[1], q_shape[2]])
+}
+
+/// `vision_mha_bf16`: non-causal BF16 vision MHA batched per camera view.
+/// Routes through the dense per-batch MHA, the same composed route the legacy
+/// non-FA2 builds took.
+pub fn vision_mha_bf16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    tokens_per_batch: usize,
+) -> Result<Tensor> {
+    let shape = q.shape().dims();
+    if [q, k, v]
+        .into_iter()
+        .any(|tensor| tensor.dtype() != DType::BF16)
+        || shape.len() != 3
+        || k.shape() != q.shape()
+        || v.shape() != q.shape()
+        || shape[2] > 256
+        || tokens_per_batch == 0
+        || shape[0] % tokens_per_batch != 0
+    {
+        return Err(Error::Other(
+            "static inference BF16 vision MHA shape mismatch".into(),
+        ));
+    }
+    mha_bf16(ctx, q, k, v, tokens_per_batch)
+}
+
+/// `full_gqa_f16`: non-causal FP16 GQA using Xavier FP16 tensor-core GEMMs.
+pub fn full_gqa_f16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
+) -> Result<Tensor> {
+    use crate::ffi::abi::smolvla as abi;
+    use crate::ffi::raw::cublas::check_cublas;
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if q.dtype() != DType::F16
+        || k.dtype() != DType::F16
+        || v.shape() != k.shape()
+        || q_shape.len() != 3
+        || k_shape.len() != 3
+        || q_shape[1] == 0
+        || q_shape[1] % k_shape[1] != 0
+        || q_shape[2] != k_shape[2]
+        || key_tokens == 0
+        || key_tokens != k_shape[0]
+    {
+        return Err(Error::Other("non-causal FP16 GQA shape mismatch".into()));
+    }
+    let output = crate::workspace::output_buffer(ctx, q.size_in_bytes())?;
+    unsafe {
+        check_cublas(abi::apxinf_smolvla_cublas_gqa_f16(
+            gpu_ptr(q)?,
+            gpu_ptr(k)?,
+            gpu_ptr(v)?,
+            output.ptr(),
+            q_shape[0] as i32,
+            key_tokens as i32,
+            q_shape[1] as i32,
+            k_shape[1] as i32,
+            q_shape[2] as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        q.shape().clone(),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+/// `suffix_causal_gqa_f16`: FP16 GQA for a causal suffix following a fully
+/// visible prefix. Query row `i` attends to all `key_offset + i + 1` keys.
+pub fn suffix_causal_gqa_f16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
+    key_offset: usize,
+) -> Result<Tensor> {
+    use crate::ffi::abi::smolvla as abi;
+    use crate::ffi::raw::cublas::check_cublas;
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if q.dtype() != DType::F16
+        || k.dtype() != DType::F16
+        || v.shape() != k.shape()
+        || q_shape.len() != 3
+        || k_shape.len() != 3
+        || q_shape[1] == 0
+        || q_shape[1] % k_shape[1] != 0
+        || q_shape[2] != k_shape[2]
+        || key_tokens == 0
+        || key_tokens != k_shape[0]
+        || key_offset >= key_tokens
+        || q_shape[0] + key_offset != key_tokens
+    {
+        return Err(Error::Other(
+            "causal suffix FP16 GQA shape mismatch".into(),
+        ));
+    }
+    let output = crate::workspace::output_buffer(ctx, q.size_in_bytes())?;
+    unsafe {
+        check_cublas(abi::apxinf_smolvla_cublas_gqa_causal_f16(
+            gpu_ptr(q)?,
+            gpu_ptr(k)?,
+            gpu_ptr(v)?,
+            output.ptr(),
+            q_shape[0] as i32,
+            key_tokens as i32,
+            q_shape[1] as i32,
+            k_shape[1] as i32,
+            q_shape[2] as i32,
+            key_offset as i32,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        q.shape().clone(),
+        DType::F16,
+        ctx.device_id(),
+        output,
+    ))
+}
+
+/// `prefix_gqa_f16`: the FP16 two-block prefix attention.
+pub fn prefix_gqa_f16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    shared_tokens: usize,
+) -> Result<Tensor> {
+    let q_shape = q.shape().dims();
+    let k_shape = k.shape().dims();
+    if q_shape.len() != 3 || k_shape.len() != 3 {
+        return Err(Error::Other(
+            "prefix FP16 GQA requires rank-3 Q/K tensors".into(),
+        ));
+    }
+    let key_tokens = k_shape[0];
+    if shared_tokens == 0
+        || shared_tokens >= key_tokens
+        || q_shape[0] != key_tokens
+        || q.dtype() != DType::F16
+    {
+        return Err(Error::Other(
+            "prefix FP16 GQA requires 0 < shared tokens < key tokens".into(),
+        ));
+    }
+    let shared_q = row_view(ctx, q, 0, shared_tokens, DType::F16)?;
+    let shared_k = row_view(ctx, k, 0, shared_tokens, DType::F16)?;
+    let shared_v = row_view(ctx, v, 0, shared_tokens, DType::F16)?;
+    let state_q = row_view(ctx, q, shared_tokens, key_tokens, DType::F16)?;
+    let shared_output = full_gqa_f16(ctx, &shared_q, &shared_k, &shared_v, shared_tokens)?;
+    let state_output = full_gqa_f16(ctx, &state_q, k, v, key_tokens)?;
+    let head_width = q_shape[1] * q_shape[2];
+    let shared_rows = shared_output.reshape(vec![shared_tokens, head_width])?;
+    let state_rows = state_output.reshape(vec![key_tokens - shared_tokens, head_width])?;
+    super::elementwise::concat_rows_f16(ctx, &shared_rows, &state_rows)?
+        .reshape(vec![key_tokens, q_shape[1], q_shape[2]])
+}
+
+/// `vision_mha_f16`: non-causal FP16 vision MHA that keeps each camera view
+/// independent, composed from per-view cuBLAS GQA like the legacy helper.
+pub fn vision_mha_f16(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    tokens_per_view: usize,
+) -> Result<Tensor> {
+    let shape = q.shape().dims();
+    if q.dtype() != DType::F16
+        || k.dtype() != DType::F16
+        || v.dtype() != DType::F16
+        || shape.len() != 3
+        || k.shape() != q.shape()
+        || v.shape() != q.shape()
+        || shape[1] == 0
+        || tokens_per_view == 0
+        || shape[0] % tokens_per_view != 0
+    {
+        return Err(Error::Other(
+            "FP16 vision MHA expects matching [tokens,heads,head_dim] tensors".into(),
+        ));
+    }
+    let views = shape[0] / tokens_per_view;
+    let head_width = shape[1]
+        .checked_mul(shape[2])
+        .ok_or_else(|| Error::Other("FP16 vision MHA width overflow".into()))?;
+    let mut output = None;
+    for view in 0..views {
+        let start = view * tokens_per_view;
+        let end = start + tokens_per_view;
+        let view_q = row_view(ctx, q, start, end, DType::F16)?;
+        let view_k = row_view(ctx, k, start, end, DType::F16)?;
+        let view_v = row_view(ctx, v, start, end, DType::F16)?;
+        let view_output = full_gqa_f16(ctx, &view_q, &view_k, &view_v, tokens_per_view)?
+            .reshape(vec![tokens_per_view, head_width])?;
+        output = Some(match output {
+            Some(output) => super::elementwise::concat_rows_f16(ctx, &output, &view_output)?,
+            None => view_output,
+        });
+    }
+    output
+        .ok_or_else(|| Error::Other("FP16 vision MHA requires at least one view".into()))?
+        .reshape(vec![shape[0], shape[1], shape[2]])
+}
+
+/// `split_qkv_bias_f16`: split a `[tokens, 3*heads*dim]` packed FP16 vision
+/// projection into Q/K/V with an optional packed bias, no rotation. The
+/// cuda-new RoPE operator's dtype-templated `split_qkv_bias` kernel is the
+/// verbatim legacy kernel.
+pub fn split_qkv_bias_f16(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    heads: usize,
+    head_dim: usize,
+) -> Result<QkvTensors> {
+    let (tokens, width) = matrix_shape(qkv, "vision QKV split")?;
+    let projection_width = heads * head_dim;
+    if qkv.dtype() != DType::F16
+        || width != 3 * projection_width
+        || bias.is_some_and(|x| x.dtype() != DType::F16 || x.shape().dims() != [width])
+    {
+        return Err(Error::Other(format!(
+            "static inference vision QKV expected FP16 [tokens,{}], got {:?}",
+            3 * projection_width,
+            qkv.shape().dims()
+        )));
+    }
+    let shape = Shape::new(vec![tokens, heads, head_dim]);
+    let mut q = ctx.allocate_output(shape.clone(), DType::F16)?;
+    let mut k = ctx.allocate_output(shape.clone(), DType::F16)?;
+    let mut v = ctx.allocate_output(shape, DType::F16)?;
+    ops::rope(
+        ctx,
+        ops::RopeArgs {
+            semantic: ops::RopeSemantic::SplitQkvBias,
+            qkv,
+            bias,
+            q: &mut q,
+            k: &mut k,
+            v: &mut v,
+            q_heads: heads,
+            kv_heads: heads,
+            head_dim,
+            theta: 0.0,
+            position_offset: 0,
+            kv_output_offset: 0,
+        },
+    )?;
+    Ok(QkvTensors { q, k, v })
+}
+
+// ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
+
+/// F32 attention softmax into caller-owned storage using a device position.
+pub fn softmax_f32_into(
+    ctx: &CudaContext,
+    scores: &CudaBuffer,
+    output: &CudaBuffer,
+    cols: usize,
+    heads: usize,
+    position: crate::CudaDeviceAddress,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers};
+    use crate::ffi::abi::llm_decode as abi;
+    let bytes = checked_bytes(DType::F32, &[heads, cols], "attention softmax")?;
+    require_buffers(
+        ctx,
+        "attention softmax",
+        &[("scores", scores, bytes), ("output", output, bytes)],
+    )?;
+    require_address(ctx, "attention softmax", "position", position, 4)?;
+    check_cuda(unsafe {
+        abi::apxinf_llmdec_attention_softmax_decode_f32(
+            scores.ptr(),
+            output.ptr(),
+            cols as u32,
+            heads as u32,
+            position.ptr(),
+            ctx.stream().handle(),
+        )
+    })
+}
+
+/// Decode-time BF16 flash attention into caller-owned storage. KV caches are
+/// head-major `[kv_heads, max_seq_len, head_dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn flash_bf16_into(
+    ctx: &CudaContext,
+    query: &CudaBuffer,
+    key_cache: &CudaBuffer,
+    value_cache: &CudaBuffer,
+    output: &CudaBuffer,
+    heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    bucket_kv_len: usize,
+    max_seq_len: usize,
+    scale: f32,
+    position: crate::CudaDeviceAddress,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
+    use crate::ffi::abi::llm_decode as abi;
+    require_finite("flash attention", &[scale])?;
+    if heads == 0 || kv_heads == 0 || heads % kv_heads != 0 || bucket_kv_len > max_seq_len {
+        return Err(Error::Other(
+            "flash attention received invalid head or sequence dimensions".into(),
+        ));
+    }
+    let query_size = checked_bytes(DType::BF16, &[heads, head_dim], "flash attention")?;
+    let cache_size = checked_bytes(
+        DType::BF16,
+        &[kv_heads, max_seq_len, head_dim],
+        "flash attention",
+    )?;
+    require_buffers(
+        ctx,
+        "flash attention",
+        &[
+            ("query", query, query_size),
+            ("key cache", key_cache, cache_size),
+            ("value cache", value_cache, cache_size),
+            ("output", output, query_size),
+        ],
+    )?;
+    require_address(ctx, "flash attention", "position", position, 4)?;
+    check_cuda(unsafe {
+        abi::apxinf_llmdec_flash_attn_decode_bf16(
+            query.ptr(),
+            key_cache.ptr(),
+            value_cache.ptr(),
+            output.ptr(),
+            heads as u32,
+            kv_heads as u32,
+            head_dim as u32,
+            bucket_kv_len as u32,
+            max_seq_len as u32,
+            scale,
+            position.ptr(),
+            ctx.stream().handle(),
+        )
+    })
+}

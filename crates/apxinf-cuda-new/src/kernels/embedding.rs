@@ -140,3 +140,182 @@ pub fn sinusoidal_bf16(
     }
     Ok(output)
 }
+
+// ── smolvla surface ─────────────────────────────────────────────────────────
+//
+// `lookup_bf16`/`lookup_f16` are the legacy sqrt(width)-scaled embedding
+// lookups; cuda-new's Gather operator carries the same always-scaled kernel
+// for both dtypes, so these route through it. `add_position_*` are the
+// same-dtype bias-position gathers.
+
+fn lookup_scaled(
+    ctx: &CudaContext,
+    table: &Tensor,
+    ids: &CudaBuffer,
+    tokens: usize,
+    dtype: DType,
+) -> Result<Tensor> {
+    use crate::ops;
+    let dims = table.shape().dims();
+    if table.dtype() != dtype || dims.len() != 2 || ids.len() < tokens * 4 || tokens == 0 {
+        return Err(Error::Other(format!(
+            "static inference {dtype} embedding expects [vocab,width] and device u32 ids"
+        )));
+    }
+    let mut output = ctx.allocate_output(Shape::new(vec![tokens, dims[1]]), dtype)?;
+    let mut args = ops::GatherArgs::new(ops::GatherSemantic::EmbeddingLookup, table, &mut output);
+    args.ids = Some(ids);
+    args.vocab_size = dims[0];
+    ops::gather(ctx, args)?;
+    Ok(output)
+}
+
+/// `lookup_bf16`: sqrt(width)-scaled BF16 embedding lookup over device ids.
+pub fn lookup_bf16(
+    ctx: &CudaContext,
+    table: &Tensor,
+    ids: &CudaBuffer,
+    tokens: usize,
+) -> Result<Tensor> {
+    lookup_scaled(ctx, table, ids, tokens, DType::BF16)
+}
+
+/// `lookup_f16`: sqrt(width)-scaled FP16 embedding lookup over device ids.
+pub fn lookup_f16(
+    ctx: &CudaContext,
+    table: &Tensor,
+    ids: &CudaBuffer,
+    tokens: usize,
+) -> Result<Tensor> {
+    lookup_scaled(ctx, table, ids, tokens, DType::F16)
+}
+
+fn add_position_same_dtype(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    position: &Tensor,
+    tokens_per_view: usize,
+    dtype: DType,
+) -> Result<Tensor> {
+    use crate::ops;
+    let dims = projection.shape().dims();
+    if dims.len() != 2 {
+        return Err(Error::Other(
+            "position embedding expects a rank-2 projection".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let position_dims = position.shape().dims();
+    let position_ok =
+        position_dims == [tokens_per_view, cols] || position_dims == [1, tokens_per_view, cols];
+    if projection.dtype() != dtype
+        || position.dtype() != dtype
+        || !position_ok
+        || tokens_per_view == 0
+        || rows % tokens_per_view != 0
+        || bias.is_some_and(|value| value.dtype() != dtype || value.shape().dims() != [cols])
+    {
+        return Err(Error::Other(format!(
+            "static inference {dtype} position embedding shape mismatch"
+        )));
+    }
+    // The Gather contract wants a rank-2 position tensor; the legacy helper
+    // also accepted a leading unit dim, so flatten it here.
+    let position = if position_dims.len() == 3 {
+        position.reshape(vec![tokens_per_view, cols])?
+    } else {
+        position.clone()
+    };
+    let mut output = ctx.allocate_output(Shape::new(vec![rows, cols]), dtype)?;
+    let mut args = ops::GatherArgs::new(ops::GatherSemantic::BiasPosition, projection, &mut output);
+    args.bias = bias;
+    args.position = Some(&position);
+    args.tokens_per_view = tokens_per_view;
+    ops::gather(ctx, args)?;
+    Ok(output)
+}
+
+/// `add_position_bf16`: BF16 projection + optional bias + learned per-view
+/// position embedding.
+pub fn add_position_bf16(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    position: &Tensor,
+    tokens_per_view: usize,
+) -> Result<Tensor> {
+    add_position_same_dtype(ctx, projection, bias, position, tokens_per_view, DType::BF16)
+}
+
+/// `add_position_f16`: FP16 projection + optional bias + learned per-view
+/// position embedding.
+pub fn add_position_f16(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    position: &Tensor,
+    tokens_per_view: usize,
+) -> Result<Tensor> {
+    add_position_same_dtype(ctx, projection, bias, position, tokens_per_view, DType::F16)
+}
+
+// ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
+
+/// Allocation-free embedding lookup into caller-owned decode storage; token
+/// ids are read from a device address (host-mapped on Tegra) at kernel time.
+pub fn lookup_into(
+    ctx: &CudaContext,
+    dtype: DType,
+    table: &CudaBuffer,
+    ids: crate::CudaDeviceAddress,
+    output: &CudaBuffer,
+    embed_dim: usize,
+    seq_len: usize,
+) -> Result<()> {
+    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers};
+    use crate::ffi::abi::llm_decode as llmdec;
+    require_buffers(
+        ctx,
+        "decode embedding",
+        &[
+            (
+                "table",
+                table,
+                checked_bytes(dtype, &[embed_dim], "decode embedding")?,
+            ),
+            (
+                "output",
+                output,
+                checked_bytes(dtype, &[seq_len, embed_dim], "decode embedding")?,
+            ),
+        ],
+    )?;
+    require_address(ctx, "decode embedding", "ids", ids, seq_len * 4)?;
+    let status = unsafe {
+        match dtype {
+            DType::F32 => llmdec::apxinf_llmdec_embedding_f32(
+                table.ptr(),
+                ids.ptr(),
+                output.ptr(),
+                embed_dim as u32,
+                seq_len as u32,
+                ctx.stream().handle(),
+            ),
+            DType::BF16 => llmdec::apxinf_llmdec_embedding_bf16(
+                table.ptr(),
+                ids.ptr(),
+                output.ptr(),
+                embed_dim as u32,
+                seq_len as u32,
+                ctx.stream().handle(),
+            ),
+            dtype => {
+                return Err(Error::Other(format!(
+                    "decode embedding does not support {dtype}"
+                )))
+            }
+        }
+    };
+    check_cuda(status)
+}
