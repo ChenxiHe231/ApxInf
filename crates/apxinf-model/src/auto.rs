@@ -333,10 +333,12 @@ impl AutoModel {
         // so the swap needs no model-side change; π0-FAST reaches cuda-new
         // through its kernel seam and downcasts to the concrete backend.
         // Remaining families take the legacy backend until their own stage.
+        // Callers may ask for a device-specific registry entry by suffix
+        // (`pi0_fast-cuda`); the backend choice keys on the family itself.
         #[cfg(feature = "cuda")]
         let backend = if matches!(device, Device::Cuda(_))
             && matches!(
-                model_name,
+                model_name.strip_suffix("-cuda").unwrap_or(model_name),
                 "llama"
                     | "qwen3_vl"
                     | "qwen3vl"
