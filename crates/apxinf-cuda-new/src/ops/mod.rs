@@ -21,6 +21,8 @@ pub(crate) use attention::{
     normalize_kv_cache_attention, normalize_segmented_attention,
 };
 #[cfg(test)]
+pub(crate) use norm::{fused_add_norm_spec, norm_spec, residual_add_spec};
+#[cfg(test)]
 pub(crate) use gemm::contracts;
 #[cfg(test)]
 pub(crate) use gemm::gemm_execution as execution;
