@@ -76,7 +76,7 @@ Files under `src/ops/` are named after **what the operator computes**, never aft
 which model or which block of a model happens to call it.
 
 ```text
-GOOD   norm/   rope/   gather/   pointwise/   quantization/   gemm/   attention/
+GOOD   norm/   rope/   gather/   pointwise/   quantization/   gemm/   attention/   sampling.rs
 BAD    mlp.rs  attn_ops.rs  model.rs       ← named after a call site
 ```
 
@@ -85,6 +85,17 @@ lands in it instead of in the norm family, and the same mathematical semantic en
 up implemented twice. That is not a hypothetical — `ops::mlp::rms_norm` and
 `ops::rms_norm` coexisted for exactly this reason until they were merged, and
 `gdn_widen_f16_to_bf16` still duplicates `QuantizationSemantic::CastF16ToBf16`.
+
+The three names on the BAD line are kept as the worked example, not as a
+description of the tree: they held twelve operators from seven families and have
+since been emptied into those families (§5.2). Two things that cost are worth
+noting from it. The drawers reproduced themselves one layer down — each had a
+matching `adapters/elementwise/`, `adapters/attn_helpers/` or
+`adapters/reduction/`, named after an implementation technique rather than a
+family — so clearing three Rust files meant clearing six directories. And four
+of the twelve operators turned out to sit one field away from an existing Spec
+semantic without being mergeable into it; that list only became visible once the
+files were in the right place.
 
 Two organizing axes cannot both be used. When "by semantic" and "by model" are
 mixed, the same operator necessarily appears in both, and nothing in the build
@@ -549,34 +560,58 @@ layer already selects between `_seq` and `_seq_f16` with an `if dtype`.
 | `gdn_prefill` | `apxinf_gdn_prefill` | batched prefill scan |
 | `gdn_prepare_prefill` / `gdn_conv_prepare` | `apxinf_gdn_*prepare*` | prefill input reordering |
 | `gdn_widen_f16_to_bf16` | `apxinf_gdn_widen_f16_to_bf16` | F16 → BF16; duplicates `QuantizationSemantic::CastF16ToBf16` |
-| **attn_ops.rs** (↔ `abi/attn.rs` ↔ `kernels/custom/attn_ops.cu`) | | named after a call site, not a semantic (§1.3) |
-| `partial_rope` | `apxinf_attn_partial_rope` | partial rotary position embedding; belongs to `rope/` |
-| `head_rms_norm` | `apxinf_attn_head_rms_norm` | per-head RMSNorm of q/k; belongs to `norm/` |
+| **rope/partial.rs** (↔ `abi/rope.rs` ↔ `kernels/custom/rope_partial.cu`) | | |
+| `partial_rope` | `apxinf_attn_partial_rope` | in-place partial rotary embedding; the Spec semantics fuse a QKV split and write three outputs, this rotates one tensor |
+| `rotary_dim` | — | host helper (§5.3) |
+| **norm/head.rs** (↔ `abi/norm.rs` ↔ `kernels/custom/norm_head.cu`) | | |
+| `head_rms_norm` | `apxinf_attn_head_rms_norm` | per-head RMSNorm of q/k; in place, and the family's third reduction tree — see §4.1 |
+| **attention/gates.rs** (↔ `abi/attention.rs` ↔ `kernels/custom/attention_gates.cu`) | | |
 | `split_query_and_gate` | `apxinf_attn_split_query_and_gate` | q_proj output split |
 | `apply_output_gate` | `apxinf_attn_apply_output_gate` | sigmoid output gate; needs a quantization epilogue (§4.3) |
 | **attention/kv_cache_attention.rs** | | |
 | `decode_attention` | `apxinf_decode_attention` | single-token decode, allocation-free |
-| **mlp.rs** (↔ `abi/mlp.rs` ↔ `kernels/custom/mlp_ops.cu`) | | named after a call site, not a semantic (§1.3) |
-| `swiglu` | `apxinf_swiglu_bf16` | SwiGLU; belongs to `pointwise/` |
-| `add_into` | `apxinf_new_add_bf16` | residual accumulation; belongs to `pointwise/` |
-| `quantize_fp8_per_tensor` | `apxinf_quantize_fp8_per_tensor` | per-tensor FP8 quantization; belongs to `quantization/` |
-| `fp8_gemv` / `nvfp4_gemv` | `apxinf_fp8_gemv` / `apxinf_nvfp4_gemv` | M=1 projections; these are GEMMs at M=1 |
-| **model.rs** (↔ `abi/model.rs` ↔ `kernels/custom/model_ops.cu`) | | named after a call site, not a semantic (§1.3) |
-| `embedding_gather` | `apxinf_model_embedding_gather` | embedding row gather; overlaps `GatherSemantic::EmbeddingLookup` |
-| `argmax` | `apxinf_model_argmax_bf16` | greedy sampling; correctly fixed — no variants expected |
+| **pointwise/elementwise.rs** (↔ `abi/pointwise.rs` ↔ `kernels/custom/pointwise_ops.cu`) | | |
+| `swiglu` | `apxinf_swiglu_bf16` | SwiGLU; the SiLU-gated form, not `PointwiseSemantic::Geglu` |
+| `add_into` | `apxinf_new_add_bf16` | residual accumulation |
+| **quantization/per_tensor.rs** (↔ `abi/quantization.rs` ↔ `kernels/custom/quantization_ops.cu`) | | |
+| `quantize_fp8_per_tensor` | `apxinf_quantize_fp8_per_tensor` | per-tensor FP8; same arithmetic as `FixedScaleE4m3` but 8-wide where that is scalar, and differs on NaN — merging is a measurement |
+| **gemm/gemv.rs** (↔ `abi/gemm.rs` ↔ `kernels/custom/gemv.cu`) | | |
+| `fp8_gemv` / `nvfp4_gemv` | `apxinf_fp8_gemv` / `apxinf_nvfp4_gemv` | M=1 projections; GEMMs, but one implementation each, so no registry |
+| **gather/embedding.rs** (↔ `abi/gather.rs` ↔ `kernels/custom/gather_embedding.cu`) | | |
+| `embedding_gather` | `apxinf_model_embedding_gather` | plain BF16 row gather; **not** `GatherSemantic::EmbeddingLookup`, which always applies Gemma's `sqrt(cols)` scale and indexes with `u32` |
+| **sampling.rs** (↔ `abi/sampling.rs` ↔ `kernels/custom/sampling_argmax.cu`) | | |
+| `argmax` | `apxinf_model_argmax_bf16` | greedy selection; correctly fixed — no variants expected |
 | **gemm/nvfp4_scales.rs** (↔ `abi/gemm.rs` ↔ `kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.cu`) | | |
 | `nvfp4_quantize_activation` / `_rms_norm` / `_swiglu` | `apxinf_gemm_nvfp4_quantize_*` | NVFP4 activation quantization; the `_rms_norm` / `_swiglu` forms are epilogues (§4.3) |
 | `nvfp4_pack_block_scales` | `apxinf_gemm_nvfp4_pack_block_scales` | block-scale layout |
 | `nvfp4_dense_swiglu_aot` | `apxinf_gemm_nvfp4_dense_swiglu_aot` | AOT fused FC1, specialized for M=2048 — the name carries both a build method and a shape, which §8.2 forbids; recorded debt |
 
-The entries annotated "named after a call site" and "past the §5.1 threshold" are
-recorded debt, not precedent. New operators follow §1.3 and §5.1.
+The entries annotated "past the §5.1 threshold" are recorded debt, not precedent.
+New operators follow §1.3 and §5.1.
+
+The three call-site-named files this catalog used to list — `mlp.rs`,
+`attn_ops.rs`, `model.rs`, with their `adapters/elementwise/`,
+`adapters/attn_helpers/` and `adapters/reduction/` counterparts — are gone. Their
+twelve operators moved to the families above with no change to any signature,
+kernel or public name. What the move surfaced is worth keeping, because in each
+case the operator looked mergeable into an existing Spec and was not:
+
+| Looks like | Why it is not |
+|---|---|
+| `quantize_fp8_per_tensor` = `FixedScaleE4m3` | same arithmetic, but the family's BF16 path is scalar where this is 8-wide, and `fminf`/`fmaxf` clamping maps NaN to −448 instead of to the FP8 NaN encoding |
+| `embedding_gather` = `EmbeddingLookup` | that semantic always multiplies by `sqrt(cols)`; dropping or adding the scale silently changes every embedding. Index dtype and out-of-range behaviour differ too |
+| `head_rms_norm` = `AFFINE_WEIGHT_OFFSET` | same `(1 + weight)` affine, but a third reduction order again (§4.1), and it writes in place over a rank-3 activation the `[rows, cols]` Spec cannot name |
+| `swiglu` = `PointwiseSemantic::Geglu` | identical shapes and `PointwiseActivation::Silu` already exists, but `geglu` hard-codes `gelu_tanh` instead of calling `apply_activation` |
+
+Each of these is a field away from being real, and each needs a numerics gate
+rather than a rename. Moving the files first is what made them visible as a
+list.
 
 ### 5.3 Host helpers (called by the model, no GPU work)
 
 | Function | Location | Purpose |
 |---|---|---|
-| `rotary_dim(head_dim, factor)` | `attn_ops.rs` | rotary width, pure arithmetic |
+| `rotary_dim(head_dim, factor)` | `rope/partial.rs` | rotary width, pure arithmetic |
 | `gdn_state_elements(v_heads, v_dim, k_dim)` | `gdn.rs` | state element count, pure arithmetic |
 | `gdn_prefill_workspace_bytes(v_heads, num_seqs)` | `gdn.rs` | prefill scratch bytes |
 | `decode_attention_workspace_bytes()` | `kv_cache_attention.rs` | decode workspace bytes |
@@ -950,3 +985,8 @@ through two independent ABIs, the extra path is a bypass: work that should have
 gone through the dispatch layer can be routed around it, and the resulting code
 compiles, runs, and passes tests while leaving the dispatch layer unimplemented.
 One ABI per semantic makes that structurally impossible.
+Note what this signal does *not* say: that two similar-looking entry points must
+be merged. §5.2 lists four pairs that share a name or a formula and still are not
+one semantic — differing in reduction order, in a mandatory scale, in NaN
+handling, or in which tensor they write. The signal is about one semantic with
+two ABIs, and establishing that two things are one semantic is a measurement.

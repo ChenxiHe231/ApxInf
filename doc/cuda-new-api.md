@@ -224,16 +224,34 @@ gdn_chunk_scan_interleaved(ctx, fused, g, beta, out, state,
 gdn_widen_f16_to_bf16(ctx, input, output, count)
 ```
 
-### 4.2 `ops::` attention companions (`attn_ops.rs`)
+### 4.2 `ops::` non-Spec family members
+
+Each of these belongs to a Spec-dispatched family but is not one of its
+semantics, for a stated reason -- it writes in place, its rank does not fit the
+Spec's shape, or its reduction order differs. They keep flat parameters (§5).
 
 ```rust
-partial_rope(ctx, data, positions, rotary_width, theta)    // partial rotary embedding, in place
-head_rms_norm(ctx, data, weight, epsilon)                  // per-head RMSNorm, in place
+// rope/partial.rs -- the Spec semantics fuse a QKV split and write three
+// outputs; this rotates one tensor in place
+partial_rope(ctx, data, positions, rotary_width, theta)
+
+// norm/head.rs -- in place over a rank-3 activation, and the norm family's
+// third reduction tree: not bit-comparable with `norm` or its `offset` form
+head_rms_norm(ctx, data, weight, epsilon)
+
+// attention/gates.rs -- Qwen3.5's `attn_output_gate: true` pair
 split_query_and_gate(ctx, fused, query, gate)              // q_proj output split
-apply_output_gate(ctx, data, gate)                         // sigmoid output gate, in place
+apply_output_gate(ctx, data, gate)                         // sigmoid, in place
+
+// gather/embedding.rs -- plain copy; GatherSemantic::EmbeddingLookup always
+// applies Gemma's sqrt(cols) scale and indexes with u32
+embedding_gather(ctx, table, ids, output)
+
+// sampling.rs -- greedy selection; the stateful samplers are `sampling::`
+argmax(ctx, logits, index)                                 // index is a 1-element I32
 ```
 
-### 4.3 `ops::` norm family (`norm/`) and MLP building blocks (`mlp.rs`)
+### 4.3 `ops::` norm family (`norm/`)
 
 The norm family is three entry points whose Args describe the row-wise
 pipeline as data, so one call shape covers RMS/LayerNorm, adaptive
@@ -262,19 +280,20 @@ with no kernel -- any `fused_add_norm` form, F16 -- return
 already exclude (`NormKind::Layer`, or a `post` on an F16 pipeline) return
 `APXINF_STATUS_INVALID_ARGUMENT` from `validate_spec` first.
 
+### 4.4 `ops::` elementwise and M=1 members
+
 ```rust
+// pointwise/elementwise.rs -- SiLU-gated, not PointwiseSemantic::Geglu's GELU
 swiglu(ctx, fused, output)                                 // fused=[.., 2N] → [.., N]
 add_into(ctx, addend, accumulator)                         // accumulator += addend
+
+// quantization/per_tensor.rs -- same arithmetic as FixedScaleE4m3, but 8-wide
+// where that path is scalar, and it differs on NaN input
 quantize_fp8_per_tensor(ctx, input, output, input_scale)
-fp8_gemv(ctx, weight, activation, output, alpha)           // M=1 projection
+
+// gemm/gemv.rs -- GEMMs at M=1, but one implementation each, so no registry
+fp8_gemv(ctx, weight, activation, output, alpha)
 nvfp4_gemv(ctx, weight, weight_scales, activation, activation_scales, output, alpha)
-```
-
-### 4.4 `ops::` model level (`model.rs`)
-
-```rust
-embedding_gather(ctx, table, ids, output)                  // embedding row gather
-argmax(ctx, logits, index)                                 // greedy sampling; index is a 1-element I32
 ```
 
 ### 4.5 `ops::` NVFP4 quantization (`gemm/nvfp4_scales.rs`)
@@ -302,7 +321,7 @@ nvfp4_dense_swiglu_aot(ctx, activation, activation_scales, weight, weight_scales
 ### 4.6 Host helpers (no GPU work)
 
 ```rust
-ops::rotary_dim(head_dim, partial_rotary_factor) -> usize
+ops::rotary_dim(head_dim, partial_rotary_factor) -> usize   // rope/partial.rs
 ops::gdn_state_elements(v_heads, v_dim, k_dim) -> usize
 ops::gdn_prefill_workspace_bytes(v_heads, num_seqs) -> usize
 ops::decode_attention_workspace_bytes() -> usize
