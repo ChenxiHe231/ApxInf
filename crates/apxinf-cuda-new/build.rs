@@ -418,6 +418,12 @@ fn main() {
         // the same compute_110a codegen as the CUTLASS group because it emits
         // tcgen05 and TMA. See native/kernels/flashinfer_gdn/README.md.
         cutlass_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_launch.cu"));
+    } else {
+        // No sm100 target: the kernel translation unit is absent, so link the
+        // unsupported-status stub in its place (a weak symbol is not enough —
+        // once the archive resolves the weak definition it never pulls the
+        // strong member, which turned the real kernel into the stub on Thor).
+        generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_stub.cpp"));
     }
     let has_fa2 = selection.targets.iter().any(|target| target.sm() >= 80);
     // The allocation-free FA2 decode ABI is a stub that returns
