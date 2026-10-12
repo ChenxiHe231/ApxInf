@@ -719,6 +719,13 @@ struct FusedFc1Metadata {
     tile_count: Tensor,
 }
 
+/// Row count the AOT fused FC1 kernel is specialized to.
+///
+/// Fixed at export time (`crates/apxinf-cuda/aot/qwen38.json` pins
+/// `original_m`), so both the metadata built in `PrefillScratch::new` and the
+/// dispatch test in `nvfp4_mlp_rows` have to agree on it.
+const FUSED_FC1_ROWS: usize = 2048;
+
 fn device_i32(ctx: &CudaContext, values: &[i32]) -> Tensor {
     let bytes = values
         .iter()
@@ -741,18 +748,29 @@ impl PrefillScratch {
         // reference scan remains available in the kernel harness for
         // precision comparison.
         let flashinfer = true;
-        // The AOT FC1 kernel is specialized to M=2048 and only exists when the
-        // export bundle was linked. Both are build/shape properties, so the
-        // selection is unconditional here and env-free.
-        let fused_fc1 = (t == 2048 && apxinf_cuda_new::QWEN38_DENSE_SWIGLU_AOT).then(|| {
-            let tiles = t / 128;
-            FusedFc1Metadata {
-                tile_groups: device_i32(ctx, &vec![0; tiles]),
-                tile_limits: device_i32(ctx, &vec![t as i32; tiles]),
-                token_map: device_i32(ctx, &(0..t as i32).collect::<Vec<_>>()),
-                tile_count: device_i32(ctx, &[tiles as i32]),
-            }
-        });
+        // The AOT FC1 kernel is specialized to M=FUSED_FC1_ROWS and only exists
+        // when the export bundle was linked. Both are build/shape properties,
+        // so the selection is unconditional here and env-free.
+        //
+        // Keyed on `>=`, not `==`: `capacity` rounds the first request up to
+        // CHUNK, so a 2049-token prompt reserves 2112 and an `==` test would
+        // leave the metadata absent for the whole life of that scratch --
+        // including every later request that *is* FUSED_FC1_ROWS long. The
+        // contents are built at FUSED_FC1_ROWS rather than `t` because
+        // `nvfp4_dense_swiglu_aot` sizes `token_map` as `[rows]` and the tile
+        // arrays as `[rows / 128]`, and `nvfp4_mlp_rows` only takes this path
+        // when `rows == FUSED_FC1_ROWS`.
+        let fused_fc1 = (t >= FUSED_FC1_ROWS && apxinf_cuda_new::QWEN38_DENSE_SWIGLU_AOT).then(
+            || {
+                let tiles = FUSED_FC1_ROWS / 128;
+                FusedFc1Metadata {
+                    tile_groups: device_i32(ctx, &vec![0; tiles]),
+                    tile_limits: device_i32(ctx, &vec![FUSED_FC1_ROWS as i32; tiles]),
+                    token_map: device_i32(ctx, &(0..FUSED_FC1_ROWS as i32).collect::<Vec<_>>()),
+                    tile_count: device_i32(ctx, &[tiles as i32]),
+                }
+            },
+        );
         PrefillScratch {
             capacity,
             hidden: zeros(ctx, vec![t, HIDDEN], DType::BF16),
@@ -828,7 +846,7 @@ fn nvfp4_mlp_rows(
     scratch: &mut PrefillScratch,
     rows: usize,
 ) {
-    let fused_fc1 = rows == 2048
+    let fused_fc1 = rows == FUSED_FC1_ROWS
         && gate_up.fused_fc1.is_some()
         && scratch.fused_fc1.is_some();
     let hidden_rows = prefix(&scratch.hidden, vec![rows, HIDDEN], DType::BF16);

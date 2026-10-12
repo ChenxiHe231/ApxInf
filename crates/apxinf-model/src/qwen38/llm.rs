@@ -28,7 +28,10 @@ pub struct Qwen38 {
     model: weights::Model,
     scratch: model::Scratch,
     prefill: Option<model::PrefillScratch>,
-    prefill_session: Option<ops::ExecutionSession>,
+    /// The prepared prefill session, with the token count it was prepared for.
+    /// Executions bind the GEMM shapes of that traversal, so a different count
+    /// cannot replay them.
+    prefill_session: Option<(usize, ops::ExecutionSession)>,
     gdn_states: Vec<model::GdnState>,
     kv_caches: Vec<model::KvCache>,
     decode_phases: Option<Vec<PreparedPhase>>,
@@ -112,6 +115,18 @@ impl Qwen38 {
             // the prepared session no longer matches.
             self.prefill_session = None;
         }
+        // Addresses are not the only binding: the prepared GEMMs carry the row
+        // count of the traversal that prepared them, and `needed` rounds up to
+        // CHUNK, so two different token counts share one scratch. Replaying
+        // under a different count misses the execution cache, which a
+        // non-preparation traversal cannot refill.
+        if self
+            .prefill_session
+            .as_ref()
+            .is_some_and(|(prepared, _)| *prepared != tokens)
+        {
+            self.prefill_session = None;
+        }
     }
 
     /// Logits of the position decoded last, as a `[1, VOCAB]` BF16 tensor.
@@ -168,7 +183,7 @@ impl LlmTrait for Qwen38 {
                 model::prefill_logits(ctx, model, prefill, scratch, count);
                 Ok(())
             };
-            if let Some(session) = self.prefill_session.as_ref() {
+            if let Some((_, session)) = self.prefill_session.as_ref() {
                 ops::with_session(session, || {
                     forward(
                         &self.ctx,
@@ -197,7 +212,7 @@ impl LlmTrait for Qwen38 {
                 // `with_session` resets the arena offset without the cached
                 // executions re-allocating, so the figure would read as zero.
                 model_runner::report_session("prefill", &session);
-                self.prefill_session = Some(session);
+                self.prefill_session = Some((count, session));
             }
             self.ctx.synchronize().map_err(Error::Cuda)?;
             self.position = token_ids.len();
