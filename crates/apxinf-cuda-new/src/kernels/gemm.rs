@@ -72,9 +72,47 @@ pub fn bf16(ctx: &CudaContext, activation: &Tensor, weight: &Tensor) -> Result<T
     Ok(output)
 }
 
-/// `matmul`: alias of [`bf16`] under the legacy generic name.
+/// `matmul`: the legacy generic GEMM. BF16 routes to the tuned operator; any
+/// other dtype (pi0fast's FP32 SigLIP patch projection) runs through raw
+/// cuBLAS at the operand dtype, as the legacy kernel did — the tuned GEMM
+/// operator is BF16-only and rounding the projection to BF16 changes the
+/// autoregressive action tokens.
 pub fn matmul(ctx: &CudaContext, activation: &Tensor, weight: &Tensor) -> Result<Tensor> {
-    bf16(ctx, activation, weight)
+    if activation.dtype() == DType::BF16 {
+        return bf16(ctx, activation, weight);
+    }
+    if activation.dtype() != weight.dtype() {
+        return Err(Error::DTypeMismatch {
+            expected: activation.dtype(),
+            got: weight.dtype(),
+        });
+    }
+    let a_dims = activation.shape().dims();
+    let w_dims = weight.shape().dims();
+    if a_dims.len() != 2 || w_dims.len() != 2 || a_dims[1] != w_dims[0] {
+        return Err(Error::Other(format!(
+            "matmul expects [m,k] @ [k,n], got {a_dims:?} and {w_dims:?}"
+        )));
+    }
+    let (m, k, n) = (a_dims[0], a_dims[1], w_dims[1]);
+    let output = ctx.allocate_output(Shape::new(vec![m, n]), activation.dtype())?;
+    let activation_buffer = crate::CudaBuffer::from_tensor(activation).map_err(Error::Cuda)?;
+    let weight_buffer = crate::CudaBuffer::from_tensor(weight).map_err(Error::Cuda)?;
+    let output_buffer = crate::CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
+    ctx.cublas()
+        .gemm(
+            activation.dtype(),
+            m,
+            n,
+            k,
+            1.0,
+            &activation_buffer,
+            &weight_buffer,
+            0.0,
+            &output_buffer,
+        )
+        .map_err(Error::Cuda)?;
+    Ok(output)
 }
 
 /// `bf16_bias`: BF16 GEMM with a fused `[n]` bias epilogue.
