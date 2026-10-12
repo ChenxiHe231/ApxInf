@@ -3,9 +3,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[path = "../apxinf-cuda/build_support/nvcc_build.rs"]
+#[path = "build_support/nvcc_build.rs"]
 mod nvcc_build;
-#[path = "../apxinf-cuda/aot/link.rs"]
+#[path = "aot/link.rs"]
 mod aot;
 #[path = "build_support/attention_fingerprint.rs"]
 mod attention_fingerprint;
@@ -257,7 +257,7 @@ fn main() {
     let aot_manifest = env::var_os("APXINF_CUDA_AOT_MANIFEST").map(PathBuf::from);
     let qwen38_aot = if selection.targets.iter().any(|target| target.sm() == 110) {
         aot_manifest.as_ref().and_then(|path| {
-            let aot_root = manifest.join("../apxinf-cuda/aot");
+            let aot_root = manifest.join("aot");
             aot::Bundle::load_required(
                 &aot_root,
                 &aot_root.join("qwen38.json"),

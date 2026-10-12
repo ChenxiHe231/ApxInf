@@ -8,7 +8,7 @@ pub(crate) fn create_backend(device: Device) -> Result<Arc<dyn Backend>> {
     match device {
         Device::Cpu => Ok(Arc::new(apxinf_core::CpuBackend)),
         #[cfg(feature = "cuda")]
-        Device::Cuda(id) => cuda::create(id),
+        Device::Cuda(_) => create_cuda_new_backend(device),
         #[cfg(not(feature = "cuda"))]
         Device::Cuda(_) => Err(Error::Other("CUDA support not compiled in".into())),
         #[cfg(feature = "hip")]
@@ -74,7 +74,7 @@ pub(crate) fn downcast_cuda_new_arc(
 ///
 /// The llama / qwen3-vl decode graphs compose cuda-new kernels directly
 /// (allocation-free decode workspace + CUDA Graph capture); this is their
-/// intentional seam to the concrete backend, mirroring `cuda::downcast`.
+/// intentional seam to the concrete backend.
 #[cfg(feature = "cuda")]
 pub(crate) fn downcast_cuda_new(
     backend: &dyn Backend,
@@ -82,29 +82,4 @@ pub(crate) fn downcast_cuda_new(
     backend
         .as_any()
         .downcast_ref::<apxinf_cuda_new::CudaNewBackend>()
-}
-
-#[cfg(feature = "cuda")]
-pub(crate) mod cuda {
-    use std::sync::Arc;
-
-    use apxinf_core::{Backend, Result};
-
-    pub(crate) use apxinf_cuda::nvtx;
-    pub(crate) type RuntimeBackend = apxinf_cuda::CudaBackend;
-
-    /// Recover the concrete `CudaBackend` from a `&dyn Backend`.
-    ///
-    /// This downcast is intentional, not a design gap. Families still on the
-    /// legacy runtime reach their fused kernels through the concrete backend;
-    /// `auto.rs` also uses it to configure legacy GEMM tuning. The uniform
-    /// `dyn Backend` only buys a single loading entry point (the registry
-    /// returns `dyn`); callers recover the concrete backend here on purpose.
-    pub(crate) fn downcast(backend: &dyn Backend) -> Option<&RuntimeBackend> {
-        backend.as_any().downcast_ref::<RuntimeBackend>()
-    }
-
-    pub(crate) fn create(device_id: usize) -> Result<Arc<dyn Backend>> {
-        Ok(Arc::new(RuntimeBackend::new(device_id)?))
-    }
 }
