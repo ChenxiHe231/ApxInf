@@ -414,9 +414,13 @@ fn main() {
     if has_fa2 {
         println!("cargo:rustc-cfg=apxinf_fa2_decode");
     }
+    // Always compiled: without APXINF_ATTENTION_FA2 the translation unit is
+    // only the extern "C" direct-dispatch stubs (strong symbols in the same
+    // TU — a weak stub beside a strong member does not link correctly out of
+    // a static archive).
+    generic_sources.push(adapters.join("attention/providers/fa2.cpp"));
     let mut fa2_sources = Vec::new();
     if has_fa2 {
-        generic_sources.push(adapters.join("attention/providers/fa2.cpp"));
         fa2_sources.extend(
             [
                 "fa2.cu",
