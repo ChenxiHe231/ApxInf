@@ -12,7 +12,7 @@ Contents:
 1. Overview (§1)
 2. Infrastructure: context / stream / buffer (§2)
 3. Tunable operators: GEMM family, Attention family (§3)
-4. Fixed operators: gdn / attn_ops / mlp / model / NVFP4 quantization (§4)
+4. Family and fixed operators: gdn / norm / pointwise / quantization / rope / gather / NVFP4 quantization (§4)
 5. Sessions and graph capture (§5)
 6. Build-time constants (§6)
 
@@ -40,7 +40,7 @@ Only three calling shapes exist:
 | Category | Shape | Synchronization |
 |---|---|---|
 | Tunable operators (§3) | `ops::gemm(ctx, Args)` — an Args struct + policy | synchronous under eager; enqueue-only under session/capture |
-| Fixed operators (§4) | `ops::swiglu(ctx, fused, output)` — flat parameters, or an Args struct for the norm family (§4.3) | asynchronous enqueue; the caller synchronizes |
+| Family and fixed operators (§4) | `ops::swiglu(ctx, fused, output)` — flat parameters, or an Args struct for a Spec-dispatched family such as norm (§4.3) | asynchronous enqueue; the caller synchronizes |
 | Host helpers (§4.6) | pure arithmetic / constant queries, no GPU | immediate |
 
 All tensor parameters must live on the current `CudaContext` device, be contiguous
@@ -195,9 +195,10 @@ meta.update(valid_key_tokens, query_start) -> Result<()>    // call before each 
 
 ## 4. Family and Fixed Operators
 
-One implementation per semantic, direct enqueue, asynchronous return. This section
-covers Spec-dispatched families (design doc §4) and fixed operators (design doc §5),
-listed by module.
+One implementation per semantic, direct enqueue, asynchronous return. Two shapes
+share this section: Spec-dispatched **families**, whose variants are Args fields
+(design doc §4), and **fixed** operators with flat parameters (design doc §5).
+Listed by module.
 
 ### 4.1 `ops::` GDN linear attention (`gdn.rs`)
 
@@ -228,7 +229,7 @@ gdn_widen_f16_to_bf16(ctx, input, output, count)
 
 Each of these belongs to a Spec-dispatched family but is not one of its
 semantics, for a stated reason -- it writes in place, its rank does not fit the
-Spec's shape, or its reduction order differs. They keep flat parameters (§5).
+Spec's shape, or its reduction order differs. They keep flat parameters (design doc §5).
 
 ```rust
 // rope/partial.rs -- the Spec semantics fuse a QKV split and write three

@@ -987,6 +987,7 @@ through two independent ABIs, the extra path is a bypass: work that should have
 gone through the dispatch layer can be routed around it, and the resulting code
 compiles, runs, and passes tests while leaving the dispatch layer unimplemented.
 One ABI per semantic makes that structurally impossible.
+
 Note what this signal does *not* say: that two similar-looking entry points must
 be merged. §5.2 lists four pairs that share a name or a formula and still are not
 one semantic — differing in reduction order, in a mandatory scale, in NaN
