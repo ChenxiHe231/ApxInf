@@ -25,8 +25,11 @@ pub enum Affine<'a> {
     /// the Qwen3.8 RMSNorm kernel, which has its own block size and reduction
     /// tree, so the results differ by more than the `1 +`. That kernel covers
     /// exactly one pipeline -- [`norm`] with [`NormKind::Rms`], BF16 in and
-    /// out, no `post` -- and every other combination is `UNSUPPORTED`; in
-    /// particular [`fused_add_norm`] has no `offset` form.
+    /// out, no `post`. Every other combination is refused by name rather than
+    /// approximated: those describing a coherent pipeline with no kernel (any
+    /// [`fused_add_norm`] form, F16) are `UNSUPPORTED`, while those the stage
+    /// rules already exclude ([`NormKind::Layer`], a `post`) are
+    /// `INVALID_ARGUMENT`.
     Weight { weight: &'a Tensor, offset: bool },
     /// `* (1 + style[c]) + style[cols + c]`, where `style` is `[2 * cols]`:
     /// scale in `[0, cols)` and shift in `[cols, 2 * cols)`.
@@ -34,6 +37,9 @@ pub enum Affine<'a> {
 }
 
 /// Fused output quantization, applied instead of writing the storage dtype.
+/// Must agree with the output tensor's dtype: `Some` requires an E4M3 output
+/// and an E4M3 output requires `Some`. The two state one decision, so a
+/// disagreement is refused rather than resolved in either direction.
 pub enum QuantOut {
     /// E4M3 saturating at +/-448 against a static dequantization `scale`.
     /// F16 input only.
@@ -231,10 +237,10 @@ fn stage<'a>(kind: &NormKind<'a>, affine: &Affine<'a>) -> Stage<'a> {
     }
 }
 
-fn quant_scale(post: &Option<QuantOut>) -> f32 {
+fn quant_scale(post: &Option<QuantOut>) -> Option<f32> {
     match post {
-        Some(QuantOut::E4m3 { scale }) => *scale,
-        None => 1.0,
+        Some(QuantOut::E4m3 { scale }) => Some(*scale),
+        None => None,
     }
 }
 
@@ -250,7 +256,7 @@ fn execute(ctx: &CudaContext, args: RawArgs<'_>) -> Result<()> {
 
 fn norm_raw_args(args: NormArgs<'_>) -> RawArgs<'_> {
     let stage = stage(&args.kind, &args.affine);
-    let output_scale = quant_scale(&args.post);
+    let post_scale = quant_scale(&args.post);
     RawArgs {
         fields: Fields {
             semantic: abi::SEMANTIC_NORM,
@@ -269,13 +275,13 @@ fn norm_raw_args(args: NormArgs<'_>) -> RawArgs<'_> {
         hidden: None,
         normalized: Some(args.out),
         eps: args.eps,
-        output_scale,
+        post_scale,
     }
 }
 
 fn fused_add_norm_raw_args(args: FusedAddNormArgs<'_>) -> RawArgs<'_> {
     let stage = stage(&args.kind, &args.affine);
-    let output_scale = quant_scale(&args.post);
+    let post_scale = quant_scale(&args.post);
     let has_gate = args.gate.is_some();
     RawArgs {
         fields: Fields {
@@ -295,7 +301,7 @@ fn fused_add_norm_raw_args(args: FusedAddNormArgs<'_>) -> RawArgs<'_> {
         hidden: Some(args.hidden),
         normalized: Some(args.normalized),
         eps: args.eps,
-        output_scale,
+        post_scale,
     }
 }
 
@@ -325,7 +331,7 @@ fn residual_add_raw_args(args: ResidualAddArgs<'_>) -> RawArgs<'_> {
         // The combine forms take no epsilon; the ABI validates it as a
         // positive float whether or not a reduction consumes it.
         eps: 1e-6,
-        output_scale: 1.0,
+        post_scale: None,
     }
 }
 

@@ -76,16 +76,19 @@ __global__ void rms_norm_kernel(const __nv_bfloat16* __restrict__ input,
 
 }  // namespace
 
-int rms_norm_bf16(const void* input, const void* weight, void* output,
-                  int rows, int width, float epsilon, cudaStream_t stream) {
-  if (rows <= 0 || width <= 0) return -1;
+cudaError_t rms_norm_bf16(const void* input, const void* weight, void* output,
+                          int rows, int width, float epsilon,
+                          cudaStream_t stream) {
+  if (rows <= 0 || width <= 0) return cudaErrorInvalidValue;
   const int threads = width >= 1024 ? 1024 : ((width + 31) / 32) * 32;
   const int warps = (threads + kWarpSize - 1) / kWarpSize;
   rms_norm_kernel<<<rows, threads, warps * sizeof(float), stream>>>(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const __nv_bfloat16*>(weight),
       static_cast<__nv_bfloat16*>(output), rows, width, epsilon);
-  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+  // Returns the real launch status. This call also *consumes* the error, so
+  // the caller must use this value rather than its own cudaGetLastError().
+  return cudaGetLastError();
 }
 
 }  // namespace apxinf::cuda_new::norm_offset

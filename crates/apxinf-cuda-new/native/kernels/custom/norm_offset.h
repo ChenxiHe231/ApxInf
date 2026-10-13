@@ -17,8 +17,10 @@ namespace apxinf::cuda_new::norm_offset {
 // sum in different orders and are not bit-comparable beyond the `1 +`. See
 // norm_offset.cu for why the code lives in its own translation unit.
 //
-// Returns 0 on success, -1 for a non-positive extent, -2 for a launch error.
-int rms_norm_bf16(const void* input, const void* weight, void* output,
-                  int rows, int width, float epsilon, cudaStream_t stream);
+// Returns the launch status directly, and consumes it: this function calls
+// cudaGetLastError() itself, so a caller's own check would see success.
+cudaError_t rms_norm_bf16(const void* input, const void* weight, void* output,
+                          int rows, int width, float epsilon,
+                          cudaStream_t stream);
 
 }  // namespace apxinf::cuda_new::norm_offset
