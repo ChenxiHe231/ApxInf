@@ -32,7 +32,7 @@ pub use attention::{
     KvCacheAttentionArgs, KvCacheDecodeMeta, PackedQkvAttentionArgs, SegmentedAttentionArgs,
 };
 pub use attn_ops::{
-    apply_output_gate, head_rms_norm, partial_rope, rotary_dim, split_query_and_gate,
+    apply_output_gate, head_rms_norm, partial_mrope, partial_rope, rotary_dim, split_query_and_gate,
 };
 pub use cache::{concat_rows, reserve_prefix};
 pub use gather::{gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry};

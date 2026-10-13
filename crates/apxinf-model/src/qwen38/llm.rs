@@ -4,18 +4,22 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use apxinf_core::{Backend, Device, DType, Error, Result, Shape, Tensor};
+use apxinf_core::{Backend, DType, Device, Error, Result, Shape, Tensor};
 use apxinf_cuda_new::{ops, CudaBuffer, CudaContext, PreparedPhase};
 use apxinf_loader::ModelConfig;
 
 use crate::accelerator::create_backend;
-use crate::llm_trait::LlmTrait;
+use crate::llm_trait::{LlmCapabilities, LlmInput, LlmTrait};
 
-use super::config::{CHUNK, CONV_WIDTH, FULL_ATTENTION_INTERVAL, GDN_HEAD_DIM,
-    GDN_V_HEADS, HEAD_DIM, KV_HEADS, LAYERS, QKV_WIDTH, VOCAB};
-use super::{backend, model, model_runner, weights};
+use super::backend::{LegacyBackend, LegacyBuffer};
+use super::config::{
+    CHUNK, CONV_WIDTH, FULL_ATTENTION_INTERVAL, GDN_HEAD_DIM, GDN_V_HEADS, HEAD_DIM, KV_HEADS,
+    LAYERS, MIN_KV_CAPACITY, QKV_WIDTH, VOCAB,
+};
+use super::vision_weights::VisionWeights;
+use super::{backend, model, model_runner, vision, weights};
 
-/// Qwen3.8-27B-NVFP4. Batch 1, text only, BF16 KV cache.
+/// Qwen3.8-27B-NVFP4. Batch 1, image/text input, BF16 KV cache.
 ///
 /// Execution policy is fixed: batched FlashInfer-GDN prefill, CUDA-graph
 /// decode (one phase per layer -- MLP only for a full-attention layer, mixer
@@ -26,6 +30,8 @@ pub struct Qwen38 {
     ctx: CudaContext,
     backend: Arc<dyn Backend>,
     model: weights::Model,
+    vision: VisionWeights,
+    vision_state: vision::VisionState,
     scratch: model::Scratch,
     prefill: Option<model::PrefillScratch>,
     /// The prepared prefill session, with the token count it was prepared for.
@@ -36,6 +42,8 @@ pub struct Qwen38 {
     kv_caches: Vec<model::KvCache>,
     decode_phases: Option<Vec<PreparedPhase>>,
     position: usize,
+    /// Difference between linear cache positions and compressed image mRoPE.
+    rope_delta: i64,
     kv_capacity: usize,
 }
 
@@ -63,6 +71,7 @@ impl Qwen38 {
 
         let ctx = CudaContext::new(ordinal).map_err(Error::Cuda)?;
         let backend = create_backend(device)?;
+        let vision = VisionWeights::load(&weights, &*backend)?;
         let model = weights::load_model(&ctx, &weights, true);
         ctx.synchronize().map_err(Error::Cuda)?;
         drop(weights);
@@ -80,6 +89,8 @@ impl Qwen38 {
             ctx,
             backend,
             model,
+            vision,
+            vision_state: vision::VisionState::default(),
             scratch,
             prefill: None,
             prefill_session: None,
@@ -87,8 +98,14 @@ impl Qwen38 {
             kv_caches,
             decode_phases: None,
             position: 0,
+            rope_delta: 0,
             kv_capacity: capacity,
         })
+    }
+
+    fn legacy_backend(&self) -> Result<&LegacyBackend> {
+        crate::accelerator::cuda::downcast(&*self.backend)
+            .ok_or_else(|| Error::Other("qwen38 vision requires the CUDA backend".into()))
     }
 
     fn ensure_graphs(&mut self) {
@@ -136,11 +153,146 @@ impl Qwen38 {
             .as_tensor(Shape::new(vec![1, VOCAB]), DType::BF16)
             .unwrap()
     }
+
+    fn run_prefill(
+        &mut self,
+        token_ids: &[u32],
+        positions: Option<&[[u32; 3]]>,
+        prepared_embeddings: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        self.ensure_prefill_scratch(token_ids.len());
+        self.ensure_graphs();
+        let prefill = self.prefill.as_mut().unwrap();
+        match positions {
+            Some(positions) => {
+                if positions.len() != token_ids.len() {
+                    return Err(Error::Other(format!(
+                        "qwen38 received {} mRoPE positions for {} tokens",
+                        positions.len(),
+                        token_ids.len()
+                    )));
+                }
+                model_runner::write_tokens_with_positions(&self.ctx, prefill, token_ids, positions);
+            }
+            None => model_runner::write_tokens(&self.ctx, prefill, token_ids),
+        }
+
+        if let Some(source) = prepared_embeddings {
+            if source.dtype() != DType::BF16
+                || source.shape().dims() != [token_ids.len(), super::config::HIDDEN]
+            {
+                return Err(Error::Other(format!(
+                    "qwen38 prepared embeddings must be BF16 [{}, {}], got {} {:?}",
+                    token_ids.len(),
+                    super::config::HIDDEN,
+                    source.dtype(),
+                    source.shape().dims()
+                )));
+            }
+            let destination = prefill.hidden_rows(token_ids.len());
+            let source = LegacyBuffer::from_tensor(source).map_err(Error::Cuda)?;
+            let destination = LegacyBuffer::from_tensor(&destination).map_err(Error::Cuda)?;
+            let legacy = crate::accelerator::cuda::downcast(&*self.backend)
+                .ok_or_else(|| Error::Other("qwen38 vision requires the CUDA backend".into()))?;
+            destination
+                .copy_from_device_async(
+                    &source,
+                    token_ids.len() * super::config::HIDDEN * DType::BF16.size_in_bytes(),
+                    legacy.context().stream(),
+                )
+                .map_err(Error::Cuda)?;
+            legacy.synchronize()?;
+        }
+
+        let count = token_ids.len();
+        let gather_embeddings = prepared_embeddings.is_none();
+        let forward = |ctx: &CudaContext,
+                       model: &weights::Model,
+                       prefill: &mut model::PrefillScratch,
+                       gdn_states: &mut Vec<model::GdnState>,
+                       kv_caches: &mut Vec<model::KvCache>,
+                       scratch: &model::Scratch| {
+            model::prefill_step(
+                ctx,
+                model,
+                prefill,
+                gdn_states,
+                kv_caches,
+                count,
+                gather_embeddings,
+            );
+            model::prefill_logits(ctx, model, prefill, scratch, count);
+            Ok(())
+        };
+        if let Some((_, session)) = self.prefill_session.as_ref() {
+            ops::with_session(session, || {
+                forward(
+                    &self.ctx,
+                    &self.model,
+                    prefill,
+                    &mut self.gdn_states,
+                    &mut self.kv_caches,
+                    &self.scratch,
+                )
+            })?;
+        } else {
+            let session =
+                ops::ExecutionSession::with_capacity(64 * 1024 * 1024, self.ctx.device_id())?;
+            ops::prepare_with_session(&session, || {
+                forward(
+                    &self.ctx,
+                    &self.model,
+                    prefill,
+                    &mut self.gdn_states,
+                    &mut self.kv_caches,
+                    &self.scratch,
+                )
+            })?;
+            model_runner::report_session("prefill", &session);
+            self.prefill_session = Some((count, session));
+        }
+        self.ctx.synchronize().map_err(Error::Cuda)?;
+        self.position = token_ids.len();
+        Ok(self.logits_view())
+    }
+
+    fn prefill_with_image(
+        &mut self,
+        token_ids: &[u32],
+        pixel_values: &Tensor,
+        grid_thw: &[[u32; 3]],
+    ) -> Result<Tensor> {
+        if token_ids.len() <= 1 {
+            return Err(Error::Other(
+                "qwen38 image prefill requires a complete multimodal prompt".into(),
+            ));
+        }
+        let (positions, embeddings, rope_delta) = {
+            let legacy = self.legacy_backend()?;
+            let positions = vision::rope_positions(token_ids, grid_thw)?;
+            let pixels = vision::upload_pixels(legacy, pixel_values)?;
+            let visual =
+                vision::forward(&self.vision, &self.vision_state, legacy, &pixels, grid_thw)?;
+            let embeddings =
+                vision::embed_and_replace(legacy, &self.model.embedding, token_ids, &visual)?;
+            legacy.synchronize()?;
+            let max_position = positions
+                .iter()
+                .flat_map(|position| position.iter())
+                .copied()
+                .max()
+                .unwrap_or(0) as i64;
+            let rope_delta = max_position + 1 - token_ids.len() as i64;
+            (positions, embeddings, rope_delta)
+        };
+        self.rope_delta = rope_delta;
+        self.run_prefill(token_ids, Some(&positions), Some(&embeddings))
+    }
 }
 
 impl LlmTrait for Qwen38 {
     fn load(config: ModelConfig, weights: HashMap<String, Tensor>, device: Device) -> Result<Self> {
-        let capacity = config.max_seq_len.max(4096);
+        let capacity = config.max_seq_len.max(MIN_KV_CAPACITY);
         Self::new(weights, device, capacity)
     }
 
@@ -163,60 +315,8 @@ impl LlmTrait for Qwen38 {
         }
 
         if start == 0 && token_ids.len() > 1 {
-            self.ensure_prefill_scratch(token_ids.len());
-            self.ensure_graphs();
-            let prefill = self.prefill.as_mut().unwrap();
-            model_runner::write_tokens(&self.ctx, prefill, token_ids);
-            // First pass on a fresh scratch prepares (tunes, allocates) inside
-            // a session arena; every later prefill replays those executions
-            // without allocation. Same-address rebinding is what makes the
-            // replay valid: scratch, weights, states and caches are stable
-            // between calls, and a scratch reallocation clears the session.
-            let count = token_ids.len();
-            let forward = |ctx: &CudaContext,
-                           model: &weights::Model,
-                           prefill: &mut model::PrefillScratch,
-                           gdn_states: &mut Vec<model::GdnState>,
-                           kv_caches: &mut Vec<model::KvCache>,
-                           scratch: &model::Scratch| {
-                model::prefill_step(ctx, model, prefill, gdn_states, kv_caches, count);
-                model::prefill_logits(ctx, model, prefill, scratch, count);
-                Ok(())
-            };
-            if let Some((_, session)) = self.prefill_session.as_ref() {
-                ops::with_session(session, || {
-                    forward(
-                        &self.ctx,
-                        &self.model,
-                        prefill,
-                        &mut self.gdn_states,
-                        &mut self.kv_caches,
-                        &self.scratch,
-                    )
-                })?;
-            } else {
-                let session =
-                    ops::ExecutionSession::with_capacity(64 * 1024 * 1024, self.ctx.device_id())?;
-                ops::prepare_with_session(&session, || {
-                    forward(
-                        &self.ctx,
-                        &self.model,
-                        prefill,
-                        &mut self.gdn_states,
-                        &mut self.kv_caches,
-                        &self.scratch,
-                    )
-                })?;
-                // Reported here, not after the branch: the preparation
-                // traversal is the one that sub-allocates, and every later
-                // `with_session` resets the arena offset without the cached
-                // executions re-allocating, so the figure would read as zero.
-                model_runner::report_session("prefill", &session);
-                self.prefill_session = Some((count, session));
-            }
-            self.ctx.synchronize().map_err(Error::Cuda)?;
-            self.position = token_ids.len();
-            return Ok(self.logits_view());
+            self.rope_delta = 0;
+            return self.run_prefill(token_ids, None, None);
         }
 
         // Token-by-token: the harness decode path, graphs captured lazily on
@@ -225,7 +325,13 @@ impl LlmTrait for Qwen38 {
         for (offset, &token) in token_ids.iter().enumerate() {
             let position = start + offset;
             model_runner::set_token(&self.scratch, token as i32);
-            model_runner::set_position(&self.scratch, position);
+            let mrope_position = position as i64 + self.rope_delta;
+            if mrope_position < 0 || mrope_position > u32::MAX as i64 {
+                return Err(Error::Other(format!(
+                    "qwen38 mRoPE position {mrope_position} is out of range"
+                )));
+            }
+            model_runner::set_mrope_position(&self.scratch, [mrope_position as u32; 3]);
             model_runner::decode_step_with_phases(
                 &self.ctx,
                 &self.model,
@@ -245,9 +351,23 @@ impl LlmTrait for Qwen38 {
         &*self.backend
     }
 
+    fn capabilities(&self) -> LlmCapabilities {
+        LlmCapabilities::VISION
+    }
+
+    fn prefill(&mut self, input: LlmInput<'_>) -> Result<Tensor> {
+        match input.image {
+            Some(image) => {
+                self.prefill_with_image(input.token_ids, image.pixel_values, image.grid_thw)
+            }
+            None => self.forward(input.token_ids, 0),
+        }
+    }
+
     fn reset(&mut self) {
         model_runner::reset_state(&self.ctx, &mut self.gdn_states, &mut self.kv_caches);
         self.position = 0;
+        self.rope_delta = 0;
     }
 
     fn vocab_size(&self) -> usize {
@@ -259,7 +379,11 @@ impl LlmTrait for Qwen38 {
 impl model::GdnState {
     pub(crate) fn new(ctx: &CudaContext) -> Self {
         model::GdnState {
-            recurrent: backend::zeros(ctx, vec![GDN_V_HEADS, GDN_HEAD_DIM, GDN_HEAD_DIM], DType::F32),
+            recurrent: backend::zeros(
+                ctx,
+                vec![GDN_V_HEADS, GDN_HEAD_DIM, GDN_HEAD_DIM],
+                DType::F32,
+            ),
             conv_window: backend::zeros(ctx, vec![QKV_WIDTH, CONV_WIDTH], DType::F32),
         }
     }

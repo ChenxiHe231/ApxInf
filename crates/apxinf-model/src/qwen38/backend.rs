@@ -8,6 +8,11 @@
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda_new::{CudaBuffer, CudaContext};
 
+pub(crate) use crate::accelerator::cuda::{
+    kernels as legacy_kernels, transfers as legacy_transfers, DeviceBuffer as LegacyBuffer,
+    RuntimeBackend as LegacyBackend,
+};
+
 
 pub(crate) fn cpu_bytes(tensor: &Tensor) -> &[u8] {
     match tensor.storage() {

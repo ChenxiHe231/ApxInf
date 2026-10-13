@@ -19,6 +19,12 @@ int partial_rope(void* data, const void* positions, int tokens, int heads,
                  int head_dim, int rotary_dim, float theta,
                  cudaStream_t stream);
 
+// Partial interleaved multimodal RoPE. `positions` is `[tokens, 3]` int32;
+// sections are the temporal/height/width frequency-pair counts.
+int partial_mrope(void* data, const void* positions, int tokens, int heads,
+                  int head_dim, int rotary_dim, int section_t, int section_h,
+                  int section_w, float theta, cudaStream_t stream);
+
 // Per-head RMSNorm in place over `[rows, head_dim]`, for q_norm and k_norm.
 int head_rms_norm(void* data, const void* weight, int rows, int head_dim,
                   float epsilon, cudaStream_t stream);

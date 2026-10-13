@@ -60,6 +60,44 @@ __global__ void partial_rope_kernel(__nv_bfloat16* __restrict__ data,
   }
 }
 
+__device__ __forceinline__ int partial_mrope_axis(int pair, int section_h,
+                                                  int section_w) {
+  const int remainder = pair % 3;
+  if (remainder == 1 && pair < section_h * 3) return 1;
+  if (remainder == 2 && pair < section_w * 3) return 2;
+  return 0;
+}
+
+// Qwen3.5 interleaves the three position axes across the rotary frequency
+// pairs. Pair i still rotates the half-split values (i, i + rotary_dim/2).
+__global__ void partial_mrope_kernel(__nv_bfloat16* __restrict__ data,
+                                     const int32_t* __restrict__ positions,
+                                     int tokens, int heads, int head_dim,
+                                     int rotary_dim, int section_h,
+                                     int section_w, float theta) {
+  const int token = blockIdx.x;
+  const int head = blockIdx.y;
+  if (token >= tokens || head >= heads) return;
+
+  const int half = rotary_dim / 2;
+  const long long base = ((long long)token * heads + head) * head_dim;
+  for (int pair = threadIdx.x; pair < half; pair += blockDim.x) {
+    const int axis = partial_mrope_axis(pair, section_h, section_w);
+    const float position = static_cast<float>(positions[token * 3 + axis]);
+    const float inverse_frequency =
+        __powf(theta, -2.0f * static_cast<float>(pair) /
+                          static_cast<float>(rotary_dim));
+    float sine;
+    float cosine;
+    __sincosf(position * inverse_frequency, &sine, &cosine);
+
+    const float low = __bfloat162float(data[base + pair]);
+    const float high = __bfloat162float(data[base + half + pair]);
+    data[base + pair] = __float2bfloat16(low * cosine - high * sine);
+    data[base + half + pair] = __float2bfloat16(high * cosine + low * sine);
+  }
+}
+
 // Per-head RMSNorm without a gate, for q_norm and k_norm.
 __global__ void head_rms_norm_kernel(__nv_bfloat16* __restrict__ data,
                                      const __nv_bfloat16* __restrict__ weight,
@@ -155,6 +193,22 @@ int partial_rope(void* data, const void* positions, int tokens, int heads,
       static_cast<const int32_t*>(positions), tokens, heads, head_dim,
       rotary_dim, theta);
   return cudaGetLastError() == cudaSuccess ? 0 : -3;
+}
+
+int partial_mrope(void* data, const void* positions, int tokens, int heads,
+                  int head_dim, int rotary_dim, int section_t, int section_h,
+                  int section_w, float theta, cudaStream_t stream) {
+  if (tokens <= 0 || heads <= 0 || head_dim <= 0) return -1;
+  if (rotary_dim <= 0 || rotary_dim > head_dim || rotary_dim % 2 != 0) return -2;
+  if (section_t < 0 || section_h < 0 || section_w < 0 ||
+      section_t + section_h + section_w != rotary_dim / 2) return -3;
+  const int half = rotary_dim / 2;
+  const int threads = half >= 128 ? 128 : ((half + 31) / 32) * 32;
+  partial_mrope_kernel<<<dim3(tokens, heads), threads, 0, stream>>>(
+      static_cast<__nv_bfloat16*>(data),
+      static_cast<const int32_t*>(positions), tokens, heads, head_dim,
+      rotary_dim, section_h, section_w, theta);
+  return cudaGetLastError() == cudaSuccess ? 0 : -4;
 }
 
 int head_rms_norm(void* data, const void* weight, int rows, int head_dim,

@@ -2,8 +2,8 @@
 //!
 //! Scope, same caveat as the GDN tests: these confirm the kernels compute the
 //! stated transforms with the model's real geometry. The rotary pairing
-//! convention and the mRoPE collapse still need confirming against a
-//! reference engine running this checkpoint.
+//! convention is also checked against Qwen3.5's interleaved T/H/W frequency
+//! selection.
 
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda_new::{ops, CudaBuffer, CudaContext};
@@ -103,6 +103,91 @@ fn partial_rope_rotates_only_the_rotary_prefix() {
     }
     println!("rotated prefix worst relative: {worst_rotated:.5}");
     assert!(worst_rotated < 2e-2, "rotation drifted by {worst_rotated}");
+}
+
+#[test]
+fn partial_mrope_selects_qwen35_interleaved_axes() {
+    let ctx = CudaContext::new(0).unwrap();
+    let tokens = 2usize;
+    let width = 64usize;
+    let theta = 1.0e7f32;
+    let sections = [11usize, 11, 10];
+    let values: Vec<f32> = (0..tokens * HEAD_DIM)
+        .map(|index| ((index % 29) as f32 - 14.0) / 9.0)
+        .collect();
+    let data = upload_bf16(&ctx, &values, vec![tokens, 1, HEAD_DIM]);
+    let positions = [2, 17, 41, 3, 19, 43];
+    let device_positions = upload_i32(&ctx, &positions, vec![tokens, 3]);
+
+    ops::partial_mrope(&ctx, &data, &device_positions, width, sections, theta).unwrap();
+    ctx.synchronize().unwrap();
+    let produced = read_bf16(&data);
+
+    let half = width / 2;
+    for token in 0..tokens {
+        for pair in 0..half {
+            // Transformers Qwen3.5 starts with T and overwrites every third
+            // frequency with H/W within each configured section.
+            let axis = if pair % 3 == 1 && pair < sections[1] * 3 {
+                1
+            } else if pair % 3 == 2 && pair < sections[2] * 3 {
+                2
+            } else {
+                0
+            };
+            let angle = positions[token * 3 + axis] as f64
+                * (theta as f64).powf(-2.0 * pair as f64 / width as f64);
+            let base = token * HEAD_DIM;
+            let low = half::bf16::from_f32(values[base + pair]).to_f32() as f64;
+            let high = half::bf16::from_f32(values[base + half + pair]).to_f32() as f64;
+            let expected = [
+                low * angle.cos() - high * angle.sin(),
+                high * angle.cos() + low * angle.sin(),
+            ];
+            for (got, want) in [
+                (produced[base + pair] as f64, expected[0]),
+                (produced[base + half + pair] as f64, expected[1]),
+            ] {
+                assert!(
+                    (got - want).abs() / want.abs().max(1e-2) < 2e-2,
+                    "token {token} pair {pair}: got {got}, expected {want}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn partial_mrope_is_bitwise_text_compatible() {
+    let ctx = CudaContext::new(0).unwrap();
+    let tokens = 4usize;
+    let width = 64usize;
+    let theta = 1.0e7f32;
+    let values: Vec<f32> = (0..tokens * KV_HEADS * HEAD_DIM)
+        .map(|index| ((index % 31) as f32 - 15.0) / 8.0)
+        .collect();
+    let legacy = upload_bf16(&ctx, &values, vec![tokens, KV_HEADS, HEAD_DIM]);
+    let multimodal = upload_bf16(&ctx, &values, vec![tokens, KV_HEADS, HEAD_DIM]);
+    let positions: Vec<i32> = (0..tokens as i32).map(|position| position * 7).collect();
+    let triples: Vec<i32> = positions
+        .iter()
+        .flat_map(|&position| [position, position, position])
+        .collect();
+    let legacy_positions = upload_i32(&ctx, &positions, vec![tokens]);
+    let multimodal_positions = upload_i32(&ctx, &triples, vec![tokens, 3]);
+
+    ops::partial_rope(&ctx, &legacy, &legacy_positions, width, theta).unwrap();
+    ops::partial_mrope(
+        &ctx,
+        &multimodal,
+        &multimodal_positions,
+        width,
+        [11, 11, 10],
+        theta,
+    )
+    .unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(read_bf16(&legacy), read_bf16(&multimodal));
 }
 
 #[test]
