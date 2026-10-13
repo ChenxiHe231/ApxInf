@@ -88,7 +88,7 @@ buf.as_tensor(shape, dtype) -> Result<Tensor, String>
 
 ### 2.4 `HostMappedBuffer` — fixed-address host-mapped memory
 
-The carrier for a CUDA Graph's "runtime-mutable parameters" (design doc §5.6). The CPU
+The carrier for a CUDA Graph's "runtime-mutable parameters" (design doc §7.6). The CPU
 writes, the kernel reads; the address never changes after capture.
 
 ```rust
@@ -104,7 +104,7 @@ hmb.len() / hmb.is_empty()
 ## 3. Tunable Operators
 
 Multiple implementations, autotune selection, recipes persisted to disk (design doc
-§2/§4). Every Args struct carries a `policy` field.
+§3/§6). Every Args struct carries a `policy` field.
 
 ### 3.1 Policy
 
@@ -123,12 +123,13 @@ pub struct GemmPolicy {
 }
 ```
 
-### 3.2 GEMM family (4 semantics)
+### 3.2 GEMM family (5 semantics)
 
 ```rust
 ops::gemm(ctx, GemmArgs) -> Result<()>                      // Y = alpha·A@B / output_scale
 ops::gemm_bias(ctx, GemmBiasArgs { gemm, bias }) -> Result<()>
 ops::gemm_bias_gelu(ctx, GemmBiasGeluArgs { gemm, bias }) -> Result<()>
+ops::gemm_bias_residual(ctx, GemmBiasResidualArgs { gemm, bias, residual }) -> Result<()>
 ops::gemm_geglu(ctx, GemmGegluArgs { gemm }) -> Result<()>  // B=[K,2N], gate/up halves
 ```
 
@@ -183,7 +184,7 @@ SegmentedAttentionArgs::new(query, key, value, out, offsets, host_offsets)
 // offsets: &CudaBuffer (U32 segment boundaries), host_offsets: &[u32] (same content on the host)
 ```
 
-`KvCacheDecodeMeta` — fixed-address metadata for CUDA Graph decode (design doc §5.6):
+`KvCacheDecodeMeta` — fixed-address metadata for CUDA Graph decode (design doc §7.6):
 
 ```rust
 KvCacheDecodeMeta::new(device, key_capacity) -> Result<Self>
@@ -192,10 +193,11 @@ meta.update(valid_key_tokens, query_start) -> Result<()>    // call before each 
 
 ---
 
-## 4. Fixed Operators
+## 4. Family and Fixed Operators
 
-Single implementation, direct enqueue, asynchronous return (design doc §3). Listed by
-module.
+One implementation per semantic, direct enqueue, asynchronous return. This section
+covers Spec-dispatched families (design doc §4) and fixed operators (design doc §5),
+listed by module.
 
 ### 4.1 `ops::` GDN linear attention (`gdn.rs`)
 
@@ -253,9 +255,12 @@ enum BiasOrder { SingleRound, RoundAfterBias }             // BF16 only
 shares the family's ABI but not its kernels: its block size follows `cols` and
 its reduction tree differs from `norm.cuh`, so the two `offset` settings are
 not interchangeable beyond the `1 +`. It is valid only on `norm` with
-`NormKind::Rms`, BF16 in and out and no `post`; every other combination --
-including any `fused_add_norm` form -- returns
-`APXINF_STATUS_UNSUPPORTED` naming the fields, never an approximation.
+`NormKind::Rms`, BF16 in and out and no `post`. Every other combination is
+refused by name, never approximated: those that describe a coherent pipeline
+with no kernel -- any `fused_add_norm` form, F16 -- return
+`APXINF_STATUS_UNSUPPORTED` naming the fields, while those the stage rules
+already exclude (`NormKind::Layer`, or a `post` on an F16 pipeline) return
+`APXINF_STATUS_INVALID_ARGUMENT` from `validate_spec` first.
 
 ```rust
 swiglu(ctx, fused, output)                                 // fused=[.., 2N] → [.., N]
@@ -314,13 +319,13 @@ ops::decode_attention(ctx, query, key_cache, value_cache, output, workspace,
 Qwen3.8-specialized allocation-free FA2 decode (`[1,1,24,256]` query, BF16 caches).
 Note: `key_tokens` is a scalar argument and **gets frozen into a captured graph** — any
 path meant for CUDA Graph should use `kv_cache_attention + with_decode_meta` instead
-(design doc §5.6). Availability: §6 `FA2_DECODE`.
+(design doc §7.6). Availability: §6 `FA2_DECODE`.
 
 ---
 
 ## 5. Sessions and Graph Capture
 
-Concepts and the two-pass mechanism are in design doc §5. The interface:
+Concepts and the two-pass mechanism are in design doc §7. The interface:
 
 ```rust
 // session: handle cache + operator order + workspace arena
