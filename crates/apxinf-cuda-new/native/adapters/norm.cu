@@ -177,8 +177,12 @@ void validate_spec(const apxinf_norm_spec_t& spec) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "bias_order describes a bias this Norm cannot take");
     }
-    if (spec.semantic == APXINF_NORM_SEMANTIC_RESIDUAL_ADD &&
-        spec.dtype != APXINF_DTYPE_BF16) {
+    // Unconditional in the dtype: the intermediate rounding *is* the contract,
+    // so the field is meaningless outside BF16 no matter which semantic
+    // carries it. Scoping this to RESIDUAL_ADD would make the guard depend on
+    // the Rust layer never setting the field on a fused pipeline, which is the
+    // kind of cross-layer assumption this validation exists to not make.
+    if (spec.dtype != APXINF_DTYPE_BF16) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "BiasThenResidual requires BF16 input and output");
     }
@@ -284,13 +288,13 @@ cudaError_t launch_weight_offset(const apxinf_norm_spec_t& spec,
     unsupported(spec);
   }
   // The moved host function calls cudaGetLastError() itself, which clears the
-  // error, so the caller's own check would see success. Map its status here.
-  const int status = offset_kernels::rms_norm_bf16(
+  // error, so the caller's own check would see success. Return its status
+  // verbatim rather than re-deriving one -- a synthesized code would report an
+  // illegal address or a bad configuration as a generic launch failure.
+  return offset_kernels::rms_norm_bf16(
       bindings.input, bindings.weight, bindings.normalized,
       static_cast<int>(spec.rows), static_cast<int>(spec.cols), bindings.eps,
       static_cast<cudaStream_t>(bindings.stream));
-  if (status == 0) return cudaSuccess;
-  return status == -1 ? cudaErrorInvalidValue : cudaErrorLaunchFailure;
 }
 
 cudaError_t launch_quantized_f16(const apxinf_norm_spec_t& spec,

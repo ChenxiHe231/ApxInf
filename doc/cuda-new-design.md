@@ -249,14 +249,21 @@ GEMM family — 5 semantics, each an independent tuning domain:
 | `gemm_bias_residual` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue` | cublas |
 | `gemm_geglu` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue`, `cutlass-dual-geglu`, `cutlass-bf16-dual-geglu` | cublas |
 
-Attention family — 3 public semantics (plus `packed_qkv`, a storage layout for the
-dense semantic rather than a separate public operator):
+Attention family — 3 tuned semantics, each an independent tuning domain:
 
 | Semantic | Candidates | Fallback |
 |---|---|---|
 | `attention` (dense) | `cutlass-fmha-sm100`, `flash-attention-2`, `flash-attention-2-f16-e4m3-522`, `custom-attention-fallback` | custom |
 | `kv_cache_attention` | `flash-attention-2-kv-cache`, `custom-kv-cache-attention` | custom |
 | `segmented_attention` | `custom-segmented-attention` | custom |
+
+There is a fourth, `packed_qkv`. Mathematically it is the dense semantic over a
+packed QKV buffer — a storage layout, which by §1.1 is a field — but it is wired
+as a full semantic: `SEMANTIC_PACKED_QKV = 3`, a crate-root `pub fn
+packed_qkv_attention`, its own `normalize_packed_qkv`, and its own
+`packed_qkv_entries` registry in `attention/candidates.cpp`, i.e. a fourth
+independent tuning domain. Recorded as debt; it is also absent from
+`cuda-operator.md`.
 
 Not every candidate is compiled into every binary: CUTLASS / FA2 candidates are only
 registered when the corresponding build target is enabled (e.g.
@@ -367,11 +374,18 @@ error anywhere.
 Each predicate must be derived from the single field that decides it:
 
 ```text
-reads_weight     ⟸ affine_kind != none
-writes_hidden    ⟸ semantic == fused_add_norm
+reads_weight     ⟸ affine_kind ∈ {weight, weight_offset}
+reads_norm_style ⟸ affine_kind == ada_scale_shift
+reads_norm_bias  ⟸ norm_kind == layer
+writes_hidden    ⟸ semantic != norm             # fused_add_norm *and* residual_add
 reads_residual   ⟸ semantic != norm
 quantizes_output ⟸ quant_kind != none
 ```
+
+Note what the first two lines are not: `affine_kind != none` would make the
+adaptive forms demand a `weight` binding they do not take, and
+`semantic == fused_add_norm` would null the only output `residual_add` has.
+Each predicate reads the field that decides it and no coarser test.
 
 One field decides one predicate, on both sides, so the two sides cannot drift.
 A combination with no kernel must raise `APXINF_STATUS_UNSUPPORTED` **naming the
@@ -410,7 +424,7 @@ So the norm family is three entry points, not nine:
 
 | Entry point | Outputs | Covers |
 |---|---|---|
-| `norm` | 1 | plain RMS / LayerNorm / adaptive, any affine, any epilogue |
+| `norm` | 1 | plain RMS / LayerNorm / adaptive, any affine, any epilogue — except `Affine::Weight { offset: true }`, whose single kernel is BF16-in/BF16-out and unquantized |
 | `fused_add_norm` | 2 (hidden + normalized) | the same, with a residual prologue |
 | `residual_add` | 1 | prologue only, no normalization |
 
@@ -454,9 +468,16 @@ holds:
 | it changes the epilogue's access pattern | adaptive affine reads an extra tensor |
 | measurement shows the branch costs | — use the existing benchmarks, do not guess |
 
-`bias` presence, `gate` presence, and `BiasOrder` are runtime by this rule: norm is
-memory-bound, and a null-pointer test in the epilogue is free, while promoting four
-such axes would multiply instantiations by sixteen.
+`bias` presence is runtime by this rule: norm is memory-bound, so a null-pointer
+test costs nothing against the memory traffic. `gate` and `BiasOrder` are the
+weaker case, and worth stating honestly — the adapter does select a different
+`__global__` for each of them (`bias_residual` / `bias_then_residual` /
+`ada_gate_residual`), because both are *prologue* stages, which by §4.2 may change
+the signature shape. They stay Spec **fields** rather than semantics all the same,
+so a third rounding order adds a field value and not an entry point. What the rule
+forbids is promoting them to template parameters *on top of* that dispatch, which
+would multiply those three instantiations by the dtype and quantization axes with
+nothing measured to justify it.
 
 Prune illegal combinations with a static assertion rather than letting the
 cartesian product exist:
@@ -465,7 +486,7 @@ cartesian product exist:
 static_assert(!ADA_AFFINE || !HAS_WEIGHT, "adaptive scale/shift replaces weight");
 ```
 
-### 4.5 The AOT instantiation list is derived, not written
+### 4.5 The AOT instantiation list should be derived, not written
 
 The combination space is bounded not by the cartesian product but by **the
 combinations the shipped models actually use**. These semantic codes are internal,
@@ -474,7 +495,9 @@ precisely what keeps this shape from degenerating into an append-only operator
 registry that can never be pruned.
 
 Build-time instantiation should therefore be derived from the model configurations
-being shipped, not hand-maintained.
+being shipped, not hand-maintained. Today it is not: `crates/apxinf-cuda/aot/qwen38.json`
+is a hand-written list. That is the gap this section names, not a description of
+current state.
 
 ---
 
@@ -491,14 +514,15 @@ fn gdn_prefill(ctx, q, k, v, state, ...):
     abi::apxinf_gdn_prefill(...)
 ```
 
-This is the right shape for a genuinely isolated operator: `argmax`, `concat_rows`,
-`reserve_prefix`. A Spec for something that will never gain a variant is overhead,
-and one more structure for a reader to load.
+This is the right shape for a genuinely isolated operator — `argmax` is the clean
+example. A Spec for something that will never gain a variant is overhead, and one
+more structure for a reader to load. (`concat_rows` and `reserve_prefix` are
+isolated too but do not cross the C ABI at all; see §5.4.)
 
 ### 5.1 When a fixed operator must be promoted to a family
 
 > **When the same mathematical semantic acquires its third signature variant, it
-> must be merged into a Spec-dispatched family (§6).**
+> must be merged into a Spec-dispatched family (§4).**
 
 - first variant: normal
 - second: possibly temporary (a one-off F16 version); tolerated
@@ -562,7 +586,7 @@ layer already selects between `_seq` and `_seq_f16` with an `if dtype`.
 | **gemm/nvfp4_scales.rs** (↔ `abi/gemm.rs` ↔ `kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.cu`) | | |
 | `nvfp4_quantize_activation` / `_rms_norm` / `_swiglu` | `apxinf_gemm_nvfp4_quantize_*` | NVFP4 activation quantization; the `_rms_norm` / `_swiglu` forms are epilogues (§4.3) |
 | `nvfp4_pack_block_scales` | `apxinf_gemm_nvfp4_pack_block_scales` | block-scale layout |
-| `nvfp4_dense_swiglu_aot` | `apxinf_gemm_nvfp4_dense_swiglu_aot` | AOT fused FC1, specialized for M=2048 |
+| `nvfp4_dense_swiglu_aot` | `apxinf_gemm_nvfp4_dense_swiglu_aot` | AOT fused FC1, specialized for M=2048 — the name carries both a build method and a shape, which §8.2 forbids; recorded debt |
 
 The entries annotated "past the §5.1 threshold" are recorded debt, not precedent.
 New operators follow §1.3 and §5.1.
@@ -617,7 +641,7 @@ promotion path.
 | Object | What it is | Contains addresses? | Where it lives |
 |---|---|---|---|
 | **Recipe** | The chosen "candidate identity + configuration number", e.g. `(cublasLt, impl 2, config 5)` | No, pure identity | Persistable, cross-process (key = `RecipeKey`) |
-| **Execution** | A runnable handle instantiated from a Recipe, bound to the current addresses and stream | Yes | This process only (key = `ExecutionKey`, see §2) |
+| **Execution** | A runnable handle instantiated from a Recipe, bound to the current addresses and stream | Yes | This process only (key = `ExecutionKey`, see §3) |
 
 **Tuning produces a Recipe.** `autotune` takes "a problem + a candidate table" and
 outputs a Recipe (who won); it knows nothing about addresses. Turning a Recipe into a
@@ -936,7 +960,10 @@ see from `try_fp8_bias_gelu_quant_e4m3_m41` that it is only valid at M=41; calli
 it at another shape produces either a crash or wrong numbers, and nothing in the
 type system objects. If a shape specialization is genuinely faster, it is a
 *candidate with a `supports()` predicate* (§3) or a Spec-field-gated fast path
-(§4) — both of which fail loudly outside their domain.
+(§4) — both of which fail loudly outside their domain. (That example and
+`_cached_1536` are not from this crate: they are in
+`crates/apxinf-model/src/gr00t/{fp8,bf16,int8}_weights.rs`. The rule is stated
+here because this is where the shape question is decided.)
 
 The same applies one level down: a candidate gated on exact production shapes
 (`m ∈ {522, 533, 778, 789}`) is a recorded compromise, not a pattern to copy. It

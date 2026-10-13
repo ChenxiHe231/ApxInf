@@ -72,7 +72,12 @@ pub(crate) struct RawArgs<'a> {
     pub(crate) hidden: Option<&'a mut Tensor>,
     pub(crate) normalized: Option<&'a mut Tensor>,
     pub(crate) eps: f32,
-    pub(crate) output_scale: f32,
+    /// The `QuantOut` scale, or `None` when the caller asked for no output
+    /// quantization. Deliberately not a bare `f32` defaulting to 1.0: that
+    /// made `post: Some(E4m3 { scale: 1.0 })` indistinguishable from `post:
+    /// None`, so a quantization request against a non-E4M3 output was
+    /// silently dropped instead of refused.
+    pub(crate) post_scale: Option<f32>,
 }
 
 pub(crate) struct Normalized {
@@ -161,7 +166,8 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
     if !(args.eps.is_finite() && args.eps > 0.0) {
         return Err(invalid("Norm eps must be finite and positive"));
     }
-    if !(args.output_scale.is_finite() && args.output_scale > 0.0) {
+    let output_scale = args.post_scale.unwrap_or(1.0);
+    if !(output_scale.is_finite() && output_scale > 0.0) {
         return Err(invalid("Norm output_scale must be finite and positive"));
     }
     if args.bias.is_some() && !fields.may_have_bias() {
@@ -287,20 +293,37 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
         .normalized
         .as_ref()
         .map_or(dtype, |tensor| tensor.dtype());
-    let quant_kind = if output_dtype == DType::F8E4M3 {
-        if dtype != DType::F16 || !fields.writes_normalized() {
-            return Err(invalid(
-                "Quantized Norm output requires an F16 normalization semantic",
-            ));
+    // The output dtype and `post` are one decision stated twice, so they must
+    // agree. Deriving `quant_kind` from the dtype alone let a `post` on a
+    // non-E4M3 output be dropped whenever its scale happened to be 1.0 -- the
+    // caller asked for quantization and got a plain norm, silently.
+    let quant_kind = match (output_dtype == DType::F8E4M3, args.post_scale.is_some()) {
+        (true, true) => {
+            if dtype != DType::F16 || !fields.writes_normalized() {
+                return Err(invalid(
+                    "Quantized Norm output requires an F16 normalization semantic",
+                ));
+            }
+            abi::QUANT_E4M3
         }
-        abi::QUANT_E4M3
-    } else {
-        if output_dtype != dtype || args.output_scale != 1.0 {
+        (false, false) => {
+            if output_dtype != dtype {
+                return Err(invalid(
+                    "Non-quantized Norm output must preserve dtype and use unit output_scale",
+                ));
+            }
+            abi::QUANT_NONE
+        }
+        (true, false) => {
+            return Err(invalid(
+                "E4M3 Norm output requires a post quantization scale",
+            ))
+        }
+        (false, true) => {
             return Err(invalid(
                 "Non-quantized Norm output must preserve dtype and use unit output_scale",
-            ));
+            ))
         }
-        abi::QUANT_NONE
     };
     let (normalized, normalized_alignment) = bind_output(
         args.normalized,
@@ -331,7 +354,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
         normalized_alignment,
         rows: i64::from(rows_abi),
         cols: i64::from(cols_abi),
-        output_scale_is_unit: u32::from(args.output_scale == 1.0),
+        output_scale_is_unit: u32::from(output_scale == 1.0),
     };
 
     let bindings = abi::Bindings {
@@ -346,7 +369,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
         normalized,
         stream: ctx.stream().handle() as abi::CudaStream,
         eps: args.eps,
-        output_scale: args.output_scale,
+        output_scale,
     };
 
     Ok(Normalized {

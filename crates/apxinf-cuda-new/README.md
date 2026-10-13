@@ -4,7 +4,9 @@
 
 Preparation and graph capture have different owners. GEMM and Attention may own persistent native executions because they select providers and configurations. Fixed operators enqueue directly on the active stream. A model or execution phase owns the CUDA Graph; use `PreparedPhase` when a phase contains both direct fixed operators and persistent GEMM/Attention executions.
 
-- Current public interfaces and mathematical semantics: [L3 operator catalog](cuda-operator.md)
+- Mathematical semantics of the tunable operators: [L3 operator catalog](cuda-operator.md)
+  (GEMM and Attention only; the Spec-dispatched families are specified by their Args in
+  [the public API listing](../../doc/cuda-new-api.md) §4)
 - Workflow for adding or extending a kernel: [Adding New Kernels](../../doc/adding-new-kernels.md)
 
 The norm family has three L3 entry points -- `ops::norm`,
@@ -12,7 +14,7 @@ The norm family has three L3 entry points -- `ops::norm`,
 pipeline stages (`NormKind`, `Affine`, bias/gate, `QuantOut`) as data.
 `Affine::Weight { offset: true }` is the Qwen3.8 `(1 + weight)` RMSNorm; it
 goes through the same `apxinf_norm_launch` ABI but keeps its own kernel
-(`kernels/custom/norm_offset.cu`) because that kernel's reduction order differs
+(`native/kernels/custom/norm_offset.cu`) because that kernel's reduction order differs
 from the shared norm kernels, so the two `offset` settings are not
 interchangeable beyond the `1 +`.
 GEMM Spec version 6 combines NVFP4 block-scale bindings with the

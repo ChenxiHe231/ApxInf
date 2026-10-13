@@ -637,6 +637,48 @@ fn quant_kind_follows_the_output_dtype() {
         error.contains("must preserve dtype") || error.contains("unit output_scale"),
         "{error}"
     );
+
+    // The same, at scale 1.0. This is the case that used to slip through: the
+    // scale was the only thing carried forward from `post`, so a unit scale
+    // made "quantize to E4M3" indistinguishable from "do not quantize", and
+    // the request was dropped in favour of a plain F16 norm.
+    let mut out = f16(vec![ROWS, COLS]);
+    let mut args = NormArgs::new(
+        &input,
+        &mut out,
+        NormKind::Rms,
+        Affine::Weight {
+            weight: &weight,
+            offset: false,
+        },
+        1e-6,
+    );
+    args.post = Some(QuantOut::E4m3 { scale: 1.0 });
+    let error = norm_spec(&ctx, args).unwrap_err().to_string();
+    assert!(
+        error.contains("must preserve dtype") || error.contains("unit output_scale"),
+        "{error}"
+    );
+
+    // And the converse: an E4M3 output with no `post` has no scale to quantize
+    // against, so it is refused rather than defaulted to 1.0.
+    let mut out = zeros_tensor(0, vec![ROWS, COLS], DType::F8E4M3);
+    let error = norm_spec(
+        &ctx,
+        NormArgs::new(
+            &input,
+            &mut out,
+            NormKind::Rms,
+            Affine::Weight {
+                weight: &weight,
+                offset: false,
+            },
+            1e-6,
+        ),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("requires a post quantization scale"), "{error}");
 }
 
 /// Combinations the Rust contract must refuse before they reach the adapter.
