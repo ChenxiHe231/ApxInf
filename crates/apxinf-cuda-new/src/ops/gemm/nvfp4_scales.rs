@@ -271,12 +271,46 @@ pub fn nvfp4_quantize_swiglu(
     }
 }
 
+/// Which implementation of the fused NVFP4 FC1 + SwiGLU + requantization
+/// operator a call should use.
+///
+/// The two are required to be bit-identical on the production shape; the
+/// choice exists so an end-to-end regression can be attributed to this
+/// operator rather than to the whole kernel swap. It is a *build-time*
+/// selection -- see `crate::QWEN38_DENSE_SWIGLU` -- not a runtime switch.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DenseSwigluImpl {
+    /// The CuTe DSL AOT object from the `APXINF_CUDA_AOT_MANIFEST` bundle.
+    /// Consumes *row-major* activation block scales.
+    Aot,
+    /// The in-tree CUDA/CUTLASS translation. Consumes activation block scales
+    /// in the *GEMM atom* layout.
+    Cuda,
+}
+
+impl DenseSwigluImpl {
+    /// Block-scale layout this implementation expects for the activation.
+    /// Getting this wrong is silent: both layouts have the same byte count.
+    pub fn activation_scale_layout(self) -> ScaleLayout {
+        match self {
+            Self::Aot => ScaleLayout::RowMajor,
+            Self::Cuda => ScaleLayout::GemmAtom,
+        }
+    }
+}
+
 /// Shape-specialized NVFP4 dense projection with fused SwiGLU and NVFP4
-/// requantization. This entry point is available only when the matching CuTe
-/// DSL AOT object was supplied at build time.
+/// requantization.
+///
+/// Validation is shared; only the final ABI call differs between the two
+/// implementations. `tile_groups`/`tile_limits`/`token_map`/`tile_count` are
+/// grouped-GEMM metadata that only the AOT object reads, but they are still
+/// validated on both paths so a caller cannot build a plan that works on one
+/// arm and not the other.
 #[allow(clippy::too_many_arguments)]
-pub fn nvfp4_dense_swiglu_aot(
+pub fn nvfp4_dense_swiglu(
     ctx: &CudaContext,
+    implementation: DenseSwigluImpl,
     activation: &Tensor,
     activation_scales: &Tensor,
     weight: &Tensor,
@@ -341,24 +375,41 @@ pub fn nvfp4_dense_swiglu_aot(
     let count_buffer = tensor_storage(ctx, tile_count, DType::I32, &[1])?;
 
     unsafe {
-        status::check(abi::apxinf_gemm_nvfp4_dense_swiglu_aot(
-            activation_buffer.ptr(),
-            weight_buffer.ptr(),
-            activation_scale_buffer.ptr(),
-            weight_scale_buffer.ptr(),
-            output_buffer.ptr(),
-            output_scale_buffer.ptr(),
-            alpha_buffer.ptr(),
-            input_scale_buffer.ptr(),
-            down_scale_buffer.ptr(),
-            group_buffer.ptr(),
-            limit_buffer.ptr(),
-            map_buffer.ptr(),
-            count_buffer.ptr(),
-            rows as i64,
-            n as i64,
-            k as i64,
-            ctx.stream().handle(),
-        ))
+        match implementation {
+            DenseSwigluImpl::Aot => status::check(abi::apxinf_gemm_nvfp4_dense_swiglu_aot(
+                activation_buffer.ptr(),
+                weight_buffer.ptr(),
+                activation_scale_buffer.ptr(),
+                weight_scale_buffer.ptr(),
+                output_buffer.ptr(),
+                output_scale_buffer.ptr(),
+                alpha_buffer.ptr(),
+                input_scale_buffer.ptr(),
+                down_scale_buffer.ptr(),
+                group_buffer.ptr(),
+                limit_buffer.ptr(),
+                map_buffer.ptr(),
+                count_buffer.ptr(),
+                rows as i64,
+                n as i64,
+                k as i64,
+                ctx.stream().handle(),
+            )),
+            DenseSwigluImpl::Cuda => status::check(abi::apxinf_gemm_nvfp4_dense_swiglu_cuda(
+                activation_buffer.ptr(),
+                weight_buffer.ptr(),
+                activation_scale_buffer.ptr(),
+                weight_scale_buffer.ptr(),
+                output_buffer.ptr(),
+                output_scale_buffer.ptr(),
+                alpha_buffer.ptr(),
+                input_scale_buffer.ptr(),
+                down_scale_buffer.ptr(),
+                rows as i64,
+                n as i64,
+                k as i64,
+                ctx.stream().handle(),
+            )),
+        }
     }
 }

@@ -726,6 +726,15 @@ struct FusedFc1Metadata {
 /// dispatch test in `nvfp4_mlp_rows` have to agree on it.
 const FUSED_FC1_ROWS: usize = 2048;
 
+/// Fused FC1 implementation this build carries, or `None` when the operator
+/// falls back to the unfused quantize/GEMM/quantize sequence.
+///
+/// The in-tree CUDA/CUTLASS kernel is shape-generic, but the dispatch stays
+/// pinned to `FUSED_FC1_ROWS` for now because that is the only shape either
+/// implementation has been shown bit-exact on.
+const FUSED_FC1_IMPL: Option<apxinf_cuda_new::ops::DenseSwigluImpl> =
+    apxinf_cuda_new::QWEN38_DENSE_SWIGLU;
+
 fn device_i32(ctx: &CudaContext, values: &[i32]) -> Tensor {
     let bytes = values
         .iter()
@@ -757,10 +766,12 @@ impl PrefillScratch {
         // leave the metadata absent for the whole life of that scratch --
         // including every later request that *is* FUSED_FC1_ROWS long. The
         // contents are built at FUSED_FC1_ROWS rather than `t` because
-        // `nvfp4_dense_swiglu_aot` sizes `token_map` as `[rows]` and the tile
+        // `nvfp4_dense_swiglu` sizes `token_map` as `[rows]` and the tile
         // arrays as `[rows / 128]`, and `nvfp4_mlp_rows` only takes this path
         // when `rows == FUSED_FC1_ROWS`.
-        let fused_fc1 = (t >= FUSED_FC1_ROWS && apxinf_cuda_new::QWEN38_DENSE_SWIGLU_AOT).then(
+        let fused_fc1 = (t >= FUSED_FC1_ROWS
+            && apxinf_cuda_new::QWEN38_DENSE_SWIGLU.is_some())
+        .then(
             || {
                 let tiles = FUSED_FC1_ROWS / 128;
                 FusedFc1Metadata {
@@ -861,10 +872,13 @@ fn nvfp4_mlp_rows(
         EPSILON,
         gate_up.input_scale,
         BLOCK,
-        if fused_fc1 {
-            ops::ScaleLayout::RowMajor
-        } else {
-            ops::ScaleLayout::GemmAtom
+        // The AOT object takes row-major activation block scales; the in-tree
+        // CUDA/CUTLASS kernel takes the GEMM atom layout, which is also what
+        // the unfused path uses. The two layouts have the same byte count, so a
+        // mismatch here is silent -- always derive it from the implementation.
+        match FUSED_FC1_IMPL {
+            Some(implementation) if fused_fc1 => implementation.activation_scale_layout(),
+            _ => ops::ScaleLayout::GemmAtom,
         },
     )
     .unwrap();
@@ -880,8 +894,9 @@ fn nvfp4_mlp_rows(
     if fused_fc1 {
         let weight = gate_up.fused_fc1.as_ref().unwrap();
         let metadata = scratch.fused_fc1.as_ref().unwrap();
-        ops::nvfp4_dense_swiglu_aot(
+        ops::nvfp4_dense_swiglu(
             ctx,
+            FUSED_FC1_IMPL.expect("fused FC1 metadata implies an implementation"),
             &activation,
             &scratch.nvfp4_scales,
             &weight.packed,

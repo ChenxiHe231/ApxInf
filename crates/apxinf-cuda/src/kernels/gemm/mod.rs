@@ -3,7 +3,11 @@ mod fp8;
 mod plan;
 mod providers;
 mod swiglu;
-pub use swiglu::bf16_swiglu_checkpoint;
+pub use swiglu::{
+    bf16_swiglu_checkpoint, bf16_swiglu_checkpoint_with, bf16_swiglu_impl,
+    bf16_swiglu_packed_source_index, bf16_swiglu_weight_layout,
+    pack_bf16_swiglu_weight_host, Bf16SwigluImpl, Bf16SwigluWeightLayout,
+};
 mod w8a8;
 
 use std::cell::RefCell;

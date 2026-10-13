@@ -408,6 +408,7 @@ impl BackboneBf16 {
         )?;
         Ok(out)
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn forward_mlp(
         &self,
         x: &Tensor,
@@ -421,6 +422,11 @@ impl BackboneBf16 {
         let eps = self.config.text.rms_norm_eps;
         let (x, normed) = la::add_rms_norm_plus1(ctx, x, delta, post_norm, eps)?;
 
+        // One weight, both routes: the operator picks the fused kernel or the
+        // generic cuBLAS + interleaved-pairing activation from `normed`'s M,
+        // and both read the layout the load path materialized. The layout is
+        // asked of the operator (not of the sequence length) at load; see
+        // `gemm::bf16_swiglu_weight_layout`.
         let act = gemm::bf16_swiglu_checkpoint(ctx, &normed, gate_up_w)?;
         let down = gemm::bf16(ctx, &act, down_w)?;
         // The operator may return padded physical rows to accelerate the down

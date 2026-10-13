@@ -113,4 +113,20 @@ fi
 fail_if_cuda_present 'extern[[:space:]]+"C"' 'pure CUDA/CUTLASS operator sources must not export C ABI symbols' crates/apxinf-cuda/kernels/custom crates/apxinf-cuda/kernels/cutlass/*.cu
 fail_if_cuda_present 'cublasLt' 'cuBLASLt vendor planning belongs under adapters/, not kernels/' crates/apxinf-cuda/kernels/custom
 
+# `-arch=sm_NNNa` is a silent miscompile, not a synonym for `--generate-code`.
+# Under `-c` nvcc lowers it to an internal `*.compute_NNN.ptx` whose `.target`
+# drops the `a` suffix, and ptxas then refuses every arch-specific instruction
+# ("Feature 'cvt.e2m1x2.f32' not supported on .target 'sm_110'",
+# "Instruction 'setmaxnreg.inc' not supported"). `nvcc -ptx` shows a correctly
+# targeted file, so the bug is invisible unless you compile to an object.
+for build_script in crates/apxinf-cuda/build.rs crates/apxinf-cuda-new/build.rs \
+    crates/apxinf-cuda/build_support/*.rs crates/apxinf-cuda-new/build_support/*.rs; do
+    [[ -e "$build_script" ]] || continue
+    if grep -n -E -- '"-arch=|"-arch |-arch=\{' "$build_script" |
+        grep -v -E '^[0-9]+:[[:space:]]*(//|\*)'; then
+        echo "kernel architecture violation: $build_script passes -arch=sm_*; use cuda_arch::gencode_args (--generate-code arch=compute_NNNa,code=sm_NNNa)" >&2
+        exit 1
+    fi
+done
+
 echo 'kernel architecture checks passed'

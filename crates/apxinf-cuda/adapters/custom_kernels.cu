@@ -82,6 +82,20 @@ extern "C" cudaError_t apxinf_swiglu_bf16_rounded(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_swiglu_bf16_rounded_pair_interleaved(
+    const void* gate_up, void* output, int rows, int inner, int pair,
+    cudaStream_t stream) {
+  if (!gate_up || !output || rows <= 0 || inner <= 0 || pair <= 0 ||
+      inner % pair != 0)
+    return cudaErrorInvalidValue;
+  const int64_t count = static_cast<int64_t>(rows) * inner;
+  const int blocks = static_cast<int>((count + 255) / 256 > 65535 ? 65535 : (count + 255) / 256);
+  swiglu_bf16_pair_interleaved_kernel<true><<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(gate_up),
+      static_cast<__nv_bfloat16*>(output), rows, inner, pair);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_channel_layer_norm_bf16_rounded(const void* x,
     const void* weight, const void* bias, void* out, int batches, int channels,
     int spatial, float eps, cudaStream_t stream) {
