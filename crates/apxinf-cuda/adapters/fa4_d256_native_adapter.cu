@@ -26,7 +26,7 @@ void set_dense(T& tensor, const void* data, int seq, int heads) {
 }
 }  // namespace
 
-extern "C" int32_t apxinf_static_fa4_d256_init(void) {
+extern "C" int32_t apxinf_static_fa4_d256_aot_init(void) {
   int device = -1;
   cudaError_t error = cudaGetDevice(&device);
   if (error != cudaSuccess) return int32_t(error);
@@ -56,7 +56,7 @@ extern "C" int32_t apxinf_static_fa4_d256_init(void) {
   return 0;
 }
 
-extern "C" int32_t apxinf_static_fa4_d256_forward(
+extern "C" int32_t apxinf_static_fa4_d256_aot_forward(
     const void* q, const void* k, const void* v,
     void* out, cudaStream_t stream) {
   if (!ready.load(std::memory_order_acquire)) return int32_t(cudaErrorNotReady);

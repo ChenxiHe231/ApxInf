@@ -113,6 +113,33 @@ pub fn select_cuda_arch(
     })
 }
 
+/// Translate `sm_110a` into `--generate-code arch=compute_110a,code=sm_110a`.
+///
+/// `-arch=sm_110a` must not be used. Under `-c` (but *not* under `-ptx`) nvcc
+/// lowers it to an internal `*.compute_110.ptx` whose `.target` is `sm_110`,
+/// and ptxas then rejects every arch-specific instruction against it:
+///
+/// ```text
+/// Feature 'cvt.e2m1x2.f32' not supported on .target 'sm_110'
+/// Instruction 'setmaxnreg.inc' not supported on .target 'sm_110'
+/// ```
+///
+/// `__CUDA_ARCH_FEAT_SM110_ALL` is defined under *both* spellings, so the macro
+/// gate and the ptxas target are decoupled and the failure stays invisible
+/// until ptxas runs. `--generate-code` keeps the `a` suffix all the way down.
+pub fn gencode_args(arches: impl IntoIterator<Item = String>) -> Vec<String> {
+    arches
+        .into_iter()
+        .flat_map(|arch| {
+            let compute = arch.replacen("sm_", "compute_", 1);
+            [
+                "--generate-code".to_owned(),
+                format!("arch={compute},code={arch}"),
+            ]
+        })
+        .collect()
+}
+
 fn validate_arch_name(arch: &str) -> Result<&str, String> {
     let Some(suffix) = arch.strip_prefix("sm_") else {
         return Err(format!(
@@ -248,7 +275,9 @@ fn validate_nvcc_arch(nvcc: &Path, out_dir: &Path, arch: &str) -> Result<(), Str
         .arg(&source)
         .arg("-o")
         .arg(&object)
-        .arg(format!("-arch={arch}"))
+        // Validate the same flag spelling the real compiles use, so a target
+        // that only works under `-arch=` never reaches the kernel build.
+        .args(gencode_args([arch.to_owned()]))
         .output()
         .map_err(|error| format!("run {} to validate {arch}: {error}", nvcc.display()))?;
     ensure_success(&format!("validate CUDA architecture {arch}"), &output)
@@ -316,6 +345,26 @@ mod tests {
         assert_eq!(cutlass_arch_for("sm_110"), "sm_110a");
         assert_eq!(cutlass_arch_for("sm_87"), "sm_87");
         assert_eq!(cutlass_arch_for("sm_110a"), "sm_110a");
+    }
+
+    #[test]
+    fn arch_specific_targets_use_generate_code_not_dash_arch() {
+        // `-arch=sm_110a` silently retargets ptxas at `sm_110` under `-c`.
+        assert_eq!(
+            gencode_args(["sm_110a".to_owned()]),
+            vec![
+                "--generate-code".to_owned(),
+                "arch=compute_110a,code=sm_110a".to_owned()
+            ]
+        );
+        assert_eq!(
+            gencode_args(["sm_87".to_owned()]),
+            vec![
+                "--generate-code".to_owned(),
+                "arch=compute_87,code=sm_87".to_owned()
+            ]
+        );
+        assert!(gencode_args(Vec::<String>::new()).is_empty());
     }
 
     #[test]

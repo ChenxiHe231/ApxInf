@@ -34,6 +34,11 @@
 #include "cute/layout.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
+// apxinf: trait that TYPES the TMA_O atom's dummy tensor.  The default
+// specialisation is byte-for-byte upstream's `repeat_like(StrideO{}, 0)`;
+// pack-GQA specialises it because its M mode is hierarchical with a STATIC
+// leading extent.  See the header for the full argument.
+#include "cutlass/gemm/collective/apxinf_tma_dummy_shape.hpp"
 
 namespace cutlass::fmha::collective {
 
@@ -43,17 +48,26 @@ template<
   class TileShape,  // Q, D, _
   class StrideO,    // Q, D, B
   class StrideLSE_,   // Q, B
-  class OrderLoadEpilogue = cute::false_type
+  class OrderLoadEpilogue = cute::false_type,
+  // apxinf: number of Q sub-tiles (O accumulator stages) the mainloop produces
+  // per CTA.  UPSTREAM IS 2 -- the stock collective hardwires two Q stages
+  // (ThreadShape<_2,_1,_1>).  The single-Q-stage head_dim-256 path produces
+  // one.  The kernel static_asserts that this matches the mainloop, so a
+  // mismatched pairing is a compile error rather than a wrong O half.
+  int NumAccStages_ = 2
 >
 struct Sm100FmhaFwdEpilogueTmaWarpspecialized {
-    
+
+  static constexpr int NumAccStages = NumAccStages_;
+  static_assert(NumAccStages == 1 || NumAccStages == 2, "only 1 or 2 O acc stages");
+
   using Pipeline = cutlass::PipelineAsync<2>;
 
 //  using SmemLayoutO = decltypa(make_layout(append<3>(select<0,1>(TileShape_WG{}), _2{})));
   using SmemLayoutAtomO = decltype(cutlass::gemm::collective::detail::sm100_smem_selector<
         cute::UMMA::Major::K, Element, tuple_element_t<0, TileShape>, tuple_element_t<1, TileShape>>());
 //  using SmemLayoutAtomO = decltype(make_ordered_layout(select<0,1>(TileShape{}), Step<_1, _0>{}));
-  using SmemLayoutO = decltype(tile_to_shape(SmemLayoutAtomO{}, replace<2>(TileShape{}, _2{}), Step<_2, _1, _3>{}));
+  using SmemLayoutO = decltype(tile_to_shape(SmemLayoutAtomO{}, replace<2>(TileShape{}, Int<NumAccStages>{}), Step<_2, _1, _3>{}));
   using SmemLayoutO_ = SmemLayoutO;
   using StrideLSE = StrideLSE_;
   using ElementOut = Element;
@@ -78,7 +92,7 @@ struct Sm100FmhaFwdEpilogueTmaWarpspecialized {
 
   using TMA_O = decltype(make_tma_copy(
     SM90_TMA_STORE{},
-    make_tensor((Element*) nullptr, repeat_like(StrideO{}, 0), StrideO{}),
+    make_tensor((Element*) nullptr, cutlass::gemm::collective::detail::ApxinfTmaDummyShape<StrideO>::get(), StrideO{}),
     SmemLayoutO{}(_,_,_0{})
   ));
 
@@ -161,8 +175,8 @@ struct Sm100FmhaFwdEpilogueTmaWarpspecialized {
 
     using X = Underscore;
 
-    int o0_index = 2 * get<0>(blk_coord);
-    int o1_index = 2 * get<0>(blk_coord) + 1;
+    int o0_index = NumAccStages * get<0>(blk_coord);
+    int o1_index = NumAccStages * get<0>(blk_coord) + 1;
 
     Tensor mO_qdl_p = params.tma_store_o.get_tma_tensor(get_problem_shape_O(problem_shape));
     // offset mode 0 by (max_length - real_length)
@@ -204,6 +218,24 @@ struct Sm100FmhaFwdEpilogueTmaWarpspecialized {
     }
     tma_store_arrive();
 
+    // apxinf: the single-Q-stage mainloop produces exactly ONE O sub-tile per
+    // CTA, so there is no second store to wait for and only one pipeline slot
+    // to release.  Guarded on a compile-time constant whose default is 2, so
+    // the two-Q-stage body below is reached verbatim on the stock path.
+    if constexpr (NumAccStages == 1) {
+      tma_store_wait<0>();
+
+      if constexpr (cute::is_same_v<OrderLoadEpilogue, cute::true_type>) {
+        cutlass::arch::NamedBarrier::arrive((NumWarpsLoad + NumWarpsEpilogue) * NumThreadsPerWarp,
+                                            cutlass::arch::ReservedNamedBarriers::EpilogueBarrier);
+      }
+
+      pipeline.consumer_release(pipeline_release_state);
+      ++pipeline_release_state;
+      return;
+    }
+    else {
+
     pipeline.consumer_wait(pipeline_consumer_state);
     ++pipeline_consumer_state;
 
@@ -226,6 +258,8 @@ struct Sm100FmhaFwdEpilogueTmaWarpspecialized {
 
     pipeline.consumer_release(pipeline_release_state);
     ++pipeline_release_state;
+
+    }  // else (two O acc stages)
 
   } 
 

@@ -753,6 +753,14 @@ extern "C" {
         inner: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub fn apxinf_swiglu_bf16_rounded_pair_interleaved(
+        gate_up: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        inner: i32,
+        pair: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub fn apxinf_static_swiglu_quant_f16_e4m3(
         gate_up: *const c_void,
         bias: *const c_void,

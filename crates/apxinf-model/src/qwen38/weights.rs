@@ -130,7 +130,7 @@ fn load_fused_gate_up(
     // not. Building it unconditionally would waste host time and device memory
     // on builds where the op is a stub. The shape check lives at the call site
     // (`nvfp4_mlp_rows`); here the checkpoint always supplies the tensors.
-    let fused_fc1 = apxinf_cuda_new::QWEN38_DENSE_SWIGLU_AOT.then(|| {
+    let fused_fc1 = apxinf_cuda_new::QWEN38_DENSE_SWIGLU.is_some().then(|| {
         let gate_weight = cpu_bytes(&tensors[&format!("{prefix}.gate_proj.weight")]);
         let up_weight = cpu_bytes(&tensors[&format!("{prefix}.up_proj.weight")]);
         let bytes_per_row = HIDDEN / 2;

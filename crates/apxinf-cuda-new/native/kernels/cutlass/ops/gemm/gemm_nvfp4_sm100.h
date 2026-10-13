@@ -110,4 +110,21 @@ int nvfp4_dense_swiglu_aot(
     const void* tile_limits, const void* token_map, const void* tile_count,
     int rows, int n, int k, cudaStream_t stream);
 
+// In-tree CUDA/CUTLASS translation of the same operator, shape-generic in
+// `rows` and requiring only `n % 128 == 0 && k % 128 == 0`.
+//
+// It differs from the AOT entry point in two ways that the caller must honour:
+//   * `a_sf` must be in the GEMM atom layout, not row-major. The AOT consumes
+//     row-major activation scales; the CUTLASS block-scaled collective does
+//     not. `b_sf` and `c_sf` are the atom layout for both.
+//   * There is no grouped-GEMM metadata. The tile grid comes from the problem
+//     shape, so `tile_groups`/`tile_limits`/`token_map`/`tile_count` have no
+//     counterpart and are not taken.
+size_t nvfp4_dense_swiglu_cuda_workspace_bytes(int rows, int n, int k);
+int nvfp4_dense_swiglu_cuda(
+    const void* a, const void* b, const void* a_sf, const void* b_sf,
+    void* c, void* c_sf, const void* alpha, const void* input_global_scale,
+    const void* down_inverse_global_scale, void* workspace,
+    size_t workspace_bytes, int rows, int n, int k, cudaStream_t stream);
+
 }  // namespace apxinf::cuda_new::cutlass_ops

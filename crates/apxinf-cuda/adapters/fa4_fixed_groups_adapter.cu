@@ -66,7 +66,7 @@ int32_t launch_group(int group, const void* q, const void* k,
 }
 }  // namespace
 
-extern "C" int32_t apxinf_static_fa4_bf16_vfixed_init(cudaStream_t stream) {
+extern "C" int32_t apxinf_static_fa4_bf16_vfixed_aot_init(cudaStream_t stream) {
   cudaStreamCaptureStatus capture = cudaStreamCaptureStatusNone;
   cudaError_t error = cudaStreamIsCapturing(stream, &capture);
   if (error != cudaSuccess) return int32_t(error);
@@ -106,7 +106,7 @@ extern "C" int32_t apxinf_static_fa4_bf16_vfixed_init(cudaStream_t stream) {
   return 0;
 }
 
-extern "C" int32_t apxinf_static_fa4_bf16_vfixed_ready(void) {
+extern "C" int32_t apxinf_static_fa4_bf16_vfixed_aot_ready(void) {
   if (!ready.load(std::memory_order_acquire)) return kUnsupported;
   int device = -1;
   cudaError_t error = cudaGetDevice(&device);
@@ -114,7 +114,7 @@ extern "C" int32_t apxinf_static_fa4_bf16_vfixed_ready(void) {
   return device == initialized_device ? 0 : kUnsupported;
 }
 
-extern "C" int32_t apxinf_static_fa4_bf16_vfixed_forward(
+extern "C" int32_t apxinf_static_fa4_bf16_vfixed_aot_forward(
     const void* q, const void* k, const void* v, void* out,
     cudaStream_t stream) {
   if (!ready.load(std::memory_order_acquire)) return int32_t(cudaErrorNotReady);

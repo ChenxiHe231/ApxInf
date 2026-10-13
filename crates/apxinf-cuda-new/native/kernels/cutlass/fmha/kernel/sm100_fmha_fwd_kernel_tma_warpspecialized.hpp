@@ -48,6 +48,89 @@ namespace cutlass::fmha::kernel {
 using namespace cute;
 using namespace cutlass::fmha::collective;
 
+// ---------------------------------------------------------------------------
+// apxinf: macro vocabulary for this header.  EVERY DEFAULT IS UPSTREAM; with no
+// -DAPXINF_* on the command line the generated code is numerically identical to
+// pristine CUTLASS (proven by run, see
+// devlocal/aot2cuda/reports/22-fmha-kernel-epilogue-reconciliation.md).
+//
+//   APXINF_NUM_REGS_SOFTMAX     192  per-warpgroup register budget of the
+//   APXINF_NUM_REGS_CORRECTION   96  stock 16-warp (two-Q-stage) schedule
+//   APXINF_NUM_REGS_OTHER        32  `Sm100FmhaCtxKernelWarpspecializedSchedule`
+//
+//   APXINF_1Q_NUM_REGS_SOFTMAX     256  budgets of the 12-warp single-Q-stage
+//   APXINF_1Q_NUM_REGS_CORRECTION  160  schedule
+//   APXINF_1Q_NUM_REGS_OTHER        32  `Sm100FmhaCtxKernelWarpspecialized1QSchedule`
+//                                       (opt-in: a consumer must name the type)
+//
+// NOTE the two groups are SEPARATE knobs.  The 1-Q-stage fork spelled its
+// budgets `APXINF_REGS_*` while the vision fork spelled the 16-warp ones
+// `APXINF_NUM_REGS_*`; those names differ by four characters and mean different
+// warp counts, so the old short spelling is a hard error below.
+// `APXINF_NO_LSE` and `APXINF_PERSISTENT` are NOT read here -- they are
+// consumer-side knobs (ptr_LSE = nullptr, and which TileScheduler to name);
+// report 20 §7.1 listed them as kernel-header knobs, which was wrong.
+// ---------------------------------------------------------------------------
+#if defined(APXINF_REGS_SOFTMAX) || defined(APXINF_REGS_CORRECTION) || defined(APXINF_REGS_OTHER)
+#  error "APXINF_REGS_* is gone; use APXINF_1Q_NUM_REGS_* for the 12-warp single-Q-stage schedule, or APXINF_NUM_REGS_* for the stock 16-warp one"
+#endif
+
+#ifndef APXINF_NUM_REGS_SOFTMAX
+#define APXINF_NUM_REGS_SOFTMAX 192
+#endif
+#ifndef APXINF_NUM_REGS_CORRECTION
+#define APXINF_NUM_REGS_CORRECTION 96
+#endif
+#ifndef APXINF_NUM_REGS_OTHER
+#define APXINF_NUM_REGS_OTHER 32
+#endif
+
+#ifndef APXINF_1Q_NUM_REGS_SOFTMAX
+#define APXINF_1Q_NUM_REGS_SOFTMAX 256
+#endif
+#ifndef APXINF_1Q_NUM_REGS_CORRECTION
+#define APXINF_1Q_NUM_REGS_CORRECTION 160
+#endif
+#ifndef APXINF_1Q_NUM_REGS_OTHER
+#define APXINF_1Q_NUM_REGS_OTHER 32
+#endif
+
+namespace apxinf_detail {
+
+// `CollectiveMainloop::kSingleQStage` only exists on the reconciled forward
+// mainloop; the MLA mainloop does not define it.  Detect instead of requiring.
+template<class T, class = void>
+struct SingleQStage { static constexpr bool value = false; };
+template<class T>
+struct SingleQStage<T, cute::void_t<decltype(T::kSingleQStage)>> {
+  static constexpr bool value = T::kSingleQStage;
+};
+
+// Number of rows in mode 0 of the logical problem shape.  Upstream writes
+// `get<0>(logical_problem_shape)`, which is an `int` for every flat problem
+// shape; pack-GQA makes mode 0 the HIERARCHICAL coordinate (q_per_kv, seq_q),
+// for which the row count is `size<0>`, not `get<0>`.  The integral branch is
+// textually upstream so the stock path cannot drift.
+template<class Shape>
+CUTLASS_HOST_DEVICE constexpr int logical_seqlen_q(Shape const& s) {
+  if constexpr (cute::is_integral<cute::remove_cvref_t<decltype(cute::get<0>(s))>>::value) {
+    return cute::get<0>(s);
+  } else {
+    return int(cute::size<0>(s));
+  }
+}
+
+// Guard the mainloop/epilogue pairing only when the epilogue actually declares
+// `NumAccStages` (the gen/MLA epilogues do not); otherwise stay out of the way.
+template<class T, int Want, class = void>
+struct AccStagesMatch { static constexpr bool value = true; };
+template<class T, int Want>
+struct AccStagesMatch<T, Want, cute::void_t<decltype(T::NumAccStages)>> {
+  static constexpr bool value = (T::NumAccStages == Want);
+};
+
+}  // namespace apxinf_detail
+
 struct Sm100FmhaCtxKernelWarpspecializedSchedule {
 
   enum class WarpRole {
@@ -77,13 +160,13 @@ struct Sm100FmhaCtxKernelWarpspecializedSchedule {
   static const int NumWarpsLoad = 1;
 
   static const bool kDebugUsingPrintf = false;
-  static const int NumRegsSoftmax = 192;
-  static const int NumRegsCorrection = 96 - (kDebugUsingPrintf ? 16 : 0);
-  static const int NumRegsOther = 32 + (kDebugUsingPrintf ? 16 : 0);
+  static const int NumRegsSoftmax = APXINF_NUM_REGS_SOFTMAX;
+  static const int NumRegsCorrection = APXINF_NUM_REGS_CORRECTION - (kDebugUsingPrintf ? 16 : 0);
+  static const int NumRegsOther = APXINF_NUM_REGS_OTHER + (kDebugUsingPrintf ? 16 : 0);
   static const int NumRegsEmpty = 24;
-  
+
   static const int NumWarps = 16;
-  
+
 };
 
 
@@ -125,6 +208,54 @@ struct Sm100MlaFwdCtxKernelWarpspecializedSchedule {
 
 };
 
+// apxinf: schedule for the single-Q-stage (head_dim 256) mainloop, selected by
+// naming this type as `KernelSchedule`.  Purely additive -- nothing below reads
+// it unless a consumer asks for it.
+//
+// Only one softmax warpgroup exists on that path, so the 4 Softmax1 warps of
+// the stock 16-warp schedule are pure overhead: they still consume the CTA's
+// register pool.  12 warps leaves 65536/384 = 170 regs/thread for ptxas to hand
+// out, which is what lets the softmax warpgroup take FA4's 256
+// (`num_regs_softmax`) without spilling -- at 16 warps ptxas caps at 128 and
+// the softmax warp spilled 67 STL / 63 LDL.
+struct Sm100FmhaCtxKernelWarpspecialized1QSchedule {
+
+  enum class WarpRole {
+    Softmax0,
+    Softmax1,
+    Correction,
+    MMA,
+    Load,
+    Epilogue,
+    Empty
+  };
+
+  static constexpr WarpRole warp_idx_to_WarpRole(int warp_idx) {
+    int wg_idx = warp_idx / 4;                        // warp_idx
+    if (wg_idx == 0) return WarpRole::Softmax0;       //   0 -  3
+    if (wg_idx == 1) return WarpRole::Correction;     //   4 -  7
+    if (warp_idx == 8) return WarpRole::MMA;          //       8
+    if (warp_idx == 9) return WarpRole::Load;         //       9
+    if (warp_idx == 10) return WarpRole::Epilogue;    //      10
+    return WarpRole::Empty;                           //      11
+  }
+
+  static const int NumWarpsSoftmax = 4;
+  static const int NumWarpsCorrection = 4;
+  static const int NumWarpsEpilogue = 1;
+  static const int NumWarpsLoad = 1;
+
+  static const bool kDebugUsingPrintf = false;
+  // FA4 hd256 defaults: num_regs_softmax = 256, num_regs_correction = 160,
+  // num_regs_other = 32.
+  static const int NumRegsSoftmax = APXINF_1Q_NUM_REGS_SOFTMAX;
+  static const int NumRegsCorrection = APXINF_1Q_NUM_REGS_CORRECTION;
+  static const int NumRegsOther = APXINF_1Q_NUM_REGS_OTHER;
+  static const int NumRegsEmpty = 24;
+
+  static const int NumWarps = 12;
+};
+
 template<
   class ProblemShapeIn,
   class CollectiveMainloop,
@@ -159,6 +290,27 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
   static const int NumWarps = KernelSchedule::NumWarps;
 
   static constexpr bool IsMla = std::is_same_v<KernelSchedule, Sm100MlaFwdCtxKernelWarpspecializedSchedule>;
+
+  // apxinf: the single-Q-stage mainloop (head_dim 256) has only one softmax
+  // warpgroup; the Softmax1 warps idle and donate their registers.  `false`
+  // for every two-Q-stage mainloop and for mainloops that never heard of the
+  // flag (MLA), so this is inert on the stock path.
+  static constexpr bool kSingleQStage = apxinf_detail::SingleQStage<CollectiveMainloop>::value;
+
+  // apxinf: a single-Q-stage mainloop produces ONE O sub-tile per CTA, so the
+  // epilogue must be instantiated with NumAccStages = 1.  Pairing them the
+  // other way round silently stores the wrong half of O (and over-runs the
+  // epilogue's smem), so assert instead of trusting the consumer.
+  static_assert(apxinf_detail::AccStagesMatch<CollectiveEpilogue, kSingleQStage ? 1 : 2>::value,
+                "CollectiveEpilogue's NumAccStages must match the mainloop's Q stage count");
+
+  // apxinf: a single-Q-stage mainloop has no Softmax1 work, so it may only be
+  // driven by a KernelSchedule whose warp_idx_to_WarpRole() never returns
+  // Softmax1.  `Sm100FmhaCtxKernelWarpspecialized1QSchedule` is the only such
+  // schedule in this header.
+  static_assert(! kSingleQStage ||
+                    std::is_same_v<KernelSchedule, Sm100FmhaCtxKernelWarpspecialized1QSchedule>,
+                "a single-Q-stage mainloop needs Sm100FmhaCtxKernelWarpspecialized1QSchedule");
 
   using ClusterShape = typename CollectiveMainloop::ClusterShape;
 
@@ -434,7 +586,31 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
     CollectiveMainloop mainloop;
     CollectiveEpilogue epilogue{params.epilogue};
 
-    if (role == WarpRole::Softmax0 || role == WarpRole::Softmax1) {
+    // apxinf: this is upstream's text with one compile-time guard added, and
+    // on the stock two-Q-stage path `kSingleQStage` is a compile-time `false`
+    // so `! kSingleQStage &&` folds away and it IS upstream verbatim (proven:
+    // the whole stock consumer is byte-identical to pristine over 25 arms).
+    //
+    // On the single-Q-stage path the guard is logically dead --
+    // `Sm100FmhaCtxKernelWarpspecialized1QSchedule::warp_idx_to_WarpRole()`
+    // never returns Softmax1 -- and it is kept only because it documents that.
+    //
+    // HISTORY, so nobody re-learns it: in round 22 dropping this dead guard
+    // measurably broke the language (hd256, 1-Q-stage, S_PIPE_STAGES=2)
+    // operator -- 98.8188% bit-equal with outputs ~1e36 -- with an IDENTICAL
+    // register report and an identical arithmetic histogram; only the
+    // role-dispatch control flow moved.  That was not a property of this line.
+    // It was an unguarded tmem RAW hazard in the multi-S-slot mainloop
+    // (PV(i) read P(i) with no barrier against softmax(i)'s store), which
+    // ptxas' branch layout happened to tip one way or the other.  Report 24
+    // put a real barrier on it, and then re-ran the round-22 bisection: all
+    // FIVE dispatch spellings (bare `else`; `else if (Empty)`; `else if (Empty
+    // || (1Q && Softmax1))`; that plus `logical_seqlen_q` reverted; and
+    // `Softmax0 || Softmax1` here) now give 13873119/13873152 with a
+    // byte-identical 33-element MISS list, 3 runs each.  The same bisection on
+    // the pre-fix mainloop, in the same session, still reproduced 99.5274% /
+    // 99.7636% / 99.0550%.  Report 24 §3.
+    if (role == WarpRole::Softmax0 || (! kSingleQStage && role == WarpRole::Softmax1)) {
       warpgroup_reg_set<NumRegsSoftmax>();
 
       CUTLASS_PRAGMA_NO_UNROLL
@@ -444,7 +620,7 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
         auto logical_problem_shape = apply_batch(params,
             params.problem_shape, get<2,1>(blk_coord));
 
-        if (get<0>(blk_coord) * get<0>(TileShape{}) >= get<0>(logical_problem_shape)) {
+        if (get<0>(blk_coord) * get<0>(TileShape{}) >= apxinf_detail::logical_seqlen_q(logical_problem_shape)) {
           continue;
         }
 
@@ -478,7 +654,7 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
         auto logical_problem_shape = apply_batch(params,
             params.problem_shape, get<2,1>(blk_coord));
 
-        if (get<0>(blk_coord) * get<0>(TileShape{}) >= get<0>(logical_problem_shape)) {
+        if (get<0>(blk_coord) * get<0>(TileShape{}) >= apxinf_detail::logical_seqlen_q(logical_problem_shape)) {
           continue;
         }
 
@@ -532,7 +708,7 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
         auto logical_problem_shape = apply_batch(params,
             params.problem_shape, get<2,1>(blk_coord));
 
-        if (get<0>(blk_coord) * get<0>(TileShape{}) >= get<0>(logical_problem_shape)) {
+        if (get<0>(blk_coord) * get<0>(TileShape{}) >= apxinf_detail::logical_seqlen_q(logical_problem_shape)) {
           continue;
         }
 
@@ -574,7 +750,7 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
         auto logical_problem_shape = apply_batch(params,
             params.problem_shape, get<2,1>(blk_coord));
 
-        if (get<0>(blk_coord) * get<0>(TileShape{}) >= get<0>(logical_problem_shape)) {
+        if (get<0>(blk_coord) * get<0>(TileShape{}) >= apxinf_detail::logical_seqlen_q(logical_problem_shape)) {
           continue;
         }
 
@@ -604,7 +780,7 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
         auto logical_problem_shape = apply_batch(params,
             params.problem_shape, get<2,1>(blk_coord));
 
-        if (get<0>(blk_coord) * get<0>(TileShape{}) >= get<0>(logical_problem_shape)) {
+        if (get<0>(blk_coord) * get<0>(TileShape{}) >= apxinf_detail::logical_seqlen_q(logical_problem_shape)) {
           continue;
         }
 
@@ -628,6 +804,17 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
       }
 
     }
+    // apxinf: UPSTREAM TEXT.  The single-Q-stage schedule's
+    // warp_idx_to_WarpRole() never returns Softmax1, so no extra disjunct is
+    // needed here.  In round 22, adding one (a logically DEAD term) collapsed
+    // the role dispatch from a BRX jump table to straight-line branches (BRA
+    // 189->186, BRX 2->1, EXIT 18->16) with a bit-identical arithmetic
+    // histogram, and that flipped the language operator to 99.5274% /
+    // 99.7636% / 99.2912% with outputs ~1e36.  That was a symptom of the
+    // unguarded P RAW hazard in the multi-S-slot mainloop, not of this line;
+    // report 24 barriered the hazard and re-ran the bisection, and the
+    // operator is now invariant to all five spellings.  Keep upstream's text
+    // anyway -- it is the smallest diff -- but it is no longer load-bearing.
     else if (role == WarpRole::Empty) {
       warpgroup_reg_set<NumRegsEmpty>();
 

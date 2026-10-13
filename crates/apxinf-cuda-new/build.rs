@@ -186,6 +186,7 @@ fn main() {
     // `apxinf_cuda_new::QWEN38_DENSE_SWIGLU_AOT`; a cfg would not cross the
     // crate boundary, so the capability is a `pub const` instead.
     println!("cargo:rustc-check-cfg=cfg(apxinf_qwen38_dense_swiglu_aot)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_qwen38_dense_swiglu_cuda)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_decode)");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
@@ -251,8 +252,16 @@ fn main() {
     println!("cargo:warning=GEMM targets: {target_summary}");
 
     let aot_manifest = env::var_os("APXINF_CUDA_AOT_MANIFEST").map(PathBuf::from);
-    let qwen38_aot = if selection.targets.iter().any(|target| target.sm() == 110) {
-        aot_manifest.as_ref().and_then(|path| {
+    // AOT-vs-CUDA attribution arm for the fused NVFP4 FC1+SwiGLU operator.
+    // Build-time, per operator, mutually exclusive: with the feature the AOT
+    // object is linked and selected; without it the in-tree CUDA/CUTLASS
+    // translation is. There is deliberately no runtime switch -- both model
+    // docs record "no runtime optimization switches" as policy.
+    let want_qwen38_aot = env::var_os("CARGO_FEATURE_AOT_QWEN38_DENSE_SWIGLU").is_some();
+    let qwen38_aot = if want_qwen38_aot
+        && selection.targets.iter().any(|target| target.sm() == 110)
+    {
+        let bundle = aot_manifest.as_ref().and_then(|path| {
             let aot_root = manifest.join("../apxinf-cuda/aot");
             aot::Bundle::load_required(
                 &aot_root,
@@ -263,13 +272,33 @@ fn main() {
                 "sm_110",
                 &bundled_nvcc,
             )
-        })
+        });
+        assert!(
+            bundle.is_some(),
+            "feature aot-qwen38-dense-swiglu is enabled but no AOT bundle \
+             supplied the qwen38-dense-swiglu-nvfp4 kernel; set \
+             APXINF_CUDA_AOT_MANIFEST or drop the feature"
+        );
+        bundle
     } else {
         None
     };
+    // The in-tree CUDA/CUTLASS kernel is compiled whenever SM110 is targeted,
+    // including on the AOT arm. Both implementations being linked is what lets
+    // `tests/qwen38_fused_fc1_equivalence.rs` compare them in one process on
+    // one power state; which one *production* uses is still decided here at
+    // build time by `QWEN38_DENSE_SWIGLU`, not at runtime.
+    let qwen38_cuda = selection.targets.iter().any(|target| target.sm() == 110)
+        && selection
+            .targets
+            .iter()
+            .any(|target| is_cutlass_sm100_family(&target.cutlass_arch));
     // Surface the capability so runtime selection is a compile-time constant.
     if qwen38_aot.is_some() {
         println!("cargo:rustc-cfg=apxinf_qwen38_dense_swiglu_aot");
+    }
+    if qwen38_cuda {
+        println!("cargo:rustc-cfg=apxinf_qwen38_dense_swiglu_cuda");
     }
 
     let mut id = env::var("APXINF_KERNEL_BUILD_ID").unwrap_or_else(|_| {
@@ -394,6 +423,9 @@ fn main() {
         );
         if qwen38_aot.is_some() {
             cutlass_sources.push(operators.join("gemm_nvfp4_swiglu_aot_sm100.cu"));
+        }
+        if qwen38_cuda {
+            cutlass_sources.push(operators.join("gemm_nvfp4_swiglu_sm100.cu"));
         }
         cutlass_sources.push(adapters.join("attention/providers/cutlass.cu"));
         // Vendored FlashInfer Cake GDN prefill: plain CUDA C++, but it needs
@@ -587,6 +619,9 @@ fn main() {
             command.arg("-DAPXINF_GEMM_CUTLASS=1");
             command.arg("-DAPXINF_ATTENTION_CUTLASS=1");
         }
+        if qwen38_cuda {
+            command.arg("-DAPXINF_QWEN38_DENSE_SWIGLU_CUDA=1");
+        }
         if qwen38_aot.is_some() {
             command.arg("-DAPXINF_QWEN38_DENSE_SWIGLU_AOT=1");
             command.arg(format!(
@@ -615,6 +650,11 @@ fn main() {
         }
         if is_cutlass || is_cutlass_sm87 || is_cutlass_sm89 {
             command.args(["--expt-relaxed-constexpr", "--expt-extended-lambda"]);
+            // `nvcc -O3` does not imply `-DNDEBUG`, so every `CUTLASS_ASSERT`
+            // survives into device code (97 `BPT.TRAP` instructions in the
+            // FMHA family before this). Scoped to the CUTLASS translation
+            // units so the other adapters keep their asserts.
+            command.arg("-DNDEBUG");
             for include in &cutlass_includes {
                 command.arg(format!("-I{}", include.display()));
             }

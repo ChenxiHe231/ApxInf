@@ -9,6 +9,13 @@ build = "build.rs"
 default = []
 # Kept as an empty Cargo capability for cuda-new-specific profiling builds.
 nvtx = []
+# Route the fused Qwen3.8 NVFP4 FC1+SwiGLU operator through the CuTe-DSL AOT
+# object from `APXINF_CUDA_AOT_MANIFEST` instead of the in-tree CUDA/CUTLASS
+# translation. Build-time only: the two are required to be bit-identical, and
+# the feature exists so an end-to-end regression can be attributed to this one
+# operator. It is removed when the AOT bundle plumbing is deleted.
+# Without the feature (and the default) the in-tree kernel is used.
+aot-qwen38-dense-swiglu = []
 
 [dependencies]
 apxinf-core = { path = "../apxinf-core" }

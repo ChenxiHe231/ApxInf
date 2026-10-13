@@ -96,6 +96,33 @@ struct Sm100FmhaLoadTmaWarpspecialized {
     auto dK = args.dK;
     auto dV = args.dV;
 
+    // APXINF_LOAD_SHAPE_PER_MODE
+    //   0 (UPSTREAM) declare a hard-coded
+    //       using IntProblemShape = tuple<int,int,int,tuple<tuple<int,int>,int>>;
+    //     and assign the problem shape into it.  Two problems with that:
+    //      1. it silently DEMOTES every static extent to a dynamic int, which
+    //         breaks pack-GQA (the M mode is (Int<q_per_kv>, seq_q) and
+    //         make_tma_copy needs the tile-M size to be a compile-time
+    //         constant);
+    //      2. it only resolves VariableLength when BOTH mode 0 and mode 1 are
+    //         variable -- the action kernel needs a variable seq_k with a
+    //         fixed seq_q so that both batches fit in ONE launch.
+    //   1 resolve each mode on its own and otherwise pass the shape through.
+    // For a fully dynamic `tuple<int,int,int,tuple<tuple<int,int>,int>>` the
+    // two are the same type with the same values, which is what both in-tree
+    // consumers (crates/apxinf-cuda{,-new}) instantiate.
+#ifndef APXINF_LOAD_SHAPE_PER_MODE
+#define APXINF_LOAD_SHAPE_PER_MODE 0
+#endif
+#if APXINF_LOAD_SHAPE_PER_MODE
+    auto resolve_len = [](auto const& s_) {
+      if constexpr (is_variable_length_v<decltype(s_)>) { return s_.total_length; }
+      else { return s_; }
+    };
+    auto problem_shape_qk = cute::make_tuple(
+        resolve_len(get<0>(problem_shape)), resolve_len(get<1>(problem_shape)),
+        get<2>(problem_shape), get<3>(problem_shape));
+#else
     using IntProblemShape = cute::tuple<int, int, int, cute::tuple<cute::tuple<int, int>, int>>;
 
     IntProblemShape problem_shape_qk;
@@ -111,6 +138,7 @@ struct Sm100FmhaLoadTmaWarpspecialized {
     } else {
       problem_shape_qk = problem_shape;
     }
+#endif
 
     auto params_qk = CollectiveMmaQK::to_underlying_arguments(
         problem_shape_qk,
@@ -119,7 +147,19 @@ struct Sm100FmhaLoadTmaWarpspecialized {
             ptr_K, dK,
         }, /*workspace=*/ nullptr);
 
+#if APXINF_LOAD_SHAPE_PER_MODE
+    // The PV collective's A side is a dummy (P comes from tmem, never from
+    // gmem) but its TMA_A is still TYPED from make_shape(M,K,L) x StrideK, so
+    // M has to stay FLAT here even when the real Q/O M mode is the
+    // hierarchical pack-GQA coordinate -- otherwise shape and stride have a
+    // different number of leaves.
+    auto problem_shape_pv = cute::make_tuple(cute::size<0>(problem_shape_qk),
+                                             cute::get<2>(problem_shape_qk),
+                                             cute::get<1>(problem_shape_qk),
+                                             cute::get<3>(problem_shape_qk));
+#else
     auto problem_shape_pv = select<0,2,1,3>(problem_shape_qk);
+#endif
     auto params_pv = CollectiveMmaPV::to_underlying_arguments(
         problem_shape_pv,
         typename CollectiveMmaPV::Arguments {
@@ -236,9 +276,14 @@ struct Sm100FmhaLoadTmaWarpspecialized {
 
     uint32_t lane_predicate = cute::elect_one_sync();
 
+    // apxinf: how many Q sub-tiles this CTA owns. Two for the stock
+    // ThreadShape<_2,_1,_1>; one for the single-Q-stage head_dim 256 path.
+    constexpr int kNumQStages = size<0>(TileShape{}) / size<0>(TileShapeQK{});
+    static_assert(kNumQStages == 1 || kNumQStages == 2, "only 1 or 2 Q stages");
+
     // Q1
-    int q0_index = 2 * get<0>(blk_coord_q);
-    int q1_index = 2 * get<0>(blk_coord_q) + 1;
+    int q0_index = kNumQStages * get<0>(blk_coord_q);
+    int q1_index = kNumQStages * get<0>(blk_coord_q) + 1;
     pipeline_q.producer_acquire(pipeline_q_producer_state);
     if (lane_predicate) {
       auto tma_barrier = pipeline_q.producer_get_barrier(pipeline_q_producer_state);
@@ -247,7 +292,26 @@ struct Sm100FmhaLoadTmaWarpspecialized {
     ++pipeline_q_producer_state;
 
     // K1
+    // FA4's two hd256 kernels fetch in opposite directions; both the frozen row
+    // max and the O accumulation order depend on it, so the fetch order has to
+    // match the softmax warp's loop (the mma and softmax warps just drain this
+    // pipeline in order).
+    //   DESCENDING: `flash_fwd_sm100.py:2355` (action, vision)
+    //   ASCENDING : `sm100_hd256_2cta_fmha_forward.py:1449` (language)
+// APXINF_KV_DESCENDING is defined (default 0 = UPSTREAM ascending) by
+// collective/sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp, which also
+// documents it; this header only consumes it.  Both headers MUST see the same
+// value or the fetch order and the softmax loop order disagree.
+#ifndef APXINF_KV_DESCENDING
+#define APXINF_KV_DESCENDING 0
+#endif
+#if APXINF_KV_DESCENDING
+    int k_index = mask_tile_count - 1;
+    constexpr int k_step = -1;
+#else
     int k_index = 0;
+    constexpr int k_step = 1;
+#endif
     pipeline_kv.producer_acquire(pipeline_kv_producer_state);
     if (lane_predicate) {
       auto tma_barrier = pipeline_kv.producer_get_barrier(pipeline_kv_producer_state);
@@ -256,12 +320,14 @@ struct Sm100FmhaLoadTmaWarpspecialized {
     ++pipeline_kv_producer_state;
 
     // Q2
-    pipeline_q.producer_acquire(pipeline_q_producer_state);
-    if (lane_predicate) {
-      auto tma_barrier = pipeline_q.producer_get_barrier(pipeline_q_producer_state);
-      copy(params.tma_load_q.with(*tma_barrier, 0), tQgQ(_, q1_index), tQsQ(_, pipeline_q_producer_state.index()));
+    if constexpr (kNumQStages == 2) {
+      pipeline_q.producer_acquire(pipeline_q_producer_state);
+      if (lane_predicate) {
+        auto tma_barrier = pipeline_q.producer_get_barrier(pipeline_q_producer_state);
+        copy(params.tma_load_q.with(*tma_barrier, 0), tQgQ(_, q1_index), tQsQ(_, pipeline_q_producer_state.index()));
+      }
+      ++pipeline_q_producer_state;
     }
-    ++pipeline_q_producer_state;
 
     // V1
     pipeline_kv.producer_acquire(pipeline_kv_producer_state);
@@ -270,7 +336,7 @@ struct Sm100FmhaLoadTmaWarpspecialized {
       copy(params.tma_load_v.with(*tma_barrier, 0), tVgV(_, k_index), tVsV(_, pipeline_kv_producer_state.index()));
     }
     ++pipeline_kv_producer_state;
-    k_index += 1;
+    k_index += k_step;
 
     // loop:
     mask_tile_count -= 1;
@@ -291,7 +357,7 @@ struct Sm100FmhaLoadTmaWarpspecialized {
         copy(params.tma_load_v.with(*tma_barrier, 0), tVgV(_, k_index), tVsV(_, pipeline_kv_producer_state.index()));
       }
       ++pipeline_kv_producer_state;
-      k_index += 1;
+      k_index += k_step;
     }
   }
 };

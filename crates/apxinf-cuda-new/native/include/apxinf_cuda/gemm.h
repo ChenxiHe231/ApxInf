@@ -69,6 +69,18 @@ apxinf_status_t apxinf_gemm_nvfp4_dense_swiglu_aot(
     const void* token_map, const void* tile_count,
     int64_t rows, int64_t n, int64_t k, apxinf_cuda_stream_t stream);
 
+/* In-tree CUDA/CUTLASS implementation of the same operator. Same leading
+   arguments as the AOT entry point so a caller can switch on the function
+   pointer, minus the grouped-GEMM metadata the dense kernel has no use for.
+   NOTE: `activation_scales` must be in the GEMM atom layout here, whereas the
+   AOT entry point above takes them row-major. */
+apxinf_status_t apxinf_gemm_nvfp4_dense_swiglu_cuda(
+    const void* activation, const void* weight,
+    const void* activation_scales, const void* weight_scales,
+    void* output, void* output_scales, const void* alpha,
+    const void* input_global_scale, const void* down_inverse_global_scale,
+    int64_t rows, int64_t n, int64_t k, apxinf_cuda_stream_t stream);
+
 uint64_t apxinf_gemm_execution_weight_prepack_count(
     apxinf_gemm_execution_t execution);
 apxinf_status_t apxinf_gemm_test_validate_candidates(

@@ -7,7 +7,7 @@ mod cuda_arch;
 #[path = "build_support/nvcc_build.rs"]
 mod nvcc_build;
 
-use cuda_arch::{is_cutlass_sm100_family, select_cuda_arch, ArchSource};
+use cuda_arch::{gencode_args, is_cutlass_sm100_family, select_cuda_arch, ArchSource};
 
 const FNV1A_128_OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
 const FNV1A_128_PRIME: u128 = 0x0000000001000000000000000000013b;
@@ -127,7 +127,13 @@ fn is_cutlass_sm89_family(arch: &str) -> bool {
 }
 
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(apxinf_aot_sm110)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_aot_gemm_swiglu_bf16)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_aot_gdn_prefill_bf16)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_aot_vision_attention)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_aot_action_attention)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_aot_language_attention)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_fa4_attention_cuda)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_gdn_prefill_bf16_cuda)");
     println!("cargo:rustc-check-cfg=cfg(nvtx_header)");
     println!("cargo:rustc-check-cfg=cfg(nvtx_v2)");
     println!("cargo:rustc-check-cfg=cfg(nvtx_v3)");
@@ -344,13 +350,48 @@ fn main() {
                 "one or more required CUDA adapters are missing under {adapters_dir}"
             );
 
+            // Per-operator AOT attribution arms. A feature without a usable
+            // bundle is a hard error: a typo that quietly measures the in-tree
+            // arm is the failure mode these exist to prevent.
+            let want_swiglu_aot =
+                env::var_os("CARGO_FEATURE_AOT_GEMM_SWIGLU_BF16").is_some();
+            let want_gdn_aot = env::var_os("CARGO_FEATURE_AOT_GDN_PREFILL_BF16").is_some();
+            let want_vision_aot = env::var_os("CARGO_FEATURE_AOT_VISION_ATTENTION").is_some();
+            let want_action_aot = env::var_os("CARGO_FEATURE_AOT_ACTION_ATTENTION").is_some();
+            let want_language_aot =
+                env::var_os("CARGO_FEATURE_AOT_LANGUAGE_ATTENTION").is_some();
+            for (want, feature) in [
+                (want_swiglu_aot, "aot-gemm-swiglu-bf16"),
+                (want_gdn_aot, "aot-gdn-prefill-bf16"),
+                (want_vision_aot, "aot-vision-attention"),
+                (want_action_aot, "aot-action-attention"),
+                (want_language_aot, "aot-language-attention"),
+            ] {
+                assert!(
+                    !want || aot_bundle.is_some(),
+                    "feature {feature} needs a usable SM110 AOT bundle; set \
+                     APXINF_CUDA_AOT_MANIFEST. Refusing to silently build the \
+                     in-tree arm instead."
+                );
+            }
+
             if let Some(bundle) = &aot_bundle {
                 bundle.kernel("gemm-swiglu-bf16");
                 bundle.kernel("gdn-prefill-bf16");
-                kernel_files
-                    .push(std::path::Path::new(&adapters_dir).join("gdn_bf16_aot_adapter.cu"));
-                kernel_files
-                    .push(std::path::Path::new(&adapters_dir).join("quack_m256n256_adapter.cu"));
+                if want_gdn_aot {
+                    kernel_files
+                        .push(std::path::Path::new(&adapters_dir).join("gdn_bf16_aot_adapter.cu"));
+                    println!("cargo:rustc-cfg=apxinf_aot_gdn_prefill_bf16");
+                }
+                if want_swiglu_aot {
+                    kernel_files.push(
+                        std::path::Path::new(&adapters_dir).join("quack_m256n256_adapter.cu"),
+                    );
+                    println!("cargo:rustc-cfg=apxinf_aot_gemm_swiglu_bf16");
+                }
+                // The bundle-completeness assertion is unconditional: a bundle
+                // that is missing one of the four attention objects is a broken
+                // bundle whichever arm is being built.
                 for id in [
                     "language-attention",
                     "action-attention",
@@ -359,16 +400,41 @@ fn main() {
                 ] {
                     bundle.kernel(id);
                 }
-                for file in [
-                    "fa4_d256_native_adapter.cu",
-                    "fa4_d256_split_batch_adapter.cu",
-                    "fa4_d256_split_batch_merge.cu",
-                    "fa4_fixed_groups_adapter.cu",
-                ] {
-                    kernel_files.push(std::path::Path::new(&adapters_dir).join(file));
+                if want_vision_aot {
+                    kernel_files.push(
+                        std::path::Path::new(&adapters_dir).join("fa4_fixed_groups_adapter.cu"),
+                    );
+                    println!("cargo:rustc-cfg=apxinf_aot_vision_attention");
                 }
-                println!("cargo:rustc-cfg=apxinf_aot_sm110");
+                if want_action_aot {
+                    kernel_files.push(
+                        std::path::Path::new(&adapters_dir)
+                            .join("fa4_d256_split_batch_adapter.cu"),
+                    );
+                    println!("cargo:rustc-cfg=apxinf_aot_action_attention");
+                }
+                if want_language_aot {
+                    kernel_files.push(
+                        std::path::Path::new(&adapters_dir).join("fa4_d256_native_adapter.cu"),
+                    );
+                    println!("cargo:rustc-cfg=apxinf_aot_language_attention");
+                }
             }
+
+            // Vendored FlashInfer Cake GDN prefill (BF16 I/O, full-DV). The
+            // kernel translation unit must stay separate from the descriptor
+            // one: the generated header declares its own `CUtensorMap` and
+            // <cuda.h> declares another.
+            let gdn_cuda_launch =
+                std::path::Path::new(&adapters_dir).join("gdn_bf16_cuda_launch.cu");
+            let gdn_cuda_adapter =
+                std::path::Path::new(&adapters_dir).join("gdn_bf16_cuda_adapter.cu");
+            // The conv/pack/gate prologue and the state transpose, in one
+            // translation unit shared by both arms. It cannot be a header: the
+            // kernels are `__global__` and would be emitted with external
+            // linkage in every includer.
+            let gdn_prologue =
+                std::path::Path::new(&adapters_dir).join("gdn_bf16_prefill_prologue.cu");
 
             let cutlass_root = std::path::Path::new(&kernels_dir).join("cutlass");
             let cutlass_fmha_operator = cutlass_root.join("fmha_sm100.cu");
@@ -382,6 +448,26 @@ fn main() {
             let cutlass_bf16_sm89_header = cutlass_root.join("bf16_operators_sm89.h");
             let cutlass_int8_operator = cutlass_root.join("w8a8_gemm_sm80.cu");
             let cutlass_fmha = std::path::Path::new(&adapters_dir).join("cutlass_fmha_adapter.cu");
+            // In-tree CUDA arms of the three FA4 attention operators. One
+            // translation unit each because the operator's numeric contract IS
+            // its `-DAPXINF_*` flag line (see `fmha_d256_sm100.cuh`), and the
+            // flags configure the vendored FMHA headers without taking part in
+            // name mangling.
+            let fa4_vision_operator = cutlass_root.join("fmha_vision_sm100.cu");
+            let fa4_language_operator = cutlass_root.join("fmha_d256_language_sm100.cu");
+            let fa4_action_operator = cutlass_root.join("fmha_d256_action_sm100.cu");
+            let fa4_vision_cuda =
+                std::path::Path::new(&adapters_dir).join("fa4_fixed_groups_cuda_adapter.cu");
+            let fa4_language_cuda =
+                std::path::Path::new(&adapters_dir).join("fa4_d256_cuda_adapter.cu");
+            let fa4_action_cuda =
+                std::path::Path::new(&adapters_dir).join("fa4_d256_split_batch_cuda_adapter.cu");
+            // Q duplication and the LSE merge are plain CUDA kernels shared by
+            // BOTH arms, so a difference can only come from the attention
+            // launch -- the same discipline `gdn_bf16_prefill_prologue.cu`
+            // follows.
+            let fa4_split_batch_merge =
+                std::path::Path::new(&adapters_dir).join("fa4_d256_split_batch_merge.cu");
             let cutlass_gemm = std::path::Path::new(&adapters_dir).join("cutlass_fp8_adapter.cu");
             let cutlass_bf16 = std::path::Path::new(&adapters_dir).join("cutlass_bf16_adapter.cu");
             let cutlass_bf16_sm89 =
@@ -422,7 +508,57 @@ fn main() {
                 kernel_files.push(cutlass_fmha.clone());
                 println!("cargo:rustc-cfg=apxinf_cutlass_gemm");
                 println!("cargo:rustc-cfg=apxinf_cutlass_fmha");
+                // The three FA4 attention operators are SM110-only (single-Q
+                // stage `setmaxnreg`, `UTCHMMA`) and need no bundle, so they
+                // are compiled on every SM110 target INCLUDING the AOT arms --
+                // linking both implementations is what makes the in-process
+                // equivalence tests possible.
+                if matches!(nvcc_arch.as_deref(), Some("sm_110" | "sm_110a")) {
+                    assert!(
+                        fa4_vision_operator.is_file()
+                            && fa4_language_operator.is_file()
+                            && fa4_action_operator.is_file()
+                            && cutlass_root.join("fmha_d256_sm100.cuh").is_file()
+                            && fa4_vision_cuda.is_file()
+                            && fa4_language_cuda.is_file()
+                            && fa4_action_cuda.is_file()
+                            && fa4_split_batch_merge.is_file(),
+                        "in-tree FA4 attention operators or adapters are missing"
+                    );
+                    kernel_files.extend([
+                        fa4_vision_operator.clone(),
+                        fa4_language_operator.clone(),
+                        fa4_action_operator.clone(),
+                        fa4_vision_cuda.clone(),
+                        fa4_language_cuda.clone(),
+                        fa4_action_cuda.clone(),
+                        fa4_split_batch_merge.clone(),
+                    ]);
+                    println!("cargo:rustc-cfg=apxinf_fa4_attention_cuda");
+                }
                 emit_rerun_if_changed_tree(&cutlass_root);
+            }
+
+            // The vendored GDN kernel is SM110-only (it issues UTCHMMA) and
+            // needs no bundle, so it is compiled on every SM110 target
+            // including the AOT arm -- linking both is what makes the
+            // in-process equivalence test possible.
+            if matches!(nvcc_arch.as_deref(), Some("sm_110" | "sm_110a")) {
+                let gdn_root = std::path::Path::new(&kernels_dir).join("flashinfer_gdn");
+                assert!(
+                    gdn_cuda_launch.is_file()
+                        && gdn_cuda_adapter.is_file()
+                        && gdn_prologue.is_file()
+                        && gdn_root.join("cake_gdn_prefill_b384fd71263b.cu").is_file()
+                        && gdn_root.join("gdn_prefill_generated.cuh").is_file(),
+                    "vendored FlashInfer GDN sources or adapters are missing under {}",
+                    gdn_root.display()
+                );
+                kernel_files.push(gdn_prologue.clone());
+                kernel_files.push(gdn_cuda_launch.clone());
+                kernel_files.push(gdn_cuda_adapter.clone());
+                emit_rerun_if_changed_tree(&gdn_root);
+                println!("cargo:rustc-cfg=apxinf_gdn_prefill_bf16_cuda");
             }
 
             if cutlass_arch.as_deref().is_some_and(is_cutlass_sm89_family) {
@@ -574,6 +710,63 @@ fn main() {
                     format!("{cuda_path}/thor/targets/aarch64-linux/include"),
                 ];
                 let workers = nvcc_build::parallelism();
+                // `--generate-code arch=compute_NNNa,code=sm_NNNa`, never
+                // `-arch=sm_NNNa`: see `cuda_arch::gencode_args`. Without this
+                // no arch-specific SM110 instruction can be assembled, so the
+                // CUTLASS `reg_reconfig.h` SM110 gate below would turn
+                // `setmaxnreg` into a hard ptxas error instead of a speedup.
+                let generic_codegen = gencode_args(nvcc_arch.clone());
+                let cutlass_codegen = gencode_args(cutlass_arch.clone());
+                // Translation units that include vendored CUTLASS headers.
+                // They get the arch-specific `sm_110a` codegen, the CUTLASS
+                // include path, the relaxed-constexpr/extended-lambda pair and
+                // `-DNDEBUG`. The list used to be spelled out twice as an
+                // `entry == &..` chain; it is now one set because the SM110
+                // operator translation units are appended to it.
+                let cutlass_tus: Vec<std::path::PathBuf> = vec![
+                    cutlass_fmha.clone(),
+                    cutlass_gemm_operator.clone(),
+                    cutlass_fp8_dual_operator.clone(),
+                    cutlass_bf16_operator.clone(),
+                    cutlass_bf16_dual_operator.clone(),
+                    cutlass_bf16_sm89_operator.clone(),
+                    cutlass_bf16_sm89.clone(),
+                    cutlass_gemm.clone(),
+                    cutlass_bf16.clone(),
+                    fa4_vision_operator.clone(),
+                    fa4_language_operator.clone(),
+                    fa4_action_operator.clone(),
+                ];
+                // The numeric contract of each FA4 attention operator, as a
+                // flag line. This is the SAME vocabulary as
+                // `devlocal/aot2cuda/harness/MERGED_FLAGS.sh`, which is
+                // authoritative and carries the per-flag provenance; changing
+                // a value here without re-running that harness silently drops
+                // bit-exactness to roughly 50%, not to an error. Every macro
+                // defaults to its UPSTREAM value in the headers, so the stock
+                // `cutlass_fmha_adapter.cu` translation unit -- which takes NO
+                // `-DAPXINF_*` -- stays byte-identical to pristine `main`.
+                //
+                // Shared by the two head_dim-256 operators. `EX2_APPROX`,
+                // `DEBUG_SHOW_SO`, `FUSE_ROWSUM`, `P_FLUSH_HALF`,
+                // `CORR_RING2` and `LOAD_SHAPE_PER_MODE` were unconditional in
+                // the fork and their upstream defaults are the other way
+                // round, so they have to be spelled out.
+                //
+                // `ROWSUM_RESCALE_RN` is intentionally NOT shared. The two
+                // d256 AOT objects encode different arithmetic here: language
+                // keeps the multiply and packed add separately rounded, while
+                // action contracts them into FFMA. Each operator pins its own
+                // value below.
+                let fa4_d256_common: &[&str] = &[
+                    "-DAPXINF_EX2_APPROX=1",
+                    "-DAPXINF_EX2_FTZ=1",
+                    "-DAPXINF_DEBUG_SHOW_SO=0",
+                    "-DAPXINF_FUSE_ROWSUM=1",
+                    "-DAPXINF_P_FLUSH_HALF=1",
+                    "-DAPXINF_CORR_RING2=1",
+                    "-DAPXINF_LOAD_SHAPE_PER_MODE=1",
+                ];
                 let mut jobs: Vec<CompileJob> = Vec::new();
                 for entry in &kernel_files {
                     println!("cargo:rerun-if-changed={}", entry.display());
@@ -595,22 +788,27 @@ fn main() {
                             cmd.arg(format!("-I{}", kernel.header.parent().unwrap().display()));
                         }
                     }
-                    let selected_arch = if entry == &cutlass_fmha
-                        || entry == &cutlass_gemm_operator
-                        || entry == &cutlass_fp8_dual_operator
-                        || entry == &cutlass_bf16_operator
-                        || entry == &cutlass_bf16_dual_operator
-                        || entry == &cutlass_bf16_sm89_operator
-                        || entry == &cutlass_bf16_sm89
-                        || entry == &cutlass_gemm
-                        || entry == &cutlass_bf16
-                    {
-                        cutlass_arch.as_ref()
+                    let is_cutlass_tu = cutlass_tus.contains(entry);
+                    // The vendored GDN kernel is not a CUTLASS translation
+                    // unit but does need the arch-specific `sm_110a` target:
+                    // it issues UTCHMMA, which the non-`a` target rejects.
+                    let is_arch_specific = is_cutlass_tu || entry == &gdn_cuda_launch;
+                    cmd.args(if is_arch_specific {
+                        &cutlass_codegen
                     } else {
-                        nvcc_arch.as_ref()
-                    };
-                    if let Some(selected_arch) = selected_arch {
-                        cmd.args([format!("-arch={selected_arch}")]);
+                        &generic_codegen
+                    });
+                    if entry == &gdn_cuda_launch {
+                        // 16 qk heads, 32 v heads, 2^1 v per qk, 2^5 o heads.
+                        // Not defined in the vendored source; see
+                        // kernels/flashinfer_gdn/README.md. Deliberately no
+                        // `--use_fast_math`.
+                        cmd.args([
+                            "-DHEAD_GROUP_LOG2=1",
+                            "-DNUM_O_HEADS_LOG2=5",
+                            "-DIS_GQA=0",
+                            "-DNDEBUG",
+                        ]);
                     }
                     if nvcc_arch.as_deref().is_some_and(is_pre_sm80) {
                         cmd.arg("-DAPXINF_GDN_WMMA_UNSUPPORTED=1");
@@ -627,18 +825,15 @@ fn main() {
                             cmd.arg(format!("-I{include}"));
                         }
                     }
-                    if entry == &cutlass_fmha
-                        || entry == &cutlass_gemm_operator
-                        || entry == &cutlass_fp8_dual_operator
-                        || entry == &cutlass_bf16_operator
-                        || entry == &cutlass_bf16_dual_operator
-                        || entry == &cutlass_bf16_sm89_operator
-                        || entry == &cutlass_bf16_sm89
-                        || entry == &cutlass_gemm
-                        || entry == &cutlass_bf16
-                    {
+                    if is_cutlass_tu {
                         cmd.arg("--expt-relaxed-constexpr");
                         cmd.arg("--expt-extended-lambda");
+                        // `nvcc -O3` does not imply `-DNDEBUG`. Without it
+                        // every `CUTLASS_ASSERT` survives into device code:
+                        // the FMHA adapter shipped 97 `BPT.TRAP` instructions
+                        // on `main`. Scoped to the CUTLASS translation units so
+                        // the other adapters keep their asserts.
+                        cmd.arg("-DNDEBUG");
                         for include in &cutlass_includes {
                             cmd.arg(format!("-I{}", include.display()));
                         }
@@ -648,6 +843,123 @@ fn main() {
                     }
                     if entry == &cutlass_bf16_dual_operator {
                         cmd.arg("-DAPXINF_BF16_DUAL_GEGLU_PRODUCTION=1");
+                    }
+                    if entry == &fa4_vision_operator {
+                        // vision hd64: `flash_fwd_sm100.py` contract, two Q
+                        // stages, PersistentTileScheduler, ex2 emulation ON,
+                        // `rcp.approx` normalisation (FINAL_NORM=1), R2P mask.
+                        // `ACC_SCALE_HALF`'s UPSTREAM default is 1, so the 0
+                        // here is load-bearing. The last two are bit-neutral
+                        // scheduling knobs (report 21; re-verified element for
+                        // element in report 32 §1).
+                        //
+                        // 🔴 DO NOT re-add `-DAPXINF_NO_ORDER_S=1`. Report 21
+                        // §①.4 adopted it as that round's largest single win
+                        // (1.0648 -> 1.0424 at L=624, 2.3%) and recorded it as
+                        // bit-neutral; that was measured on the `+-0.05`
+                        // uniform stimulus, which report 31 §2.3 showed is the
+                        // degenerate `mean(V)` regime. It is NOT bit-neutral.
+                        // Dropping CUTLASS' `OrderBarrierSoftmax` between the
+                        // two softmax warpgroups makes the operator differ from
+                        // the AOT object by exactly one BF16 ULP on ~3 of every
+                        // 1e8 elements of a model-shaped (heavy-tailed) input,
+                        // in BOTH AOT objects, and that single bit moves the
+                        // Qwen-Drive trajectory by 0.322 m (= 2 BF16 ULP of one
+                        // waypoint x `trajectory_scale[0]`). Report 32 §1.1:
+                        // the model-shaped gate goes 3/100073472 -> 0, and the
+                        // captured `vis01.qkv` tensor that produced the
+                        // in-model divergence goes 12509183 -> 12509184.
+                        //
+                        // The four scheduling numbers below (`NUM_REGS_*` and
+                        // `FMHA_KV_STAGES`) are a MEASURED local optimum of
+                        // the repo path and every neighbour swept is worse --
+                        // see report 30 and the tables beside each knob's
+                        // `#define`. The vision fork's standalone L=624 driver
+                        // prefers 192/96/32 and KV=6; both lose here, as do
+                        // `CORR_TILE=8` and `CORR_RING2=1`, so those two stay
+                        // at their upstream defaults for this operator.
+                        cmd.args([
+                            "-DAPXINF_MASK_R2P=1",
+                            "-DAPXINF_KV_DESCENDING=1",
+                            "-DAPXINF_RESCALE_THRESHOLD=8.0f",
+                            "-DAPXINF_EX2_APPROX=1",
+                            "-DAPXINF_EX2_FTZ=1",
+                            "-DAPXINF_DEBUG_SHOW_SO=0",
+                            "-DAPXINF_FUSE_ROWSUM=1",
+                            "-DAPXINF_EX2_EMU_FREQ=16",
+                            "-DAPXINF_EX2_EMU_RES=4",
+                            "-DAPXINF_EX2_EMU_START_FRG=1",
+                            "-DAPXINF_ACC_SCALE_HALF=0",
+                            "-DAPXINF_FINAL_NORM=1",
+                            "-DAPXINF_NO_LSE=1",
+                            "-DAPXINF_PERSISTENT=1",
+                            "-DAPXINF_NUM_REGS_SOFTMAX=200",
+                            "-DAPXINF_NUM_REGS_CORRECTION=64",
+                            "-DAPXINF_NUM_REGS_OTHER=48",
+                            "-DAPXINF_FMHA_KV_STAGES=4",
+                            "-DAPXINF_SKIP_PAD_QSTAGE=1",
+                            "-DAPXINF_P_CHUNKS16=1",
+                            // 🔴 report 35. Bit-neutral HERE (measured: the
+                            // model-shaped gate stays 0/100073472 over 8 seeds
+                            // and all five scales stay 12509184/12509184),
+                            // because `RESCALE_THRESHOLD=8.0f` keeps
+                            // `acc_scale` at exactly 1.0f on essentially every
+                            // tile and `row_sum * 1.0f` is exact either way.
+                            // It is set anyway: the defect it removes is
+                            // LATENT, not absent, and it would surface on any
+                            // input whose row max climbs by more than 2^8
+                            // between KV tiles. See the macro's block in
+                            // sm100_fmha_fwd_mainloop_tma_warpspecialized.hpp.
+                            "-DAPXINF_ROWSUM_RESCALE_RN=1",
+                        ]);
+                    }
+                    if entry == &fa4_action_operator {
+                        // action hd256 non-causal: DESCENDING KV, mask first,
+                        // no ex2 emulation, `rcp.approx` + 0/NaN->1 guard.
+                        // `LSE_FA4` is the ONE operator that needs it: this is
+                        // the only arm that emits an LSE, and its split-batch
+                        // merge weight is `sigmoid(lse0 - lse1)`, which at
+                        // `key_tokens = 3436` has no leading term left to
+                        // absorb a 1-fp32-ULP log difference. Report 27.
+                        cmd.args(fa4_d256_common);
+                        cmd.args([
+                            "-DAPXINF_EX2_EMU_RES=0",
+                            "-DAPXINF_RESCALE_THRESHOLD=8.0f",
+                            "-DAPXINF_KV_DESCENDING=1",
+                            "-DAPXINF_ROWSUM_QUARTERS=0",
+                            "-DAPXINF_ACC_SCALE_HALF=0",
+                            // The action AOT contracts carried row_sum scaling
+                            // with the first packed accumulator add. Forcing
+                            // add.rn.f32x2 caused the one real Qwen-Drive LSE
+                            // mismatch; FFMA restores 1600/1600 bit equality.
+                            "-DAPXINF_ROWSUM_RESCALE_RN=0",
+                            "-DAPXINF_FINAL_NORM=2",
+                            "-DAPXINF_LSE_FA4=1",
+                        ]);
+                    }
+                    if entry == &fa4_language_operator {
+                        // language hd256 causal: ASCENDING KV, mask last, no
+                        // rescale threshold, ex2 emulation 14/6/0, `div.rn`
+                        // with 0/NaN->0.0, row_sum over contiguous quarters
+                        // seeded (s,s) -- QUARTERS and ACC_SCALE_HALF are a
+                        // PAIR, 1/1 gives the 33 known elements and the other
+                        // three combinations give 418/530/571 -- and the
+                        // two-slot S pipeline that report 24's barrier fixed.
+                        cmd.args(fa4_d256_common);
+                        cmd.args([
+                            "-DAPXINF_EX2_EMU_FREQ=14",
+                            "-DAPXINF_EX2_EMU_RES=6",
+                            "-DAPXINF_EX2_EMU_START_FRG=0",
+                            "-DAPXINF_RESCALE_THRESHOLD=0.0f",
+                            "-DAPXINF_KV_DESCENDING=0",
+                            "-DAPXINF_ROWSUM_QUARTERS=1",
+                            "-DAPXINF_ACC_SCALE_HALF=1",
+                            // The language AOT uses separately rounded
+                            // mul.f32 + add.rn.f32x2 (report 35).
+                            "-DAPXINF_ROWSUM_RESCALE_RN=1",
+                            "-DAPXINF_FINAL_NORM=3",
+                            "-DAPXINF_S_PIPE_STAGES=2",
+                        ]);
                     }
                     if entry == &cutlass_int8 {
                         cmd.arg("--expt-relaxed-constexpr");

@@ -6,10 +6,43 @@ use super::cuda::{cudaError_t, cudaStream_t};
 use crate::kernels::gdn_policy::GdnLaunchPolicy;
 
 extern "C" {
-    #[cfg(apxinf_aot_sm110)]
+    #[cfg(apxinf_aot_gdn_prefill_bf16)]
     pub fn apxinf_static_gdn_flashinfer64_init() -> i32;
-    #[cfg(apxinf_aot_sm110)]
-    pub fn apxinf_static_gdn_flashinfer64_prefill_compact_v(
+    /// Conv + gate prologue, the pinned AOT GDN prefill, then the state
+    /// transpose. The prologue and the transpose are shared with the `_cuda`
+    /// entry below (`adapters/gdn_bf16_prefill_common.cuh`), so the two differ
+    /// in exactly one kernel launch.
+    #[cfg(apxinf_aot_gdn_prefill_bf16)]
+    pub fn apxinf_static_gdn_flashinfer64_prefill_compact_v_aot(
+        zba: *const c_void,
+        conv_weight: *const c_void,
+        new_conv_state: *mut c_void,
+        a_log: *const c_void,
+        dt_bias_bf16: *const c_void,
+        raw_qk_scratch: *mut c_void,
+        q: *mut c_void,
+        k: *mut c_void,
+        v: *mut c_void,
+        a: *mut c_void,
+        b: *mut c_void,
+        h_out_vmajor: *mut c_void,
+        final_state_kmajor: *mut c_void,
+        out_pad: *mut c_void,
+        cu_seqlens: *mut c_void,
+        seq: i32,
+        pad: i32,
+        stream: cudaStream_t,
+    ) -> i32;
+    /// Sets the vendored kernel's dynamic shared-memory attribute. Separate
+    /// from the launch so it can be hoisted out of a graph capture, like the
+    /// AOT arm's module load.
+    #[cfg(apxinf_gdn_prefill_bf16_cuda)]
+    pub fn apxinf_static_gdn_flashinfer64_cuda_init() -> i32;
+    /// Same prologue and state transpose as the `_aot` entry above, around the
+    /// vendored in-tree FlashInfer Cake GDN prefill (BF16 I/O, full-DV).
+    #[cfg(apxinf_gdn_prefill_bf16_cuda)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn apxinf_static_gdn_flashinfer64_prefill_compact_v_cuda(
         zba: *const c_void,
         conv_weight: *const c_void,
         new_conv_state: *mut c_void,

@@ -636,6 +636,44 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_dense_swiglu_aot(
 #endif
 }
 
+extern "C" apxinf_status_t apxinf_gemm_nvfp4_dense_swiglu_cuda(
+    const void* activation, const void* weight,
+    const void* activation_scales, const void* weight_scales,
+    void* output, void* output_scales, const void* alpha,
+    const void* input_global_scale, const void* down_inverse_global_scale,
+    int64_t rows, int64_t n, int64_t k, apxinf_cuda_stream_t stream) {
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN38_DENSE_SWIGLU_CUDA)
+  return apxinf::framework::abi_boundary([&] {
+    if (activation == nullptr || weight == nullptr ||
+        activation_scales == nullptr || weight_scales == nullptr ||
+        output == nullptr || output_scales == nullptr || alpha == nullptr ||
+        input_global_scale == nullptr || down_inverse_global_scale == nullptr ||
+        rows <= 0 || n <= 0 || k <= 0 ||
+        rows > INT32_MAX || n > INT32_MAX || k > INT32_MAX) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid fused NVFP4 dense SwiGLU arguments");
+    }
+    const int status = apxinf::cuda_new::cutlass_ops::nvfp4_dense_swiglu_cuda(
+        activation, weight, activation_scales, weight_scales, output,
+        output_scales, alpha, input_global_scale, down_inverse_global_scale,
+        /*workspace=*/nullptr, /*workspace_bytes=*/0, static_cast<int>(rows),
+        static_cast<int>(n), static_cast<int>(k),
+        static_cast<cudaStream_t>(stream));
+    if (status != 0) {
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                    "fused NVFP4 dense SwiGLU (CUDA) failed with status " +
+                        std::to_string(status));
+    }
+  });
+#else
+  (void)activation; (void)weight; (void)activation_scales;
+  (void)weight_scales; (void)output; (void)output_scales; (void)alpha;
+  (void)input_global_scale; (void)down_inverse_global_scale;
+  (void)rows; (void)n; (void)k; (void)stream;
+  return APXINF_STATUS_UNSUPPORTED;
+#endif
+}
+
 extern "C" uint64_t apxinf_gemm_execution_weight_prepack_count(
     apxinf_gemm_execution_t handle) {
   const auto* execution = reinterpret_cast<const Execution*>(handle);

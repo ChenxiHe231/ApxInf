@@ -18,3 +18,10 @@ extern "C" int apxinf_static_cutlass_bf16_dual_gemm_geglu(
   return apxinf::cuda::cutlass_ops::bf16_dual_geglu_detail::production_dual_geglu_bf16(
       activation, interleaved_weight, output, m, n, k, full_n, stream);
 }
+
+extern "C" int apxinf_static_cutlass_bf16_dual_swiglu(
+    const void* activation, const void* interleaved_weight, void* output,
+    int m, int n, int k, int full_n, cudaStream_t stream) {
+  return apxinf::cuda::cutlass_ops::bf16_dual_geglu_detail::production_dual_swiglu_bf16(
+      activation, interleaved_weight, output, m, n, k, full_n, stream);
+}

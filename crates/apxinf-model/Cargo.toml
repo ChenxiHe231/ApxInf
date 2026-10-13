@@ -24,6 +24,15 @@ mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "dep:sha2"]
 # Full NVIDIA CUDA inference: links both the legacy (`apxinf-cuda`) and the
 # current (`apxinf-cuda-new`) runtimes and enables every CUDA model family.
 cuda = ["dep:apxinf-cuda", "dep:apxinf-cuda-new"]
+# Per-operator attribution arms. These intentionally stay out of `cuda` so a
+# production build uses the in-tree CUDA translations, while model-level A/B
+# tests can link the pinned CuTe-DSL implementation of exactly one operator.
+aot-gemm-swiglu-bf16 = ["cuda", "apxinf-cuda/aot-gemm-swiglu-bf16"]
+aot-gdn-prefill-bf16 = ["cuda", "apxinf-cuda/aot-gdn-prefill-bf16"]
+aot-vision-attention = ["cuda", "apxinf-cuda/aot-vision-attention"]
+aot-action-attention = ["cuda", "apxinf-cuda/aot-action-attention"]
+aot-language-attention = ["cuda", "apxinf-cuda/aot-language-attention"]
+aot-qwen38-dense-swiglu = ["cuda", "apxinf-cuda-new/aot-qwen38-dense-swiglu"]
 # Deprecated alias of `cuda`, kept so existing build commands keep working.
 # It no longer gates anything: `cuda` already pulls in `apxinf-cuda-new`, and
 # the model code that used to hide behind this flag now follows `cuda`.
