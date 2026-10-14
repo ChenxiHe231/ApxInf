@@ -66,6 +66,21 @@ __global__ void argmax_kernel(const __nv_bfloat16* __restrict__ logits,
   }
 }
 
+__global__ void replace_rows_bf16_kernel(
+    __nv_bfloat16* __restrict__ destination,
+    const __nv_bfloat16* __restrict__ source,
+    const uint32_t* __restrict__ source_rows, int destination_rows,
+    int source_row_count, int columns) {
+  const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  const long long total = (long long)destination_rows * columns;
+  if (index >= total) return;
+  const int destination_row = static_cast<int>(index / columns);
+  const uint32_t source_row = source_rows[destination_row];
+  if (source_row == UINT32_MAX || source_row >= (uint32_t)source_row_count) return;
+  const int column = static_cast<int>(index % columns);
+  destination[index] = source[(long long)source_row * columns + column];
+}
+
 }  // namespace
 
 int embedding_gather(const void* table, const int32_t* ids, void* output,
@@ -85,6 +100,23 @@ int argmax_bf16(const void* logits, int32_t* index, int count,
   if (count <= 0) return -1;
   argmax_kernel<<<1, 1024, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(logits), index, count);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int replace_rows_bf16(void* destination, const void* source,
+                      const uint32_t* source_rows, int destination_rows,
+                      int source_row_count, int columns, cudaStream_t stream) {
+  if (destination == nullptr || source == nullptr || source_rows == nullptr ||
+      destination_rows <= 0 || source_row_count <= 0 || columns <= 0) {
+    return -1;
+  }
+  const long long total = (long long)destination_rows * columns;
+  constexpr int threads = 256;
+  const long long blocks = (total + threads - 1) / threads;
+  replace_rows_bf16_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
+      static_cast<__nv_bfloat16*>(destination),
+      static_cast<const __nv_bfloat16*>(source), source_rows,
+      destination_rows, source_row_count, columns);
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 

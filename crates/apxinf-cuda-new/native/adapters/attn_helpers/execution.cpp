@@ -47,6 +47,47 @@ extern "C" apxinf_status_t apxinf_attn_partial_rope(
   });
 }
 
+extern "C" apxinf_status_t apxinf_attn_partial_mrope(
+    void* data, const void* positions, int64_t tokens, int64_t heads,
+    int64_t head_dim, int64_t rotary_dim, int64_t section_height,
+    int64_t section_width, float theta, apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (data == nullptr || positions == nullptr || !extent(tokens) ||
+        !extent(heads) || !extent(head_dim) || !extent(rotary_dim) ||
+        !extent(section_height) || !extent(section_width)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid multimodal RoPE arguments");
+    }
+    check(apxinf::cuda_new::attn_ops::partial_mrope(
+              data, positions, static_cast<int>(tokens),
+              static_cast<int>(heads), static_cast<int>(head_dim),
+              static_cast<int>(rotary_dim), static_cast<int>(section_height),
+              static_cast<int>(section_width), theta,
+              static_cast<cudaStream_t>(stream)),
+          "partial multimodal RoPE");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_attn_split_vision_qkv_rope(
+    const void* qkv, const void* bias, const void* positions, void* query,
+    void* key, void* value, int64_t tokens, int64_t heads,
+    int64_t head_dim, float theta, apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (qkv == nullptr || bias == nullptr || positions == nullptr ||
+        query == nullptr || key == nullptr || value == nullptr ||
+        !extent(tokens) || !extent(heads) || !extent(head_dim)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid vision QKV/RoPE arguments");
+    }
+    check(apxinf::cuda_new::attn_ops::split_vision_qkv_rope(
+              qkv, bias, positions, query, key, value,
+              static_cast<int>(tokens), static_cast<int>(heads),
+              static_cast<int>(head_dim), theta,
+              static_cast<cudaStream_t>(stream)),
+          "vision QKV/RoPE");
+  });
+}
+
 extern "C" apxinf_status_t apxinf_attn_head_rms_norm(
     void* data, const void* weight, int64_t rows, int64_t head_dim,
     float epsilon, apxinf_cuda_stream_t stream) {

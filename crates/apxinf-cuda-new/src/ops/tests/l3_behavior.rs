@@ -11,6 +11,24 @@ use crate::CudaContext;
 use half::bf16;
 
 #[test]
+fn pointwise_exact_gelu_runs_on_all_bf16_vector_paths() {
+    let ctx = CudaContext::new(0).unwrap();
+    for cols in [3, 2, 4] {
+        let input = tensor(0, vec![1, cols], &vec![1.0; cols]);
+        let bias = tensor(0, vec![cols], &vec![0.0; cols]);
+        let mut output = tensor(0, vec![1, cols], &vec![0.0; cols]);
+        let mut args = PointwiseArgs::new(PointwiseSemantic::BiasActivation, &input, &mut output);
+        args.bias = Some(&bias);
+        args.activation = PointwiseActivation::GeluExact;
+        pointwise(&ctx, args).unwrap();
+        ctx.synchronize().unwrap();
+        for actual in values(&output) {
+            assert!((actual - 0.83984375).abs() < 1e-6, "cols={cols}: {actual}");
+        }
+    }
+}
+
+#[test]
 fn quantization_rejects_packed_fp4_input() {
     use apxinf_core::DType;
 
@@ -20,6 +38,8 @@ fn quantization_rejects_packed_fp4_input() {
         (QuantizationSemantic::FixedScaleE4m3, DType::F8E4M3),
         (QuantizationSemantic::RowwiseE4m3, DType::F8E4M3),
         (QuantizationSemantic::CastF16ToBf16, DType::BF16),
+        (QuantizationSemantic::CastBf16ToF32, DType::F32),
+        (QuantizationSemantic::CastF32ToBf16, DType::BF16),
         (QuantizationSemantic::SliceColumnsBf16, DType::BF16),
         (QuantizationSemantic::RowwiseI8, DType::I8),
     ] {
@@ -32,6 +52,58 @@ fn quantization_rejects_packed_fp4_input() {
             "{semantic:?}: {error}"
         );
     }
+}
+
+#[test]
+fn quantization_casts_bf16_to_f32_exactly() {
+    use apxinf_core::DType;
+
+    let ctx = CudaContext::new(0).unwrap();
+    let source = [1.0, -2.5, 0.125, 65_536.0];
+    let input = tensor(0, vec![1, source.len()], &source);
+    let mut output = zeros_tensor(0, vec![1, source.len()], DType::F32);
+    quantization(
+        &ctx,
+        QuantizationArgs::new(QuantizationSemantic::CastBf16ToF32, &input, &mut output),
+    )
+    .unwrap();
+    ctx.synchronize().unwrap();
+    let buffer = crate::CudaBuffer::from_tensor(&output).unwrap();
+    let mut bytes = vec![0u8; source.len() * 4];
+    buffer.copy_to_host(&mut bytes).unwrap();
+    let actual = bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_ne_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, source);
+}
+
+#[test]
+fn quantization_casts_f32_to_bf16_with_rounding() {
+    use apxinf_core::{DType, Shape};
+
+    let ctx = CudaContext::new(0).unwrap();
+    let source = [1.0f32, -2.5, 0.1, 65_536.0];
+    let bytes = unsafe {
+        std::slice::from_raw_parts(source.as_ptr().cast::<u8>(), std::mem::size_of_val(&source))
+    };
+    let buffer = crate::CudaBuffer::alloc(bytes.len(), 0).unwrap();
+    buffer.copy_from_host(bytes).unwrap();
+    let input = buffer
+        .as_tensor(Shape::new(vec![1, source.len()]), DType::F32)
+        .unwrap();
+    let mut output = zeros_tensor(0, vec![1, source.len()], DType::BF16);
+    quantization(
+        &ctx,
+        QuantizationArgs::new(QuantizationSemantic::CastF32ToBf16, &input, &mut output),
+    )
+    .unwrap();
+    ctx.synchronize().unwrap();
+    let expected = source
+        .iter()
+        .map(|value| bf16::from_f32(*value).to_f32())
+        .collect::<Vec<_>>();
+    assert_eq!(values(&output), expected);
 }
 
 fn u32_buffer(device: usize, values: &[u32]) -> crate::CudaBuffer {

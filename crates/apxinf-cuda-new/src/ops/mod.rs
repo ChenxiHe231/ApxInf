@@ -32,7 +32,8 @@ pub use attention::{
     KvCacheAttentionArgs, KvCacheDecodeMeta, PackedQkvAttentionArgs, SegmentedAttentionArgs,
 };
 pub use attn_ops::{
-    apply_output_gate, head_rms_norm, partial_rope, rotary_dim, split_query_and_gate,
+    apply_output_gate, head_rms_norm, partial_mrope, partial_rope, rotary_dim,
+    split_query_and_gate, split_vision_qkv_rope,
 };
 pub use cache::{concat_rows, reserve_prefix};
 pub use gather::{gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry};
@@ -51,7 +52,7 @@ pub use gemm::{
     GemmBiasResidualArgs, GemmGegluArgs, GemmPolicy, GemmQuantization, ScaleLayout, WeightVersion,
 };
 pub use mlp::{add_into, fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu};
-pub use model::{argmax, embedding_gather};
+pub use model::{argmax, embedding_gather, replace_rows_bf16};
 pub use norm::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,
     bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, layer_norm, rms_norm,

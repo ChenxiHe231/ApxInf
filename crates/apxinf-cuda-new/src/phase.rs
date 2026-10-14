@@ -65,6 +65,13 @@ impl PreparedPhase {
         self.graph.replay()
     }
 
+    /// Execute the phase eagerly with the same prepared resources used by the
+    /// captured graph. This is primarily useful for eager/captured parity
+    /// checks without changing selected operator recipes.
+    pub fn run(&self, operation: impl FnOnce() -> Result<()>) -> Result<()> {
+        crate::ops::with_session(&self.session, operation)
+    }
+
     /// Arena bytes this phase actually needs.
     ///
     /// Measured during preparation, which is the traversal that sub-allocates;

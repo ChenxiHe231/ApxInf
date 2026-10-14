@@ -17,6 +17,11 @@ apxinf_status_t apxinf_model_argmax_bf16(const void* logits, void* index,
                                          int64_t count,
                                          apxinf_cuda_stream_t stream);
 
+apxinf_status_t apxinf_model_replace_rows_bf16(
+    void* destination, const void* source, const void* source_rows,
+    int64_t destination_rows, int64_t source_row_count, int64_t columns,
+    apxinf_cuda_stream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

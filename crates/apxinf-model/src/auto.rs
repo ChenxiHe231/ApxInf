@@ -7,6 +7,7 @@ use apxinf_core::{DType, Device, Error, Result, Tensor};
 
 use crate::accelerator::create_backend;
 use crate::builtin::register_builtin_models;
+use crate::d3::{DecisionInput, DecisionOutput, DecisionRuntime};
 use crate::generation_config::{
     load_generation_options, GenerationConfigSource, GenerationOptions,
 };
@@ -86,6 +87,7 @@ pub enum LoadedModel {
         generation_defaults: GenerationOptions,
     },
     Vla(Box<dyn VlaRuntime>),
+    Decision(Box<dyn DecisionRuntime>),
 }
 
 impl LoadedModel {
@@ -100,6 +102,7 @@ impl LoadedModel {
         match self {
             Self::Text { model, .. } => Ok(&mut **model),
             Self::Vla(_) => Err(Error::Other("loaded model is VLA, not text".into())),
+            Self::Decision(_) => Err(Error::Other("loaded model is decision, not text".into())),
         }
     }
 
@@ -107,7 +110,20 @@ impl LoadedModel {
         match self {
             Self::Vla(model) => Ok(&**model),
             Self::Text { .. } => Err(Error::Other("loaded model is text, not VLA".into())),
+            Self::Decision(_) => Err(Error::Other("loaded model is decision, not VLA".into())),
         }
+    }
+
+    pub fn decision_mut(&mut self) -> Result<&mut dyn DecisionRuntime> {
+        match self {
+            Self::Decision(model) => Ok(&mut **model),
+            Self::Text { .. } => Err(Error::Other("loaded model is text, not decision".into())),
+            Self::Vla(_) => Err(Error::Other("loaded model is VLA, not decision".into())),
+        }
+    }
+
+    pub fn decide(&mut self, input: DecisionInput<'_>) -> Result<DecisionOutput> {
+        self.decision_mut()?.decide(input)
     }
 
     pub fn forward(&mut self, token_ids: &[u32], start_pos: u32) -> Result<Tensor> {
@@ -118,6 +134,7 @@ impl LoadedModel {
         match self {
             Self::Text { model, .. } => Ok(model.capabilities()),
             Self::Vla(_) => Err(Error::Other("loaded model is VLA, not text".into())),
+            Self::Decision(model) => Ok(model.capabilities()),
         }
     }
 
@@ -130,6 +147,9 @@ impl LoadedModel {
             } => Ok(generation_defaults),
             Self::Vla(_) => Err(Error::Other(
                 "VLA models do not use autoregressive generation defaults".into(),
+            )),
+            Self::Decision(_) => Err(Error::Other(
+                "decision models do not use autoregressive generation defaults".into(),
             )),
         }
     }
@@ -172,6 +192,7 @@ impl LoadedModel {
                 )
             }
             Self::Vla(_) => Err(Error::Other("loaded model is VLA, not text".into())),
+            Self::Decision(_) => Err(Error::Other("loaded model is decision, not text".into())),
         }
     }
 
@@ -271,6 +292,25 @@ impl AutoModel {
         } else {
             path.parent().unwrap_or_else(|| Path::new("."))
         };
+        // Decision 3.0 deliberately preserves the base Qwen3.5 model_type in
+        // config.json. Its package-level format is the discriminator; without
+        // this check it is incorrectly routed to the Qwen3.8 NVFP4 loader.
+        let decision_path = model_dir.join("decision_config.json");
+        if decision_path.is_file() {
+            let raw = std::fs::read_to_string(&decision_path).map_err(|error| {
+                Error::Other(format!("read {}: {error}", decision_path.display()))
+            })?;
+            let decision: serde_json::Value = serde_json::from_str(&raw).map_err(|error| {
+                Error::Other(format!("parse {}: {error}", decision_path.display()))
+            })?;
+            if decision
+                .get("format_id")
+                .and_then(serde_json::Value::as_str)
+                == Some("d3-code-readout-v1")
+            {
+                return Ok("d3".to_owned());
+            }
+        }
         let config_path = model_dir.join("config.json");
         let raw = std::fs::read_to_string(&config_path)
             .map_err(|error| Error::Other(format!("read {}: {error}", config_path.display())))?;
@@ -320,6 +360,14 @@ impl AutoModel {
 
             #[cfg(not(feature = "cuda"))]
             return Err(Error::Other("PI0.5 requires CUDA support".into()));
+        }
+
+        if matches!(model_name, "d3" | "d3-cuda") {
+            #[cfg(feature = "cuda")]
+            return crate::d3::load::load_with_cuda_new(path, device, options);
+
+            #[cfg(not(feature = "cuda"))]
+            return Err(Error::Other("d3-mini requires CUDA support".into()));
         }
 
         register_builtin_models();
@@ -431,7 +479,14 @@ fn metal_registry_name(model_name: &str) -> String {
 fn supports_model_variant(model_name: &str, device: Device) -> bool {
     matches!(
         model_name,
-        "pi05" | "pi05-cuda" | "qwen_drive" | "qwen_drive-cuda" | "smolvla" | "smolvla_libero"
+        "pi05"
+            | "pi05-cuda"
+            | "qwen_drive"
+            | "qwen_drive-cuda"
+            | "d3"
+            | "d3-cuda"
+            | "smolvla"
+            | "smolvla_libero"
     ) || (matches!(device, Device::Metal(_))
         && matches!(
             model_name,
@@ -653,6 +708,29 @@ mod tests {
             select_cuda_tuning_database_path(&default_path, &legacy_path, &options),
             Some(explicit_path)
         );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn d3_package_is_not_misdetected_as_generic_qwen3_5() {
+        let directory = temporary_directory("d3-detection");
+        std::fs::write(directory.join("config.json"), r#"{"model_type":"qwen3_5"}"#).unwrap();
+        std::fs::write(
+            directory.join("decision_config.json"),
+            r#"{"format_id":"d3-code-readout-v1"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(AutoModel::detect_model_name(&directory).unwrap(), "d3");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn non_d3_qwen3_5_detection_is_unchanged() {
+        let directory = temporary_directory("qwen35-detection");
+        std::fs::write(directory.join("config.json"), r#"{"model_type":"qwen3_5"}"#).unwrap();
+
+        assert_eq!(AutoModel::detect_model_name(&directory).unwrap(), "qwen3_5");
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

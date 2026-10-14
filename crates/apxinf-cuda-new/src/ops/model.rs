@@ -54,3 +54,39 @@ pub fn argmax(ctx: &CudaContext, logits: &Tensor, index: &Tensor) -> Result<()> 
         ))
     }
 }
+
+/// Replace rows of a BF16 destination embedding matrix.
+///
+/// `source_rows` is I32 `[destination_rows]`; `-1` preserves that row and
+/// non-negative values select a row from `source`.
+pub fn replace_rows_bf16(
+    ctx: &CudaContext,
+    destination: &Tensor,
+    source: &Tensor,
+    source_rows: &Tensor,
+) -> Result<()> {
+    let destination_dims = destination.shape().dims().to_vec();
+    let source_dims = source.shape().dims().to_vec();
+    if destination_dims.len() != 2
+        || source_dims.len() != 2
+        || destination_dims[1] != source_dims[1]
+    {
+        return Err(invalid(
+            "row replacement expects equal-width rank-2 matrices",
+        ));
+    }
+    let destination_buffer = tensor_storage(ctx, destination, DType::BF16, &destination_dims)?;
+    let source_buffer = tensor_storage(ctx, source, DType::BF16, &source_dims)?;
+    let rows_buffer = tensor_storage(ctx, source_rows, DType::I32, &[destination_dims[0]])?;
+    unsafe {
+        status::check(abi::apxinf_model_replace_rows_bf16(
+            destination_buffer.ptr(),
+            source_buffer.ptr(),
+            rows_buffer.ptr(),
+            destination_dims[0] as i64,
+            source_dims[0] as i64,
+            destination_dims[1] as i64,
+            ctx.stream().handle(),
+        ))
+    }
+}

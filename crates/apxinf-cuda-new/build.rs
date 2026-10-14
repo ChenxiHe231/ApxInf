@@ -400,6 +400,11 @@ fn main() {
         // the same compute_110a codegen as the CUTLASS group because it emits
         // tcgen05 and TMA. See native/kernels/flashinfer_gdn/README.md.
         cutlass_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_launch.cu"));
+    } else {
+        // The descriptor-side wrapper is part of the stable ABI on every CUDA
+        // target, but the generated Cake kernel itself requires Blackwell.
+        // Keep non-Blackwell builds linkable and report unsupported at launch.
+        generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_stub.cpp"));
     }
     let has_fa2 = selection.targets.iter().any(|target| target.sm() >= 80);
     // The allocation-free FA2 decode ABI is a stub that returns

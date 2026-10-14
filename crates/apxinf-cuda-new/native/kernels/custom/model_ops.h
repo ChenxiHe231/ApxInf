@@ -20,4 +20,11 @@ int embedding_gather(const void* table, const int32_t* ids, void* output,
 int argmax_bf16(const void* logits, int32_t* index, int count,
                 cudaStream_t stream);
 
+// Replace selected destination rows from a dense source matrix. Each entry in
+// `source_rows[destination_row]` is either a source row or UINT32_MAX to keep
+// the destination embedding unchanged.
+int replace_rows_bf16(void* destination, const void* source,
+                      const uint32_t* source_rows, int destination_rows,
+                      int source_row_count, int columns, cudaStream_t stream);
+
 }  // namespace apxinf::cuda_new::model_ops

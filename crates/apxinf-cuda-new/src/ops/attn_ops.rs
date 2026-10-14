@@ -54,6 +54,88 @@ pub fn partial_rope(
     }
 }
 
+/// Apply Qwen interleaved multimodal partial RoPE in place.
+/// `positions` is I32 `[tokens, 3]` in temporal, height, width order.
+pub fn partial_mrope(
+    ctx: &CudaContext,
+    data: &Tensor,
+    positions: &Tensor,
+    rotary_width: usize,
+    sections: [usize; 3],
+    theta: f32,
+) -> Result<()> {
+    let dims = data.shape().dims().to_vec();
+    if dims.len() != 3 {
+        return Err(invalid("multimodal RoPE expects [tokens, heads, head_dim]"));
+    }
+    let (tokens, heads, head_dim) = (dims[0], dims[1], dims[2]);
+    if rotary_width == 0
+        || rotary_width > head_dim
+        || rotary_width % 2 != 0
+        || sections.iter().sum::<usize>() != rotary_width / 2
+        || sections.contains(&0)
+    {
+        return Err(invalid("invalid multimodal rotary width or sections"));
+    }
+    let data_buffer = tensor_storage(ctx, data, DType::BF16, &dims)?;
+    let position_buffer = tensor_storage(ctx, positions, DType::I32, &[tokens, 3])?;
+    unsafe {
+        status::check(abi::apxinf_attn_partial_mrope(
+            data_buffer.ptr(),
+            position_buffer.ptr(),
+            tokens as i64,
+            heads as i64,
+            head_dim as i64,
+            rotary_width as i64,
+            sections[1] as i64,
+            sections[2] as i64,
+            theta,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+/// Split BF16 vision QKV, add its bias, and apply Qwen 2D RoPE to Q/K.
+pub fn split_vision_qkv_rope(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: &Tensor,
+    positions: &Tensor,
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+    theta: f32,
+) -> Result<()> {
+    let dims = query.shape().dims().to_vec();
+    if dims.len() != 3 || key.shape().dims() != dims || value.shape().dims() != dims {
+        return Err(invalid(
+            "vision QKV outputs must share [tokens, heads, head_dim]",
+        ));
+    }
+    let (tokens, heads, head_dim) = (dims[0], dims[1], dims[2]);
+    let qkv_buffer = tensor_storage(ctx, qkv, DType::BF16, &[tokens, 3 * heads * head_dim])?;
+    let bias_buffer = tensor_storage(ctx, bias, DType::BF16, &[3 * heads * head_dim])?;
+    let position_buffer = tensor_storage(ctx, positions, DType::I32, &[tokens, 2])?;
+    let query_buffer = tensor_storage(ctx, query, DType::BF16, &dims)?;
+    let key_buffer = tensor_storage(ctx, key, DType::BF16, &dims)?;
+    let value_buffer = tensor_storage(ctx, value, DType::BF16, &dims)?;
+    unsafe {
+        status::check(abi::apxinf_attn_split_vision_qkv_rope(
+            qkv_buffer.ptr(),
+            bias_buffer.ptr(),
+            position_buffer.ptr(),
+            query_buffer.ptr(),
+            key_buffer.ptr(),
+            value_buffer.ptr(),
+            tokens as i64,
+            heads as i64,
+            head_dim as i64,
+            theta,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
 /// Per-head RMSNorm in place over `[rows, head_dim]`, for q_norm and k_norm.
 pub fn head_rms_norm(
     ctx: &CudaContext,

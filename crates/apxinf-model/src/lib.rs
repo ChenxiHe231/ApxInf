@@ -3,6 +3,7 @@
 mod accelerator;
 pub mod auto;
 pub mod builtin;
+pub mod d3;
 pub mod debug;
 mod generation_config;
 pub mod gr00t;
@@ -27,6 +28,10 @@ mod walloss;
 
 pub use auto::{AutoModel, LoadOptions, LoadedModel, ModelPrecision, SyntheticWeights};
 pub use builtin::register_builtin_models;
+pub use d3::{
+    D3Config, D3DecisionConfig, D3PackageConfig, D3TextConfig, D3VisionConfig, DecisionInput,
+    DecisionOutput, DecisionRuntime, DecisionScore,
+};
 pub use debug::{DebugCapture, DebugConfig};
 pub use generation_config::{GenerationConfigSource, GenerationOptions, SamplingMode};
 #[cfg(feature = "cuda")]
