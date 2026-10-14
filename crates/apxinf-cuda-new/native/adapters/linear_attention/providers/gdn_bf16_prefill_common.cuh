@@ -66,7 +66,7 @@ inline bool arguments_valid(
 // Conv + offsets + a/b pack + linear-space gate. On success `*alpha` and
 // `*beta` point into the caller's scratch and `*descriptor_workspace` is the
 // tail the GDN kernel uses for its per-CTA TMA rewrites.
-extern "C" int32_t apxinf_static_gdn_bf16_prologue(
+extern "C" int32_t apxinf_gdn_bf16_prefill_prologue(
     const void* zba, const void* conv_weight, void* new_conv_state,
     const float* A_log, const void* dt_bias_bf16, void* raw_qk_scratch,
     void* q, void* k, void* v, void* a, void* b, int32_t* cu_seqlens,
@@ -75,6 +75,6 @@ extern "C" int32_t apxinf_static_gdn_bf16_prologue(
 
 // The GDN kernel writes the recurrent state value-major; the decode path reads
 // it key-major.
-extern "C" int32_t apxinf_static_gdn_bf16_state_transpose(
+extern "C" int32_t apxinf_gdn_bf16_prefill_state_transpose(
     const float* h_output_vmajor, float* final_state_kmajor,
     cudaStream_t stream);

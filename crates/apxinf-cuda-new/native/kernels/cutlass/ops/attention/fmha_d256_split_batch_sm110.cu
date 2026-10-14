@@ -1,9 +1,9 @@
 // Copyright 2025 ApxInf contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// `action-attention`: BF16 head_dim 256, 16 query heads over 4 KV heads,
+// Split-batch D256 attention: BF16 head_dim 256, 16 query heads over 4 KV heads,
 // NON-causal, 50 query tokens against a split-batch KV view. In-tree CUDA
-// translation of the `apxinf_fa4_d256_a_splitbatch_sm110` AOT object.
+// translated from the validated CuTe DSL implementation.
 //
 // Numeric contract (`flash_fwd_sm100.py`): fully DESCENDING KV with the mask
 // FIRST, `rescale_threshold = 8.0`, ex2 polynomial emulation OFF
@@ -11,7 +11,7 @@
 // seeded into LANE 0 only, `ResidualMask` through FA4's R2P bitmask is NOT
 // used here (`APXINF_MASK_R2P` stays at its upstream default). All of it comes
 // from this translation unit's `-DAPXINF_*` flag line, which
-// `crates/apxinf-cuda/build.rs` keeps in step with
+// `crates/apxinf-cuda-new/build.rs` keeps in step with
 // `devlocal/aot2cuda/harness/MERGED_FLAGS.sh` (authoritative).
 //
 // Pack-GQA (`run_pack`) folds `q_per_kv` into the M mode, which is what makes
@@ -32,10 +32,10 @@
 // own reduction (non-causal, every row in the tile sees the same KV range) and
 // the trip count is still `ceil_div(seq_k, 128)`.
 
-#define APXINF_D256_NS apxinf_d256_action
+#define APXINF_D256_NS apxinf_attention_d256_split_batch
 #define APXINF_D256_BUILD_LANGUAGE 0
 #define APXINF_D256_BUILD_ACTION 1
-#include "fmha_d256_sm100.cuh"
+#include "fmha_d256_sm110.cuh"
 
 namespace APXINF_D256_NS {
 
@@ -83,7 +83,7 @@ int run_pack(const void* q, const void* k, const void* v, void* output,
   // The LSE row index inside one (kv_head, batch) block is `q * q_per_kv + j`
   // -- the packed M mode's own linearisation -- over `rounded_query` = 256
   // slots of which 4*50 = 200 are written. The caller owns the buffer;
-  // `apxinf_d256_action_lse_elements()` is the single source of truth for its
+  // `apxinf_attention_d256_split_batch_lse_elements()` is the single source of truth for its
   // size and `fa4_d256_split_batch_cuda_adapter.cu` owns the repack into the
   // merge kernel's dense [batch, query_head, token] layout.
   const int rounded_query = ((seq_q * q_per_kv + 127) / 128) * 128;
@@ -118,13 +118,13 @@ int run_pack(const void* q, const void* k, const void* v, void* output,
 
 }  // namespace APXINF_D256_NS
 
-extern "C" size_t apxinf_d256_action_state_size() {
+extern "C" size_t apxinf_attention_d256_split_batch_state_size() {
   return sizeof(APXINF_D256_NS::State);
 }
 
 // Elements of the native (packed-M) LSE buffer for the action geometry:
 // batch * kv_heads * round_up(q_per_kv * seq_q, 128).
-extern "C" size_t apxinf_d256_action_lse_elements(int seq_q, int kv_heads,
+extern "C" size_t apxinf_attention_d256_split_batch_lse_elements(int seq_q, int kv_heads,
                                                   int batch) {
   const int rounded_query =
       ((seq_q * APXINF_PACK_GQA_QPK + 127) / 128) * 128;
@@ -134,7 +134,7 @@ extern "C" size_t apxinf_d256_action_lse_elements(int seq_q, int kv_heads,
 // Row index inside the (kv_head, batch) block for query head `q_head` and
 // token `token`. Exported so the repack in the adapter and the test cannot
 // drift from the stride the kernel was given.
-extern "C" size_t apxinf_d256_action_lse_index(int seq_q, int kv_heads,
+extern "C" size_t apxinf_attention_d256_split_batch_lse_index(int seq_q, int kv_heads,
                                                int batch_index, int q_head,
                                                int token) {
   const int rounded_query =
@@ -146,7 +146,7 @@ extern "C" size_t apxinf_d256_action_lse_index(int seq_q, int kv_heads,
          size_t(token) * APXINF_PACK_GQA_QPK + size_t(lane);
 }
 
-extern "C" void apxinf_d256_action_state_destroy(void* state_ptr) {
+extern "C" void apxinf_attention_d256_split_batch_state_destroy(void* state_ptr) {
   using APXINF_D256_NS::State;
   if (state_ptr == nullptr) return;
   auto& state = *static_cast<State*>(state_ptr);
@@ -156,7 +156,7 @@ extern "C" void apxinf_d256_action_state_destroy(void* state_ptr) {
   state = State{};
 }
 
-extern "C" int apxinf_d256_action_forward_cuda(
+extern "C" int apxinf_attention_d256_split_batch_forward(
     const void* q, const void* k, const void* v, void* output, float* lse,
     int seq_q, int max_seq_k, int total_seq_k, int* cu_seqlens_k,
     int query_heads, int kv_heads, int batch, int q_batch_stride,

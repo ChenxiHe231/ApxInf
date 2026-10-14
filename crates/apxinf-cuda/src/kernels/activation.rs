@@ -509,54 +509,6 @@ pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor
     Ok(matrix_tensor(ctx, rows, inner, output))
 }
 
-/// [`swiglu_bf16_rounded`] for a projection whose columns arrive in
-/// `[gate pair, up pair]` tiles instead of `[gate_all, up_all]`.
-///
-/// That is the column order a GEMM against the fused operator's packed
-/// `[K, 2I]` weight produces, so this is what lets one packed weight serve
-/// both the fused route and the generic one. The per-element arithmetic is
-/// shared with [`swiglu_bf16_rounded`] in `swiglu_bf16_element`, so the two
-/// differ only in which pair of columns an output element reads.
-pub fn swiglu_bf16_rounded_pair_interleaved(
-    ctx: &CudaContext,
-    gate_up: &Tensor,
-    pair: usize,
-) -> Result<Tensor> {
-    let (rows, cols) = matrix_shape(gate_up, "rounded SwiGLU")?;
-    if gate_up.dtype() != DType::BF16 || cols == 0 || cols % 2 != 0 || rows == 0 {
-        return Err(Error::Other(
-            "rounded SwiGLU expects nonempty BF16 [rows,2*inner]".into(),
-        ));
-    }
-    if gate_up.device() != apxinf_core::Device::Cuda(ctx.device_id()) {
-        return Err(Error::Other(
-            "rounded SwiGLU input is on the wrong device".into(),
-        ));
-    }
-    let inner = cols / 2;
-    if pair == 0 || inner % pair != 0 {
-        return Err(Error::Other(format!(
-            "interleaved SwiGLU pair {pair} must divide inner {inner}"
-        )));
-    }
-    let r = i32::try_from(rows).map_err(|_| Error::Other("SwiGLU rows overflow".into()))?;
-    let n = i32::try_from(inner).map_err(|_| Error::Other("SwiGLU inner overflow".into()))?;
-    let p = i32::try_from(pair).map_err(|_| Error::Other("SwiGLU pair overflow".into()))?;
-    let output = bf16_output(ctx, rows, inner)?;
-    unsafe {
-        ffi::check_cuda(ffi::apxinf_swiglu_bf16_rounded_pair_interleaved(
-            gpu_ptr(gate_up)?,
-            output.ptr(),
-            r,
-            n,
-            p,
-            ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
-    }
-    Ok(matrix_tensor(ctx, rows, inner, output))
-}
-
 /// Fuse optional bias, SwiGLU, and dynamic per-row E4M3 quantization.
 pub fn swiglu_quantize_rows_bf16_e4m3(
     ctx: &CudaContext,

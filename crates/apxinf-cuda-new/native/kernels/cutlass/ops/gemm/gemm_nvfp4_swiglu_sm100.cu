@@ -1,7 +1,7 @@
 // Copyright 2026 ApxInf contributors.
 //
 // CUDA/CUTLASS translation of the CuTe-DSL AOT operator
-// `qwen38-dense-swiglu-nvfp4` (AOT symbol `dense_swiglu`).
+// the NVFP4 GEMM + SwiGLU + requantization operator.
 //
 //   c[M, I] (NVFP4) + c_sf = requant( SwiGLU( a[M,K] @ b[2I,K]^T ) )
 //
@@ -415,7 +415,7 @@ size_t workspace_bytes_for(int m, int interm, int k) {
 
 }  // namespace nvfp4_swiglu
 
-size_t nvfp4_dense_swiglu_cuda_workspace_bytes(int rows, int n, int k) {
+size_t nvfp4_gemm_swiglu_workspace_bytes(int rows, int n, int k) {
   return nvfp4_swiglu::workspace_bytes_for(rows, n, k);
 }
 
@@ -459,12 +459,7 @@ bool reserve(int rows, int n, int k, void** ptr, size_t* bytes) {
 }  // namespace
 }  // namespace nvfp4_swiglu
 
-// Same 15-argument prefix as `nvfp4_dense_swiglu_aot` so the Rust dispatch can
-// choose between the two without reshaping its call. `tile_groups`,
-// `tile_limits`, `token_map` and `tile_count` are the AOT's grouped-GEMM
-// metadata; the dense CUDA kernel derives its tile grid from the problem shape
-// and ignores them.
-int nvfp4_dense_swiglu_cuda(
+int nvfp4_gemm_swiglu(
     const void* a, const void* b, const void* a_sf, const void* b_sf,
     void* c, void* c_sf, const void* alpha, const void* input_global_scale,
     const void* down_inverse_global_scale, void* workspace,

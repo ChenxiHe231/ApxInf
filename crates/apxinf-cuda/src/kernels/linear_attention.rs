@@ -19,51 +19,6 @@ use crate::ffi;
 use crate::kernels::gdn_policy::{wmma, GdnLaunchPolicy};
 use crate::workspace::output_buffer;
 
-/// Fused BF16 first-prefill GDN implementation linked by this build.
-///
-/// `Aot` is the pinned CuTe-DSL object `flashinfer_gdn_bf16_t64_sm110_real3392`
-/// from `APXINF_CUDA_AOT_MANIFEST`; `Cuda` is the vendored upstream FlashInfer
-/// Cake prefill in `kernels/flashinfer_gdn/` (BF16 I/O, FP32 state, full-DV).
-/// They are required to be bit-identical on both the layer output and the final
-/// recurrent state, and which one a build links is decided at build time by the
-/// `aot-gdn-prefill-bf16` Cargo feature, never at runtime.
-///
-/// Both arms share the conv/pack/gate prologue and the state transpose
-/// (`adapters/gdn_bf16_prefill_common.cuh`), so they differ in exactly one
-/// kernel launch.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum GdnPrefillImpl {
-    Aot,
-    Cuda,
-}
-
-impl GdnPrefillImpl {
-    /// Whether this build links this implementation at all.
-    pub const fn linked(self) -> bool {
-        match self {
-            Self::Aot => cfg!(apxinf_aot_gdn_prefill_bf16),
-            Self::Cuda => cfg!(apxinf_gdn_prefill_bf16_cuda),
-        }
-    }
-}
-
-/// The fused GDN prefill implementation this build will use, if any.
-///
-/// AOT wins when linked: it is the previously measured baseline, and the arm
-/// exists so an end-to-end regression can be attributed to this one operator.
-/// The default build links only the in-tree kernel and needs no bundle.
-pub fn gdn_prefill_impl(ctx: &CudaContext, geometry: [usize; 4]) -> Option<GdnPrefillImpl> {
-    if ctx.caps().sm != 110
-        || ctx.caps().multiprocessor_count != 20
-        || geometry != [16, 32, 128, 128]
-    {
-        return None;
-    }
-    [GdnPrefillImpl::Aot, GdnPrefillImpl::Cuda]
-        .into_iter()
-        .find(|candidate| candidate.linked())
-}
-
 /// Fused first-prefill causal convolution and gated delta-rule scan.
 /// Returns no implementation for unsupported geometry or device, before any
 /// allocation. Stateful continuation uses the recurrent operators instead.
@@ -78,173 +33,107 @@ pub fn try_causal_conv_gdn_prefill_bf16(
     final_state: &CudaBuffer,
     geometry: [usize; 4],
 ) -> Result<Option<Tensor>> {
-    let Some(implementation) = gdn_prefill_impl(ctx, geometry) else {
-        return Ok(None);
-    };
-    if zba.shape().dims() != [3387, 12352] || conv_weight.shape().dims() != [8192, 4] {
-        return Ok(None);
-    }
-    causal_conv_gdn_prefill_bf16_with(
-        ctx,
-        zba,
-        conv_weight,
-        new_conv_state,
-        a_log,
-        dt_bias,
-        final_state,
-        implementation,
-    )
-    .map(Some)
-}
-
-/// [`try_causal_conv_gdn_prefill_bf16`] with the implementation named
-/// explicitly, and without the "return `None` for an unsupported shape"
-/// fallback.
-///
-/// Only the equivalence test uses this: it is the one caller that wants both
-/// arms in one process. Production goes through
-/// [`try_causal_conv_gdn_prefill_bf16`] so a build can never run two different
-/// implementations in one pass.
-#[allow(clippy::too_many_arguments)]
-pub fn causal_conv_gdn_prefill_bf16_with(
-    ctx: &CudaContext,
-    zba: &Tensor,
-    conv_weight: &Tensor,
-    new_conv_state: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    final_state: &CudaBuffer,
-    implementation: GdnPrefillImpl,
-) -> Result<Tensor> {
-    if !implementation.linked() {
-        return Err(Error::Other(format!(
-            "GDN prefill implementation {implementation:?} is not linked by this build"
-        )));
-    }
-    if zba.shape().dims() != [3387, 12352]
+    if !cfg!(apxinf_aot_sm110)
+        || ctx.caps().sm != 110
+        || ctx.caps().multiprocessor_count != 20
+        || geometry != [16, 32, 128, 128]
+        || zba.shape().dims() != [3387, 12352]
         || conv_weight.shape().dims() != [8192, 4]
-        || new_conv_state.shape().dims() != [8192, 4]
-        || a_log.shape().dims() != [32]
-        || a_log.dtype() != DType::F32
-        || dt_bias.shape().dims() != [32]
     {
-        return Err(Error::Other(
-            "fused GDN prefill state/weight contract mismatch".into(),
-        ));
+        return Ok(None);
     }
-    for tensor in [zba, conv_weight, new_conv_state, dt_bias] {
-        expect_bf16(tensor, "fused GDN prefill")?;
-    }
-    let z = CudaBuffer::from_tensor(zba).map_err(Error::Cuda)?;
-    let weight = CudaBuffer::from_tensor(conv_weight).map_err(Error::Cuda)?;
-    let conv_state = CudaBuffer::from_tensor(new_conv_state).map_err(Error::Cuda)?;
-    let log = CudaBuffer::from_tensor(a_log).map_err(Error::Cuda)?;
-    let bias = CudaBuffer::from_tensor(dt_bias).map_err(Error::Cuda)?;
-    require_buffers(
-        ctx,
-        "fused GDN prefill",
-        &[
-            ("zba", &z, 3387 * 12352 * 2),
-            ("conv_weight", &weight, 8192 * 4 * 2),
-            ("conv_state", &conv_state, 8192 * 4 * 2),
-            ("a_log", &log, 32 * 4),
-            ("dt_bias", &bias, 32 * 2),
-            ("final_state", final_state, 32 * 128 * 128 * 4),
-        ],
-    )?;
-    if crate::workspace::may_prepare_native_resources() {
-        let status = match implementation {
-            #[cfg(apxinf_aot_gdn_prefill_bf16)]
-            GdnPrefillImpl::Aot => unsafe { ffi::apxinf_static_gdn_flashinfer64_init() },
-            #[cfg(apxinf_gdn_prefill_bf16_cuda)]
-            GdnPrefillImpl::Cuda => unsafe {
-                ffi::apxinf_static_gdn_flashinfer64_cuda_init()
-            },
-            #[allow(unreachable_patterns)]
-            _ => {
+    #[cfg(apxinf_aot_sm110)]
+    {
+        if new_conv_state.shape().dims() != [8192, 4]
+            || a_log.shape().dims() != [32]
+            || a_log.dtype() != DType::F32
+            || dt_bias.shape().dims() != [32]
+        {
+            return Err(Error::Other(
+                "fused GDN prefill state/weight contract mismatch".into(),
+            ));
+        }
+        for tensor in [zba, conv_weight, new_conv_state, dt_bias] {
+            expect_bf16(tensor, "fused GDN prefill")?;
+        }
+        let z = CudaBuffer::from_tensor(zba).map_err(Error::Cuda)?;
+        let weight = CudaBuffer::from_tensor(conv_weight).map_err(Error::Cuda)?;
+        let conv_state = CudaBuffer::from_tensor(new_conv_state).map_err(Error::Cuda)?;
+        let log = CudaBuffer::from_tensor(a_log).map_err(Error::Cuda)?;
+        let bias = CudaBuffer::from_tensor(dt_bias).map_err(Error::Cuda)?;
+        require_buffers(
+            ctx,
+            "fused GDN prefill",
+            &[
+                ("zba", &z, 3387 * 12352 * 2),
+                ("conv_weight", &weight, 8192 * 4 * 2),
+                ("conv_state", &conv_state, 8192 * 4 * 2),
+                ("a_log", &log, 32 * 4),
+                ("dt_bias", &bias, 32 * 2),
+                ("final_state", final_state, 32 * 128 * 128 * 4),
+            ],
+        )?;
+        if crate::workspace::may_prepare_native_resources() {
+            let status = unsafe { ffi::apxinf_static_gdn_flashinfer64_init() };
+            if status != 0 {
                 return Err(Error::Other(format!(
-                    "GDN prefill implementation {implementation:?} is not linked by this build"
-                )))
+                    "fused GDN AOT prepare failed: {status}"
+                )));
             }
+        }
+        const PAD: usize = 3392;
+        let scratch = output_buffer(ctx, 2 * PAD * 32 * 4 + 10240)?;
+        if scratch.ptr() as usize & 255 != 0 {
+            return Err(Error::Other(
+                "fused GDN scratch requires 256-byte alignment".into(),
+            ));
+        }
+        let q = output_buffer(ctx, PAD * 16 * 128 * 2)?;
+        let k = output_buffer(ctx, PAD * 16 * 128 * 2)?;
+        let v = output_buffer(ctx, PAD * 32 * 128 * 2)?;
+        let a = output_buffer(ctx, PAD * 32 * 2)?;
+        let b = output_buffer(ctx, PAD * 32 * 2)?;
+        let state = output_buffer(ctx, 32 * 128 * 128 * 4)?;
+        let output = output_buffer(ctx, PAD * 32 * 128 * 2)?;
+        let offsets = output_buffer(ctx, 2 * 4)?;
+        let status = unsafe {
+            ffi::apxinf_static_gdn_flashinfer64_prefill_compact_v(
+                z.ptr(),
+                weight.ptr(),
+                conv_state.ptr(),
+                log.ptr(),
+                bias.ptr(),
+                scratch.ptr(),
+                q.ptr(),
+                k.ptr(),
+                v.ptr(),
+                a.ptr(),
+                b.ptr(),
+                state.ptr(),
+                final_state.ptr(),
+                output.ptr(),
+                offsets.ptr(),
+                3387,
+                PAD as i32,
+                ctx.stream().handle(),
+            )
         };
         if status != 0 {
             return Err(Error::Other(format!(
-                "fused GDN {implementation:?} prepare failed: {status}"
+                "fused GDN AOT enqueue failed: {status}"
             )));
         }
+        return output
+            .view(0, 3387 * 4096 * 2)
+            .map_err(Error::Cuda)?
+            .as_tensor(Shape::new(vec![3387, 4096]), DType::BF16)
+            .map(Some)
+            .map_err(Error::Cuda);
     }
-    const PAD: usize = 3392;
-    // 2 * gate planes + the per-CTA TMA descriptor workspace and its
-    // optional-pointer tail; the constant is mirrored by
-    // `FLASH_WORKSPACE_BYTES` in adapters/gdn_bf16_prefill_common.cuh and both
-    // arms get the same scratch so the comparison stays controlled.
-    const GDN_WORKSPACE_BYTES: usize = 10240 + 256;
-    let scratch = output_buffer(ctx, 2 * PAD * 32 * 4 + GDN_WORKSPACE_BYTES)?;
-    if scratch.ptr() as usize & 255 != 0 {
-        return Err(Error::Other(
-            "fused GDN scratch requires 256-byte alignment".into(),
-        ));
-    }
-    let q = output_buffer(ctx, PAD * 16 * 128 * 2)?;
-    let k = output_buffer(ctx, PAD * 16 * 128 * 2)?;
-    let v = output_buffer(ctx, PAD * 32 * 128 * 2)?;
-    let a = output_buffer(ctx, PAD * 32 * 2)?;
-    let b = output_buffer(ctx, PAD * 32 * 2)?;
-    let state = output_buffer(ctx, 32 * 128 * 128 * 4)?;
-    let output = output_buffer(ctx, PAD * 32 * 128 * 2)?;
-    let offsets = output_buffer(ctx, 2 * 4)?;
-    macro_rules! enqueue {
-        ($entry:path) => {
-            unsafe {
-                $entry(
-                    z.ptr(),
-                    weight.ptr(),
-                    conv_state.ptr(),
-                    log.ptr(),
-                    bias.ptr(),
-                    scratch.ptr(),
-                    q.ptr(),
-                    k.ptr(),
-                    v.ptr(),
-                    a.ptr(),
-                    b.ptr(),
-                    state.ptr(),
-                    final_state.ptr(),
-                    output.ptr(),
-                    offsets.ptr(),
-                    3387,
-                    PAD as i32,
-                    ctx.stream().handle(),
-                )
-            }
-        };
-    }
-    let status = match implementation {
-        #[cfg(apxinf_aot_gdn_prefill_bf16)]
-        GdnPrefillImpl::Aot => {
-            enqueue!(ffi::apxinf_static_gdn_flashinfer64_prefill_compact_v_aot)
-        }
-        #[cfg(apxinf_gdn_prefill_bf16_cuda)]
-        GdnPrefillImpl::Cuda => {
-            enqueue!(ffi::apxinf_static_gdn_flashinfer64_prefill_compact_v_cuda)
-        }
-        #[allow(unreachable_patterns)]
-        _ => {
-            return Err(Error::Other(format!(
-                "GDN prefill implementation {implementation:?} is not linked by this build"
-            )))
-        }
-    };
-    if status != 0 {
-        return Err(Error::Other(format!(
-            "fused GDN {implementation:?} enqueue failed: {status}"
-        )));
-    }
-    output
-        .view(0, 3387 * 4096 * 2)
-        .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(vec![3387, 4096]), DType::BF16)
-        .map_err(Error::Cuda)
+    #[cfg(not(apxinf_aot_sm110))]
+    let _ = (new_conv_state, a_log, dt_bias, final_state);
+    #[cfg(not(apxinf_aot_sm110))]
+    Ok(None)
 }
 
 fn expect_bf16(tensor: &Tensor, name: &str) -> Result<()> {

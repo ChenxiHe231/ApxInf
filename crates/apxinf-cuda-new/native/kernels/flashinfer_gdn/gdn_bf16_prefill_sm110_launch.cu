@@ -11,7 +11,10 @@
 // `APXINF_GDN_LOG_GATE` is deliberately never defined; the caller passes
 // linear-space `alpha = exp(g)`. See kernels/flashinfer_gdn/README.md.
 
-#include "../kernels/flashinfer_gdn/cake_gdn_prefill_b384fd71263b.cu"
+#define kernel_flashinfer_blackwell_gdn_prefill \
+  kernel_flashinfer_blackwell_gdn_prefill_bf16_fulldv
+#include "cake_gdn_prefill_bf16_fulldv_sm110.cu"
+#undef kernel_flashinfer_blackwell_gdn_prefill
 
 #include <cuda_runtime.h>
 #include <cstdint>
@@ -25,7 +28,8 @@ constexpr int kDynamicSharedBytes = 226048;
 }  // namespace
 
 extern "C" int32_t apxinf_gdn_bf16_fulldv_set_attr() {
-  return cudaFuncSetAttribute(kernel_flashinfer_blackwell_gdn_prefill,
+  return cudaFuncSetAttribute(
+             kernel_flashinfer_blackwell_gdn_prefill_bf16_fulldv,
                               cudaFuncAttributeMaxDynamicSharedMemorySize,
                               kDynamicSharedBytes) == cudaSuccess
              ? 0
@@ -42,7 +46,7 @@ extern "C" int32_t apxinf_gdn_bf16_fulldv_launch(
   // `USE_INITIAL_STATE == 0`, so the incoming state pointer is unused and the
   // same buffer is only the output. Passing it twice matches the parameter
   // list of the FP16 sibling already vendored in apxinf-cuda-new.
-  kernel_flashinfer_blackwell_gdn_prefill<<<
+  kernel_flashinfer_blackwell_gdn_prefill_bf16_fulldv<<<
       grid_x, kBlockThreads, kDynamicSharedBytes, stream>>>(
       *static_cast<const CUtensorMap*>(map_q),
       *static_cast<const CUtensorMap*>(map_k),

@@ -701,20 +701,6 @@ __global__ void geglu_bf16_kernel(
   }
 }
 
-// The one definition of the generic (non-fused) BF16 SwiGLU element. Every
-// kernel below that claims "the same numerics" calls this, so a layout change
-// can never drag the arithmetic with it. NOT the fused CUTLASS epilogue's
-// numerics: that one keeps gate/up in FP32 through one rounding and uses
-// ex2.approx/rcp.approx. Here `RoundSilu` reproduces the reference's bf16 cast
-// after SiLU, i.e. two roundings, and `expf` is the libdevice call.
-template <bool RoundSilu>
-__device__ __forceinline__ __nv_bfloat16 swiglu_bf16_element(float gate,
-                                                             float up) {
-  float silu = gate / (1.0f + expf(-gate));
-  if (RoundSilu) silu = __bfloat162float(__float2bfloat16(silu));
-  return __float2bfloat16(silu * up);
-}
-
 template <bool RoundSilu = false>
 __global__ void swiglu_bf16_kernel(
     const __nv_bfloat16* gate_up, __nv_bfloat16* output,
@@ -727,39 +713,9 @@ __global__ void swiglu_bf16_kernel(
     const int col = static_cast<int>(index % inner);
     const float gate = __bfloat162float(gate_up[static_cast<int64_t>(row) * 2 * inner + col]);
     const float up = __bfloat162float(gate_up[static_cast<int64_t>(row) * 2 * inner + inner + col]);
-    output[index] = swiglu_bf16_element<RoundSilu>(gate, up);
-  }
-}
-
-// Same element as `swiglu_bf16_kernel`, different gate/up pairing: the
-// projection's columns arrive in `[gate pair, up pair]` tiles of `pair`
-// columns each, which is what a GEMM against the fused operator's packed
-// `[K, 2I]` weight produces. `pair == inner` is exactly the plain
-// `[gate_all, up_all]` split, so this kernel is a strict generalization and
-// the test asserts the two agree there.
-//
-// Column map, identical to `bf16_swiglu_packed_source_index`'s destination
-// side and to `geglu_quant_interleaved256` in bf16_dual_geglu_sm100.cu:
-//   tile = col / pair; within = col - tile * pair
-//   gate_col = tile * 2 * pair + within;  up_col = gate_col + pair
-template <bool RoundSilu = false>
-__global__ void swiglu_bf16_pair_interleaved_kernel(
-    const __nv_bfloat16* gate_up, __nv_bfloat16* output,
-    int rows, int inner, int pair) {
-  const int64_t count = static_cast<int64_t>(rows) * inner;
-  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
-  for (; index < count; index += stride) {
-    const int row = static_cast<int>(index / inner);
-    const int col = static_cast<int>(index % inner);
-    const int tile = col / pair;
-    const int within = col - tile * pair;
-    const int gate_col = tile * 2 * pair + within;
-    const __nv_bfloat16* row_input =
-        gate_up + static_cast<int64_t>(row) * 2 * inner;
-    const float gate = __bfloat162float(row_input[gate_col]);
-    const float up = __bfloat162float(row_input[gate_col + pair]);
-    output[index] = swiglu_bf16_element<RoundSilu>(gate, up);
+    float silu = gate / (1.0f + expf(-gate));
+    if (RoundSilu) silu = __bfloat162float(__float2bfloat16(silu));
+    output[index] = __float2bfloat16(silu * up);
   }
 }
 
@@ -802,8 +758,11 @@ __global__ void swiglu_bf16_vec8_kernel(
     __nv_bfloat16* ol = reinterpret_cast<__nv_bfloat16*>(&out);
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-      ol[i] = swiglu_bf16_element<RoundSilu>(__bfloat162float(gl[i]),
-                                             __bfloat162float(ul[i]));
+      const float gate = __bfloat162float(gl[i]);
+      const float up = __bfloat162float(ul[i]);
+      float silu = gate / (1.0f + expf(-gate));
+      if (RoundSilu) silu = __bfloat162float(__float2bfloat16(silu));
+      ol[i] = __float2bfloat16(silu * up);
     }
     *reinterpret_cast<float4*>(output + row * inner + col) = out;
   }

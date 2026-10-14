@@ -70,6 +70,19 @@ using namespace cutlass::fmha::collective;
 // `APXINF_NO_LSE` and `APXINF_PERSISTENT` are NOT read here -- they are
 // consumer-side knobs (ptr_LSE = nullptr, and which TileScheduler to name);
 // report 20 §7.1 listed them as kernel-header knobs, which was wrong.
+//
+// The 16-warp budget is NON-MONOTONE and its optimum has now flipped twice, so
+// it must be re-swept whenever the compile regime changes.  Report 30, vision
+// hd64 through the repo path (16 rounds, ABBA, control band [1.0164, 1.0190]
+// over six replicates of the shipped 200/64/48):
+//     200/64/48  controls 1.0183 / 1.0187 / 1.0188 / 1.0190   <- shipped
+//     192/96/32  1.0212   (CUTLASS default; the vision fork's post-NDEBUG
+//                          optimum on its standalone L=624 driver)
+//     184/112/32 1.0199
+//     216/56/24  1.0248   (the vision fork's pre-NDEBUG optimum)
+// ptxas STACK does not predict any of it: 200/64/48 spills 40 B, 192/96/32
+// spills 8 B and is slower, 216/56/24 spills 88 B and is slowest.
+// Constraint: 2*SOFTMAX + CORRECTION + OTHER <= 512.
 // ---------------------------------------------------------------------------
 #if defined(APXINF_REGS_SOFTMAX) || defined(APXINF_REGS_CORRECTION) || defined(APXINF_REGS_OTHER)
 #  error "APXINF_REGS_* is gone; use APXINF_1Q_NUM_REGS_* for the 12-warp single-Q-stage schedule, or APXINF_NUM_REGS_* for the stock 16-warp one"
@@ -313,8 +326,10 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
                 "a single-Q-stage mainloop needs Sm100FmhaCtxKernelWarpspecialized1QSchedule");
 
   using ClusterShape = typename CollectiveMainloop::ClusterShape;
+  static constexpr bool kIs2Sm = cute::size(ClusterShape{}) == 2;
 
-  using TmemAllocator = cute::TMEM::Allocator1Sm;
+  using TmemAllocator = cute::conditional_t<
+      kIs2Sm, cute::TMEM::Allocator2Sm, cute::TMEM::Allocator1Sm>;
 
   struct SharedStorage {
     using UnionType = union {
@@ -413,6 +428,9 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
     int warp_idx = cutlass::canonical_warp_idx_sync();
     auto role = warp_idx_to_WarpRole(warp_idx);
     uint32_t lane_predicate = cute::elect_one_sync();
+    uint32_t cta_rank_in_cluster = cute::block_rank_in_cluster();
+    bool is_mma_leader_cta =
+        (cta_rank_in_cluster % cute::size(typename CollectiveMainloop::CollectiveMmaQK::TiledMma::AtomThrID{})) == 0;
 
     if (role == WarpRole::Load && lane_predicate) {
       CollectiveMainloop::prefetch_tma_descriptors(params.mainloop);
@@ -441,7 +459,8 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
     if (role == WarpRole::MMA) {
       pipeline_load_q_params.role = CollectiveMainloop::PipelineQ::ThreadCategory::Consumer;
     }
-    pipeline_load_q_params.is_leader = lane_predicate && (role == WarpRole::Load);
+    pipeline_load_q_params.is_leader =
+        lane_predicate && (role == WarpRole::Load) && is_mma_leader_cta;
     pipeline_load_q_params.transaction_bytes = CollectiveMainloop::TransactionBytesLoadQ;
     typename CollectiveMainloop::PipelineQ pipeline_load_q(
       shared_storage.pipelines.load_q,
@@ -455,7 +474,8 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
     if (role == WarpRole::MMA) {
       pipeline_load_kv_params.role = CollectiveMainloop::PipelineKV::ThreadCategory::Consumer;
     }
-    pipeline_load_kv_params.is_leader = lane_predicate && (role == WarpRole::Load);
+    pipeline_load_kv_params.is_leader =
+        lane_predicate && (role == WarpRole::Load) && is_mma_leader_cta;
     pipeline_load_kv_params.transaction_bytes = CollectiveMainloop::TransactionBytesLoadK;
     typename CollectiveMainloop::PipelineKV pipeline_load_kv(
       shared_storage.pipelines.load_kv,
@@ -469,7 +489,8 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
     if (role == WarpRole::Softmax0) {
       pipeline_mma_s0_params.role = CollectiveMainloop::PipelineS::ThreadCategory::Consumer;
     }
-    pipeline_mma_s0_params.consumer_arv_count = NumWarpsSoftmax * cutlass::NumThreadsPerWarp;
+    pipeline_mma_s0_params.consumer_arv_count =
+        NumWarpsSoftmax * cutlass::NumThreadsPerWarp * cute::size(ClusterShape{});
     typename CollectiveMainloop::PipelineS pipeline_mma_s0(
       shared_storage.pipelines.mma_s0,
       pipeline_mma_s0_params,
@@ -482,7 +503,8 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
     if (role == WarpRole::Softmax1) {
       pipeline_mma_s1_params.role = CollectiveMainloop::PipelineS::ThreadCategory::Consumer;
     }
-    pipeline_mma_s1_params.consumer_arv_count = NumWarpsSoftmax * cutlass::NumThreadsPerWarp;
+    pipeline_mma_s1_params.consumer_arv_count =
+        NumWarpsSoftmax * cutlass::NumThreadsPerWarp * cute::size(ClusterShape{});
     typename CollectiveMainloop::PipelineS pipeline_mma_s1(
       shared_storage.pipelines.mma_s1,
       pipeline_mma_s1_params,
@@ -523,7 +545,8 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
     if (role == WarpRole::Correction) {
       pipeline_mma_corr_params.role = CollectiveMainloop::PipelineO::ThreadCategory::Consumer;
     }
-    pipeline_mma_corr_params.consumer_arv_count = NumWarpsCorrection * cutlass::NumThreadsPerWarp;
+    pipeline_mma_corr_params.consumer_arv_count =
+        NumWarpsCorrection * cutlass::NumThreadsPerWarp * cute::size(ClusterShape{});
     typename CollectiveMainloop::PipelineO pipeline_mma_corr(
       shared_storage.pipelines.mma_corr,
       pipeline_mma_corr_params,
@@ -722,16 +745,22 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
           continue;
         }
 
-        mainloop.mma(
-          blk_coord,
-          params.mainloop, logical_problem_shape,
-          shared_storage.mainloop_epilogue.mainloop,
-          pipeline_load_q, pipeline_load_q_consumer_state,
-          pipeline_load_kv, pipeline_load_kv_consumer_state,
-          pipeline_mma_s0, pipeline_mma_s0_producer_state,
-          pipeline_mma_s1, pipeline_mma_s1_producer_state,
-          pipeline_mma_corr, pipeline_mma_corr_producer_state
-        );
+        // A 2-SM TMEM allocation is a cluster-wide operation: the MMA warp in
+        // both CTAs must execute allocate/free even though only CTA 0 issues
+        // the paired UMMA instructions.  Skipping the peer CTA here leaves the
+        // Allocator2Sm handshake incomplete and deadlocks before the first QK.
+        if (is_mma_leader_cta) {
+          mainloop.mma(
+            blk_coord,
+            params.mainloop, logical_problem_shape,
+            shared_storage.mainloop_epilogue.mainloop,
+            pipeline_load_q, pipeline_load_q_consumer_state,
+            pipeline_load_kv, pipeline_load_kv_consumer_state,
+            pipeline_mma_s0, pipeline_mma_s0_producer_state,
+            pipeline_mma_s1, pipeline_mma_s1_producer_state,
+            pipeline_mma_corr, pipeline_mma_corr_producer_state
+          );
+        }
 
       }
     }
@@ -786,17 +815,26 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
 
         has_valid = true;
 
-        epilogue.store(
-          blk_coord, logical_problem_shape,
-          params.epilogue, params.problem_shape,
-          epilogue_storage,
-          pipeline_corr_epi, pipeline_corr_epi_consumer_state
-        );
+        if constexpr (kIs2Sm) {
+          // The scheduler coordinate names the logical 256-row cluster tile,
+          // while each CTA stores one 128-row local epilogue tile.
+          get<0>(blk_coord) = get<0>(blk_coord) * cute::size<0>(ClusterShape{})
+                            + int(cta_rank_in_cluster % cute::size<0>(ClusterShape{}));
+          CollectiveEpilogue::consume_only(
+              pipeline_corr_epi, pipeline_corr_epi_consumer_state);
+        } else {
+          epilogue.store(
+            blk_coord, logical_problem_shape,
+            params.epilogue, params.problem_shape,
+            epilogue_storage,
+            pipeline_corr_epi, pipeline_corr_epi_consumer_state
+          );
+        }
 
       }
 
       static_assert(NumWarpsEpilogue <= 1);
-      if constexpr (NumWarpsEpilogue == 1) {
+      if constexpr (NumWarpsEpilogue == 1 && !kIs2Sm) {
         if(has_valid) {
           uint32_t free_stage_ptr = shared_storage.tmem_base_ptr;
           tmem_allocator.free(free_stage_ptr, TmemAllocator::Sm100TmemCapacityColumns);
@@ -819,6 +857,14 @@ struct Sm100FmhaFwdKernelTmaWarpspecialized {
       warpgroup_reg_set<NumRegsEmpty>();
 
       /* no-op, donate regs and exit */
+    }
+
+    if constexpr (kIs2Sm) {
+      cute::cluster_sync();
+      if (role == WarpRole::MMA) {
+        uint32_t free_stage_ptr = shared_storage.tmem_base_ptr;
+        tmem_allocator.free(free_stage_ptr, TmemAllocator::Sm100TmemCapacityColumns);
+      }
     }
 #endif
   }

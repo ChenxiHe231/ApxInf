@@ -271,46 +271,16 @@ pub fn nvfp4_quantize_swiglu(
     }
 }
 
-/// Which implementation of the fused NVFP4 FC1 + SwiGLU + requantization
-/// operator a call should use.
+/// NVFP4 GEMM with fused SwiGLU and NVFP4 requantization.
 ///
-/// The two are required to be bit-identical on the production shape; the
-/// choice exists so an end-to-end regression can be attributed to this
-/// operator rather than to the whole kernel swap. It is a *build-time*
-/// selection -- see `crate::QWEN38_DENSE_SWIGLU` -- not a runtime switch.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum DenseSwigluImpl {
-    /// The CuTe DSL AOT object from the `APXINF_CUDA_AOT_MANIFEST` bundle.
-    /// Consumes *row-major* activation block scales.
-    Aot,
-    /// The in-tree CUDA/CUTLASS translation. Consumes activation block scales
-    /// in the *GEMM atom* layout.
-    Cuda,
-}
-
-impl DenseSwigluImpl {
-    /// Block-scale layout this implementation expects for the activation.
-    /// Getting this wrong is silent: both layouts have the same byte count.
-    pub fn activation_scale_layout(self) -> ScaleLayout {
-        match self {
-            Self::Aot => ScaleLayout::RowMajor,
-            Self::Cuda => ScaleLayout::GemmAtom,
-        }
-    }
-}
-
-/// Shape-specialized NVFP4 dense projection with fused SwiGLU and NVFP4
-/// requantization.
-///
-/// Validation is shared; only the final ABI call differs between the two
-/// implementations. `tile_groups`/`tile_limits`/`token_map`/`tile_count` are
-/// grouped-GEMM metadata that only the AOT object reads, but they are still
-/// validated on both paths so a caller cannot build a plan that works on one
-/// arm and not the other.
+/// This is a fixed operator because its output contract carries two extra
+/// scale tensors and three runtime calibration scalars. It stays in the GEMM
+/// family, but does not pretend to fit the ordinary GEMM bindings. The native
+/// implementation currently supports the production SM110 shape; callers use
+/// the unfused GEMM + SwiGLU path for every other shape.
 #[allow(clippy::too_many_arguments)]
-pub fn nvfp4_dense_swiglu(
+pub fn nvfp4_gemm_swiglu(
     ctx: &CudaContext,
-    implementation: DenseSwigluImpl,
     activation: &Tensor,
     activation_scales: &Tensor,
     weight: &Tensor,
@@ -320,10 +290,6 @@ pub fn nvfp4_dense_swiglu(
     alpha: &Tensor,
     input_global_scale: &Tensor,
     down_inverse_global_scale: &Tensor,
-    tile_groups: &Tensor,
-    tile_limits: &Tensor,
-    token_map: &Tensor,
-    tile_count: &Tensor,
 ) -> Result<()> {
     let activation_dims = activation.shape().dims().to_vec();
     if activation_dims.len() != 2 {
@@ -336,6 +302,11 @@ pub fn nvfp4_dense_swiglu(
         return Err(invalid("fused NVFP4 SwiGLU weight must be [2*n, k/2]"));
     }
     let n = weight_dims[0] / 2;
+    if (rows, n, k) != (2048, 17408, 5120) {
+        return Err(invalid(
+            "native NVFP4 GEMM SwiGLU supports only [m,n,k] = [2048,17408,5120]",
+        ));
+    }
     let output_dims = output.shape().dims().to_vec();
     if output_dims != [rows, n / 2] {
         return Err(invalid("fused NVFP4 SwiGLU output must be [rows, n/2]"));
@@ -368,48 +339,22 @@ pub fn nvfp4_dense_swiglu(
     let alpha_buffer = scalar(alpha)?;
     let input_scale_buffer = scalar(input_global_scale)?;
     let down_scale_buffer = scalar(down_inverse_global_scale)?;
-    let tiles = rows.div_ceil(128);
-    let group_buffer = tensor_storage(ctx, tile_groups, DType::I32, &[tiles])?;
-    let limit_buffer = tensor_storage(ctx, tile_limits, DType::I32, &[tiles])?;
-    let map_buffer = tensor_storage(ctx, token_map, DType::I32, &[rows])?;
-    let count_buffer = tensor_storage(ctx, tile_count, DType::I32, &[1])?;
 
     unsafe {
-        match implementation {
-            DenseSwigluImpl::Aot => status::check(abi::apxinf_gemm_nvfp4_dense_swiglu_aot(
-                activation_buffer.ptr(),
-                weight_buffer.ptr(),
-                activation_scale_buffer.ptr(),
-                weight_scale_buffer.ptr(),
-                output_buffer.ptr(),
-                output_scale_buffer.ptr(),
-                alpha_buffer.ptr(),
-                input_scale_buffer.ptr(),
-                down_scale_buffer.ptr(),
-                group_buffer.ptr(),
-                limit_buffer.ptr(),
-                map_buffer.ptr(),
-                count_buffer.ptr(),
-                rows as i64,
-                n as i64,
-                k as i64,
-                ctx.stream().handle(),
-            )),
-            DenseSwigluImpl::Cuda => status::check(abi::apxinf_gemm_nvfp4_dense_swiglu_cuda(
-                activation_buffer.ptr(),
-                weight_buffer.ptr(),
-                activation_scale_buffer.ptr(),
-                weight_scale_buffer.ptr(),
-                output_buffer.ptr(),
-                output_scale_buffer.ptr(),
-                alpha_buffer.ptr(),
-                input_scale_buffer.ptr(),
-                down_scale_buffer.ptr(),
-                rows as i64,
-                n as i64,
-                k as i64,
-                ctx.stream().handle(),
-            )),
-        }
+        status::check(abi::apxinf_gemm_nvfp4_swiglu(
+            activation_buffer.ptr(),
+            weight_buffer.ptr(),
+            activation_scale_buffer.ptr(),
+            weight_scale_buffer.ptr(),
+            output_buffer.ptr(),
+            output_scale_buffer.ptr(),
+            alpha_buffer.ptr(),
+            input_scale_buffer.ptr(),
+            down_scale_buffer.ptr(),
+            rows as i64,
+            n as i64,
+            k as i64,
+            ctx.stream().handle(),
+        ))
     }
 }

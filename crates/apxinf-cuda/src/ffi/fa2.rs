@@ -5,15 +5,12 @@ use std::ffi::c_void;
 use super::cuda::{cudaError_t, cudaStream_t};
 
 extern "C" {
-    // --- action-attention: AOT arm (feature `aot-action-attention`) ---------
-    #[cfg(apxinf_aot_action_attention)]
-    pub fn apxinf_static_fa4_split_batch_aot_init(stream: cudaStream_t) -> i32;
+    #[cfg(apxinf_aot_sm110)]
+    pub fn apxinf_static_fa4_split_batch_init(stream: cudaStream_t) -> i32;
+    pub fn apxinf_static_fa4_split_batch_ready() -> i32;
 
-    #[cfg(apxinf_aot_action_attention)]
-    pub fn apxinf_static_fa4_split_batch_aot_ready() -> i32;
-
-    #[cfg(apxinf_aot_action_attention)]
-    pub fn apxinf_static_fa4_split_batch_aot_forward(
+    #[cfg(apxinf_aot_sm110)]
+    pub fn apxinf_static_fa4_split_batch_forward(
         q: *const c_void,
         k: *const c_void,
         v: *const c_void,
@@ -25,43 +22,11 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    // --- action-attention: in-tree CUDA arm ---------------------------------
-    #[cfg(apxinf_fa4_attention_cuda)]
-    pub fn apxinf_static_fa4_split_batch_cuda_init(stream: cudaStream_t) -> i32;
+    #[cfg(apxinf_aot_sm110)]
+    pub fn apxinf_static_fa4_d256_init() -> i32;
 
-    #[cfg(apxinf_fa4_attention_cuda)]
-    pub fn apxinf_static_fa4_split_batch_cuda_ready() -> i32;
-
-    #[cfg(apxinf_fa4_attention_cuda)]
-    pub fn apxinf_static_fa4_split_batch_cuda_forward(
-        q: *const c_void,
-        k: *const c_void,
-        v: *const c_void,
-        q2: *mut c_void,
-        partial: *mut c_void,
-        lse: *mut f32,
-        output: *mut c_void,
-        key_tokens: i32,
-        stream: cudaStream_t,
-    ) -> i32;
-
-    /// Index into the CUTLASS arm's native packed-M LSE buffer. Exported so a
-    /// test can check the repack rather than re-deriving the layout.
-    #[cfg(apxinf_fa4_attention_cuda)]
-    pub fn apxinf_d256_action_lse_index(
-        seq_q: i32,
-        kv_heads: i32,
-        batch_index: i32,
-        q_head: i32,
-        token: i32,
-    ) -> usize;
-
-    // --- language-attention: AOT arm (feature `aot-language-attention`) -----
-    #[cfg(apxinf_aot_language_attention)]
-    pub fn apxinf_static_fa4_d256_aot_init() -> i32;
-
-    #[cfg(apxinf_aot_language_attention)]
-    pub fn apxinf_static_fa4_d256_aot_forward(
+    #[cfg(apxinf_aot_sm110)]
+    pub fn apxinf_static_fa4_d256_forward(
         q: *const c_void,
         k: *const c_void,
         v: *const c_void,
@@ -69,44 +34,14 @@ extern "C" {
         stream: cudaStream_t,
     ) -> i32;
 
-    // --- language-attention: in-tree CUDA arm -------------------------------
-    #[cfg(apxinf_fa4_attention_cuda)]
-    pub fn apxinf_static_fa4_d256_cuda_init() -> i32;
+    #[cfg(apxinf_aot_sm110)]
+    pub fn apxinf_static_fa4_bf16_vfixed_init(stream: cudaStream_t) -> i32;
 
-    #[cfg(apxinf_fa4_attention_cuda)]
-    pub fn apxinf_static_fa4_d256_cuda_forward(
-        q: *const c_void,
-        k: *const c_void,
-        v: *const c_void,
-        output: *mut c_void,
-        stream: cudaStream_t,
-    ) -> i32;
+    #[cfg(apxinf_aot_sm110)]
+    pub fn apxinf_static_fa4_bf16_vfixed_ready() -> i32;
 
-    // --- vision-attention: AOT arm (feature `aot-vision-attention`) ---------
-    #[cfg(apxinf_aot_vision_attention)]
-    pub fn apxinf_static_fa4_bf16_vfixed_aot_init(stream: cudaStream_t) -> i32;
-
-    #[cfg(apxinf_aot_vision_attention)]
-    pub fn apxinf_static_fa4_bf16_vfixed_aot_ready() -> i32;
-
-    #[cfg(apxinf_aot_vision_attention)]
-    pub fn apxinf_static_fa4_bf16_vfixed_aot_forward(
-        q: *const c_void,
-        k: *const c_void,
-        v_strided: *const c_void,
-        output: *mut c_void,
-        stream: cudaStream_t,
-    ) -> i32;
-
-    // --- vision-attention: in-tree CUDA arm --------------------------------
-    #[cfg(apxinf_fa4_attention_cuda)]
-    pub fn apxinf_static_fa4_bf16_vfixed_cuda_init(stream: cudaStream_t) -> i32;
-
-    #[cfg(apxinf_fa4_attention_cuda)]
-    pub fn apxinf_static_fa4_bf16_vfixed_cuda_ready() -> i32;
-
-    #[cfg(apxinf_fa4_attention_cuda)]
-    pub fn apxinf_static_fa4_bf16_vfixed_cuda_forward(
+    #[cfg(apxinf_aot_sm110)]
+    pub fn apxinf_static_fa4_bf16_vfixed_forward(
         q: *const c_void,
         k: *const c_void,
         v_strided: *const c_void,

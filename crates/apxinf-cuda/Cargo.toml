@@ -10,18 +10,6 @@ default = ["nvtx"]
 # nsys markers via CUDA NVTX3 headers, with legacy shared-library fallback.
 # Disable with --no-default-features to build without profiling markers.
 nvtx = []
-# Per-operator AOT attribution arms. Each routes ONE fixed operator through the
-# pinned CuTe-DSL object from `APXINF_CUDA_AOT_MANIFEST` instead of the in-tree
-# CUDA/CUTLASS translation. Build-time only: the two are required to be
-# bit-identical and the feature exists so an end-to-end regression can be
-# attributed to that one operator. The default build uses the in-tree kernels
-# and needs no bundle; enabling a feature without a bundle is a build error,
-# never a silent fallback to the other arm. Removed with the bundle plumbing.
-aot-gemm-swiglu-bf16 = []
-aot-gdn-prefill-bf16 = []
-aot-vision-attention = []
-aot-action-attention = []
-aot-language-attention = []
 
 [dependencies]
 apxinf-core = { path = "../apxinf-core" }

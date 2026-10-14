@@ -45,9 +45,9 @@ pub use gdn::{
     gdn_recurrent_step, gdn_state_elements,
 };
 pub use gemm::{
-    gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu, nvfp4_dense_swiglu,
+    gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu, nvfp4_gemm_swiglu,
     nvfp4_pack_block_scales, nvfp4_quantize_activation, nvfp4_quantize_rms_norm,
-    nvfp4_quantize_swiglu, nvfp4_scale_buffer_bytes, DenseSwigluImpl, GemmArgs, GemmBiasArgs,
+    nvfp4_quantize_swiglu, nvfp4_scale_buffer_bytes, GemmArgs, GemmBiasArgs,
     GemmBiasGeluArgs, GemmBiasResidualArgs, GemmGegluArgs, GemmPolicy, GemmQuantization,
     ScaleLayout, WeightVersion,
 };
