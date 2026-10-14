@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use apxinf_core::{
-    Backend, Device, Error, NextTokenLogits, Result, Tensor, TokenSamplingInit, TokenSamplingSpec,
+    Device, Error, NextTokenLogits, Result, SamplingBackend, Tensor, TokenSamplingInit,
+    TokenSamplingSpec,
 };
 use apxinf_loader::ModelConfig;
 use serde::Serialize;
@@ -171,8 +172,8 @@ pub trait LlmTrait {
     /// Returns logits of shape `[seq_len, vocab_size]`.
     fn forward(&mut self, token_ids: &[u32], start_pos: u32) -> Result<Tensor>;
 
-    /// Backend that owns model tensors and creates the model-neutral sampler.
-    fn backend(&self) -> &dyn Backend;
+    /// Backend used to create the model-neutral sampler.
+    fn sampling_backend(&self) -> &dyn SamplingBackend;
 
     /// Modalities accepted by [`Self::prefill`]. Text is always supported.
     fn capabilities(&self) -> LlmCapabilities {
@@ -318,7 +319,7 @@ where
         vocab_size: model.vocab_size(),
         max_sequence_len: capacity,
     };
-    let mut sampler = model.backend().create_token_sampler(spec)?;
+    let mut sampler = model.sampling_backend().create_token_sampler(spec)?;
     sampler.begin(TokenSamplingInit {
         prompt_token_ids: prompt_tokens,
         params: &options.sampling,

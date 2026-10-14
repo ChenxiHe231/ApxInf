@@ -74,20 +74,17 @@ fn partial_rope_rotates_only_the_rotary_prefix() {
         for head in 0..KV_HEADS {
             let base = (token * KV_HEADS + head) * HEAD_DIM;
             for index in 0..half {
-                let frequency =
-                    (theta as f64).powf(-2.0 * index as f64 / width as f64);
+                let frequency = (theta as f64).powf(-2.0 * index as f64 / width as f64);
                 let angle = positions[token] as f64 * frequency;
                 let low = half::bf16::from_f32(values[base + index]).to_f32() as f64;
-                let high =
-                    half::bf16::from_f32(values[base + half + index]).to_f32() as f64;
+                let high = half::bf16::from_f32(values[base + half + index]).to_f32() as f64;
                 let expect_low = low * angle.cos() - high * angle.sin();
                 let expect_high = high * angle.cos() + low * angle.sin();
                 for (got, want) in [
                     (produced[base + index] as f64, expect_low),
                     (produced[base + half + index] as f64, expect_high),
                 ] {
-                    worst_rotated =
-                        worst_rotated.max((got - want).abs() / want.abs().max(1e-2));
+                    worst_rotated = worst_rotated.max((got - want).abs() / want.abs().max(1e-2));
                 }
             }
             // Everything past the rotary prefix must be untouched, which is
@@ -95,7 +92,8 @@ fn partial_rope_rotates_only_the_rotary_prefix() {
             for index in width..HEAD_DIM {
                 let untouched = half::bf16::from_f32(values[base + index]).to_f32();
                 assert_eq!(
-                    produced[base + index], untouched,
+                    produced[base + index],
+                    untouched,
                     "element {index} past the rotary width was modified"
                 );
             }
@@ -188,6 +186,114 @@ fn partial_mrope_is_bitwise_text_compatible() {
     .unwrap();
     ctx.synchronize().unwrap();
     assert_eq!(read_bf16(&legacy), read_bf16(&multimodal));
+}
+
+#[test]
+fn vision_qkv_rope_uses_height_then_width_axes() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (tokens, heads, head_dim) = (2usize, 2usize, 8usize);
+    let projection = heads * head_dim;
+    let theta = 10_000.0f32;
+    let qkv_values: Vec<f32> = (0..tokens * 3 * projection)
+        .map(|index| ((index % 37) as f32 - 18.0) / 11.0)
+        .collect();
+    let bias_values: Vec<f32> = (0..3 * projection)
+        .map(|index| ((index % 9) as f32 - 4.0) / 17.0)
+        .collect();
+    let positions = [3, 19, 11, 5];
+    let qkv = upload_bf16(&ctx, &qkv_values, vec![tokens, 3 * projection]);
+    let bias = upload_bf16(&ctx, &bias_values, vec![3 * projection]);
+    let positions_dev = upload_i32(&ctx, &positions, vec![tokens, 2]);
+    let query = upload_bf16(
+        &ctx,
+        &vec![0.0; tokens * projection],
+        vec![tokens, heads, head_dim],
+    );
+    let key = upload_bf16(
+        &ctx,
+        &vec![0.0; tokens * projection],
+        vec![tokens, heads, head_dim],
+    );
+    let value = upload_bf16(
+        &ctx,
+        &vec![0.0; tokens * projection],
+        vec![tokens, heads, head_dim],
+    );
+
+    ops::vision_qkv_rope(
+        &ctx,
+        &qkv,
+        Some(&bias),
+        &positions_dev,
+        &query,
+        &key,
+        &value,
+        theta,
+    )
+    .unwrap();
+    ctx.synchronize().unwrap();
+    let produced = [read_bf16(&query), read_bf16(&key), read_bf16(&value)];
+
+    let half = head_dim / 2;
+    let quarter = half / 2;
+    for token in 0..tokens {
+        for projection_index in 0..3 {
+            for head in 0..heads {
+                let source_base = token * 3 * projection + projection_index * projection;
+                let bias_base = projection_index * projection;
+                let destination_base = (token * heads + head) * head_dim;
+                if projection_index == 2 {
+                    for element in 0..head_dim {
+                        let source = half::bf16::from_f32(
+                            half::bf16::from_f32(
+                                qkv_values[source_base + head * head_dim + element],
+                            )
+                            .to_f32()
+                                + half::bf16::from_f32(
+                                    bias_values[bias_base + head * head_dim + element],
+                                )
+                                .to_f32(),
+                        )
+                        .to_f32();
+                        assert_eq!(produced[2][destination_base + element], source);
+                    }
+                    continue;
+                }
+                for pair in 0..half {
+                    let axis = usize::from(pair >= quarter);
+                    let axis_pair = pair % quarter;
+                    let angle = positions[token * 2 + axis] as f64
+                        * (theta as f64).powf(-2.0 * axis_pair as f64 / half as f64);
+                    let round_with_bias = |element: usize| {
+                        half::bf16::from_f32(
+                            half::bf16::from_f32(
+                                qkv_values[source_base + head * head_dim + element],
+                            )
+                            .to_f32()
+                                + half::bf16::from_f32(
+                                    bias_values[bias_base + head * head_dim + element],
+                                )
+                                .to_f32(),
+                        )
+                        .to_f32() as f64
+                    };
+                    let first = round_with_bias(pair);
+                    let second = round_with_bias(half + pair);
+                    let expected = [
+                        first * angle.cos() - second * angle.sin(),
+                        first * angle.sin() + second * angle.cos(),
+                    ];
+                    for (element, expected) in [(pair, expected[0]), (half + pair, expected[1])] {
+                        let got = produced[projection_index][destination_base + element] as f64;
+                        assert!(
+                            (got - expected).abs() / expected.abs().max(1e-2) < 2e-2,
+                            "projection {projection_index}, token {token}, head {head}, element {element}: got {got}, expected {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]

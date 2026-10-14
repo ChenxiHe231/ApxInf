@@ -2,16 +2,13 @@
 //! surface over the split modules: [`super::weights`], [`super::model`], [`super::model_runner`].
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use apxinf_core::{Backend, DType, Device, Error, Result, Shape, Tensor};
+use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 use apxinf_cuda_new::{ops, CudaBuffer, CudaContext, PreparedPhase};
 use apxinf_loader::ModelConfig;
 
-use crate::accelerator::create_backend;
 use crate::llm_trait::{LlmCapabilities, LlmInput, LlmTrait};
 
-use super::backend::{LegacyBackend, LegacyBuffer};
 use super::config::{
     CHUNK, CONV_WIDTH, FULL_ATTENTION_INTERVAL, GDN_HEAD_DIM, GDN_V_HEADS, HEAD_DIM, KV_HEADS,
     LAYERS, MIN_KV_CAPACITY, QKV_WIDTH, VOCAB,
@@ -28,7 +25,6 @@ use super::{backend, model, model_runner, vision, weights};
 /// comparison.
 pub struct Qwen38 {
     ctx: CudaContext,
-    backend: Arc<dyn Backend>,
     model: weights::Model,
     /// Some text-only checkpoints intentionally omit the visual tower.
     vision: Option<VisionWeights>,
@@ -71,10 +67,9 @@ impl Qwen38 {
         model_runner::apply_validated_kernel_defaults();
 
         let ctx = CudaContext::new(ordinal).map_err(Error::Cuda)?;
-        let backend = create_backend(device)?;
         let vision = weights
             .contains_key("model.visual.patch_embed.proj.weight")
-            .then(|| VisionWeights::load(&weights, &*backend))
+            .then(|| VisionWeights::load(&weights, &ctx))
             .transpose()?;
         let model = weights::load_model(&ctx, &weights, true);
         ctx.synchronize().map_err(Error::Cuda)?;
@@ -91,7 +86,6 @@ impl Qwen38 {
 
         Ok(Self {
             ctx,
-            backend,
             model,
             vision,
             vision_state: vision::VisionState::default(),
@@ -105,11 +99,6 @@ impl Qwen38 {
             rope_delta: 0,
             kv_capacity: capacity,
         })
-    }
-
-    fn legacy_backend(&self) -> Result<&LegacyBackend> {
-        crate::accelerator::cuda::downcast(&*self.backend)
-            .ok_or_else(|| Error::Other("qwen38 vision requires the CUDA backend".into()))
     }
 
     fn ensure_graphs(&mut self) {
@@ -195,18 +184,15 @@ impl Qwen38 {
                 )));
             }
             let destination = prefill.hidden_rows(token_ids.len());
-            let source = LegacyBuffer::from_tensor(source).map_err(Error::Cuda)?;
-            let destination = LegacyBuffer::from_tensor(&destination).map_err(Error::Cuda)?;
-            let legacy = crate::accelerator::cuda::downcast(&*self.backend)
-                .ok_or_else(|| Error::Other("qwen38 vision requires the CUDA backend".into()))?;
+            let source = CudaBuffer::from_tensor(source).map_err(Error::Cuda)?;
+            let destination = CudaBuffer::from_tensor(&destination).map_err(Error::Cuda)?;
             destination
                 .copy_from_device_async(
                     &source,
                     token_ids.len() * super::config::HIDDEN * DType::BF16.size_in_bytes(),
-                    legacy.context().stream(),
+                    self.ctx.stream(),
                 )
                 .map_err(Error::Cuda)?;
-            legacy.synchronize()?;
         }
 
         let count = token_ids.len();
@@ -283,19 +269,17 @@ impl Qwen38 {
                         .into(),
                 )
             })?;
-            let legacy = self.legacy_backend()?;
             let positions = vision::rope_positions(token_ids, grid_thw)?;
-            let pixels = vision::upload_pixels(legacy, pixel_values)?;
+            let pixels = vision::upload_pixels(&self.ctx, pixel_values)?;
             let visual = vision::forward(
                 vision_weights,
                 &self.vision_state,
-                legacy,
+                &self.ctx,
                 &pixels,
                 grid_thw,
             )?;
             let embeddings =
-                vision::embed_and_replace(legacy, &self.model.embedding, token_ids, &visual)?;
-            legacy.synchronize()?;
+                vision::embed_and_replace(&self.ctx, &self.model.embedding, token_ids, &visual)?;
             let max_position = positions
                 .iter()
                 .flat_map(|position| position.iter())
@@ -361,8 +345,8 @@ impl LlmTrait for Qwen38 {
         Ok(self.logits_view())
     }
 
-    fn backend(&self) -> &dyn Backend {
-        &*self.backend
+    fn sampling_backend(&self) -> &dyn apxinf_core::SamplingBackend {
+        &self.ctx
     }
 
     fn capabilities(&self) -> LlmCapabilities {

@@ -128,6 +128,30 @@ impl CudaBuffer {
         }
     }
 
+    /// Copy bytes from another allocation on the same device and stream.
+    pub fn copy_from_device_async(
+        &self,
+        source: &CudaBuffer,
+        bytes: usize,
+        stream: &crate::CudaStream,
+    ) -> Result<(), String> {
+        if self.device != source.device {
+            return Err("CUDA device copy requires matching devices".into());
+        }
+        if bytes > self.len || bytes > source.len {
+            return Err("CUDA device copy exceeds buffer bounds".into());
+        }
+        unsafe {
+            ffi::check_cuda(ffi::cudaMemcpyAsync(
+                self.ptr,
+                source.ptr,
+                bytes,
+                ffi::cudaMemcpyKind::cudaMemcpyDeviceToDevice,
+                stream.handle(),
+            ))
+        }
+    }
+
     /// Zero-fill the buffer on device, without a host staging allocation.
     pub fn zero(&self) -> Result<(), String> {
         unsafe { ffi::check_cuda(ffi::cudaMemset(self.ptr, 0, self.len)) }

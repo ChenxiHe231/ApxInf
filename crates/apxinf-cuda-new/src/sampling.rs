@@ -1,8 +1,9 @@
 //! CUDA implementations of the model-neutral sampling contracts.
 
 use apxinf_core::{
-    DType, Device, Error, NextTokenLogits, NormalGenerator, Result, RngKey, Tensor, TokenSample,
-    TokenSampler, TokenSamplingInit, TokenSamplingParams, TokenSamplingSpec, TokenSelection,
+    DType, Device, Error, NextTokenLogits, NormalGenerator, Result, RngKey, SamplingBackend,
+    Tensor, TokenSample, TokenSampler, TokenSamplingInit, TokenSamplingParams, TokenSamplingSpec,
+    TokenSelection,
 };
 
 use crate::buffer::CudaBuffer;
@@ -235,7 +236,8 @@ impl TokenSampler for CudaTokenSampler {
         // the sampling kernels. Sampling returns a host token and therefore
         // must explicitly wait for its own stream before reading `output`.
         unsafe {
-            ffi::check_cuda(ffi::cudaStreamSynchronize(self.stream.handle())).map_err(Error::Cuda)?;
+            ffi::check_cuda(ffi::cudaStreamSynchronize(self.stream.handle()))
+                .map_err(Error::Cuda)?;
         }
         let mut output = [0u8; OUTPUT_BYTES];
         self.output.copy_to_host(&mut output).map_err(Error::Cuda)?;
@@ -320,4 +322,14 @@ pub fn create_normal_generator(
     output: Tensor,
 ) -> Result<Box<dyn NormalGenerator>> {
     Ok(Box::new(CudaNormalGenerator::new(ctx, output)?))
+}
+
+impl SamplingBackend for CudaContext {
+    fn create_token_sampler(&self, spec: TokenSamplingSpec) -> Result<Box<dyn TokenSampler>> {
+        create_token_sampler(self, spec)
+    }
+
+    fn create_normal_generator(&self, output: Tensor) -> Result<Box<dyn NormalGenerator>> {
+        create_normal_generator(self, output)
+    }
 }

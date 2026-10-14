@@ -98,6 +98,75 @@ __global__ void partial_mrope_kernel(__nv_bfloat16* __restrict__ data,
   }
 }
 
+// Qwen vision uses the first quarter of each half-split rotary head for the
+// height axis and the second quarter for width. The explicit BF16 round after
+// adding bias preserves the existing Qwen vision kernel's numerical contract.
+__global__ void vision_qkv_rope_kernel(
+    const __nv_bfloat16* __restrict__ qkv,
+    const __nv_bfloat16* __restrict__ bias,
+    const int32_t* __restrict__ positions,
+    __nv_bfloat16* __restrict__ query,
+    __nv_bfloat16* __restrict__ key,
+    __nv_bfloat16* __restrict__ value,
+    int tokens, int heads, int head_dim, float theta) {
+  const int token = blockIdx.x;
+  const int half = head_dim / 2;
+  const int projection_width = heads * head_dim;
+  const int fused_width = 3 * projection_width;
+  const int pairs_per_projection = heads * half;
+
+  extern __shared__ float rope[];
+  const int quarter = half / 2;
+  float* sine = rope;
+  float* cosine = rope + 2 * quarter;
+  for (int slot = threadIdx.x; slot < 2 * quarter; slot += blockDim.x) {
+    const int axis = slot / quarter;
+    const int pair = slot - axis * quarter;
+    const float position = static_cast<float>(positions[token * 2 + axis]);
+    const float frequency =
+        powf(theta, -2.0f * static_cast<float>(pair) / half);
+    sincosf(position * frequency, &sine[slot], &cosine[slot]);
+  }
+  __syncthreads();
+
+  for (int work = threadIdx.x; work < 2 * pairs_per_projection;
+       work += blockDim.x) {
+    const bool is_key = work >= pairs_per_projection;
+    const int local = is_key ? work - pairs_per_projection : work;
+    const int head = local / half;
+    const int pair = local - head * half;
+    const int projection_offset = is_key ? projection_width : 0;
+    const int source = token * fused_width + projection_offset + head * head_dim;
+    const int bias_base = projection_offset + head * head_dim;
+    float first = __bfloat162float(qkv[source + pair]);
+    float second = __bfloat162float(qkv[source + half + pair]);
+    if (bias != nullptr) {
+      first += __bfloat162float(bias[bias_base + pair]);
+      second += __bfloat162float(bias[bias_base + half + pair]);
+    }
+    first = __bfloat162float(__float2bfloat16(first));
+    second = __bfloat162float(__float2bfloat16(second));
+    const int axis = pair < quarter ? 0 : 1;
+    const int slot = axis * quarter + (pair < quarter ? pair : pair - quarter);
+    __nv_bfloat16* destination = (is_key ? key : query) +
+        (token * heads + head) * head_dim;
+    destination[pair] =
+        __float2bfloat16(first * cosine[slot] - second * sine[slot]);
+    destination[half + pair] =
+        __float2bfloat16(first * sine[slot] + second * cosine[slot]);
+  }
+
+  for (int column = threadIdx.x; column < projection_width;
+       column += blockDim.x) {
+    const int source = token * fused_width + 2 * projection_width + column;
+    float result = __bfloat162float(qkv[source]);
+    if (bias != nullptr) {
+      result += __bfloat162float(bias[2 * projection_width + column]);
+    }
+    value[token * projection_width + column] = __float2bfloat16(result);
+  }
+}
+
 // Per-head RMSNorm without a gate, for q_norm and k_norm.
 __global__ void head_rms_norm_kernel(__nv_bfloat16* __restrict__ data,
                                      const __nv_bfloat16* __restrict__ weight,
@@ -209,6 +278,27 @@ int partial_mrope(void* data, const void* positions, int tokens, int heads,
       static_cast<const int32_t*>(positions), tokens, heads, head_dim,
       rotary_dim, section_h, section_w, theta);
   return cudaGetLastError() == cudaSuccess ? 0 : -4;
+}
+
+int vision_qkv_rope(const void* qkv, const void* bias,
+                    const void* positions, void* query, void* key,
+                    void* value, int tokens, int heads, int head_dim,
+                    float theta, cudaStream_t stream) {
+  if (qkv == nullptr || positions == nullptr || query == nullptr ||
+      key == nullptr || value == nullptr || tokens <= 0 || heads <= 0 ||
+      head_dim <= 0 || head_dim > 256 || head_dim % 4 != 0 ||
+      !(theta > 0.0f)) {
+    return -1;
+  }
+  const size_t shared = static_cast<size_t>(head_dim) * sizeof(float);
+  vision_qkv_rope_kernel<<<tokens, 256, shared, stream>>>(
+      static_cast<const __nv_bfloat16*>(qkv),
+      static_cast<const __nv_bfloat16*>(bias),
+      static_cast<const int32_t*>(positions),
+      static_cast<__nv_bfloat16*>(query),
+      static_cast<__nv_bfloat16*>(key),
+      static_cast<__nv_bfloat16*>(value), tokens, heads, head_dim, theta);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
 int head_rms_norm(void* data, const void* weight, int rows, int head_dim,

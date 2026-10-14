@@ -66,6 +66,48 @@ __global__ void argmax_kernel(const __nv_bfloat16* __restrict__ logits,
   }
 }
 
+__global__ void cast_f32_to_bf16_kernel(
+    const float* __restrict__ input, __nv_bfloat16* __restrict__ output,
+    long long count) {
+  long long index = blockIdx.x * static_cast<long long>(blockDim.x) + threadIdx.x;
+  const long long stride = static_cast<long long>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    output[index] = __float2bfloat16(input[index]);
+  }
+}
+
+__global__ void gelu_exact_bf16_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    __nv_bfloat16* __restrict__ output, long long count) {
+  long long index = blockIdx.x * static_cast<long long>(blockDim.x) + threadIdx.x;
+  const long long stride = static_cast<long long>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    const float value = __bfloat162float(input[index]);
+    output[index] = __float2bfloat16(
+        value * 0.5f * (1.0f + erff(value * 0.70710678f)));
+  }
+}
+
+__global__ void replace_rows_bf16_kernel(
+    const __nv_bfloat16* __restrict__ base,
+    const __nv_bfloat16* __restrict__ replacement,
+    const int32_t* __restrict__ row_map,
+    __nv_bfloat16* __restrict__ output, int rows, int columns,
+    int replacement_rows) {
+  const long long index =
+      blockIdx.x * static_cast<long long>(blockDim.x) + threadIdx.x;
+  const long long count = static_cast<long long>(rows) * columns;
+  const long long stride = static_cast<long long>(blockDim.x) * gridDim.x;
+  for (long long current = index; current < count; current += stride) {
+    const int row = static_cast<int>(current / columns);
+    const int column = static_cast<int>(current % columns);
+    const int replacement_row = row_map[row];
+    output[current] = replacement_row >= 0 && replacement_row < replacement_rows
+        ? replacement[static_cast<long long>(replacement_row) * columns + column]
+        : base[current];
+  }
+}
+
 }  // namespace
 
 int embedding_gather(const void* table, const int32_t* ids, void* output,
@@ -85,6 +127,50 @@ int argmax_bf16(const void* logits, int32_t* index, int count,
   if (count <= 0) return -1;
   argmax_kernel<<<1, 1024, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(logits), index, count);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int cast_f32_to_bf16(const void* input, void* output, long long count,
+                     cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0) return -1;
+  const int threads = 256;
+  const long long needed = (count + threads - 1) / threads;
+  const int blocks = static_cast<int>(needed < 4096 ? needed : 4096);
+  cast_f32_to_bf16_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const float*>(input),
+      static_cast<__nv_bfloat16*>(output), count);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int gelu_exact_bf16(const void* input, void* output, long long count,
+                    cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0) return -1;
+  const int threads = 256;
+  const long long needed = (count + threads - 1) / threads;
+  const int blocks = static_cast<int>(needed < 1024 ? needed : 1024);
+  gelu_exact_bf16_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<__nv_bfloat16*>(output), count);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int replace_rows_bf16(const void* base, const void* replacement,
+                      const int32_t* row_map, void* output, int rows,
+                      int columns, int replacement_rows,
+                      cudaStream_t stream) {
+  if (base == nullptr || replacement == nullptr || row_map == nullptr ||
+      output == nullptr || rows <= 0 || columns <= 0 ||
+      replacement_rows <= 0) {
+    return -1;
+  }
+  const long long count = static_cast<long long>(rows) * columns;
+  const int threads = 256;
+  const long long needed = (count + threads - 1) / threads;
+  const int blocks = static_cast<int>(needed < 65535 ? needed : 65535);
+  replace_rows_bf16_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(base),
+      static_cast<const __nv_bfloat16*>(replacement), row_map,
+      static_cast<__nv_bfloat16*>(output), rows, columns, replacement_rows);
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 

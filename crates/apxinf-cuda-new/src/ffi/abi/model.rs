@@ -18,4 +18,26 @@ unsafe extern "C" {
         count: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_model_cast_f32_to_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        count: i64,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_model_gelu_exact_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        count: i64,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_model_replace_rows_bf16(
+        base: *const c_void,
+        replacement: *const c_void,
+        row_map: *const c_void,
+        output: *mut c_void,
+        rows: i64,
+        columns: i64,
+        replacement_rows: i64,
+        stream: CudaStream,
+    ) -> i32;
 }

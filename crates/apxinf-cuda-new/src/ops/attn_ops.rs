@@ -11,6 +11,73 @@ use crate::ffi::abi::{attn as abi, status};
 use crate::ops::gemm::contracts::{invalid, tensor_storage};
 use crate::CudaContext;
 
+/// Split packed BF16 vision QKV and apply Qwen's two-axis rotary embedding.
+///
+/// `qkv` is `[tokens, 3 * heads * head_dim]`, `positions` is `[tokens, 2]`
+/// I32 in height/width order, and every output is
+/// `[tokens, heads, head_dim]` BF16.
+#[allow(clippy::too_many_arguments)]
+pub fn vision_qkv_rope(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    positions: &Tensor,
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+    theta: f32,
+) -> Result<()> {
+    let qkv_dims = qkv.shape().dims();
+    let output_dims = query.shape().dims();
+    if qkv_dims.len() != 2 || output_dims.len() != 3 {
+        return Err(invalid(
+            "vision QKV RoPE expects rank-2 packed input and rank-3 outputs",
+        ));
+    }
+    let (tokens, heads, head_dim) = (output_dims[0], output_dims[1], output_dims[2]);
+    let projection = heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| invalid("vision QKV projection width overflow"))?;
+    if tokens == 0
+        || heads == 0
+        || head_dim == 0
+        || head_dim > 256
+        || head_dim % 4 != 0
+        || qkv_dims != [tokens, 3 * projection]
+        || key.shape().dims() != output_dims
+        || value.shape().dims() != output_dims
+        || positions.shape().dims() != [tokens, 2]
+        || !(theta.is_finite() && theta > 0.0)
+    {
+        return Err(invalid("vision QKV RoPE shape mismatch"));
+    }
+    let qkv = tensor_storage(ctx, qkv, DType::BF16, qkv_dims)?;
+    let bias = bias
+        .map(|tensor| tensor_storage(ctx, tensor, DType::BF16, &[3 * projection]))
+        .transpose()?;
+    let positions = tensor_storage(ctx, positions, DType::I32, &[tokens, 2])?;
+    let query = tensor_storage(ctx, query, DType::BF16, output_dims)?;
+    let key = tensor_storage(ctx, key, DType::BF16, output_dims)?;
+    let value = tensor_storage(ctx, value, DType::BF16, output_dims)?;
+    unsafe {
+        status::check(abi::apxinf_attn_vision_qkv_rope(
+            qkv.ptr(),
+            bias.as_ref()
+                .map(|buffer| buffer.ptr().cast_const())
+                .unwrap_or(std::ptr::null()),
+            positions.ptr(),
+            query.ptr(),
+            key.ptr(),
+            value.ptr(),
+            tokens as i64,
+            heads as i64,
+            head_dim as i64,
+            theta,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
 /// Rotary dimension implied by a partial rotary factor.
 ///
 /// Rounded down to an even number because the rotation pairs elements.
@@ -137,8 +204,7 @@ pub fn split_query_and_gate(
         return Err(invalid("query must be [tokens, heads, head_dim]"));
     }
     let (tokens, heads, head_dim) = (dims[0], dims[1], dims[2]);
-    let fused_buffer =
-        tensor_storage(ctx, fused, DType::BF16, &[tokens, heads, 2 * head_dim])?;
+    let fused_buffer = tensor_storage(ctx, fused, DType::BF16, &[tokens, heads, 2 * head_dim])?;
     let query_buffer = tensor_storage(ctx, query, DType::BF16, &dims)?;
     let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
     unsafe {

@@ -47,7 +47,7 @@ impl LlmTrait for TextOnlyModel {
         Self::logits(token_ids.len(), token)
     }
 
-    fn backend(&self) -> &dyn Backend {
+    fn sampling_backend(&self) -> &dyn apxinf_core::SamplingBackend {
         static BACKEND: CpuBackend = CpuBackend;
         &BACKEND
     }
@@ -143,7 +143,7 @@ impl LlmTrait for VisionModel {
         TextOnlyModel::logits(token_ids.len(), 3)
     }
 
-    fn backend(&self) -> &dyn Backend {
+    fn sampling_backend(&self) -> &dyn apxinf_core::SamplingBackend {
         static BACKEND: CpuBackend = CpuBackend;
         &BACKEND
     }

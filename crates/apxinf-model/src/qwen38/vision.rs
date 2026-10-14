@@ -4,24 +4,16 @@
 //! `grid_thw`. All per-request tower computation remains on CUDA. The learned
 //! 48x48 position table is interpolated on the host once per distinct grid and
 //! retained in a small device cache, matching the maintained Qwen-Drive path.
-//!
-//! This module temporarily uses the legacy CUDA runtime while the language
-//! stack uses cuda-new. The compatibility seam and its migration constraint
-//! are documented in `backend`; explicit synchronization at the two transfer
-//! points keeps ownership and ordering correct until the vision operators are
-//! ported.
+//! Vision and language computation share the same cuda-new context and stream.
 
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
+use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext};
 
-use super::backend::{
-    legacy_kernels as kernels, legacy_transfers as transfers, LegacyBackend, LegacyBuffer,
-};
 use super::config::*;
 use super::vision_weights::VisionWeights;
-
-use kernels::{attention, elementwise, embedding, fused, gemm, linear_attention as la, norm};
 
 #[derive(Default)]
 pub(crate) struct VisionState {
@@ -31,38 +23,79 @@ pub(crate) struct VisionState {
 
 struct PreparedVision {
     offsets: Vec<u32>,
-    offsets_dev: LegacyBuffer,
+    offsets_dev: CudaBuffer,
     pos_embeds: Tensor,
-    pos_ids_dev: LegacyBuffer,
-    max_tokens: usize,
+    pos_ids_dev: Tensor,
     total_patches: usize,
-    segments: usize,
 }
 
-fn upload_u32(backend: &LegacyBackend, values: &[u32]) -> Result<LegacyBuffer> {
+fn upload_u32(ctx: &CudaContext, values: &[u32]) -> Result<CudaBuffer> {
     let bytes: Vec<u8> = values
         .iter()
         .flat_map(|value| value.to_ne_bytes())
         .collect();
-    let buffer =
-        LegacyBuffer::alloc(bytes.len().max(1), backend.device_id()).map_err(Error::Cuda)?;
+    let buffer = CudaBuffer::alloc(bytes.len().max(1), ctx.device_id()).map_err(Error::Cuda)?;
     buffer.copy_from_host(&bytes).map_err(Error::Cuda)?;
     Ok(buffer)
 }
 
-fn device_tensor(backend: &LegacyBackend, dims: &[usize], dtype: DType) -> Result<Tensor> {
+fn upload_i32(ctx: &CudaContext, dims: Vec<usize>, values: &[i32]) -> Result<Tensor> {
+    transfers::to_cuda(&Tensor::from_i32(dims, values)?, ctx.device_id())
+}
+
+fn device_tensor(ctx: &CudaContext, dims: &[usize], dtype: DType) -> Result<Tensor> {
     let bytes = dims
         .iter()
         .product::<usize>()
         .checked_mul(dtype.size_in_bytes())
         .ok_or_else(|| Error::Other("qwen38 vision tensor size overflow".into()))?;
-    kernels::scratch_buffer(backend.context(), bytes.max(1))?
+    CudaBuffer::alloc(bytes.max(1), ctx.device_id())
+        .map_err(Error::Cuda)?
         .as_tensor(Shape::new(dims.to_vec()), dtype)
         .map_err(Error::Cuda)
 }
 
-pub(crate) fn upload_pixels(backend: &LegacyBackend, pixels: &Tensor) -> Result<Tensor> {
-    let ctx = backend.context();
+fn dump_vision_stage(stage: &str, tensor: &Tensor) -> Result<()> {
+    let Ok(directory) = std::env::var("APXINF_QWEN38_VISION_DUMP_DIR") else {
+        return Ok(());
+    };
+    let directory = Path::new(&directory);
+    std::fs::create_dir_all(directory).map_err(|error| {
+        Error::Other(format!(
+            "create qwen38 vision dump directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    let values = transfers::to_cpu(tensor)?.to_f32_vec()?;
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+    let data_path = directory.join(format!("{stage}.f32"));
+    std::fs::write(&data_path, bytes).map_err(|error| {
+        Error::Other(format!(
+            "write qwen38 vision stage {}: {error}",
+            data_path.display()
+        ))
+    })?;
+    let shape = tensor
+        .shape()
+        .dims()
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let shape_path = directory.join(format!("{stage}.shape"));
+    std::fs::write(&shape_path, format!("{shape}\n")).map_err(|error| {
+        Error::Other(format!(
+            "write qwen38 vision stage shape {}: {error}",
+            shape_path.display()
+        ))
+    })?;
+    Ok(())
+}
+
+pub(crate) fn upload_pixels(ctx: &CudaContext, pixels: &Tensor) -> Result<Tensor> {
     let on_device = if pixels.device() != Device::Cuda(ctx.device_id()) {
         transfers::to_cuda(pixels, ctx.device_id())?
     } else {
@@ -72,8 +105,8 @@ pub(crate) fn upload_pixels(backend: &LegacyBackend, pixels: &Tensor) -> Result<
         DType::BF16 => Ok(on_device),
         DType::F32 => {
             let dims = on_device.shape().dims().to_vec();
-            let out = device_tensor(backend, &dims, DType::BF16)?;
-            la::cast_f32_to_bf16(ctx, &on_device, &out)?;
+            let out = device_tensor(ctx, &dims, DType::BF16)?;
+            ops::cast_f32_to_bf16(ctx, &on_device, &out)?;
             Ok(out)
         }
         dtype => Err(Error::Other(format!(
@@ -87,12 +120,12 @@ pub(crate) fn upload_pixels(backend: &LegacyBackend, pixels: &Tensor) -> Result<
 pub(crate) fn forward(
     weights: &VisionWeights,
     state: &VisionState,
-    backend: &LegacyBackend,
+    ctx: &CudaContext,
     pixel_values: &Tensor,
     grid_thw: &[[u32; 3]],
 ) -> Result<Tensor> {
-    let prepared = prepare(weights, state, backend, pixel_values, grid_thw)?;
-    let output = forward_device(weights, backend, pixel_values, &prepared)?;
+    let prepared = prepare(weights, state, ctx, pixel_values, grid_thw)?;
+    let output = forward_device(weights, ctx, pixel_values, &prepared)?;
     if let Ok(path) = std::env::var("APXINF_QWEN38_VISION_DUMP") {
         let values = transfers::to_cpu(&output)?.to_f32_vec()?;
         let bytes: Vec<u8> = values
@@ -113,7 +146,7 @@ pub(crate) fn forward(
 fn prepare(
     weights: &VisionWeights,
     state: &VisionState,
-    backend: &LegacyBackend,
+    ctx: &CudaContext,
     pixel_values: &Tensor,
     grid_thw: &[[u32; 3]],
 ) -> Result<PreparedVision> {
@@ -127,7 +160,6 @@ fn prepare(
     }
 
     let mut offsets = vec![0u32];
-    let mut max_tokens = 0usize;
     for &[t, h, w] in grid_thw {
         let (t, h, w) = (t as usize, h as usize, w as usize);
         if t == 0 || h == 0 || w == 0 || h % VISION_MERGE != 0 || w % VISION_MERGE != 0 {
@@ -139,7 +171,6 @@ fn prepare(
             .checked_mul(h)
             .and_then(|value| value.checked_mul(w))
             .ok_or_else(|| Error::Other("qwen38 image grid is too large".into()))?;
-        max_tokens = max_tokens.max(patches);
         let next = offsets[offsets.len() - 1]
             .checked_add(
                 u32::try_from(patches)
@@ -156,97 +187,179 @@ fn prepare(
         )));
     }
 
-    let offsets_dev = upload_u32(backend, &offsets)?;
-    let pos_embeds = compute_pos_embeds(weights, state, backend, grid_thw)?;
-    let pos_ids_dev = upload_u32(backend, &vision_position_ids(grid_thw))?;
+    let offsets_dev = upload_u32(ctx, &offsets)?;
+    let pos_embeds = compute_pos_embeds(weights, state, ctx, grid_thw)?;
+    let pos_ids = vision_position_ids(grid_thw);
+    let pos_ids: Vec<i32> = pos_ids.into_iter().map(|value| value as i32).collect();
+    let pos_ids_dev = upload_i32(ctx, vec![total_patches, 2], &pos_ids)?;
     Ok(PreparedVision {
         offsets,
         offsets_dev,
         pos_embeds,
         pos_ids_dev,
-        max_tokens,
         total_patches,
-        segments: grid_thw.len(),
     })
+}
+
+fn gemm_bias(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+) -> Result<Tensor> {
+    let input_dims = input.shape().dims();
+    let weight_dims = weight.shape().dims();
+    if input_dims.len() != 2 || weight_dims.len() != 2 || input_dims[1] != weight_dims[0] {
+        return Err(Error::Other("qwen38 vision GEMM shape mismatch".into()));
+    }
+    let mut output = device_tensor(ctx, &[input_dims[0], weight_dims[1]], DType::BF16)?;
+    ops::gemm_bias(
+        ctx,
+        ops::GemmBiasArgs {
+            gemm: ops::GemmArgs::new(input, weight, &mut output),
+            bias,
+        },
+    )?;
+    Ok(output)
+}
+
+fn gemm_bias_gelu(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+) -> Result<Tensor> {
+    let input_dims = input.shape().dims();
+    let weight_dims = weight.shape().dims();
+    if input_dims.len() != 2 || weight_dims.len() != 2 || input_dims[1] != weight_dims[0] {
+        return Err(Error::Other("qwen38 vision GELU GEMM shape mismatch".into()));
+    }
+    let mut output = device_tensor(ctx, &[input_dims[0], weight_dims[1]], DType::BF16)?;
+    ops::gemm_bias_gelu(
+        ctx,
+        ops::GemmBiasGeluArgs {
+            gemm: ops::GemmArgs::new(input, weight, &mut output),
+            bias,
+        },
+    )?;
+    Ok(output)
+}
+
+fn layer_norm(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    let mut output = device_tensor(ctx, input.shape().dims(), DType::BF16)?;
+    ops::layer_norm(
+        ctx,
+        ops::LayerNormArgs::new(input, weight, bias, &mut output, eps),
+    )?;
+    Ok(output)
+}
+
+fn bias_residual_layer_norm(
+    ctx: &CudaContext,
+    input: &Tensor,
+    residual: &Tensor,
+    weight: &Tensor,
+    norm_bias: &Tensor,
+    eps: f32,
+) -> Result<(Tensor, Tensor)> {
+    let dims = input.shape().dims();
+    let mut hidden = device_tensor(ctx, dims, DType::BF16)?;
+    let mut normalized = device_tensor(ctx, dims, DType::BF16)?;
+    ops::bias_residual_layer_norm(
+        ctx,
+        ops::BiasResidualLayerNormArgs::new(
+            input,
+            None,
+            residual,
+            weight,
+            norm_bias,
+            &mut hidden,
+            &mut normalized,
+            eps,
+        ),
+    )?;
+    Ok((hidden, normalized))
 }
 
 fn forward_device(
     weights: &VisionWeights,
-    backend: &LegacyBackend,
+    ctx: &CudaContext,
     pixel_values: &Tensor,
     prepared: &PreparedVision,
 ) -> Result<Tensor> {
-    // TODO(vision-parity): compare non-square inputs with Transformers at
-    // patch+position, every block output, and merger output. The final-output
-    // gap is aspect-ratio dependent, and this path is shared with Qwen-Drive,
-    // so any operator-level fix should be applied to both model families.
-    let ctx = backend.context();
     let eps = 1e-6f32;
-    let mut x = gemm::bf16(ctx, pixel_values, &weights.patch_w)?;
-    x = elementwise::bias_bf16(ctx, &x, Some(&weights.patch_b))?;
-    x = elementwise::add(ctx, &x, &prepared.pos_embeds)?;
+    let mut x = gemm_bias(ctx, pixel_values, &weights.patch_w, &weights.patch_b)?;
+    ops::mlp::add_into(ctx, &prepared.pos_embeds, &x)?;
+    dump_vision_stage("00_patch_position", &x)?;
 
     let mut normalized = None;
     for (block_index, block) in weights.blocks.iter().enumerate() {
         let normed = match normalized.take() {
             Some(value) => value,
-            None => norm::layer_bf16(ctx, &x, &block.norm1_w, &block.norm1_b, eps)?,
+            None => layer_norm(ctx, &x, &block.norm1_w, &block.norm1_b, eps)?,
         };
-        let qkv = gemm::bf16_bias(ctx, &normed, &block.qkv_w, &block.qkv_b)?;
-        let qkv = attention::split_vision_qkv_rope_bf16(
+        let qkv = gemm_bias(ctx, &normed, &block.qkv_w, &block.qkv_b)?;
+        let qkv_shape = [prepared.total_patches, VISION_HEADS, VISION_HEAD_DIM];
+        let query = device_tensor(ctx, &qkv_shape, DType::BF16)?;
+        let key = device_tensor(ctx, &qkv_shape, DType::BF16)?;
+        let value = device_tensor(ctx, &qkv_shape, DType::BF16)?;
+        ops::vision_qkv_rope(
             ctx,
             &qkv,
             None,
             &prepared.pos_ids_dev,
-            VISION_HEADS,
-            VISION_HEAD_DIM,
+            &query,
+            &key,
+            &value,
             10_000.0,
         )?;
-        let attn = attention::segmented_mha_bf16(
+        let mut attn = device_tensor(ctx, &qkv_shape, DType::BF16)?;
+        ops::segmented_attention(
             ctx,
-            &qkv.q,
-            &qkv.k,
-            &qkv.v,
-            &prepared.offsets_dev,
-            &prepared.offsets,
-            prepared.segments,
-            prepared.max_tokens,
-        )?
-        .reshape(vec![prepared.total_patches, VISION_HIDDEN])?;
-        let projected = gemm::bf16_bias(ctx, &attn, &block.proj_w, &block.proj_b)?;
-        let residual_norm = fused::bias_residual_layer_bf16(
+            ops::SegmentedAttentionArgs::new(
+                &query,
+                &key,
+                &value,
+                &mut attn,
+                &prepared.offsets_dev,
+                &prepared.offsets,
+            ),
+        )?;
+        let attn = attn.reshape(vec![prepared.total_patches, VISION_HIDDEN])?;
+        let projected = gemm_bias(ctx, &attn, &block.proj_w, &block.proj_b)?;
+        let (hidden, norm2) = bias_residual_layer_norm(
             ctx,
             &projected,
-            None,
             &x,
             &block.norm2_w,
             &block.norm2_b,
             eps,
         )?;
-        x = residual_norm.hidden;
+        x = hidden;
 
-        let hidden = if ctx.caps().sm == 110 {
-            gemm::bf16_bias_gelu_tanh(ctx, &residual_norm.normalized, &block.fc1_w, &block.fc1_b)?
-        } else {
-            let value =
-                gemm::bf16_bias(ctx, &residual_norm.normalized, &block.fc1_w, &block.fc1_b)?;
-            kernels::activation::gelu_tanh(ctx, &value)?
-        };
-        let mlp = gemm::bf16_bias(ctx, &hidden, &block.fc2_w, &block.fc2_b)?;
+        let hidden = gemm_bias_gelu(ctx, &norm2, &block.fc1_w, &block.fc1_b)?;
+        let mlp = gemm_bias(ctx, &hidden, &block.fc2_w, &block.fc2_b)?;
         let (next_w, next_b) = weights
             .blocks
             .get(block_index + 1)
             .map(|next| (&next.norm1_w, &next.norm1_b))
             .unwrap_or((&weights.merger_norm_w, &weights.merger_norm_b));
-        let residual_norm =
-            fused::bias_residual_layer_bf16(ctx, &mlp, None, &x, next_w, next_b, eps)?;
-        x = residual_norm.hidden;
-        normalized = Some(residual_norm.normalized);
+        let (hidden, next_normalized) =
+            bias_residual_layer_norm(ctx, &mlp, &x, next_w, next_b, eps)?;
+        x = hidden;
+        dump_vision_stage(&format!("block_{block_index:02}_output"), &x)?;
+        normalized = Some(next_normalized);
     }
 
     let normalized = match normalized {
         Some(value) => value,
-        None => norm::layer_bf16(ctx, &x, &weights.merger_norm_w, &weights.merger_norm_b, eps)?,
+        None => layer_norm(ctx, &x, &weights.merger_norm_w, &weights.merger_norm_b, eps)?,
     };
     let rows = normalized.shape().dims()[0];
     let factor = VISION_MERGE * VISION_MERGE;
@@ -256,24 +369,30 @@ fn forward_device(
         )));
     }
     let merged = normalized.reshape(vec![rows / factor, VISION_HIDDEN * factor])?;
-    let hidden = gemm::bf16_bias(ctx, &merged, &weights.merger_fc1_w, &weights.merger_fc1_b)?;
-    let hidden = la::gelu_exact(ctx, &hidden)?;
-    gemm::bf16_bias(ctx, &hidden, &weights.merger_fc2_w, &weights.merger_fc2_b)
+    dump_vision_stage("merger_norm", &merged)?;
+    let hidden = gemm_bias(ctx, &merged, &weights.merger_fc1_w, &weights.merger_fc1_b)?;
+    let activated = device_tensor(ctx, hidden.shape().dims(), DType::BF16)?;
+    ops::gelu_exact(ctx, &hidden, &activated)?;
+    let output = gemm_bias(ctx, &activated, &weights.merger_fc2_w, &weights.merger_fc2_b)?;
+    dump_vision_stage("merger_output", &output)?;
+    Ok(output)
 }
 
 /// Replace image-token embedding rows with visual features. The replacement
 /// is assignment (`masked_scatter` in Transformers), not residual addition.
 pub(crate) fn embed_and_replace(
-    backend: &LegacyBackend,
+    ctx: &CudaContext,
     embedding_table: &Tensor,
     token_ids: &[u32],
     visual: &Tensor,
 ) -> Result<Tensor> {
-    let ctx = backend.context();
-    let ids = upload_u32(backend, token_ids)?;
-    let base = embedding::lookup(ctx, embedding_table, &ids, token_ids.len())?;
-    let mut ordinal = 0u32;
-    let row_map: Vec<u32> = token_ids
+    let ids: Vec<i32> = token_ids.iter().map(|&value| value as i32).collect();
+    let ids = upload_i32(ctx, vec![token_ids.len()], &ids)?;
+    let hidden = embedding_table.shape().dims()[1];
+    let base = device_tensor(ctx, &[token_ids.len(), hidden], DType::BF16)?;
+    ops::embedding_gather(ctx, embedding_table, &ids, &base)?;
+    let mut ordinal = 0i32;
+    let row_map: Vec<i32> = token_ids
         .iter()
         .map(|&token| {
             if token == IMAGE_TOKEN_ID {
@@ -281,7 +400,7 @@ pub(crate) fn embed_and_replace(
                 ordinal += 1;
                 current
             } else {
-                u32::MAX
+                -1
             }
         })
         .collect();
@@ -292,14 +411,16 @@ pub(crate) fn embed_and_replace(
             visual.shape().dims()[0]
         )));
     }
-    let row_map = upload_u32(backend, &row_map)?;
-    elementwise::replace_rows_bf16(ctx, &base, visual, &row_map)
+    let row_map = upload_i32(ctx, vec![token_ids.len()], &row_map)?;
+    let output = device_tensor(ctx, &[token_ids.len(), hidden], DType::BF16)?;
+    ops::replace_rows(ctx, &base, visual, &row_map, &output)?;
+    Ok(output)
 }
 
 fn compute_pos_embeds(
     weights: &VisionWeights,
     state: &VisionState,
-    backend: &LegacyBackend,
+    ctx: &CudaContext,
     grid_thw: &[[u32; 3]],
 ) -> Result<Tensor> {
     if let Ok(cache) = state.pos_embed_cache.lock() {
@@ -375,7 +496,7 @@ fn compute_pos_embeds(
         .map(|&value| half::bf16::from_f32(value))
         .collect();
     let host = Tensor::from_bf16(vec![total, VISION_HIDDEN], &rounded)?;
-    let uploaded = transfers::to_cuda(&host, backend.device_id())?;
+    let uploaded = transfers::to_cuda(&host, ctx.device_id())?;
     if let Ok(mut cache) = state.pos_embed_cache.lock() {
         const MAX_GRIDS: usize = 4;
         if cache.len() >= MAX_GRIDS {

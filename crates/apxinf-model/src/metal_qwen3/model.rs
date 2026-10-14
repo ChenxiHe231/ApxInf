@@ -701,7 +701,7 @@ impl LlmTrait for Qwen3Model {
             .ok_or_else(|| err("missing Qwen3 prefill logits"))
     }
 
-    fn backend(&self) -> &dyn Backend {
+    fn sampling_backend(&self) -> &dyn apxinf_core::SamplingBackend {
         &self.backend
     }
     fn vocab_size(&self) -> usize {

@@ -723,7 +723,7 @@ impl LlmTrait for DSpark {
         self.draft_offset = 0;
         self.target.forward(ids, start_pos)
     }
-    fn backend(&self) -> &dyn Backend {
+    fn sampling_backend(&self) -> &dyn apxinf_core::SamplingBackend {
         &self.target.backend
     }
     fn preparation_status(&self) -> TextPreparationStatus {

@@ -59,3 +59,50 @@ extern "C" apxinf_status_t apxinf_model_argmax_bf16(
           "argmax");
   });
 }
+
+extern "C" apxinf_status_t apxinf_model_cast_f32_to_bf16(
+    const void* input, void* output, int64_t count,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || output == nullptr || count <= 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid cast arguments");
+    }
+    check(apxinf::cuda_new::model_ops::cast_f32_to_bf16(
+              input, output, count, static_cast<cudaStream_t>(stream)),
+          "F32 to BF16 cast");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_model_gelu_exact_bf16(
+    const void* input, void* output, int64_t count,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (input == nullptr || output == nullptr || count <= 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid exact GELU arguments");
+    }
+    check(apxinf::cuda_new::model_ops::gelu_exact_bf16(
+              input, output, count, static_cast<cudaStream_t>(stream)),
+          "exact GELU");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_model_replace_rows_bf16(
+    const void* base, const void* replacement, const void* row_map,
+    void* output, int64_t rows, int64_t columns, int64_t replacement_rows,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (base == nullptr || replacement == nullptr || row_map == nullptr ||
+        output == nullptr || !extent(rows) || !extent(columns) ||
+        !extent(replacement_rows)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid row replacement arguments");
+    }
+    check(apxinf::cuda_new::model_ops::replace_rows_bf16(
+              base, replacement, static_cast<const int32_t*>(row_map), output,
+              static_cast<int>(rows), static_cast<int>(columns),
+              static_cast<int>(replacement_rows),
+              static_cast<cudaStream_t>(stream)),
+          "row replacement");
+  });
+}

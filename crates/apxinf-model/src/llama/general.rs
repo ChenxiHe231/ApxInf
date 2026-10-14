@@ -208,7 +208,7 @@ impl LlmTrait for GeneralLlama {
         Ok(logits)
     }
 
-    fn backend(&self) -> &dyn Backend {
+    fn sampling_backend(&self) -> &dyn apxinf_core::SamplingBackend {
         &*self.backend
     }
 

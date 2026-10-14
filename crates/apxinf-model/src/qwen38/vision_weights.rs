@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 
-use apxinf_core::{Backend, DType, Error, Result, Tensor};
+use apxinf_core::{DType, Error, Result, Tensor};
+use apxinf_cuda_new::{transfers, CudaContext};
 
 use super::config::*;
 
@@ -79,28 +80,28 @@ fn transpose_2d(tensor: &Tensor) -> Result<Tensor> {
     }
 }
 
-fn upload(backend: &dyn Backend, tensor: &Tensor) -> Result<Tensor> {
-    backend.to_device(tensor)
+fn upload(ctx: &CudaContext, tensor: &Tensor) -> Result<Tensor> {
+    transfers::to_cuda(tensor, ctx.device_id())
 }
 
 fn upload_named(
-    backend: &dyn Backend,
+    ctx: &CudaContext,
     tensors: &HashMap<String, Tensor>,
     name: &str,
 ) -> Result<Tensor> {
-    upload(backend, get(tensors, name)?)
+    upload(ctx, get(tensors, name)?)
 }
 
 fn upload_transposed(
-    backend: &dyn Backend,
+    ctx: &CudaContext,
     tensors: &HashMap<String, Tensor>,
     name: &str,
 ) -> Result<Tensor> {
-    upload(backend, &transpose_2d(get(tensors, name)?)?)
+    upload(ctx, &transpose_2d(get(tensors, name)?)?)
 }
 
 impl VisionWeights {
-    pub(crate) fn load(tensors: &HashMap<String, Tensor>, backend: &dyn Backend) -> Result<Self> {
+    pub(crate) fn load(tensors: &HashMap<String, Tensor>, ctx: &CudaContext) -> Result<Self> {
         let patch = get(tensors, "model.visual.patch_embed.proj.weight")?;
         let patch_dims = patch.shape().dims();
         let patch_width =
@@ -120,32 +121,32 @@ impl VisionWeights {
             )));
         }
         let patch_2d = patch.reshape(vec![VISION_HIDDEN, patch_width])?;
-        let patch_w = upload(backend, &transpose_2d(&patch_2d)?)?;
+        let patch_w = upload(ctx, &transpose_2d(&patch_2d)?)?;
 
         let mut blocks = Vec::with_capacity(VISION_DEPTH);
         for index in 0..VISION_DEPTH {
             let prefix = format!("model.visual.blocks.{index}");
             blocks.push(VisionBlockWeights {
-                norm1_w: upload_named(backend, tensors, &format!("{prefix}.norm1.weight"))?,
-                norm1_b: upload_named(backend, tensors, &format!("{prefix}.norm1.bias"))?,
-                qkv_w: upload_transposed(backend, tensors, &format!("{prefix}.attn.qkv.weight"))?,
-                qkv_b: upload_named(backend, tensors, &format!("{prefix}.attn.qkv.bias"))?,
-                proj_w: upload_transposed(backend, tensors, &format!("{prefix}.attn.proj.weight"))?,
-                proj_b: upload_named(backend, tensors, &format!("{prefix}.attn.proj.bias"))?,
-                norm2_w: upload_named(backend, tensors, &format!("{prefix}.norm2.weight"))?,
-                norm2_b: upload_named(backend, tensors, &format!("{prefix}.norm2.bias"))?,
+                norm1_w: upload_named(ctx, tensors, &format!("{prefix}.norm1.weight"))?,
+                norm1_b: upload_named(ctx, tensors, &format!("{prefix}.norm1.bias"))?,
+                qkv_w: upload_transposed(ctx, tensors, &format!("{prefix}.attn.qkv.weight"))?,
+                qkv_b: upload_named(ctx, tensors, &format!("{prefix}.attn.qkv.bias"))?,
+                proj_w: upload_transposed(ctx, tensors, &format!("{prefix}.attn.proj.weight"))?,
+                proj_b: upload_named(ctx, tensors, &format!("{prefix}.attn.proj.bias"))?,
+                norm2_w: upload_named(ctx, tensors, &format!("{prefix}.norm2.weight"))?,
+                norm2_b: upload_named(ctx, tensors, &format!("{prefix}.norm2.bias"))?,
                 fc1_w: upload_transposed(
-                    backend,
+                    ctx,
                     tensors,
                     &format!("{prefix}.mlp.linear_fc1.weight"),
                 )?,
-                fc1_b: upload_named(backend, tensors, &format!("{prefix}.mlp.linear_fc1.bias"))?,
+                fc1_b: upload_named(ctx, tensors, &format!("{prefix}.mlp.linear_fc1.bias"))?,
                 fc2_w: upload_transposed(
-                    backend,
+                    ctx,
                     tensors,
                     &format!("{prefix}.mlp.linear_fc2.weight"),
                 )?,
-                fc2_b: upload_named(backend, tensors, &format!("{prefix}.mlp.linear_fc2.bias"))?,
+                fc2_b: upload_named(ctx, tensors, &format!("{prefix}.mlp.linear_fc2.bias"))?,
             });
         }
 
@@ -164,15 +165,15 @@ impl VisionWeights {
 
         Ok(Self {
             patch_w,
-            patch_b: upload_named(backend, tensors, "model.visual.patch_embed.proj.bias")?,
-            pos_embed: upload_named(backend, tensors, "model.visual.pos_embed.weight")?,
+            patch_b: upload_named(ctx, tensors, "model.visual.patch_embed.proj.bias")?,
+            pos_embed: upload_named(ctx, tensors, "model.visual.pos_embed.weight")?,
             blocks,
-            merger_norm_w: upload_named(backend, tensors, "model.visual.merger.norm.weight")?,
-            merger_norm_b: upload_named(backend, tensors, "model.visual.merger.norm.bias")?,
-            merger_fc1_w: upload(backend, &merger_fc1)?,
-            merger_fc1_b: upload_named(backend, tensors, "model.visual.merger.linear_fc1.bias")?,
-            merger_fc2_w: upload(backend, &merger_fc2)?,
-            merger_fc2_b: upload_named(backend, tensors, "model.visual.merger.linear_fc2.bias")?,
+            merger_norm_w: upload_named(ctx, tensors, "model.visual.merger.norm.weight")?,
+            merger_norm_b: upload_named(ctx, tensors, "model.visual.merger.norm.bias")?,
+            merger_fc1_w: upload(ctx, &merger_fc1)?,
+            merger_fc1_b: upload_named(ctx, tensors, "model.visual.merger.linear_fc1.bias")?,
+            merger_fc2_w: upload(ctx, &merger_fc2)?,
+            merger_fc2_b: upload_named(ctx, tensors, "model.visual.merger.linear_fc2.bias")?,
         })
     }
 }

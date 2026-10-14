@@ -26,6 +26,19 @@ unsafe extern "C" {
         theta: f32,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_attn_vision_qkv_rope(
+        qkv: *const c_void,
+        bias: *const c_void,
+        positions: *const c_void,
+        query: *mut c_void,
+        key: *mut c_void,
+        value: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        head_dim: i64,
+        theta: f32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_attn_head_rms_norm(
         data: *mut c_void,
         weight: *const c_void,
