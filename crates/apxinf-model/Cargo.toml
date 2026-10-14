@@ -78,3 +78,7 @@ required-features = ["cuda"]
 [[example]]
 name = "d3_vision_smoke"
 required-features = ["cuda"]
+
+[[example]]
+name = "d3_eval"
+required-features = ["cuda"]

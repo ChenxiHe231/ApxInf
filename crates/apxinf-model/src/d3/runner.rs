@@ -1,6 +1,6 @@
 //! Owning text-decision runtime and fixed-shape CUDA Graph profiles.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use apxinf_core::{Error, Result};
 use apxinf_cuda_new::{ops, CudaContext, PreparedPhase};
@@ -40,6 +40,8 @@ pub(crate) struct D3Runner {
     weights: D3DeviceWeights,
     policies: D3Policies,
     text_profiles: HashMap<usize, TextProfile>,
+    text_profile_order: VecDeque<usize>,
+    text_profile_limit: usize,
     vision_profiles: HashMap<VisionProfileKey, VisionProfile>,
 }
 
@@ -56,6 +58,12 @@ impl D3Runner {
             weights,
             policies,
             text_profiles: HashMap::new(),
+            text_profile_order: VecDeque::new(),
+            text_profile_limit: std::env::var("APXINF_D3_TEXT_PROFILE_LIMIT")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|limit| *limit > 0)
+                .unwrap_or(usize::MAX),
             vision_profiles: HashMap::new(),
         }
     }
@@ -63,7 +71,15 @@ impl D3Runner {
     fn prepare_text_profile(&mut self, token_ids: &[u32]) -> Result<()> {
         let tokens = token_ids.len();
         if self.text_profiles.contains_key(&tokens) {
+            self.text_profile_order.retain(|length| *length != tokens);
+            self.text_profile_order.push_back(tokens);
             return Ok(());
+        }
+        while self.text_profiles.len() >= self.text_profile_limit {
+            let oldest = self.text_profile_order.pop_front().ok_or_else(|| {
+                Error::Other("d3 text profile cache order is inconsistent".into())
+            })?;
+            self.text_profiles.remove(&oldest);
         }
         let mut scratch = D3TextScratch::new(&self.ctx, &self.config, tokens)?;
         write_text_inputs(&self.ctx, &self.config, &scratch, token_ids)?;
@@ -94,6 +110,7 @@ impl D3Runner {
         }
         self.text_profiles
             .insert(tokens, TextProfile { scratch, graph });
+        self.text_profile_order.push_back(tokens);
         Ok(())
     }
 
