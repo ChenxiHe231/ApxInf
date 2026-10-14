@@ -42,6 +42,7 @@ pub(crate) struct D3Runner {
     text_profiles: HashMap<usize, TextProfile>,
     text_profile_order: VecDeque<usize>,
     text_profile_limit: usize,
+    text_profile_token_budget: usize,
     vision_profiles: HashMap<VisionProfileKey, VisionProfile>,
 }
 
@@ -64,6 +65,11 @@ impl D3Runner {
                 .and_then(|value| value.parse::<usize>().ok())
                 .filter(|limit| *limit > 0)
                 .unwrap_or(usize::MAX),
+            text_profile_token_budget: std::env::var("APXINF_D3_TEXT_PROFILE_TOKEN_BUDGET")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|budget| *budget > 0)
+                .unwrap_or(usize::MAX),
             vision_profiles: HashMap::new(),
         }
     }
@@ -75,7 +81,16 @@ impl D3Runner {
             self.text_profile_order.push_back(tokens);
             return Ok(());
         }
-        while self.text_profiles.len() >= self.text_profile_limit {
+        while !self.text_profiles.is_empty()
+            && (self.text_profiles.len() >= self.text_profile_limit
+                || self
+                    .text_profiles
+                    .keys()
+                    .copied()
+                    .fold(0usize, usize::saturating_add)
+                    .saturating_add(tokens)
+                    > self.text_profile_token_budget)
+        {
             let oldest = self.text_profile_order.pop_front().ok_or_else(|| {
                 Error::Other("d3 text profile cache order is inconsistent".into())
             })?;
