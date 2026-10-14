@@ -4,6 +4,12 @@
 //! `grid_thw`. All per-request tower computation remains on CUDA. The learned
 //! 48x48 position table is interpolated on the host once per distinct grid and
 //! retained in a small device cache, matching the maintained Qwen-Drive path.
+//!
+//! This module temporarily uses the legacy CUDA runtime while the language
+//! stack uses cuda-new. The compatibility seam and its migration constraint
+//! are documented in `backend`; explicit synchronization at the two transfer
+//! points keeps ownership and ordering correct until the vision operators are
+//! ported.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -170,6 +176,10 @@ fn forward_device(
     pixel_values: &Tensor,
     prepared: &PreparedVision,
 ) -> Result<Tensor> {
+    // TODO(vision-parity): compare non-square inputs with Transformers at
+    // patch+position, every block output, and merger output. The final-output
+    // gap is aspect-ratio dependent, and this path is shared with Qwen-Drive,
+    // so any operator-level fix should be applied to both model families.
     let ctx = backend.context();
     let eps = 1e-6f32;
     let mut x = gemm::bf16(ctx, pixel_values, &weights.patch_w)?;

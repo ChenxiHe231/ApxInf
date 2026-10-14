@@ -19,7 +19,7 @@ use super::config::{
 use super::vision_weights::VisionWeights;
 use super::{backend, model, model_runner, vision, weights};
 
-/// Qwen3.8-27B-NVFP4. Batch 1, image/text input, BF16 KV cache.
+/// Qwen3.8-27B-NVFP4. Batch 1, text and optional image input, BF16 KV cache.
 ///
 /// Execution policy is fixed: batched FlashInfer-GDN prefill, CUDA-graph
 /// decode (one phase per layer -- MLP only for a full-attention layer, mixer
@@ -30,7 +30,8 @@ pub struct Qwen38 {
     ctx: CudaContext,
     backend: Arc<dyn Backend>,
     model: weights::Model,
-    vision: VisionWeights,
+    /// Some text-only checkpoints intentionally omit the visual tower.
+    vision: Option<VisionWeights>,
     vision_state: vision::VisionState,
     scratch: model::Scratch,
     prefill: Option<model::PrefillScratch>,
@@ -71,7 +72,10 @@ impl Qwen38 {
 
         let ctx = CudaContext::new(ordinal).map_err(Error::Cuda)?;
         let backend = create_backend(device)?;
-        let vision = VisionWeights::load(&weights, &*backend)?;
+        let vision = weights
+            .contains_key("model.visual.patch_embed.proj.weight")
+            .then(|| VisionWeights::load(&weights, &*backend))
+            .transpose()?;
         let model = weights::load_model(&ctx, &weights, true);
         ctx.synchronize().map_err(Error::Cuda)?;
         drop(weights);
@@ -160,6 +164,7 @@ impl Qwen38 {
         positions: Option<&[[u32; 3]]>,
         prepared_embeddings: Option<&Tensor>,
     ) -> Result<Tensor> {
+        validate_kv_capacity(0, token_ids.len(), self.kv_capacity)?;
         self.ensure_prefill_scratch(token_ids.len());
         self.ensure_graphs();
         let prefill = self.prefill.as_mut().unwrap();
@@ -262,17 +267,32 @@ impl Qwen38 {
         pixel_values: &Tensor,
         grid_thw: &[[u32; 3]],
     ) -> Result<Tensor> {
+        // Reject oversized multimodal prompts before running the expensive
+        // vision tower. `run_prefill` repeats this guard so every prefill
+        // caller shares the cache-boundary invariant.
+        validate_kv_capacity(0, token_ids.len(), self.kv_capacity)?;
         if token_ids.len() <= 1 {
             return Err(Error::Other(
                 "qwen38 image prefill requires a complete multimodal prompt".into(),
             ));
         }
         let (positions, embeddings, rope_delta) = {
+            let vision_weights = self.vision.as_ref().ok_or_else(|| {
+                Error::Other(
+                    "qwen38 checkpoint does not contain model.visual weights required for image input"
+                        .into(),
+                )
+            })?;
             let legacy = self.legacy_backend()?;
             let positions = vision::rope_positions(token_ids, grid_thw)?;
             let pixels = vision::upload_pixels(legacy, pixel_values)?;
-            let visual =
-                vision::forward(&self.vision, &self.vision_state, legacy, &pixels, grid_thw)?;
+            let visual = vision::forward(
+                vision_weights,
+                &self.vision_state,
+                legacy,
+                &pixels,
+                grid_thw,
+            )?;
             let embeddings =
                 vision::embed_and_replace(legacy, &self.model.embedding, token_ids, &visual)?;
             legacy.synchronize()?;
@@ -306,13 +326,7 @@ impl LlmTrait for Qwen38 {
             return Err(Error::Other("forward: empty token_ids".into()));
         }
         let start = start_pos as usize;
-        if start + token_ids.len() > self.kv_capacity {
-            return Err(Error::Other(format!(
-                "sequence {} exceeds the KV capacity {} fixed at load",
-                start + token_ids.len(),
-                self.kv_capacity
-            )));
-        }
+        validate_kv_capacity(start, token_ids.len(), self.kv_capacity)?;
 
         if start == 0 && token_ids.len() > 1 {
             self.rope_delta = 0;
@@ -352,7 +366,11 @@ impl LlmTrait for Qwen38 {
     }
 
     fn capabilities(&self) -> LlmCapabilities {
-        LlmCapabilities::VISION
+        if self.vision.is_some() {
+            LlmCapabilities::VISION
+        } else {
+            LlmCapabilities::TEXT_ONLY
+        }
     }
 
     fn prefill(&mut self, input: LlmInput<'_>) -> Result<Tensor> {
@@ -373,6 +391,18 @@ impl LlmTrait for Qwen38 {
     fn vocab_size(&self) -> usize {
         VOCAB
     }
+}
+
+fn validate_kv_capacity(start: usize, len: usize, capacity: usize) -> Result<()> {
+    let end = start
+        .checked_add(len)
+        .ok_or_else(|| Error::Other("qwen38 sequence length overflow".into()))?;
+    if end > capacity {
+        return Err(Error::Other(format!(
+            "sequence {end} exceeds the KV capacity {capacity} fixed at load"
+        )));
+    }
+    Ok(())
 }
 
 // Constructors the wrapper needs for state it owns per generation session.
@@ -401,3 +431,24 @@ impl model::KvCache {
 // Unused-import silencer for non-graph builds of ops.
 #[allow(unused_imports)]
 use ops as _ops_used;
+
+#[cfg(test)]
+mod tests {
+    use super::validate_kv_capacity;
+
+    #[test]
+    fn kv_capacity_accepts_boundary_and_rejects_oversized_prefill() {
+        assert!(validate_kv_capacity(0, 8192, 8192).is_ok());
+        let error = validate_kv_capacity(0, 8193, 8192).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("sequence 8193 exceeds the KV capacity 8192"));
+    }
+
+    #[test]
+    fn kv_capacity_accounts_for_decode_start() {
+        assert!(validate_kv_capacity(8191, 1, 8192).is_ok());
+        assert!(validate_kv_capacity(8192, 1, 8192).is_err());
+        assert!(validate_kv_capacity(usize::MAX, 1, usize::MAX).is_err());
+    }
+}

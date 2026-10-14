@@ -4,15 +4,18 @@
 //! `doc/model-layer-architecture.md`: every other qwen38 module reaches
 //! device memory through these helpers or through `apxinf_cuda_new::ops`.
 
-
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda_new::{CudaBuffer, CudaContext};
 
+// Transitional compatibility seam: the language stack runs on cuda-new,
+// while the vision tower reuses the maintained legacy CUDA kernels used by
+// Qwen-Drive. This currently entails one allocator and synchronization domain
+// per runtime. Keep all cross-runtime transfers centralized here until the
+// vision operators move to cuda-new.
 pub(crate) use crate::accelerator::cuda::{
     kernels as legacy_kernels, transfers as legacy_transfers, DeviceBuffer as LegacyBuffer,
     RuntimeBackend as LegacyBackend,
 };
-
 
 pub(crate) fn cpu_bytes(tensor: &Tensor) -> &[u8] {
     match tensor.storage() {
