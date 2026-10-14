@@ -30,11 +30,3 @@ extension-module = ["pyo3/extension-module"]
 # which is only registered on CUDA devices. Without it the extension still
 # imports and reports shapes, but `load` errors for pi05.
 cuda = ["apxinf-model/cuda"]
-# Forward the model crate's attribution arms so a Python end-to-end benchmark
-# can compare one or all translated operators against the pinned AOT bundle.
-aot-gemm-swiglu-bf16 = ["cuda", "apxinf-model/aot-gemm-swiglu-bf16"]
-aot-gdn-prefill-bf16 = ["cuda", "apxinf-model/aot-gdn-prefill-bf16"]
-aot-vision-attention = ["cuda", "apxinf-model/aot-vision-attention"]
-aot-action-attention = ["cuda", "apxinf-model/aot-action-attention"]
-aot-language-attention = ["cuda", "apxinf-model/aot-language-attention"]
-aot-qwen38-dense-swiglu = ["cuda", "apxinf-model/aot-qwen38-dense-swiglu"]

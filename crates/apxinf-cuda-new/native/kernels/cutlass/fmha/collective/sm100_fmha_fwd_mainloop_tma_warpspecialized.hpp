@@ -496,12 +496,37 @@ CUTLASS_DEVICE float apxinf_lse(float row_sum, float row_max,
 #ifndef APXINF_SKIP_PAD_QSTAGE
 #define APXINF_SKIP_PAD_QSTAGE 0
 #endif
-// APXINF_CORR_RING2  0 = UPSTREAM, stage 128/kCorrectionTileSize chunks of O.
+// APXINF_CORR_RING2  0 = UPSTREAM, stage `D / kCorrectionTileSize` chunks of O
+//   (upstream hardcodes the numerator 128; see the derivation below).
 //   1 = stage exactly two and alternate.  Numerically identical (same values,
 //   same order) but a large register-allocation change, so it is a knob.
 //   REQUIRED for D > 128, where the upstream sizing indexes out of bounds.
+//   Both head_dim-256 operators set it.  Vision does NOT: report 30 measured
+//   1.0199 with it against a [1.0164, 1.0190] control band (16 rounds, repo
+//   path) at identical REG/STACK and identical SASS instruction COUNT -- which
+//   is also the demonstration that the instruction count is not an identity
+//   test for the generated code.
 #ifndef APXINF_CORR_RING2
 #define APXINF_CORR_RING2 0
+#endif
+// APXINF_CORR_TILE  the column tile `correction_rescale` processes per
+//   TMEM_LOAD / FMUL2 / TMEM_STORE round trip.  0 = UPSTREAM (16).  The loop
+//   runs `D / APXINF_CORR_TILE` times, so this trades round count against the
+//   live register footprint of one chunk.  Bit-neutral (same values, same
+//   order; verified: vision 12509184/12509184 absmax 0 at 8 and at 16), and
+//   8 needs the 8-column TMEM atoms, hence the `conditional_t` below.
+//   Must divide `size<2>(TileShape)`; 8 and 16 are the values measured.
+//   MEASURED (report 30, repo path, 16 rounds, ABBA, control band
+//   [1.0164, 1.0190] over six replicates of identical code):
+//     8               1.0186  -- neutral, NOT adopted
+//     8 + CORR_RING2  1.0218  -- worse
+//     16 (upstream)   1.0183/1.0187/1.0188/1.0190 (controls)
+//   The vision fork measured 8 as a ~5% WIN on its standalone L=624 driver
+//   (report 08 #13).  That did not transfer: through the repo path the 624
+//   group is already at 1.004 and the whole gap is the 2200 group, which this
+//   knob does not touch.  Re-sweep before trusting either verdict.
+#ifndef APXINF_CORR_TILE
+#define APXINF_CORR_TILE 0
 #endif
 // APXINF_DEBUG_SHOW_SO  upstream unconditionally `print(sO)` in the
 //   degenerate (empty) epilogue.  That single statement is worth 60
@@ -512,6 +537,13 @@ CUTLASS_DEVICE float apxinf_lse(float row_sum, float row_max,
 #define APXINF_DEBUG_SHOW_SO 1
 #endif
 // APXINF_FMHA_KV_STAGES  0 = UPSTREAM formula (fp8 ? 4 : 3)
+//   MEASURED (report 30, vision hd64, repo path, 16 rounds, ABBA, control band
+//   [1.0164, 1.0190] over six replicates of the shipped 4):
+//     3 -> 1.0210   4 -> controls (shipped)   5 -> 1.0234   6 -> 1.0244
+//   The vision fork preferred 6 on its standalone L=624 driver (report 08 #10)
+//   and then re-measured 3/4/6 as 1.122/1.129/1.123 there, i.e. 4 WORST.
+//   Through the repo path 4 is the best of the four -- another sign flip; do
+//   not carry either verdict across a regime change without re-sweeping.
 #ifndef APXINF_FMHA_KV_STAGES
 #define APXINF_FMHA_KV_STAGES 0
 #endif
@@ -522,33 +554,57 @@ CUTLASS_DEVICE float apxinf_lse(float row_sum, float row_max,
 #define APXINF_S_PIPE_STAGES 1
 #endif
 
-// 🔴 APXINF_ROWSUM_RESCALE_RN -- report 35's root cause.  0 = upstream,
-//    contractable packed add; 1 spells the following packed add as
-//    `add.rn.f32x2`, exactly like the CuTe DSL.  **Every FA4 AOT operator must
-//    set 1.**  `cute::add(float2&,...)` spells `add.f32x2` with NO rounding
-//    modifier, so the PTX ISA lets ptxas contract the feeding multiply into it
-//    -- and ptxas did (`FFMA R105, R2, R140, R100`).  The AOT's own PTX has
-//    `mul.f32` then `add.rn.f32x2`, two separate roundings.  One fused
-//    rounding instead of two was the ENTIRE `aot-language-attention`
-//    31/13873152 residual (and 904/54192 fp32 LSE).  No-op exactly when
-//    `acc_scale` is a power of two, which is why only language (no
-//    `APXINF_RESCALE_THRESHOLD`) ever showed it.  Default MUST stay 0 so this
-//    header still reproduces pristine upstream CUTLASS byte for byte.
-//    Report 35; mirror of crates/apxinf-cuda/kernels/.../<same file>.
+// 🔴 APXINF_ROWSUM_RESCALE_RN -- operator-specific AOT arithmetic.
+//    0 = upstream, contractable packed add.  1 = keep the carried-row-sum
+//    multiply separate by spelling it as `mul.rn.f32`.
+//
+//    `cute::add(float2&,...)` (include/cute/arch/simd_sm100.hpp:45) spells
+//    `add.f32x2` with NO rounding modifier, and the PTX ISA then licenses
+//    ptxas to contract a feeding multiply into it: "mul/add sequences with no
+//    rounding modifiers may be optimized to use fused-multiply-add".
+//    `asm volatile` constrains motion, not contraction.  With the plain `*=`
+//    ptxas DID contract -- the language SASS had
+//        FFMA R105, R2, R140, R100     // fma(acc_scale, row_sum, P[0])
+//    where the AOT's own PTX has two separately rounded operations
+//        mul.f32 %r2101, %r3062, %r2100 ; add.rn.f32x2 %rd938, {%r2101,%r2101}, ..
+//    (`sm100_hd256_2cta_fmha_forward.py:1772-1773` lowered through
+//    `cute.arch.add_packed_f32x2`, which emits the `.rn` spelling).
+//
+//    One fused rounding instead of two moved `row_sum` by 1-4 fp32 ULP and was
+//    the ENTIRE `aot-language-attention` 31/13873152 residual: setting 1 took
+//    the strict gate to 13873152/13873152 **and** report 34's fp32-LSE
+//    instrument from 904/54192 to 0/54192, on 4 seeds x 7 lengths and on both
+//    exponent stimulus modes (report 35 §3).
+//
+//    This is not a universal "CuTe DSL" setting. The action AOT's own SASS
+//    contracts `row_sum * acc_scale + first_exp` into FFMA, so action must set
+//    0. On a captured Qwen-Drive tensor, setting 1 made 9/1600 row sums differ
+//    and left one LSE mismatch; setting 0 gives 1600/1600 direct bit equality.
+//    Language must set 1 as above. Vision independently pins 1, which its
+//    model-shaped and captured-input gates have verified bit-exact.
+//
+//    🔴 The default must stay 0: at zero `-DAPXINF_*` this header has to
+//    reproduce pristine upstream CUTLASS byte for byte, and upstream contracts.
+//    Measured: flipping this knob alone moves 7 of the 25 upstream-default
+//    equivalence files -- and EXACTLY the seven `.lse` ones, i.e. only
+//    `row_sum`, never `O` (report 35 §5.1).  That is also the cleanest
+//    independent proof of the mechanism, in pristine CUTLASS with no AOT
+//    anywhere in the picture.
 #ifndef APXINF_ROWSUM_RESCALE_RN
 #define APXINF_ROWSUM_RESCALE_RN 0
 #endif
-#define APXINF_ROWSUM_RESCALE(rs, sc) ((rs) *= (sc))
-
-#if APXINF_ROWSUM_RESCALE_RN && defined(CUTE_ARCH_FLOAT2_MATH_ENABLED)
-#define APXINF_ROWSUM_ADD(c, a, b)                                          \
-  asm volatile("add.rn.f32x2 %0, %1, %2;\n"                               \
-    : "=l"(reinterpret_cast<uint64_t      &>(c))                           \
-    :  "l"(reinterpret_cast<uint64_t const&>(a)),                          \
-       "l"(reinterpret_cast<uint64_t const&>(b)))
+#if APXINF_ROWSUM_RESCALE_RN
+#define APXINF_ROWSUM_RESCALE(rs, sc)                                       \
+  asm volatile("mul.rn.f32 %0, %0, %1;\n" : "+f"(rs) : "f"(sc))
 #else
-#define APXINF_ROWSUM_ADD(c, a, b) cute::add((c), (a), (b))
+#define APXINF_ROWSUM_RESCALE(rs, sc) ((rs) *= (sc))
 #endif
+
+// No multiply feeds the remaining packed additions, so their ordinary
+// `add.f32x2` cannot contract.  Keeping them outside inline asm gives ptxas
+// the same scheduling freedom as the upstream path while preserving the AOT
+// arithmetic above.
+#define APXINF_ROWSUM_ADD(c, a, b) cute::add((c), (a), (b))
 
 // Carried-row_sum rescale + packed-accumulator seeding, shared by the fused
 // and the upstream two-pass row_sum reductions.  Expanded inside
@@ -601,6 +657,7 @@ template<
   // (2, 1, 1) means that they are stacked (best for large Q since it loads the least K/V)
   // (1, 2, 1) means they sit side by side (best for small Q / large K)
   class ThreadShape = Shape<_2, _1, _1>,
+  class ClusterShape_ = Shape<_1, _1, _1>,
   // Since shared memory is sufficient for FMHA, there is no need to reuse shared memory.
   class OrderLoadEpilogue = cute::false_type
 >
@@ -629,7 +686,16 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
   static_assert(NumQStages == 1 || NumQStages == 2, "only 1 or 2 Q stages");
   static constexpr bool kSingleQStage = (NumQStages == 1);
 
-  static constexpr int StageCountQ = NumQStages;
+  using ClusterShape = ClusterShape_;
+  static constexpr bool kIs2Sm = cute::size(ClusterShape{}) == 2;
+  static_assert(cute::size(ClusterShape{}) == 1 || kIs2Sm,
+                "FMHA supports one- or two-CTA clusters");
+
+  // The dedicated hd256 2-CTA kernel uses an M256N128K128 UMMA atom and
+  // therefore stages the two K128 halves of Q independently.  NumQStages is
+  // still one from the softmax/tmem point of view; this is only the smem/TMA
+  // pipeline depth.
+  static constexpr int StageCountQ = kIs2Sm ? 2 : NumQStages;
 
   // apxinf: depth of the mma -> softmax S pipeline. The stock collective has
   // one S slot per Q stage, which with a single Q stage means the MMA warp
@@ -649,20 +715,40 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
   // Number of distinct 128-column S slots in tmem: two for the stock
   // ping-pong layout (S0/S1), and NumSStages for the single-Q-stage path.
   static constexpr int NumSSlots = kSingleQStage ? NumSStages : NumQStages;
-  static constexpr int StageCountKV = APXINF_FMHA_KV_STAGES > 0
-      ? APXINF_FMHA_KV_STAGES
-      : (sizeof(Element_) == 1 ? 4 : 3);
+  static constexpr int StageCountKV = kIs2Sm ? 4
+      : (APXINF_FMHA_KV_STAGES > 0
+          ? APXINF_FMHA_KV_STAGES
+          : (sizeof(Element_) == 1 ? 4 : 3));
 
   using StagesQ = cutlass::gemm::collective::StageCount<StageCountQ>;
   using StagesKV = cutlass::gemm::collective::StageCount<StageCountKV>;
 
-  using ClusterShape = Shape<_1, _1, _1>;
+  using MmaSchedule = cute::conditional_t<
+      kIs2Sm,
+      cutlass::gemm::KernelTmaWarpSpecialized2SmSm100,
+      cutlass::gemm::KernelTmaWarpSpecialized1SmSm100>;
 
   static const int Alignment = 128 / sizeof_bits_v<Element>;
 
-  using TileShapeQK = decltype(shape_div(TileShape{}, ThreadShape{}));
+  using TileShapeQKDefault = decltype(shape_div(TileShape{}, ThreadShape{}));
+  using TileShapeQK = std::conditional_t<
+      kIs2Sm,
+      decltype(make_shape(get<0>(TileShapeQKDefault{}),
+                          get<1>(TileShapeQKDefault{}), _128{})),
+      TileShapeQKDefault>;
 
-  using TileShapePV = decltype(select<0,2,1>(TileShapeQK{}));
+  // TileShapePV is the full logical O tile used by correction/epilogue.  The
+  // 2-CTA MMA itself emits it as two adjacent N128 instructions.
+  using TileShapePV = std::conditional_t<
+      kIs2Sm,
+      decltype(make_shape(get<0>(TileShapeQK{}), get<2>(TileShape{}),
+                          get<1>(TileShapeQK{}))),
+      decltype(select<0,2,1>(TileShapeQK{}))>;
+  using TileShapePVMma = std::conditional_t<
+      kIs2Sm,
+      decltype(make_shape(get<0>(TileShapePV{}), _128{},
+                          get<2>(TileShapePV{}))),
+      TileShapePV>;
 
   using CollectiveMmaQK = typename cutlass::gemm::collective::CollectiveBuilder<
       cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
@@ -670,7 +756,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
       Element, StrideK, Alignment,
       ElementQK,
       TileShapeQK, ClusterShape, cutlass::gemm::collective::StageCount<3> /* we change it later anyways*/,
-      cutlass::gemm::KernelTmaWarpSpecialized1SmSm100>::CollectiveOp;
+      MmaSchedule>::CollectiveOp;
 
   using CollectiveMmaPV = typename cutlass::gemm::collective::CollectiveBuilder<
       cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
@@ -679,11 +765,38 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
       Element, decltype(select<1,0,2>(StrideV{})), Alignment,
       ElementPV,
       TileShapePV, ClusterShape, cutlass::gemm::collective::StageCount<3> /* we change it later anyways*/,
-      cutlass::gemm::KernelTmaWarpSpecialized1SmSm100>::CollectiveOp;
+      MmaSchedule>::CollectiveOp;
+
+  // FA4's hd256 2-CTA kernel keeps the full N256 V/TMA layout, but issues PV
+  // as two M256N128 UMMA instructions.  A separate compute collective gives
+  // us that instruction shape while CollectiveMmaPV remains the full-tile
+  // layout used by the loader and correction epilogue.
+  using CollectiveMmaPVCompute = typename cutlass::gemm::collective::CollectiveBuilder<
+      cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp,
+      Element, StrideK, Alignment,
+      Element, decltype(select<1,0,2>(StrideV{})), Alignment,
+      ElementPV,
+      TileShapePVMma, ClusterShape,
+      cutlass::gemm::collective::StageCount<3>, MmaSchedule>::CollectiveOp;
+
+  using CtaShapeQK = typename CollectiveMmaQK::CtaShape_MNK;
+  using CtaShapePV = typename CollectiveMmaPV::CtaShape_MNK;
+
+  CUTLASS_DEVICE static uint32_t cta_mma_rank() {
+    return cute::block_rank_in_cluster() %
+           cute::size(typename CollectiveMmaQK::TiledMma::AtomThrID{});
+  }
+
+  template<class TensorStorageEpi>
+  CUTLASS_DEVICE static auto make_epilogue_smem_tensor(TensorStorageEpi& storage) {
+    using LogicalLayout = typename TensorStorageEpi::SmemLayoutO;
+    return make_tensor(make_smem_ptr(storage.smem_o.data()), LogicalLayout{});
+  }
 
   using SmemLayoutQ = decltype(unstageSmemLayout(typename CollectiveMmaQK::SmemLayoutA{}, Int<StageCountQ>{}));
   using SmemLayoutK = decltype(unstageSmemLayout(typename CollectiveMmaQK::SmemLayoutB{}, Int<StageCountKV>{}));
-  using SmemLayoutV = decltype(unstageSmemLayout(typename CollectiveMmaPV::SmemLayoutB{}, Int<StageCountKV>{}));
+  using SmemLayoutV = decltype(unstageSmemLayout(
+      typename CollectiveMmaPVCompute::SmemLayoutB{}, Int<StageCountKV>{}));
 
   // Reuse shared memory for V and O.
   static constexpr bool IsOrderLoadEpilogue = std::is_same_v<OrderLoadEpilogue, cute::true_type>;
@@ -700,6 +813,15 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
   static constexpr uint32_t kTmemSizeS = size<1>(TileShapeQK{});   // N columns of f32
   static constexpr uint32_t kTmemSizeO = size<2>(TileShape{});     // D columns of f32
   static constexpr uint32_t kTmemNumStages = NumSSlots;
+  static constexpr uint32_t kPackedPColumns =
+      size<1>(TileShapeQK{}) / 4 * sizeof(Element_);
+  // The dedicated hd256 2CTA kernel stores packed P at the start of each S
+  // slot and puts its two fp32 statistics immediately after P.  The stock
+  // 1CTA path uses the opposite arrangement (stats at 0, P at column 32).
+  // For 2CTA TS MMA, P must start at column zero so the duplicated TMEM-A
+  // allocation reaches both N/2 halves of the instruction.
+  static constexpr uint32_t kPBaseOffset = kIs2Sm ? 0 : 32;
+  static constexpr uint32_t kStatsOffset = kIs2Sm ? kPackedPColumns : 0;
 
   enum class TmemAllocation : uint32_t {
     kSizeS = kTmemSizeS,
@@ -707,10 +829,10 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     kSizeP = 32,
     S0 = 0,
     S1 = (kTmemNumStages - 1) * kTmemSizeS,
-    V0 = S0,  // stats storage from softmax to correction
-    V1 = S1,
-    P0 = S0 + kSizeP,
-    P1 = S1 + kSizeP,
+    V0 = S0 + kStatsOffset,  // stats storage from softmax to correction
+    V1 = S1 + kStatsOffset,
+    P0 = S0 + kPBaseOffset,
+    P1 = S1 + kPBaseOffset,
     O0 = kTmemNumStages * kTmemSizeS,
     O1 = O0 + (NumQStages - 1) * kTmemSizeO,
     kEnd = O1 + kSizeO
@@ -720,9 +842,10 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
   static_assert(kTmemColumns <= 512,
       "FMHA tmem footprint exceeds the 512-column SM100 budget; "
       "use ThreadShape<_1,_1,_1> (one Q stage) for large head_dim");
-  static_assert(uint32_t(TmemAllocation::kSizeP) + size<1>(TileShapeQK{}) / 4 * sizeof(Element_)
-                  <= kTmemSizeS,
+  static_assert(kPBaseOffset + kPackedPColumns <= kTmemSizeS,
       "P does not fit inside the S tmem slot");
+  static_assert(kStatsOffset + 2 <= kTmemSizeS,
+      "softmax statistics do not fit inside the S tmem slot");
 
   // indices for V0 / V1
   enum : int {
@@ -735,25 +858,29 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
   // from load to mma warp, protects q in smem
   using PipelineQ = cutlass::PipelineTmaUmmaAsync<
     StageCountQ,
+    ClusterShape,
     typename CollectiveMmaQK::AtomThrShapeMNK
   >;
 
   // from load to mma warp, protects k/v in smem
   using PipelineKV = cutlass::PipelineTmaUmmaAsync<
     StageCountKV,
+    ClusterShape,
     typename CollectiveMmaQK::AtomThrShapeMNK
   >;
 
   // from mma to softmax0/1 warp, protects S in tmem
   // (not sure yet about the reverse direction)
   // there is one pipe per softmax warp, and the mma warp alternates between them
-  using PipelineS = cutlass::PipelineUmmaAsync<NumSStages>;
+  using PipelineS = cutlass::PipelineUmmaAsync<
+      NumSStages, typename CollectiveMmaQK::AtomThrShapeMNK>;
 
   // from softmax0/1/ to correction wg
   using PipelineC = cutlass::PipelineAsync<NumSStages>;
 
   // from mma to correction
-  using PipelineO = cutlass::PipelineUmmaAsync<NumQStages>;
+  using PipelineO = cutlass::PipelineUmmaAsync<
+      NumQStages, typename CollectiveMmaPV::AtomThrShapeMNK>;
 
   // from corr to epilogue
   using PipelineE = cutlass::PipelineAsync<2>;
@@ -761,18 +888,24 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
   using OrderBarrierSoftmax = cutlass::OrderedSequenceBarrier<
     /*stages*/ 1, /*groups*/ 2>;
 
-  static const int TransactionBytesLoadQ = cutlass::bits_to_bytes(cosize(take<0,3>(SmemLayoutQ{})) * cute::sizeof_bits_v<Element>);
+  static const int TransactionBytesLoadQ = cutlass::bits_to_bytes(
+      cosize(take<0,3>(SmemLayoutQ{})) * cute::sizeof_bits_v<Element>) *
+      cute::size(typename CollectiveMmaQK::TiledMma::AtomThrID{});
 
-  static const int TransactionBytesLoadK = cutlass::bits_to_bytes(cosize(take<0,3>(SmemLayoutK{})) * cute::sizeof_bits_v<Element>);
-  static const int TransactionBytesLoadV = cutlass::bits_to_bytes(cosize(take<0,3>(SmemLayoutV{})) * cute::sizeof_bits_v<Element>);
+  static const int TransactionBytesLoadK = cutlass::bits_to_bytes(
+      cosize(take<0,3>(SmemLayoutK{})) * cute::sizeof_bits_v<Element>) *
+      cute::size(typename CollectiveMmaQK::TiledMma::AtomThrID{});
+  static const int TransactionBytesLoadV = cutlass::bits_to_bytes(
+      cosize(take<0,3>(SmemLayoutV{})) * cute::sizeof_bits_v<Element>) *
+      cute::size(typename CollectiveMmaQK::TiledMma::AtomThrID{});
 
   static_assert(TransactionBytesLoadK == TransactionBytesLoadV, "K and V smem layouts must be of equal size");
 
   using Load = Sm100FmhaLoadTmaWarpspecialized<
     Element, StrideQ, StrideK, StrideV,
-    CollectiveMmaQK, CollectiveMmaPV,
+    CollectiveMmaQK, CollectiveMmaPVCompute,
     SmemLayoutQ, SmemLayoutK, SmemLayoutV,
-    TensorStorage, PipelineQ, PipelineKV, Mask, TileShape
+    TensorStorage, PipelineQ, PipelineKV, Mask, TileShape, ClusterShape
   >;
 
   struct Arguments {
@@ -812,7 +945,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
 
     float scale_softmax = args.scale_softmax;
     if (scale_softmax == 0.0f) {
-      scale_softmax = 1.0f / (float) std::sqrt(get<2>(problem_shape));
+      scale_softmax = 1.0f / std::sqrt(float(get<2>(problem_shape)));
     }
     float log2_e = static_cast<float>(std::log2(std::exp(1.0)));
 
@@ -869,11 +1002,11 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     int mask_tile_count = Mask{}.get_trip_count(blk_coord, TileShape{}, problem_shape);
 
     typename CollectiveMmaQK::TiledMma mma_qk;
-    ThrMMA thr_mma_qk = mma_qk.get_slice(0);
+    ThrMMA thr_mma_qk = mma_qk.get_slice(cta_mma_rank());
 
-    typename CollectiveMmaPV::TiledMma mma_pv;
+    typename CollectiveMmaPVCompute::TiledMma mma_pv;
     TiledMMA mma_pv_ts = to_tiled_mma_sm100_ts(mma_pv);
-    ThrMMA thr_mma_pv = mma_pv_ts.get_slice(0);
+    ThrMMA thr_mma_pv = mma_pv_ts.get_slice(cta_mma_rank());
 
     Tensor sQ = make_tensor(make_smem_ptr(storage.smem_q.data()), SmemLayoutQ{});
     Tensor sK = make_tensor(make_smem_ptr(storage.smem_k.data()), SmemLayoutK{});
@@ -881,20 +1014,49 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
 
     Tensor tSrQ = thr_mma_qk.make_fragment_A(sQ);
     Tensor tSrK = thr_mma_qk.make_fragment_B(sK);
-    Tensor tOrV = thr_mma_pv.make_fragment_B(sV);
 
     Tensor tStS = partition_fragment_C(mma_qk, select<0,1>(TileShapeQK{}));
-    Tensor tOtO = partition_fragment_C(mma_pv_ts, select<0,1>(TileShapePV{}));
+    Tensor cO_mma = make_identity_tensor(select<0,1>(TileShapePVMma{}));
+    Tensor tOtO = decltype(mma_pv_ts)::make_fragment_C(
+        thr_mma_pv.partition_C(cO_mma));
 
     Tensor tStS0 = tStS;
     tStS0.data() = tStS.data().get() + uint32_t(TmemAllocation::S0);
     Tensor tOtO0 = tOtO;
     tOtO0.data() = tOtO.data().get() + uint32_t(TmemAllocation::O0);
 
-    Tensor sP = make_tensor(make_smem_ptr((Element*)nullptr), typename CollectiveMmaPV::SmemLayoutA{});
+    Tensor sP = make_tensor(make_smem_ptr((Element*)nullptr),
+                            typename CollectiveMmaPVCompute::SmemLayoutA{});
     Tensor tOrP = thr_mma_pv.make_fragment_A(sP)(_, _, _, _0{});
     Tensor tOrP0 = tOrP;
     tOrP0.data() = tOrP0.data().get() + uint32_t(TmemAllocation::P0);
+
+    Tensor tOtO0_hi = tOtO0;
+    tOtO0_hi.data() = tOtO0.data().get() + 128;
+    Tensor tOrV = thr_mma_pv.make_fragment_B(sV);
+
+    auto gemm_pv_zero = [&](auto const& p, int part, int v_index) {
+      if constexpr (kIs2Sm) {
+        if (part == 0) {
+          gemm_zero_acc(mma_pv_ts, p, tOrV(_, _, _, v_index), tOtO0);
+        } else {
+          gemm_zero_acc(mma_pv_ts, p, tOrV(_, _, _, v_index), tOtO0_hi);
+        }
+      } else {
+        gemm_zero_acc(mma_pv_ts, p, tOrV(_, _, _, v_index), tOtO0);
+      }
+    };
+    auto gemm_pv_accumulate = [&](auto const& p, int part, int v_index) {
+      if constexpr (kIs2Sm) {
+        if (part == 0) {
+          gemm_reset_zero_acc(mma_pv_ts, p, tOrV(_, _, _, v_index), tOtO0);
+        } else {
+          gemm_reset_zero_acc(mma_pv_ts, p, tOrV(_, _, _, v_index), tOtO0_hi);
+        }
+      } else {
+        gemm_reset_zero_acc(mma_pv_ts, p, tOrV(_, _, _, v_index), tOtO0);
+      }
+    };
 
     // apxinf: slot-indexed views for the multi-stage S pipeline.
     auto tStS_at = [&](uint32_t slot) {
@@ -915,6 +1077,105 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     pipeline_q.consumer_wait(pipeline_q_consumer_state);
     ++pipeline_q_consumer_state;
     Tensor tSrQ0 = tSrQ(_,_,_,q_index);
+
+    if constexpr (kIs2Sm) {
+      int q_index_hi = pipeline_q_consumer_state.index();
+      pipeline_q.consumer_wait(pipeline_q_consumer_state);
+      ++pipeline_q_consumer_state;
+      Tensor tSrQ1 = tSrQ(_,_,_,q_index_hi);
+
+      int n_tiles = mask_tile_count;
+      auto issue_qk = [&]() {
+        pipeline_s0.producer_acquire(pipeline_s0_producer_state);
+        Tensor tStS_i = tStS_at(uint32_t(pipeline_s0_producer_state.index()));
+
+        int k_index = pipeline_kv_consumer_state.index();
+        pipeline_kv.consumer_wait(pipeline_kv_consumer_state);
+        ++pipeline_kv_consumer_state;
+        gemm_zero_acc(mma_qk, tSrQ0, tSrK(_, _, _, k_index), tStS_i);
+
+        pipeline_kv.consumer_release(pipeline_kv_release_state);
+        ++pipeline_kv_release_state;
+
+        k_index = pipeline_kv_consumer_state.index();
+        pipeline_kv.consumer_wait(pipeline_kv_consumer_state);
+        ++pipeline_kv_consumer_state;
+        gemm_reset_zero_acc(mma_qk, tSrQ1,
+                            tSrK(_, _, _, k_index), tStS_i);
+        pipeline_s0.producer_commit(pipeline_s0_producer_state);
+        ++pipeline_s0_producer_state;
+
+        pipeline_kv.consumer_release(pipeline_kv_release_state);
+        ++pipeline_kv_release_state;
+      };
+
+      auto issue_pv = [&](int tile, auto final_tile) {
+        // After a look-ahead QK, the producer cursor itself names P(tile).
+        // For the final PV there is no following QK, so step back one slot.
+        auto s_pv = pipeline_s0_producer_state;
+        if constexpr (decltype(final_tile)::value) {
+          ++s_pv;
+        }
+        pipeline_s0.producer_acquire(s_pv);
+        uint32_t p_slot = uint32_t(s_pv.index());
+
+        int v_index = pipeline_kv_consumer_state.index();
+        pipeline_kv.consumer_wait(pipeline_kv_consumer_state);
+        ++pipeline_kv_consumer_state;
+
+        // For tile i>0 the empty O barrier is released by correction(i), and
+        // correction(i) first needs the statistics produced by softmax(i).
+        // QK(i) therefore has to be issued before this acquire; placing the
+        // acquire at the top of the loop creates a QK(i) <-> correction(i)
+        // cycle and hangs as soon as a query has two KV tiles.
+        pipeline_corr.producer_acquire(pipeline_corr_producer_state);
+
+        if (tile == 0) {
+          gemm_pv_zero(tOrP_at(p_slot), 0, v_index);
+        } else {
+          gemm_pv_accumulate(tOrP_at(p_slot), 0, v_index);
+        }
+
+        pipeline_kv.consumer_release(pipeline_kv_release_state);
+        ++pipeline_kv_release_state;
+
+        v_index = pipeline_kv_consumer_state.index();
+        pipeline_kv.consumer_wait(pipeline_kv_consumer_state);
+        ++pipeline_kv_consumer_state;
+        if (tile == 0) {
+          gemm_pv_zero(tOrP_at(p_slot), 1, v_index);
+        } else {
+          gemm_pv_accumulate(tOrP_at(p_slot), 1, v_index);
+        }
+
+        pipeline_kv.consumer_release(pipeline_kv_release_state);
+        ++pipeline_kv_release_state;
+
+        pipeline_corr.producer_commit(pipeline_corr_producer_state);
+        ++pipeline_corr_producer_state;
+      };
+
+      // Match the DSL MMA schedule exactly: QK0, then QK(i+1) before PV(i),
+      // and finally PV(end).  The next QK overlaps the softmax/P store for the
+      // preceding tile instead of leaving the tensor pipe idle.
+      issue_qk();
+      CUTLASS_PRAGMA_NO_UNROLL
+      for (int i = 1; i < n_tiles; ++i) {
+        issue_qk();
+        issue_pv(i - 1, cute::false_type{});
+      }
+      issue_pv(n_tiles - 1, cute::true_type{});
+
+      pipeline_q.consumer_release(pipeline_q_release_state);
+      ++pipeline_q_release_state;
+      pipeline_q.consumer_release(pipeline_q_release_state);
+      ++pipeline_q_release_state;
+
+      // Match the softmax warp's trailing consumer release.
+      pipeline_s0.producer_commit(pipeline_s0_producer_state);
+      ++pipeline_s0_producer_state;
+      return;
+    }
 
     if constexpr (kMultiSStage) {
       // ---- two S slots: run QK one tile ahead of PV ------------------------
@@ -1096,10 +1357,10 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
         pipeline_s0.producer_acquire(s_pv);
 
         if (i == 0) {
-          gemm_zero_acc(mma_pv_ts, tOrP_at(p_slot), tOrV(_,_,_,v_index), tOtO0);
+          gemm_pv_zero(tOrP_at(p_slot), 0, v_index);
         }
         else {
-          gemm_reset_zero_acc(mma_pv_ts, tOrP_at(p_slot), tOrV(_,_,_,v_index), tOtO0);
+          gemm_pv_accumulate(tOrP_at(p_slot), 0, v_index);
         }
         pipeline_corr.producer_commit(pipeline_corr_producer_state);
         ++pipeline_corr_producer_state;
@@ -1142,7 +1403,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     pipeline_corr.producer_acquire(pipeline_corr_producer_state);
     pipeline_s0.producer_acquire(pipeline_s0_producer_state);
 
-    gemm_zero_acc(mma_pv_ts, tOrP0, tOrV(_,_,_,v_index), tOtO0);
+    gemm_pv_zero(tOrP0, 0, v_index);
 
     pipeline_corr.producer_commit(pipeline_corr_producer_state);
     ++pipeline_corr_producer_state;
@@ -1174,7 +1435,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
       pipeline_corr.producer_acquire(pipeline_corr_producer_state);
       pipeline_s0.producer_acquire(pipeline_s0_producer_state);
 
-      gemm_reset_zero_acc(mma_pv_ts, tOrP0, tOrV(_,_,_,v_index), tOtO0);
+      gemm_pv_accumulate(tOrP0, 0, v_index);
 
       pipeline_corr.producer_commit(pipeline_corr_producer_state);
       ++pipeline_corr_producer_state;
@@ -1218,11 +1479,11 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     int mask_tile_count = Mask{}.get_trip_count(blk_coord, TileShape{}, problem_shape);
 
     typename CollectiveMmaQK::TiledMma mma_qk;
-    ThrMMA thr_mma_qk = mma_qk.get_slice(0);
+    ThrMMA thr_mma_qk = mma_qk.get_slice(cta_mma_rank());
 
     typename CollectiveMmaPV::TiledMma mma_pv;
     TiledMMA mma_pv_ts = to_tiled_mma_sm100_ts(mma_pv);
-    ThrMMA thr_mma_pv = mma_pv_ts.get_slice(0);
+    ThrMMA thr_mma_pv = mma_pv_ts.get_slice(cta_mma_rank());
 
     Tensor sQ = make_tensor(make_smem_ptr(storage.smem_q.data()), SmemLayoutQ{});
     Tensor sK = make_tensor(make_smem_ptr(storage.smem_k.data()), SmemLayoutK{});
@@ -1492,7 +1753,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
 
     Tensor tStS = partition_fragment_C(typename CollectiveMmaQK::TiledMma{}, select<0,1>(TileShapeQK{}));
     Tensor cS = make_identity_tensor(select<0,1>(TileShapeQK{}));
-    Tensor tScS = typename CollectiveMmaQK::TiledMma{}.get_slice(0).partition_C(cS);
+    Tensor tScS = typename CollectiveMmaQK::TiledMma{}.get_slice(cta_mma_rank()).partition_C(cS);
 
     // Same derivation as `softmax_step`'s `s_base`.  V0 == S0 and V1 == S1, so
     // the statistics live in columns 0-1 of the S slot.
@@ -1502,7 +1763,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
         : uint32_t(stage == _0{} ? TmemAllocation::S0 : TmemAllocation::S1);
 
     Tensor tStS_v = tStS.compose(make_layout(make_shape(_128{}, _2{})));
-    tStS_v.data() = s_base;
+    tStS_v.data() = s_base + kStatsOffset;
     Tensor tScS_v = tScS.compose(make_layout(make_shape(_128{}, _2{})));
 
     using TMEM_STORE_V = SM100_TMEM_STORE_32dp32b2x;
@@ -1569,7 +1830,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
       PipelineC& pipeline_c, typename PipelineC::PipelineState& pipeline_c_producer_state,
       OrderBarrierSoftmax& order_s) {
 
-    Tensor tScS = typename CollectiveMmaQK::TiledMma{}.get_slice(0).partition_C(cS);
+    Tensor tScS = typename CollectiveMmaQK::TiledMma{}.get_slice(cta_mma_rank()).partition_C(cS);
 
     // apxinf: with a multi-stage S pipeline the slot is a *runtime* value (the
     // pipeline state index) instead of the compile-time Q stage. For the stock
@@ -1586,12 +1847,12 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     tStS.data() = s_base;
 
     Tensor tStS_v = tStS.compose(make_layout(make_shape(_128{}, _2{})));
-    tStS_v.data() = s_base;
+    tStS_v.data() = s_base + kStatsOffset;
     Tensor tScS_v = tScS.compose(make_layout(make_shape(_128{}, _2{})));
 
     auto tilePlikeFP32 = size<1>(TileShapeQK{}) / Int<sizeof(float)>{} * Int<sizeof(Element)>{};
     Tensor tStS_P = tStS.compose(make_layout(make_shape(_128{}, tilePlikeFP32)));
-    tStS_P.data() = warp_uniform(s_base + uint32_t(TmemAllocation::kSizeP));
+    tStS_P.data() = warp_uniform(s_base + kPBaseOffset);
     Tensor tScS_P = tScS.compose(make_layout(make_shape(_128{}, tilePlikeFP32)));
 
     // Each thread owns a single row
@@ -2113,8 +2374,8 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     typename CollectiveMmaPV::TiledMma mma;
     Tensor cO = make_identity_tensor(select<0,1>(TileShapePV{}));
     Tensor tOtO = partition_fragment_C(mma, select<0,1>(TileShapePV{}));
-    Tensor tOcO = mma.get_slice(0).partition_C(cO);
-    Tensor tOsO = mma.get_slice(0).partition_C(sO);
+    Tensor tOcO = mma.get_slice(cta_mma_rank()).partition_C(cO);
+    Tensor tOsO = mma.get_slice(cta_mma_rank()).partition_C(sO);
 
     Tensor tOtO_i = logical_divide(tOtO, make_layout(make_shape(_128{}, Int<kCorrectionTileSize>{})));
     Tensor tOcO_i = logical_divide(tOcO, make_layout(make_shape(_128{}, Int<kCorrectionTileSize>{})));
@@ -2181,6 +2442,115 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     cutlass::arch::fence_view_async_shared();
   }
 
+  // FA4's hd256 2-CTA kernel converts TMEM and writes O directly from the
+  // correction warpgroup.  Keeping that path avoids trying to express a
+  // rank-sliced 2-CTA accumulator through a one-CTA TMA-store layout.
+  template<class Stage, class BlkCoord, class ProblemShape, class CollectiveEpilogue>
+  CUTLASS_DEVICE auto
+  correction_epilogue_direct(
+      float scale, Stage stage, BlkCoord const& blk_coord,
+      ProblemShape const& problem_shape, CollectiveEpilogue& epilogue) {
+    static_assert(kIs2Sm, "direct FMHA epilogue is only used by the 2-CTA path");
+    using ElementOut = typename CollectiveEpilogue::ElementOut;
+
+    int thread_idx = threadIdx.x % (4 * cutlass::NumThreadsPerWarp);
+    // FA4 correction_epilog uses Ld32x32bOp(Repetition(32)) regardless of the
+    // bf16 output type.  The earlier 32/sizeof(ElementOut) spelling selected
+    // Repetition(16), which only covered alternating 64-column quarters.
+    const int kCorrectionTileSize = 32;
+    using TMEM_LOAD = SM100_TMEM_LOAD_32dp32b32x;
+
+    typename CollectiveMmaPVCompute::TiledMma mma;
+    TiledMMA mma_ts = to_tiled_mma_sm100_ts(mma);
+    ThrMMA thr_mma = mma_ts.get_slice(cta_mma_rank());
+    // FA4's correction warp works on the CTA-local epilogue tile (128x128),
+    // not on another MMA-partitioned view of the cluster-wide M256 tile.
+    // Partitioning the identity tensor a second time aliases coordinates and
+    // lets zero lanes overwrite the second output half.
+    Tensor cO = make_identity_tensor(
+        make_shape(_128{}, get<1>(TileShapePVMma{})));
+    Tensor cO_mma = make_identity_tensor(select<0,1>(TileShapePVMma{}));
+    Tensor tOtO = decltype(mma_ts)::make_fragment_C(
+        thr_mma.partition_C(cO_mma));
+
+    auto problem_shape_o = CollectiveEpilogue::get_problem_shape_O(problem_shape);
+    Tensor mO = make_tensor(make_gmem_ptr(epilogue.params.ptr_O),
+                            problem_shape_o, epilogue.params.dO);
+    using X = Underscore;
+    Tensor gO_qdl = local_tile(
+        mO, make_shape(_128{}, get<1>(TileShapePVMma{}), _1{}),
+        make_coord(_, _, _), Step<_1, _1, X>{});
+    float2 scale_f32x2 = make_float2(scale, scale);
+    CUTLASS_PRAGMA_UNROLL
+    for (int iter = 0; iter < get<2>(TileShape{}) / get<1>(TileShapePVMma{}); ++iter) {
+      // Match the CuTe DSL epilogue exactly: first divide the full CTA-local
+      // 128x128 output tile, then let the TMEM copy atom expose its four
+      // 32-column repetitions.  Dividing by 128x32 here adds another nested
+      // mode; its coordinate stride collapses to zero and alternating output
+      // quarters are overwritten by the other 2SM half.
+      Tensor tOtO_slice = tOtO(make_coord(_, _), _0{}, _0{});
+      Tensor tOtO_i = zipped_divide(
+          tOtO_slice, make_shape(_128{}, get<1>(TileShapePVMma{})));
+      Tensor tOcO_i = zipped_divide(
+          cO, make_shape(_128{}, get<1>(TileShapePVMma{})));
+      int row_tile = get<0>(blk_coord) * int(cute::size<0>(ClusterShape{}))
+                   + int(cta_mma_rank());
+      Tensor gO = gO_qdl(_, _, row_tile, iter, get<2>(blk_coord));
+      Tensor gO_i = zipped_divide(
+          gO, make_shape(_128{}, get<1>(TileShapePVMma{})));
+
+      uint32_t o_base = decltype(stage == _0{})::value
+          ? uint32_t(TmemAllocation::O0) : uint32_t(TmemAllocation::O1);
+      tOtO_i.data() = tOtO_i.data().get() + o_base
+                    + uint32_t(iter * get<1>(TileShapePVMma{}));
+
+      auto tiled_tmem_load = make_tmem_copy(TMEM_LOAD{}, tOtO_i);
+      auto thr_tmem_load = tiled_tmem_load.get_slice(thread_idx);
+      Tensor tTMEM_LOADtO = thr_tmem_load.partition_S(tOtO_i);
+      Tensor tTMEM_LOADcO = thr_tmem_load.partition_D(tOcO_i);
+      Tensor tTMEM_LOADgO = thr_tmem_load.partition_D(gO_i);
+
+      CUTLASS_PRAGMA_UNROLL
+      for (int i = 0; i < size<1>(tTMEM_LOADtO); ++i) {
+      Tensor tTMEM_LOADtO_i = tTMEM_LOADtO(_, i, _0{});
+      Tensor tTMEM_LOADcO_i = tTMEM_LOADcO(_, i, _0{});
+      Tensor tTMEM_LOADgO_i = tTMEM_LOADgO(_, i, _0{});
+      Tensor tTMrO = make_tensor<ElementPV>(shape(tTMEM_LOADcO_i));
+      copy(tiled_tmem_load, tTMEM_LOADtO_i, tTMrO);
+
+      CUTLASS_PRAGMA_UNROLL
+      for (int j = 0; j < size(tTMrO); j += 2) {
+        float2 in = make_float2(tTMrO(j), tTMrO(j + 1));
+        float2 out;
+        cute::mul(out, scale_f32x2, in);
+        tTMrO(j) = out.x;
+        tTMrO(j + 1) = out.y;
+      }
+
+      constexpr int N = 4 / sizeof(ElementOut);
+      NumericArrayConverter<ElementOut, ElementPV, N> convert;
+      Tensor tRrO = make_tensor_like<ElementOut>(tTMrO);
+      Tensor tCs = recast<decltype(convert)::source_type>(tTMrO);
+      Tensor tCd = recast<decltype(convert)::result_type>(tRrO);
+      CUTLASS_PRAGMA_UNROLL
+      for (int j = 0; j < size(tCs); ++j) {
+        tCd(j) = convert.convert(tCs(j));
+      }
+
+      Tensor src = recast<Array<ElementOut, N>>(coalesce(tRrO));
+      int row_base = get<0>(blk_coord) * get<0>(TileShape{})
+                   + int(cta_mma_rank()) * 128;
+      auto first_coord = tTMEM_LOADcO_i(0);
+      if (row_base + int(get<0>(first_coord)) <
+          int(cute::size<0>(problem_shape))) {
+        Tensor dst = recast<Array<ElementOut, N>>(
+            coalesce(tTMEM_LOADgO_i));
+        copy(AutoVectorizingCopyWithAssumedAlignment<128>{}, src, dst);
+      }
+    }
+    }
+  }
+
   CUTLASS_DEVICE auto
   correction_rescale(
       float scale,
@@ -2188,18 +2558,80 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
 
     int thread_idx = threadIdx.x % (4 * cutlass::NumThreadsPerWarp);
 
+    if constexpr (kIs2Sm) {
+      // Match the FA4 hd256 correction epilogue: the logical D256 output is
+      // two adjacent M256xN128 UMMA accumulators.  Each CTA owns a 128x128
+      // slice of each accumulator, so rescale the two N128 fragments
+      // independently using the same rank-sliced TMEM layout as the MMA.
+      using TMEM_LOAD_2CTA = SM100_TMEM_LOAD_32dp32b16x;
+      using TMEM_STORE_2CTA = SM100_TMEM_STORE_32dp32b16x;
+
+      typename CollectiveMmaPVCompute::TiledMma mma;
+      TiledMMA mma_ts = to_tiled_mma_sm100_ts(mma);
+      ThrMMA thr_mma = mma_ts.get_slice(cta_mma_rank());
+      Tensor cO = make_identity_tensor(
+          make_shape(_128{}, get<1>(TileShapePVMma{})));
+      Tensor cO_mma = make_identity_tensor(select<0,1>(TileShapePVMma{}));
+      Tensor tOtO = decltype(mma_ts)::make_fragment_C(
+          thr_mma.partition_C(cO_mma));
+      float2 scale_f32x2 = make_float2(scale, scale);
+
+      CUTLASS_PRAGMA_UNROLL
+      for (int iter = 0;
+           iter < get<2>(TileShape{}) / get<1>(TileShapePVMma{}); ++iter) {
+        Tensor tOtO_slice = tOtO(make_coord(_, _), _0{}, _0{});
+        Tensor tOtO_i = zipped_divide(
+            tOtO_slice, make_shape(_128{}, get<1>(TileShapePVMma{})));
+        Tensor tOcO_i = zipped_divide(
+            cO, make_shape(_128{}, get<1>(TileShapePVMma{})));
+        tOtO_i.data() = tOtO_i.data().get() + tmem_O
+                      + uint32_t(iter * get<1>(TileShapePVMma{}));
+
+        auto tiled_load = make_tmem_copy(TMEM_LOAD_2CTA{}, tOtO_i);
+        auto thr_load = tiled_load.get_slice(thread_idx);
+        auto tiled_store = make_tmem_copy(TMEM_STORE_2CTA{}, tOtO_i);
+        auto thr_store = tiled_store.get_slice(thread_idx);
+        Tensor tLoad = thr_load.partition_S(tOtO_i);
+        Tensor cLoad = thr_load.partition_D(tOcO_i);
+        Tensor tStore = thr_store.partition_D(tOtO_i);
+
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < size<1>(tLoad); ++i) {
+          Tensor tLoad_i = tLoad(_, i, _0{});
+          Tensor tStore_i = tStore(_, i, _0{});
+          Tensor rO = make_tensor<ElementPV>(shape(cLoad(_, i, _0{})));
+          copy(tiled_load, tLoad_i, rO);
+          CUTLASS_PRAGMA_UNROLL
+          for (int j = 0; j < size(rO); j += 2) {
+            float2 in = make_float2(rO(j), rO(j + 1));
+            float2 out;
+            cute::mul(out, scale_f32x2, in);
+            rO(j) = out.x;
+            rO(j + 1) = out.y;
+          }
+          copy(tiled_store, rO, tStore_i);
+        }
+      }
+      return;
+    }
+
     // As opposed to the softmax, we do not have enough registers here
     // to load all of the values (for tile kv = 128), so we loop
     // good values would be either 32 or 64
-    const int kCorrectionTileSize = 16;
+    // APXINF_CORR_TILE: 0 keeps upstream's 16.
+    const int kCorrectionTileSize = (APXINF_CORR_TILE) == 0 ? 16 : (APXINF_CORR_TILE);
+    static_assert(size<2>(TileShape{}) % ((APXINF_CORR_TILE) == 0 ? 16 : (APXINF_CORR_TILE)) == 0,
+        "APXINF_CORR_TILE must divide the head dimension");
 
-    using TMEM_LOAD = SM100_TMEM_LOAD_32dp32b16x;  // 4x32 threads with 64 cols of 32b elem
-    using TMEM_STORE = SM100_TMEM_STORE_32dp32b16x;  // 4x32 threads with 64 cols of 32b elem
+    using TMEM_LOAD = std::conditional_t<kCorrectionTileSize == 8,
+        SM100_TMEM_LOAD_32dp32b8x, SM100_TMEM_LOAD_32dp32b16x>;  // 4x32 threads with 64 cols of 32b elem
+    using TMEM_STORE = std::conditional_t<kCorrectionTileSize == 8,
+        SM100_TMEM_STORE_32dp32b8x, SM100_TMEM_STORE_32dp32b16x>;  // 4x32 threads with 64 cols of 32b elem
 
     typename CollectiveMmaPV::TiledMma mma;
     Tensor cO = make_identity_tensor(select<0,1>(TileShapePV{}));
     Tensor tOtO = partition_fragment_C(mma, select<0,1>(TileShapePV{}));
-    Tensor tOcO = mma.get_slice(0).partition_C(cO);
+    Tensor tOcO = mma.get_slice(cta_mma_rank()).partition_C(cO);
 
     Tensor tOtO_i = tOtO.compose(make_layout(make_shape(_128{}, Int<kCorrectionTileSize>{})));
     Tensor tOcO_i = tOcO.compose(make_layout(make_shape(_128{}, Int<kCorrectionTileSize>{})));
@@ -2224,11 +2656,16 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     // (the loop runs D / kCorrectionTileSize times).  Only two chunks are ever
     // live, so =1 stages exactly two.  Same values, same order; register
     // allocation differs, hence the knob.
+    // The =0 arm derives the stage count from `TileShape` rather than the
+    // hardcoded 128 -- identical for D = 128 (the only shape upstream's own
+    // adapter instantiates), correct for every other D.  The indices used are
+    // 0..D/tile-1 either way, so this is bit-neutral by construction.
 #if APXINF_CORR_RING2
     Tensor tTMrO = make_tensor<ElementPV>(make_shape(shape(tTMEM_LOADcO), _2{}));
 #define APXINF_CORR_SLOT(i) ((i) % 2)
 #else
-    Tensor tTMrO = make_tensor<ElementPV>(make_shape(shape(tTMEM_LOADcO), Int<128 / kCorrectionTileSize>{}));
+    Tensor tTMrO = make_tensor<ElementPV>(make_shape(shape(tTMEM_LOADcO),
+        Int<size<2>(TileShape{}) / ((APXINF_CORR_TILE) == 0 ? 16 : (APXINF_CORR_TILE))>{}));
 #define APXINF_CORR_SLOT(i) (i)
 #endif
 
@@ -2302,7 +2739,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     Tensor tStS = partition_fragment_C(typename CollectiveMmaQK::TiledMma{}, select<0,1>(TileShapeQK{}));
 
     Tensor cS = make_identity_tensor(select<0,1>(TileShapeQK{}));
-    Tensor tScS = typename CollectiveMmaQK::TiledMma{}.get_slice(0).partition_C(cS);
+    Tensor tScS = typename CollectiveMmaQK::TiledMma{}.get_slice(cta_mma_rank()).partition_C(cS);
 
     Tensor tStS_v = tStS.compose(make_layout(make_shape(_128{}, _2{})));
     Tensor tScS_v = tScS.compose(make_layout(make_shape(_128{}, _2{})));
@@ -2377,10 +2814,20 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     pipeline_o.consumer_wait(pipeline_o_consumer_state);
     pipeline_epi.producer_acquire(pipeline_epi_producer_state);
 
-    Tensor sO = make_tensor(make_smem_ptr(shared_storage_epi.smem_o.data()), typename TensorStorageEpi::SmemLayoutO{});
+    Tensor sO = make_epilogue_smem_tensor(shared_storage_epi);
     Tensor gLSE = make_tensor(make_gmem_ptr(epilogue.params.ptr_LSE), cute::make_shape(cute::size<0>(problem_shape), cute::get<3>(problem_shape)), epilogue.params.dLSE);
 
-    correction_epilogue(apxinf_normalize_scale(params.scale_output, tTMEM_LOADVrS(kIdxFinalRowSum)), _0{}, sO);
+    if constexpr (kIs2Sm) {
+      correction_epilogue_direct(
+          apxinf_normalize_scale(params.scale_output,
+                                 tTMEM_LOADVrS(kIdxFinalRowSum)),
+          _0{}, blk_coord, problem_shape, epilogue);
+    } else {
+      correction_epilogue(
+          apxinf_normalize_scale(params.scale_output,
+                                 tTMEM_LOADVrS(kIdxFinalRowSum)),
+          _0{}, sO);
+    }
 
     if (epilogue.params.ptr_LSE != nullptr) {
       int row_idx = get<0>(tTMEM_LOADVcS(_0{})) + get<0>(TileShape{}) * get<0>(blk_coord);
@@ -2442,7 +2889,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     Tensor tStS = partition_fragment_C(typename CollectiveMmaQK::TiledMma{}, select<0,1>(TileShapeQK{}));
 
     Tensor cS = make_identity_tensor(select<0,1>(TileShapeQK{}));
-    Tensor tScS = typename CollectiveMmaQK::TiledMma{}.get_slice(0).partition_C(cS);
+    Tensor tScS = typename CollectiveMmaQK::TiledMma{}.get_slice(cta_mma_rank()).partition_C(cS);
 
     Tensor tStS_v = tStS.compose(make_layout(make_shape(_128{}, _2{})));
     Tensor tScS_v = tScS.compose(make_layout(make_shape(_128{}, _2{})));
@@ -2547,7 +2994,7 @@ struct Sm100FmhaFwdMainloopTmaWarpspecialized {
     //    FMUL2 scale = 1 / global_sum * out_quant_scale
     //    F2FP
     //    store to smem
-    Tensor sO = make_tensor(make_smem_ptr(shared_storage_epi.smem_o.data()), typename TensorStorageEpi::SmemLayoutO{});
+    Tensor sO = make_epilogue_smem_tensor(shared_storage_epi);
     Tensor gLSE = make_tensor(make_gmem_ptr(epilogue.params.ptr_LSE), cute::make_shape(cute::size<0>(problem_shape), cute::get<3>(problem_shape)), epilogue.params.dLSE);
 
     correction_epilogue(apxinf_normalize_scale(params.scale_output, tTMEM_LOADVrS(kIdxFinalRowSum)), _0{}, sO);

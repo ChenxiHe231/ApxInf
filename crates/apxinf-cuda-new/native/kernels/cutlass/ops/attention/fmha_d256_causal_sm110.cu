@@ -1,22 +1,22 @@
 // Copyright 2025 ApxInf contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// `language-attention`: BF16 head_dim 256, 16 query heads over 4 KV heads,
+// Causal D256 attention: BF16 head_dim 256, 16 query heads over 4 KV heads,
 // CAUSAL, one sequence of `APXINF_FIXED_SCENE_TOKENS` tokens. In-tree CUDA
-// translation of the `apxinf_fa4_d256_l_sm110` AOT object.
+// translated from the validated CuTe DSL implementation.
 //
 // Numeric contract (`sm100_hd256_2cta_fmha_forward.py`): ASCENDING KV with the
 // mask LAST, NO rescale threshold, ex2 polynomial emulation 14/6/0, `div.rn`
 // normalisation with 0/NaN -> 0.0, row_sum over CONTIGUOUS QUARTERS seeded
 // (s, s) together with `acc_scale = ex2(..) * 0.5`, and a two-slot S pipeline.
 // All of it is selected by this translation unit's `-DAPXINF_*` flag line,
-// which `crates/apxinf-cuda/build.rs` keeps in step with
+// which `crates/apxinf-cuda-new/build.rs` keeps in step with
 // `devlocal/aot2cuda/harness/MERGED_FLAGS.sh` (authoritative).
 
-#define APXINF_D256_NS apxinf_d256_language
+#define APXINF_D256_NS apxinf_attention_d256_causal
 #define APXINF_D256_BUILD_LANGUAGE 1
 #define APXINF_D256_BUILD_ACTION 0
-#include "fmha_d256_sm100.cuh"
+#include "fmha_d256_sm110.cuh"
 
 namespace APXINF_D256_NS {
 
@@ -79,11 +79,11 @@ int run_causal(const void* q, const void* k, const void* v, void* output,
 
 }  // namespace APXINF_D256_NS
 
-extern "C" size_t apxinf_d256_language_state_size() {
+extern "C" size_t apxinf_attention_d256_causal_state_size() {
   return sizeof(APXINF_D256_NS::State);
 }
 
-extern "C" void apxinf_d256_language_state_destroy(void* state_ptr) {
+extern "C" void apxinf_attention_d256_causal_state_destroy(void* state_ptr) {
   using APXINF_D256_NS::State;
   if (state_ptr == nullptr) return;
   auto& state = *static_cast<State*>(state_ptr);
@@ -93,7 +93,7 @@ extern "C" void apxinf_d256_language_state_destroy(void* state_ptr) {
   state = State{};
 }
 
-extern "C" int apxinf_d256_language_forward_cuda(
+extern "C" int apxinf_attention_d256_causal_forward(
     const void* q, const void* k, const void* v, void* output, int seq,
     int query_heads, int kv_heads, float scale, cudaStream_t stream,
     void* state_ptr, int prepare_only) {

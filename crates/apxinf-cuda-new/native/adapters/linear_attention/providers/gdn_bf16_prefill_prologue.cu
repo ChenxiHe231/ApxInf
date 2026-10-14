@@ -4,7 +4,7 @@
 
 #include "gdn_bf16_prefill_common.cuh"
 
-#include "../kernels/custom/gdn_fused_qkv.cuh"
+#include "../../../kernels/custom/gdn_bf16_prefill.cuh"
 
 namespace {
 using namespace apxinf_gdn_bf16;
@@ -60,7 +60,7 @@ __global__ void flash_alpha_beta(const __nv_bfloat16* a,
 }
 }  // namespace
 
-extern "C" int32_t apxinf_static_gdn_bf16_prologue(
+extern "C" int32_t apxinf_gdn_bf16_prefill_prologue(
     const void* zba, const void* conv_weight, void* new_conv_state,
     const float* A_log, const void* dt_bias_bf16, void* raw_qk_scratch,
     void* q, void* k, void* v, void* a, void* b, int32_t* cu_seqlens,
@@ -98,7 +98,7 @@ extern "C" int32_t apxinf_static_gdn_bf16_prologue(
   return status(cudaGetLastError());
 }
 
-extern "C" int32_t apxinf_static_gdn_bf16_state_transpose(
+extern "C" int32_t apxinf_gdn_bf16_prefill_state_transpose(
     const float* h_output_vmajor, float* final_state_kmajor,
     cudaStream_t stream) {
   state_vmajor_to_kmajor<<<dim3(HV, 4, 4), dim3(32, 32), 0, stream>>>(

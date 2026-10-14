@@ -1,8 +1,8 @@
 // Copyright 2025 ApxInf contributors.
 // SPDX-License-Identifier: Apache-2.0
 //
-// In-tree CUDA/CUTLASS translation of the `vision-attention-624` /
-// `vision-attention-2200` AOT (CuTe-DSL) objects: BF16 head_dim 64, 16 heads,
+// Strided-group attention for the validated 624- and 2200-token contracts:
+// BF16 head_dim 64, 16 heads,
 // non-causal, three batches over a padded 4072-token view, V carrying a
 // different per-token stride than Q/K (the retained interleaved QKV buffer).
 //
@@ -16,7 +16,7 @@
 //   * row_sum stride-8, seeded into LANE 0 only
 //   * ResidualMask through FA4's R2P bitmask
 // selected entirely by the `-DAPXINF_*` flag line this translation unit is
-// compiled with (see `crates/apxinf-cuda/build.rs` and
+// compiled with (see `crates/apxinf-cuda-new/build.rs` and
 // `devlocal/aot2cuda/harness/MERGED_FLAGS.sh`, which is authoritative).
 // Two of those flags (`APXINF_SKIP_PAD_QSTAGE`, `APXINF_P_CHUNKS16`) are
 // bit-neutral scheduling knobs. A third, `APXINF_NO_ORDER_S`, used to be on
@@ -64,7 +64,7 @@
 #include "collective/sm100_fmha_load_tma_warpspecialized.hpp"
 #include "collective/fmha_fusion.hpp"
 
-namespace apxinf::cuda::fmha_vision {
+namespace apxinf::cuda_new::cutlass_ops::fmha_vision {
 
 using namespace cute;
 
@@ -252,14 +252,14 @@ int run(const void* q, const void* k, const void* v, void* output, int batches,
   return -1;
 }
 
-}  // namespace apxinf::cuda::fmha_vision
+}  // namespace apxinf::cuda_new::cutlass_ops::fmha_vision
 
-extern "C" size_t apxinf_vision_fmha_state_size() {
-  return sizeof(apxinf::cuda::fmha_vision::State);
+extern "C" size_t apxinf_attention_strided_groups_state_size() {
+  return sizeof(apxinf::cuda_new::cutlass_ops::fmha_vision::State);
 }
 
-extern "C" void apxinf_vision_fmha_state_destroy(void* state_ptr) {
-  using apxinf::cuda::fmha_vision::State;
+extern "C" void apxinf_attention_strided_groups_state_destroy(void* state_ptr) {
+  using apxinf::cuda_new::cutlass_ops::fmha_vision::State;
   if (state_ptr == nullptr) return;
   auto& state = *static_cast<State*>(state_ptr);
   if (state.device >= 0) cudaSetDevice(state.device);
@@ -271,14 +271,14 @@ extern "C" void apxinf_vision_fmha_state_destroy(void* state_ptr) {
 // Vision-attention parity entry: a strided padded view with a distinct V
 // stride. q/k/out token_stride = 1024, v token_stride = 3072, batch stride =
 // batch_token_count * token_stride.
-extern "C" int apxinf_vision_mha_bf16_cuda(
+extern "C" int apxinf_attention_strided_groups_forward(
     const void* q, const void* k, const void* v, void* output, int batches,
     int tokens, int heads, int head_dim, int qko_token_stride,
     int v_token_stride, int batch_token_count, float scale,
     cudaStream_t stream, void* state_ptr, int prepare_only) {
-  using apxinf::cuda::fmha_vision::State;
+  using apxinf::cuda_new::cutlass_ops::fmha_vision::State;
   if (state_ptr == nullptr) return -1;
-  return apxinf::cuda::fmha_vision::run(
+  return apxinf::cuda_new::cutlass_ops::fmha_vision::run(
       q, k, v, output, batches, tokens, heads, head_dim, qko_token_stride,
       v_token_stride, batch_token_count, scale, stream,
       *static_cast<State*>(state_ptr), prepare_only != 0);

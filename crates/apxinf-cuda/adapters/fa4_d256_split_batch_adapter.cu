@@ -30,7 +30,7 @@ void set_dense(T& tensor, const void* data, int batch, int seq, int heads) {
 }
 }
 
-extern "C" int32_t apxinf_static_fa4_split_batch_aot_init(cudaStream_t stream) {
+extern "C" int32_t apxinf_static_fa4_split_batch_init(cudaStream_t stream) {
   cudaStreamCaptureStatus capture_status{};
   cudaError_t error = cudaStreamIsCapturing(stream, &capture_status);
   if (error != cudaSuccess) return int32_t(error);
@@ -72,7 +72,7 @@ extern "C" int32_t apxinf_static_fa4_split_batch_aot_init(cudaStream_t stream) {
   return 0;
 }
 
-extern "C" int32_t apxinf_static_fa4_split_batch_aot_ready(void) {
+extern "C" int32_t apxinf_static_fa4_split_batch_ready(void) {
   if (!ready.load(std::memory_order_acquire))
     return APXINF_FA4_SPLIT_BATCH_UNSUPPORTED_TOPOLOGY;
   int device = -1;
@@ -82,7 +82,7 @@ extern "C" int32_t apxinf_static_fa4_split_batch_aot_ready(void) {
              ? 0 : APXINF_FA4_SPLIT_BATCH_UNSUPPORTED_TOPOLOGY;
 }
 
-extern "C" int32_t apxinf_static_fa4_split_batch_aot_forward(
+extern "C" int32_t apxinf_static_fa4_split_batch_forward(
     const void* q, const void* k, const void* v,
     void* q2, void* partial, float* lse, void* out, int32_t key_tokens, cudaStream_t stream) {
   if (key_tokens < 3433 || key_tokens > 3437) return int32_t(cudaErrorInvalidValue);

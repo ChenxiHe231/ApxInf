@@ -1,5 +1,5 @@
 //! BF16 weights and load-time physical layouts.
-use crate::qwen_drive::backend::{kernels::gemm, RuntimeBackend};
+use crate::qwen_drive::backend::RuntimeBackend;
 use std::collections::HashMap;
 
 use apxinf_core::{Backend, Error, Result, Tensor};
@@ -53,36 +53,6 @@ fn narrow_to_bf16(tensor: &Tensor) -> Result<Tensor> {
 /// Store checkpoint `[out, in]` weights as `[in, out]` for row-major GEMM.
 fn projection(tensor: &Tensor) -> Result<Tensor> {
     transpose_2d(tensor)
-}
-
-/// The gate/up weight in the one physical layout this build and device
-/// consume, gathered from the checkpoint's `[2I, K]` order.
-///
-/// Returns the input unchanged on the generic/AOT layout. The packed layout
-/// holds exactly as many elements as the checkpoint one, so a mix-up is
-/// silent -- it computes wrong numbers rather than failing. The layout is
-/// therefore asked of the kernel crate, which owns the GEMM whose measured
-/// `StrideB` defines it, instead of being re-derived here from a capability
-/// test. It is asked **without** a sequence length, because this is the only
-/// copy that will exist: prefill takes the fused kernel and decode takes the
-/// generic route, both on these bytes.
-fn swiglu_layout_gate_up(backend: &dyn Backend, gate_up: Tensor) -> Result<Tensor> {
-    let Some(cuda) = backend.as_any().downcast_ref::<RuntimeBackend>() else {
-        return Ok(gate_up);
-    };
-    let dims = gate_up.shape().dims();
-    if dims.len() != 2 {
-        return Err(Error::Other(
-            "qwen_drive: gate/up weight must be 2-D".into(),
-        ));
-    }
-    let (full_n, k) = (dims[0], dims[1]);
-    let layout = gemm::bf16_swiglu_weight_layout(cuda.context(), full_n * k);
-    if layout != gemm::Bf16SwigluWeightLayout::PackedPairInterleaved {
-        return Ok(gate_up);
-    }
-    let packed = gemm::pack_bf16_swiglu_weight_host(&gate_up.to_f32_vec()?, full_n, k)?;
-    Tensor::from_bf16(vec![k, full_n], &packed)
 }
 
 fn concat_rows_bf16(parts: &[&Tensor]) -> Result<Tensor> {
@@ -155,12 +125,7 @@ pub struct FullAttentionLayerWeights {
     pub k_norm: Tensor,
     pub o_w: Tensor,
     pub post_norm: Tensor,
-    /// The gate/up weight in the **one** physical layout this build and
-    /// device consume, as reported by `gemm::bf16_swiglu_weight_layout`:
-    /// either the checkpoint's `[2*intermediate, hidden]` (gate rows then up
-    /// rows) or the fused operator's packed `[hidden, 2*intermediate]` with
-    /// `[gate256, up256]` column tiles. Never both -- a second resident copy
-    /// would cost +94.4 MB per layer.
+    /// Fused `[2*intermediate, hidden]`, gate rows followed by up rows.
     pub gate_up_w: Tensor,
     pub down_w: Tensor,
 }
@@ -187,7 +152,6 @@ pub struct GdnLayerWeights {
     pub gated_norm: Tensor,
     pub out_w: Tensor,
     pub post_norm: Tensor,
-    /// See `FullAttentionLayerWeights::gate_up_w`.
     pub gate_up_w: Tensor,
     pub down_w: Tensor,
 }
@@ -375,17 +339,8 @@ impl BackboneDeviceWeights {
             )?;
             let gate = take(&mut language, &format!("{p}.mlp.gate_proj.weight"))?;
             let up_w = take(&mut language, &format!("{p}.mlp.up_proj.weight"))?;
-            // Exactly one resident representation, in whichever layout this
-            // build and device consume: the fused CUTLASS SwiGLU's packed
-            // `[K, 2I]`, or the checkpoint's `[2I, K]` for the AOT arm and
-            // every non-Thor target. Decode (`seq == 1`) reads the same bytes
-            // through the generic route's interleaved pairing, so the second
-            // copy report 19 kept (+94.4 MB per layer) is gone; see
-            // devlocal/aot2cuda/reports/23-swiglu-weight-memory.md.
-            let gate_up_w = up(
-                backend,
-                &swiglu_layout_gate_up(backend, concat_rows_bf16(&[&gate, &up_w])?)?,
-            )?;
+            // One checkpoint-row-major representation for the fused gate/up operator.
+            let gate_up_w = up(backend, &concat_rows_bf16(&[&gate, &up_w])?)?;
             let down_w = up(
                 backend,
                 &projection(&take(&mut language, &format!("{p}.mlp.down_proj.weight"))?)?,
@@ -673,200 +628,5 @@ impl ExpertDeviceWeights {
                 )?,
             )?,
         })
-    }
-}
-
-/// The gate/up load path, exercised on a real checkpoint.
-///
-/// `swiglu_layout_gate_up` performs a 47,185,920-element gather and a
-/// `to_f32_vec -> Tensor::from_bf16([K, 2I])` round trip that no other test
-/// drives at full size on real bytes (report 19 H7-b: the predecessor
-/// compiled but had never been executed). The permutation itself is covered by
-/// the kernel crate's oracle, so what this adds is the surrounding code and
-/// the real weight data.
-///
-///   APXINF_QWEN_DRIVE_TEST_MODEL=/path/to/Qwen-Drive-1.0-4B \
-///     cargo test --release -p apxinf-model --features cuda --lib \
-///       -- --ignored --nocapture --test-threads=1 swiglu
-#[cfg(test)]
-mod load_path_tests {
-    use super::*;
-    use crate::qwen_drive::backend::RuntimeBackend;
-
-    const K: usize = 2560;
-    const FULL_N: usize = 18432;
-    const PAIR: usize = 256;
-
-    /// A `/proc/meminfo` field in bytes. On Thor the GPU allocates out of the
-    /// same unified pool, so `MemFree` moves by what a device allocation
-    /// actually costs; `nvidia-smi` reports `[N/A]` for memory on this part.
-    /// `MemAvailable` is useless here because it counts reclaimable page
-    /// cache, which a 9 GB checkpoint read churns by more than the signal.
-    fn meminfo(field: &str) -> u64 {
-        let text = std::fs::read_to_string("/proc/meminfo").unwrap();
-        text.lines()
-            .find_map(|line| line.strip_prefix(&format!("{field}:")))
-            .and_then(|rest| rest.trim().strip_suffix(" kB"))
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap()
-            * 1024
-    }
-
-    #[test]
-    #[ignore = "requires CUDA and APXINF_QWEN_DRIVE_TEST_MODEL with a real Qwen-Drive checkpoint"]
-    fn swiglu_gate_up_load_path_runs_on_a_real_checkpoint() {
-        let root = std::path::PathBuf::from(
-            std::env::var_os("APXINF_QWEN_DRIVE_TEST_MODEL")
-                .expect("set APXINF_QWEN_DRIVE_TEST_MODEL to the checkpoint directory"),
-        );
-        let config = QwenDriveConfig::from_json_file(&root.join("config.json")).unwrap();
-        let text = &config.text;
-        eprintln!(
-            "checkpoint: n_layers={} hidden={} intermediate={} layer_types={}",
-            text.n_layers,
-            text.hidden_size,
-            text.intermediate_size,
-            text.layer_types.len()
-        );
-        let (tensors, _) = apxinf_loader::safetensors::load_native_path(&root).unwrap();
-        // Keep an independent copy of layer 0's two source matrices before the
-        // map is consumed, so the check below does not go through any of the
-        // production helpers.
-        // The checkpoint carries a `vlm.` prefix that `from_map` strips.
-        let source = |name: &str| -> Vec<f32> {
-            let key = format!("model.language_model.layers.0.mlp.{name}.weight");
-            tensors
-                .get(&key)
-                .or_else(|| tensors.get(&format!("vlm.{key}")))
-                .unwrap_or_else(|| panic!("checkpoint has no {key}"))
-                .to_f32_vec()
-                .unwrap()
-        };
-        let gate = source("gate_proj");
-        let up_source = source("up_proj");
-        let vlm = QwenDriveVlmWeights::from_map(tensors).unwrap();
-        let backend = RuntimeBackend::new(0).unwrap();
-        let layout = gemm::bf16_swiglu_weight_layout(backend.context(), FULL_N * K);
-
-        let before = meminfo("MemFree");
-        let backbone = BackboneDeviceWeights::from_maps(&config, vlm, &backend).unwrap();
-        let after = meminfo("MemFree");
-        eprintln!(
-            "backbone upload: MemFree {} -> {} MB ({layout:?})",
-            before / 1_000_000,
-            after / 1_000_000,
-        );
-
-        assert_eq!(backbone.layers.len(), text.n_layers);
-        let expected: &[usize] = match layout {
-            gemm::Bf16SwigluWeightLayout::PackedPairInterleaved => &[K, FULL_N],
-            gemm::Bf16SwigluWeightLayout::CheckpointRowMajor => &[FULL_N, K],
-        };
-        for (index, layer) in backbone.layers.iter().enumerate() {
-            let gate_up = match layer {
-                MixerWeights::FullAttention(w) => &w.gate_up_w,
-                MixerWeights::Gdn(w) => &w.gate_up_w,
-            };
-            assert_eq!(
-                gate_up.shape().dims(),
-                expected,
-                "layer {index} carries the wrong gate/up layout"
-            );
-        }
-
-        // Full verification of layer 0, against an index map written here from
-        // the layout description rather than imported from the packer.
-        let gate_up = match &backbone.layers[0] {
-            MixerWeights::FullAttention(w) => &w.gate_up_w,
-            MixerWeights::Gdn(w) => &w.gate_up_w,
-        };
-        let device = backend.to_cpu(gate_up).unwrap().to_f32_vec().unwrap();
-        assert_eq!(device.len(), FULL_N * K);
-        let half_n = FULL_N / 2;
-        let mut mismatches = 0usize;
-        for index in 0..FULL_N * K {
-            let expected_value = match layout {
-                gemm::Bf16SwigluWeightLayout::CheckpointRowMajor => {
-                    if index < half_n * K {
-                        gate[index]
-                    } else {
-                        up_source[index - half_n * K]
-                    }
-                }
-                gemm::Bf16SwigluWeightLayout::PackedPairInterleaved => {
-                    let row_k = index / FULL_N;
-                    let dst_col = index - row_k * FULL_N;
-                    let tile = dst_col / (2 * PAIR);
-                    let within = dst_col - tile * (2 * PAIR);
-                    if within < PAIR {
-                        gate[(tile * PAIR + within) * K + row_k]
-                    } else {
-                        up_source[(tile * PAIR + within - PAIR) * K + row_k]
-                    }
-                }
-            };
-            if device[index].to_bits() != expected_value.to_bits() {
-                mismatches += 1;
-            }
-        }
-        assert_eq!(
-            mismatches,
-            0,
-            "layer 0 gate/up: {mismatches}/{} elements differ from the \
-             checkpoint bytes",
-            FULL_N * K
-        );
-        eprintln!(
-            "layer 0 gate/up {layout:?}: {}/{} elements match the checkpoint \
-             bit for bit",
-            FULL_N * K,
-            FULL_N * K
-        );
-
-        // Resident accounting: what the one representation costs, summed over
-        // the layers of the model that actually loaded.
-        let resident: usize = backbone
-            .layers
-            .iter()
-            .map(|layer| match layer {
-                MixerWeights::FullAttention(w) => w.gate_up_w.numel(),
-                MixerWeights::Gdn(w) => w.gate_up_w.numel(),
-            })
-            .sum();
-        assert_eq!(resident, text.n_layers * FULL_N * K);
-        eprintln!(
-            "resident gate/up: {} layers x {} B = {} B in one layout; report \
-             19's tree held both layouts, i.e. {} B",
-            text.n_layers,
-            FULL_N * K * 2,
-            resident * 2,
-            resident * 4
-        );
-
-        // And what the second copy would cost, measured rather than computed:
-        // allocate and upload one `[2I, K]` buffer per layer and watch MemFree.
-        // Diagnostic only, never asserted: `MemFree` is a whole-system number,
-        // so a concurrent session on the same box swamps it (observed 3055 MB
-        // on a quiet box and 35 MB while a sibling agent was compiling). The
-        // authoritative figure is the byte accounting above.
-        let filler =
-            Tensor::from_bf16(vec![FULL_N, K], &vec![half::bf16::ZERO; FULL_N * K]).unwrap();
-        let free_before = meminfo("MemFree");
-        let second_copy: Vec<Tensor> = (0..text.n_layers)
-            .map(|_| backend.to_device(&filler).unwrap())
-            .collect();
-        backend.context().synchronize().unwrap();
-        let free_after = meminfo("MemFree");
-        let measured = free_before.saturating_sub(free_after);
-        eprintln!(
-            "second copy for {} layers: MemFree {} -> {} MB, measured cost {} MB \
-             (computed {} MB)",
-            second_copy.len(),
-            free_before / 1_000_000,
-            free_after / 1_000_000,
-            measured / 1_000_000,
-            (text.n_layers * FULL_N * K * 2) as u64 / 1_000_000
-        );
-        drop(second_copy);
     }
 }

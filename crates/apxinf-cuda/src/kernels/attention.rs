@@ -3164,96 +3164,15 @@ pub(crate) fn vision_fa2_enabled() -> bool {
     )
 }
 
-/// Which implementation of an FA4 attention operator a build links.
-///
-/// `Aot` is the pinned CuTe-DSL object from `APXINF_CUDA_AOT_MANIFEST`; `Cuda`
-/// is the in-tree CUTLASS translation. The two are required to be
-/// bit-identical and the feature exists so an end-to-end regression can be
-/// attributed to one operator. Both are linked when the matching
-/// `aot-*-attention` feature is on, which is what makes the in-process
-/// equivalence tests possible.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fa4AttentionImpl {
-    Aot,
-    Cuda,
-}
-
-/// Which operator's arms are being asked about. `Cuda` is one cfg for all
-/// three (one translation unit each, compiled on every SM110 target); the AOT
-/// arms are three independent Cargo features.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fa4Operator {
-    Vision,
-    Action,
-    Language,
-}
-
-impl Fa4AttentionImpl {
-    /// Whether this build links this implementation of `operator` at all.
-    pub const fn linked(self, operator: Fa4Operator) -> bool {
-        match self {
-            Self::Cuda => cfg!(apxinf_fa4_attention_cuda),
-            Self::Aot => match operator {
-                Fa4Operator::Vision => cfg!(apxinf_aot_vision_attention),
-                Fa4Operator::Action => cfg!(apxinf_aot_action_attention),
-                Fa4Operator::Language => cfg!(apxinf_aot_language_attention),
-            },
-        }
-    }
-}
-
-macro_rules! fa4_impl_selector {
-    ($(#[$meta:meta])* $name:ident, $aot_cfg:ident) => {
-        $(#[$meta])*
-        pub fn $name(ctx: &CudaContext) -> Option<Fa4AttentionImpl> {
-            if ctx.caps().sm != 110 {
-                return None;
-            }
-            [Fa4AttentionImpl::Aot, Fa4AttentionImpl::Cuda]
-                .into_iter()
-                .find(|candidate| match candidate {
-                    Fa4AttentionImpl::Aot => cfg!($aot_cfg),
-                    Fa4AttentionImpl::Cuda => cfg!(apxinf_fa4_attention_cuda),
-                })
-        }
-    };
-}
-
-fa4_impl_selector!(
-    /// The vision-attention implementation this build will use, if any. AOT
-    /// wins when linked: it is the previously measured baseline.
-    vision_attention_impl,
-    apxinf_aot_vision_attention
-);
-fa4_impl_selector!(
-    /// The action-attention implementation this build will use, if any.
-    action_attention_impl,
-    apxinf_aot_action_attention
-);
-fa4_impl_selector!(
-    /// The language-attention implementation this build will use, if any.
-    language_attention_impl,
-    apxinf_aot_language_attention
-);
-
-#[cfg(any(
-    apxinf_fa4_attention_cuda,
-    apxinf_aot_action_attention,
-    apxinf_aot_language_attention
-))]
+#[cfg(apxinf_aot_sm110)]
 fn check_fa4_d256_status(status: i32) -> Result<()> {
     if status >= 0x10000 {
         return Err(Error::Other(format!(
-            "FA4 D256 wrapper failed with status 0x{status:x}"
+            "FA4 D256 AOT wrapper failed with status 0x{status:x}"
         )));
     }
     check_cuda(status)
 }
-
-/// `apxinf_static_fa4_*` returns this instead of a CUDA error when the device
-/// or module topology is one the arm explicitly does not serve. It is the only
-/// status that selects a fallback rather than propagating.
-const FA4_UNSUPPORTED_TOPOLOGY: i32 = 0x20000;
 
 /// Split action attention over 3438 physical KV rows. Immutable masks admit
 /// the real prompt prefix plus 50 action tokens, preserving the 1718-row split.
@@ -3264,176 +3183,92 @@ pub fn try_gqa_bf16_fa4_d256_splitbatch_sm110(
     v: &Tensor,
     key_tokens: usize,
 ) -> Result<Option<Tensor>> {
-    let Some(implementation) = action_attention_impl(ctx) else {
-        return Ok(None);
-    };
-    gqa_bf16_fa4_d256_splitbatch_sm110_with(ctx, q, k, v, key_tokens, implementation)
-        .map(|outputs| outputs.map(|outputs| outputs.output))
-}
-
-/// Every buffer the split-batch action operator produces.
-///
-/// `partial` is the PRE-merge two-batch output, 2 x 50 x 16 x 256 BF16, and
-/// `lse` is the dense [2, 16, 50] FP32 log-sum-exp the shared merge kernel
-/// turns into its two convex weights. All three are required to be bit-exact
-/// between the arms, and the gate asserts each one separately, because the
-/// merge amplifies an LSE difference by `w0*w1*(p0-p1)` -- bounded in absolute
-/// terms but UNBOUNDED in relative terms wherever the convex combination
-/// cancels. Report 27 measured that at `key_tokens = 3436`, the shape whose
-/// two batches have exactly equal KV length: 44,832 BF16 ULP of output error
-/// from a 1-fp32-ULP LSE difference, at an `absmax` indistinguishable from the
-/// other four shapes'. Production ignores `partial` and `lse`; the gate must
-/// not.
-pub struct Fa4ActionOutputs {
-    pub output: Tensor,
-    pub partial: Tensor,
-    pub lse: Tensor,
-}
-
-/// Run one named implementation of action attention. Unsupported geometry
-/// returns `None` before any allocation or launch.
-pub fn gqa_bf16_fa4_d256_splitbatch_sm110_with(
-    ctx: &CudaContext,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    key_tokens: usize,
-    implementation: Fa4AttentionImpl,
-) -> Result<Option<Fa4ActionOutputs>> {
-    let q_shape = q.shape().dims();
-    let kv_shape = k.shape().dims();
-    if ctx.caps().sm != 110
-        || q_shape != [50, 16, 256]
-        || kv_shape != [3438, 4, 256]
-        || v.shape() != k.shape()
-        || [q, k, v].into_iter().any(|t| t.dtype() != DType::BF16)
-        || !(3433..=3437).contains(&key_tokens)
+    #[cfg(apxinf_aot_sm110)]
     {
-        return Ok(None);
-    }
-    let q_bytes = checked_bytes(DType::BF16, q_shape, "FA4 split A Q")?;
-    let kv_bytes = checked_bytes(DType::BF16, kv_shape, "FA4 split A KV")?;
-    let q_buf = CudaBuffer::from_tensor(q).map_err(Error::Cuda)?;
-    let k_buf = CudaBuffer::from_tensor(k).map_err(Error::Cuda)?;
-    let v_buf = CudaBuffer::from_tensor(v).map_err(Error::Cuda)?;
-    require_buffers(
-        ctx,
-        "FA4 split A",
-        &[
-            ("q", &q_buf, q_bytes),
-            ("k", &k_buf, kv_bytes),
-            ("v", &v_buf, kv_bytes),
-        ],
-    )?;
-    if ((q_buf.ptr() as usize) | (k_buf.ptr() as usize) | (v_buf.ptr() as usize)) & 15 != 0 {
-        return Ok(None);
-    }
-    let prepare = crate::workspace::may_prepare_native_resources();
-    let status = match implementation {
-        Fa4AttentionImpl::Aot => {
-            #[cfg(apxinf_aot_action_attention)]
-            unsafe {
-                if prepare {
-                    ffi::apxinf_static_fa4_split_batch_aot_init(ctx.stream().handle())
-                } else {
-                    ffi::apxinf_static_fa4_split_batch_aot_ready()
-                }
-            }
-            #[cfg(not(apxinf_aot_action_attention))]
-            return Err(Error::Other(
-                "action attention AOT implementation is not linked by this build".into(),
-            ));
+        // Mirrors the C ABI header. This status is emitted only before any
+        // kernel launch, so the existing D256 attention path can run safely.
+        const UNSUPPORTED_TOPOLOGY: i32 = 0x20000;
+        let q_shape = q.shape().dims();
+        let kv_shape = k.shape().dims();
+        if ctx.caps().sm != 110
+            || q_shape != [50, 16, 256]
+            || kv_shape != [3438, 4, 256]
+            || v.shape() != k.shape()
+            || [q, k, v].into_iter().any(|t| t.dtype() != DType::BF16)
+            || !(3433..=3437).contains(&key_tokens)
+        {
+            return Ok(None);
         }
-        Fa4AttentionImpl::Cuda => {
-            #[cfg(apxinf_fa4_attention_cuda)]
-            unsafe {
-                if prepare {
-                    ffi::apxinf_static_fa4_split_batch_cuda_init(ctx.stream().handle())
-                } else {
-                    ffi::apxinf_static_fa4_split_batch_cuda_ready()
-                }
-            }
-            #[cfg(not(apxinf_fa4_attention_cuda))]
-            return Err(Error::Other(
-                "action attention CUDA implementation is not linked by this build".into(),
-            ));
+        let q_bytes = checked_bytes(DType::BF16, q_shape, "FA4 split A Q")?;
+        let kv_bytes = checked_bytes(DType::BF16, kv_shape, "FA4 split A KV")?;
+        let q_buf = CudaBuffer::from_tensor(q).map_err(Error::Cuda)?;
+        let k_buf = CudaBuffer::from_tensor(k).map_err(Error::Cuda)?;
+        let v_buf = CudaBuffer::from_tensor(v).map_err(Error::Cuda)?;
+        require_buffers(
+            ctx,
+            "FA4 split A",
+            &[
+                ("q", &q_buf, q_bytes),
+                ("k", &k_buf, kv_bytes),
+                ("v", &v_buf, kv_bytes),
+            ],
+        )?;
+        if ((q_buf.ptr() as usize) | (k_buf.ptr() as usize) | (v_buf.ptr() as usize)) & 15 != 0 {
+            return Ok(None);
         }
-    };
-    if status == FA4_UNSUPPORTED_TOPOLOGY {
-        return Ok(None);
-    }
-    check_fa4_d256_status(status)?;
-
-    let q2 = output_buffer(ctx, q_bytes * 2)?;
-    let partial = output_buffer(ctx, q_bytes * 2)?;
-    let lse = output_buffer(ctx, 2 * 16 * 50 * std::mem::size_of::<f32>())?;
-    let output = output_buffer(ctx, q_bytes)?;
-    if ((q2.ptr() as usize)
-        | (partial.ptr() as usize)
-        | (lse.ptr() as usize)
-        | (output.ptr() as usize))
-        & 15
-        != 0
-    {
-        return Ok(None);
-    }
-    let status = match implementation {
-        Fa4AttentionImpl::Aot => {
-            #[cfg(apxinf_aot_action_attention)]
-            unsafe {
-                ffi::apxinf_static_fa4_split_batch_aot_forward(
-                    q_buf.ptr(),
-                    k_buf.ptr(),
-                    v_buf.ptr(),
-                    q2.ptr(),
-                    partial.ptr(),
-                    lse.ptr().cast::<f32>(),
-                    output.ptr(),
-                    key_tokens as i32,
-                    ctx.stream().handle(),
-                )
+        unsafe {
+            let status = if crate::workspace::may_prepare_native_resources() {
+                ffi::apxinf_static_fa4_split_batch_init(ctx.stream().handle())
+            } else {
+                ffi::apxinf_static_fa4_split_batch_ready()
+            };
+            if status == UNSUPPORTED_TOPOLOGY {
+                return Ok(None);
             }
-            #[cfg(not(apxinf_aot_action_attention))]
-            unreachable!()
+            check_fa4_d256_status(status)?;
         }
-        Fa4AttentionImpl::Cuda => {
-            #[cfg(apxinf_fa4_attention_cuda)]
-            unsafe {
-                ffi::apxinf_static_fa4_split_batch_cuda_forward(
-                    q_buf.ptr(),
-                    k_buf.ptr(),
-                    v_buf.ptr(),
-                    q2.ptr(),
-                    partial.ptr(),
-                    lse.ptr().cast::<f32>(),
-                    output.ptr(),
-                    key_tokens as i32,
-                    ctx.stream().handle(),
-                )
+        let q2 = output_buffer(ctx, q_bytes * 2)?;
+        let partial = output_buffer(ctx, q_bytes * 2)?;
+        let lse = output_buffer(ctx, 2 * 16 * 50 * std::mem::size_of::<f32>())?;
+        let output = output_buffer(ctx, q_bytes)?;
+        if ((q2.ptr() as usize)
+            | (partial.ptr() as usize)
+            | (lse.ptr() as usize)
+            | (output.ptr() as usize))
+            & 15
+            != 0
+        {
+            return Ok(None);
+        }
+        unsafe {
+            let status = ffi::apxinf_static_fa4_split_batch_forward(
+                q_buf.ptr(),
+                k_buf.ptr(),
+                v_buf.ptr(),
+                q2.ptr(),
+                partial.ptr(),
+                lse.ptr().cast::<f32>(),
+                output.ptr(),
+                key_tokens as i32,
+                ctx.stream().handle(),
+            );
+            if status == UNSUPPORTED_TOPOLOGY {
+                return Ok(None);
             }
-            #[cfg(not(apxinf_fa4_attention_cuda))]
-            unreachable!()
+            check_fa4_d256_status(status)?;
         }
-    };
-    if status == FA4_UNSUPPORTED_TOPOLOGY {
-        return Ok(None);
-    }
-    check_fa4_d256_status(status)?;
-    Ok(Some(Fa4ActionOutputs {
-        output: make_gpu_tensor(q.shape().clone(), DType::BF16, ctx.device_id(), output),
-        partial: make_gpu_tensor(
-            Shape::new(vec![2, 50, 16, 256]),
+        Ok(Some(make_gpu_tensor(
+            q.shape().clone(),
             DType::BF16,
             ctx.device_id(),
-            partial,
-        ),
-        lse: make_gpu_tensor(
-            Shape::new(vec![2, 16, 50]),
-            DType::F32,
-            ctx.device_id(),
-            lse,
-        ),
-    }))
+            output,
+        )))
+    }
+    #[cfg(not(apxinf_aot_sm110))]
+    {
+        let _ = (ctx, q, k, v, key_tokens);
+        Ok(None)
+    }
 }
 
 /// Causal BF16 language attention for the fixed SM110 prompt geometry.
@@ -3445,130 +3280,68 @@ pub fn try_gqa_bf16_fa4_d256_sm110(
     v: &Tensor,
     key_tokens: usize,
 ) -> Result<Option<Tensor>> {
-    let Some(implementation) = language_attention_impl(ctx) else {
-        return Ok(None);
-    };
-    gqa_bf16_fa4_d256_sm110_with(ctx, q, k, v, key_tokens, implementation)
-}
-
-/// Run one named implementation of language attention. Unsupported geometry
-/// returns `None` before any allocation or launch.
-pub fn gqa_bf16_fa4_d256_sm110_with(
-    ctx: &CudaContext,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    key_tokens: usize,
-    implementation: Fa4AttentionImpl,
-) -> Result<Option<Tensor>> {
-    let debug_tokens = if implementation == Fa4AttentionImpl::Cuda {
-        std::env::var("APX_LANGUAGE_TEST_TOKENS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-    } else {
-        None
-    };
-    let query_tokens = debug_tokens.unwrap_or(FIXED_SCENE_TOKENS);
-    let kv_tokens = query_tokens;
-    let q_shape = q.shape().dims();
-    let k_shape = k.shape().dims();
-    if ctx.caps().sm != 110
-        || q_shape != [query_tokens, 16, 256]
-        || k_shape != [kv_tokens, 4, 256]
-        || v.shape() != k.shape()
-        || [q, k, v].into_iter().any(|t| t.dtype() != DType::BF16)
-        || key_tokens != kv_tokens
+    #[cfg(apxinf_aot_sm110)]
     {
-        return Ok(None);
-    }
-    let q_bytes = checked_bytes(DType::BF16, q_shape, "FA4 D256 Q")?;
-    let kv_bytes = checked_bytes(DType::BF16, k_shape, "FA4 D256 KV")?;
-    let q_buf = CudaBuffer::from_tensor(q).map_err(Error::Cuda)?;
-    let k_buf = CudaBuffer::from_tensor(k).map_err(Error::Cuda)?;
-    let v_buf = CudaBuffer::from_tensor(v).map_err(Error::Cuda)?;
-    require_buffers(
-        ctx,
-        "FA4 D256",
-        &[
-            ("q", &q_buf, q_bytes),
-            ("k", &k_buf, kv_bytes),
-            ("v", &v_buf, kv_bytes),
-        ],
-    )?;
-    if crate::workspace::may_prepare_native_resources() {
-        let status = match implementation {
-            Fa4AttentionImpl::Aot => {
-                #[cfg(apxinf_aot_language_attention)]
-                unsafe {
-                    ffi::apxinf_static_fa4_d256_aot_init()
-                }
-                #[cfg(not(apxinf_aot_language_attention))]
-                return Err(Error::Other(
-                    "language attention AOT implementation is not linked by this build".into(),
-                ));
-            }
-            Fa4AttentionImpl::Cuda => {
-                #[cfg(apxinf_fa4_attention_cuda)]
-                unsafe {
-                    ffi::apxinf_static_fa4_d256_cuda_init()
-                }
-                #[cfg(not(apxinf_fa4_attention_cuda))]
-                return Err(Error::Other(
-                    "language attention CUDA implementation is not linked by this build".into(),
-                ));
-            }
-        };
-        check_fa4_d256_status(status)?;
-    }
-    let output = output_buffer(ctx, q_bytes)?;
-    let status = match implementation {
-        Fa4AttentionImpl::Aot => {
-            #[cfg(apxinf_aot_language_attention)]
-            unsafe {
-                ffi::apxinf_static_fa4_d256_aot_forward(
-                    q_buf.ptr(),
-                    k_buf.ptr(),
-                    v_buf.ptr(),
-                    output.ptr(),
-                    ctx.stream().handle(),
-                )
-            }
-            #[cfg(not(apxinf_aot_language_attention))]
-            return Err(Error::Other(
-                "language attention AOT implementation is not linked by this build".into(),
-            ));
+        let (query_tokens, kv_tokens) = (FIXED_SCENE_TOKENS, FIXED_SCENE_TOKENS);
+        let q_shape = q.shape().dims();
+        let k_shape = k.shape().dims();
+        if ctx.caps().sm != 110
+            || q_shape != [query_tokens, 16, 256]
+            || k_shape != [kv_tokens, 4, 256]
+            || v.shape() != k.shape()
+            || [q, k, v].into_iter().any(|t| t.dtype() != DType::BF16)
+            || key_tokens != kv_tokens
+        {
+            return Ok(None);
         }
-        Fa4AttentionImpl::Cuda => {
-            #[cfg(apxinf_fa4_attention_cuda)]
+        let q_bytes = checked_bytes(DType::BF16, q_shape, "FA4 D256 Q")?;
+        let kv_bytes = checked_bytes(DType::BF16, k_shape, "FA4 D256 KV")?;
+        let q_buf = CudaBuffer::from_tensor(q).map_err(Error::Cuda)?;
+        let k_buf = CudaBuffer::from_tensor(k).map_err(Error::Cuda)?;
+        let v_buf = CudaBuffer::from_tensor(v).map_err(Error::Cuda)?;
+        require_buffers(
+            ctx,
+            "FA4 D256",
+            &[
+                ("q", &q_buf, q_bytes),
+                ("k", &k_buf, kv_bytes),
+                ("v", &v_buf, kv_bytes),
+            ],
+        )?;
+        if crate::workspace::may_prepare_native_resources() {
             unsafe {
-                ffi::apxinf_static_fa4_d256_cuda_forward(
-                    q_buf.ptr(),
-                    k_buf.ptr(),
-                    v_buf.ptr(),
-                    output.ptr(),
-                    ctx.stream().handle(),
-                )
+                check_fa4_d256_status(ffi::apxinf_static_fa4_d256_init())?;
             }
-            #[cfg(not(apxinf_fa4_attention_cuda))]
-            return Err(Error::Other(
-                "language attention CUDA implementation is not linked by this build".into(),
-            ));
         }
-    };
-    check_fa4_d256_status(status)?;
-    Ok(Some(make_gpu_tensor(
-        q.shape().clone(),
-        DType::BF16,
-        ctx.device_id(),
-        output,
-    )))
+        let output = output_buffer(ctx, q_bytes)?;
+        unsafe {
+            check_fa4_d256_status(ffi::apxinf_static_fa4_d256_forward(
+                q_buf.ptr(),
+                k_buf.ptr(),
+                v_buf.ptr(),
+                output.ptr(),
+                ctx.stream().handle(),
+            ))?;
+        }
+        Ok(Some(make_gpu_tensor(
+            q.shape().clone(),
+            DType::BF16,
+            ctx.device_id(),
+            output,
+        )))
+    }
+    #[cfg(not(apxinf_aot_sm110))]
+    {
+        let _ = (ctx, q, k, v, key_tokens);
+        Ok(None)
+    }
 }
 
-#[cfg(any(apxinf_fa4_attention_cuda, apxinf_aot_vision_attention))]
+#[cfg(apxinf_aot_sm110)]
 fn check_fa4_vision_status(status: i32) -> Result<()> {
     if status >= 0x10000 {
         return Err(Error::Other(format!(
-            "FA4 vision wrapper failed with status 0x{status:x}"
+            "FA4 vision AOT wrapper failed with status 0x{status:x}"
         )));
     }
     check_cuda(status)
@@ -3580,58 +3353,42 @@ const FA4_VFIXED_OFFSETS: [u32; 13] = [
 
 /// Prepare fixed-group FA4 before Graph capture. Only an explicit unsupported
 /// device/module state selects the already initialized varlen fallback.
-#[allow(unused_variables)]
-fn prepare_bf16_fa4_fixed_groups_sm110(
-    ctx: &CudaContext,
-    host_offsets: &[u32],
-    implementation: Fa4AttentionImpl,
-) -> Result<bool> {
-    if ctx.caps().sm != 110
-        || ctx.caps().multiprocessor_count != 20
-        || host_offsets != FA4_VFIXED_OFFSETS.as_slice()
+fn prepare_bf16_fa4_fixed_groups_sm110(ctx: &CudaContext, host_offsets: &[u32]) -> Result<bool> {
+    #[cfg(apxinf_aot_sm110)]
     {
-        return Ok(false);
-    }
-    // Keep accepted varlen ready for explicitly unsupported fixed initialization.
-    // All other initialization errors propagate.
-    let prepare = crate::workspace::may_prepare_native_resources();
-    let status = match implementation {
-        Fa4AttentionImpl::Aot => {
-            #[cfg(apxinf_aot_vision_attention)]
-            unsafe {
-                if prepare {
-                    ffi::apxinf_static_fa4_bf16_vfixed_aot_init(ctx.stream().handle())
-                } else {
-                    ffi::apxinf_static_fa4_bf16_vfixed_aot_ready()
-                }
-            }
-            #[cfg(not(apxinf_aot_vision_attention))]
+        if ctx.caps().sm != 110
+            || ctx.caps().multiprocessor_count != 20
+            || host_offsets != FA4_VFIXED_OFFSETS.as_slice()
+        {
             return Ok(false);
         }
-        Fa4AttentionImpl::Cuda => {
-            #[cfg(apxinf_fa4_attention_cuda)]
-            unsafe {
-                if prepare {
-                    ffi::apxinf_static_fa4_bf16_vfixed_cuda_init(ctx.stream().handle())
-                } else {
-                    ffi::apxinf_static_fa4_bf16_vfixed_cuda_ready()
-                }
+        if crate::workspace::may_prepare_native_resources() {
+            // Keep accepted varlen ready for explicitly unsupported fixed-AOT
+            // initialization. All other initialization errors propagate.
+            let status = unsafe { ffi::apxinf_static_fa4_bf16_vfixed_init(ctx.stream().handle()) };
+            if status == 0x20000 {
+                return Ok(false);
             }
-            #[cfg(not(apxinf_fa4_attention_cuda))]
+            check_fa4_vision_status(status)?;
+            return Ok(true);
+        }
+        let status = unsafe { ffi::apxinf_static_fa4_bf16_vfixed_ready() };
+        if status == 0x20000 {
             return Ok(false);
         }
-    };
-    if status == FA4_UNSUPPORTED_TOPOLOGY {
-        return Ok(false);
+        check_fa4_vision_status(status)?;
+        Ok(true)
     }
-    check_fa4_vision_status(status)?;
-    Ok(true)
+    #[cfg(not(apxinf_aot_sm110))]
+    {
+        let _ = (ctx, host_offsets);
+        Ok(false)
+    }
 }
 
 /// One model-neutral BF16 attention operation over four fixed groups and a
 /// physical V token stride of 3072 elements. `false` means no launch occurred.
 #[allow(clippy::too_many_arguments)]
-#[allow(unused_variables)]
 fn try_bf16_fa4_fixed_groups_sm110(
     ctx: &CudaContext,
     q: &CudaBuffer,
@@ -3644,75 +3401,72 @@ fn try_bf16_fa4_fixed_groups_sm110(
     head_dim: usize,
     v_token_stride: usize,
     host_offsets: &[u32],
-    implementation: Fa4AttentionImpl,
 ) -> Result<bool> {
-    if ctx.caps().sm != 110
-        || ctx.caps().multiprocessor_count != 20
-        || dtype != DType::BF16
-        || tokens != 12216
-        || heads != 16
-        || head_dim != 64
-        || v_token_stride != 3072
-        || host_offsets != FA4_VFIXED_OFFSETS.as_slice()
+    #[cfg(apxinf_aot_sm110)]
     {
-        return Ok(false);
-    }
-    let plane_bytes = checked_bytes(dtype, &[tokens, heads, head_dim], "FA4 fixed plane")?;
-    let v_words = (tokens - 1)
-        .checked_mul(v_token_stride)
-        .and_then(|words| words.checked_add(heads * head_dim))
-        .ok_or_else(|| Error::Other("FA4 fixed V extent overflow".into()))?;
-    let v_bytes = v_words
-        .checked_mul(dtype.size_in_bytes())
-        .ok_or_else(|| Error::Other("FA4 fixed V byte extent overflow".into()))?;
-    require_buffers(
-        ctx,
-        "FA4 fixed groups",
-        &[
-            ("q", q, plane_bytes),
-            ("k", k, plane_bytes),
-            ("v", v, v_bytes),
-            ("output", output, plane_bytes),
-        ],
-    )?;
-    if [q.ptr(), k.ptr(), v.ptr(), output.ptr()]
-        .iter()
-        .any(|ptr| (*ptr as usize) & 15 != 0)
-    {
-        return Ok(false);
-    }
-    let status = match implementation {
-        Fa4AttentionImpl::Aot => {
-            #[cfg(apxinf_aot_vision_attention)]
-            unsafe {
-                ffi::apxinf_static_fa4_bf16_vfixed_aot_forward(
-                    q.ptr(),
-                    k.ptr(),
-                    v.ptr(),
-                    output.ptr(),
-                    ctx.stream().handle(),
-                )
-            }
-            #[cfg(not(apxinf_aot_vision_attention))]
+        if ctx.caps().sm != 110
+            || ctx.caps().multiprocessor_count != 20
+            || dtype != DType::BF16
+            || tokens != 12216
+            || heads != 16
+            || head_dim != 64
+            || v_token_stride != 3072
+            || host_offsets != FA4_VFIXED_OFFSETS.as_slice()
+        {
             return Ok(false);
         }
-        Fa4AttentionImpl::Cuda => {
-            #[cfg(apxinf_fa4_attention_cuda)]
-            unsafe {
-                ffi::apxinf_static_fa4_bf16_vfixed_cuda_forward(
-                    q.ptr(),
-                    k.ptr(),
-                    v.ptr(),
-                    output.ptr(),
-                    ctx.stream().handle(),
-                )
-            }
-            #[cfg(not(apxinf_fa4_attention_cuda))]
+        let plane_bytes = checked_bytes(dtype, &[tokens, heads, head_dim], "FA4 fixed plane")?;
+        let v_words = (tokens - 1)
+            .checked_mul(v_token_stride)
+            .and_then(|words| words.checked_add(heads * head_dim))
+            .ok_or_else(|| Error::Other("FA4 fixed V extent overflow".into()))?;
+        let v_bytes = v_words
+            .checked_mul(dtype.size_in_bytes())
+            .ok_or_else(|| Error::Other("FA4 fixed V byte extent overflow".into()))?;
+        require_buffers(
+            ctx,
+            "FA4 fixed groups",
+            &[
+                ("q", q, plane_bytes),
+                ("k", k, plane_bytes),
+                ("v", v, v_bytes),
+                ("output", output, plane_bytes),
+            ],
+        )?;
+        if [q.ptr(), k.ptr(), v.ptr(), output.ptr()]
+            .iter()
+            .any(|ptr| (*ptr as usize) & 15 != 0)
+        {
             return Ok(false);
         }
-    };
-    check_fa4_vision_status(status)?;
-    Ok(true)
+        check_fa4_vision_status(unsafe {
+            ffi::apxinf_static_fa4_bf16_vfixed_forward(
+                q.ptr(),
+                k.ptr(),
+                v.ptr(),
+                output.ptr(),
+                ctx.stream().handle(),
+            )
+        })?;
+        Ok(true)
+    }
+    #[cfg(not(apxinf_aot_sm110))]
+    {
+        let _ = (
+            ctx,
+            q,
+            k,
+            v,
+            output,
+            dtype,
+            tokens,
+            heads,
+            head_dim,
+            v_token_stride,
+            host_offsets,
+        );
+        Ok(false)
+    }
 }
 
 /// Optional physical path for an already-biased interleaved BF16 vision QKV
@@ -3732,130 +3486,115 @@ pub fn try_vision_qkv_rope_segmented_fa4_skip_v(
     segments: usize,
     fixed_groups: bool,
 ) -> Result<Option<Tensor>> {
-    let Some(implementation) = vision_attention_impl(ctx) else {
-        return Ok(None);
-    };
-    vision_qkv_rope_segmented_fa4_skip_v_with(
-        ctx,
-        qkv,
-        position_ids,
-        heads,
-        head_dim,
-        theta,
-        offsets,
-        host_offsets,
-        segments,
-        fixed_groups,
-        implementation,
-    )
-}
-
-/// Run one named implementation of vision attention. Unsupported geometry
-/// returns `None` before allocating or launching.
-#[allow(clippy::too_many_arguments)]
-pub fn vision_qkv_rope_segmented_fa4_skip_v_with(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    position_ids: &CudaBuffer,
-    heads: usize,
-    head_dim: usize,
-    theta: f32,
-    offsets: &CudaBuffer,
-    host_offsets: &[u32],
-    segments: usize,
-    fixed_groups: bool,
-    implementation: Fa4AttentionImpl,
-) -> Result<Option<Tensor>> {
-    let (tokens, width) = matrix_shape(qkv, "vision QKV RoPE FA4 skip V")?;
-    if ctx.caps().sm != 110
-        || qkv.dtype() != DType::BF16
-        || tokens != 12216
-        || heads != 16
-        || head_dim != 64
-        || width != 3 * heads * head_dim
-        || segments != 12
-        || host_offsets.len() != 13
+    #[cfg(apxinf_aot_sm110)]
     {
-        return Ok(None);
+        let (tokens, width) = matrix_shape(qkv, "vision QKV RoPE FA4 skip V")?;
+        if ctx.caps().sm != 110
+            || qkv.dtype() != DType::BF16
+            || tokens != 12216
+            || heads != 16
+            || head_dim != 64
+            || width != 3 * heads * head_dim
+            || segments != 12
+            || host_offsets.len() != 13
+        {
+            return Ok(None);
+        }
+        require_finite("vision QKV RoPE FA4 skip V", &[theta])?;
+        if theta <= 0.0 {
+            return Err(Error::Other(
+                "vision QKV RoPE theta must be positive".into(),
+            ));
+        }
+        if host_offsets.first() != Some(&0)
+            || host_offsets.last() != Some(&12216)
+            || host_offsets.windows(2).any(|pair| pair[1] <= pair[0])
+        {
+            return Err(Error::Other("FA4 vision offsets are invalid".into()));
+        }
+        if host_offsets.windows(2).any(|pair| pair[1] - pair[0] > 2200) {
+            return Ok(None);
+        }
+        let qkv_bytes = checked_bytes(DType::BF16, qkv.shape().dims(), "FA4 vision raw QKV")?;
+        let plane_bytes =
+            checked_bytes(DType::BF16, &[tokens, heads, head_dim], "FA4 vision plane")?;
+        let position_bytes = tokens
+            .checked_mul(2 * std::mem::size_of::<u32>())
+            .ok_or_else(|| Error::Other("FA4 vision position size overflow".into()))?;
+        let qkv_buf = CudaBuffer::from_tensor(qkv).map_err(Error::Cuda)?;
+        require_buffers(
+            ctx,
+            "FA4 vision skip V",
+            &[
+                ("qkv", &qkv_buf, qkv_bytes),
+                ("positions", position_ids, position_bytes),
+                ("offsets", offsets, 13 * std::mem::size_of::<i32>()),
+            ],
+        )?;
+        let v_offset = 2 * heads * head_dim * DType::BF16.size_in_bytes();
+        let v_view = qkv_buf
+            .view(v_offset, qkv_bytes - v_offset)
+            .map_err(Error::Cuda)?;
+        if !fixed_groups || !prepare_bf16_fa4_fixed_groups_sm110(ctx, host_offsets)? {
+            return Ok(None);
+        }
+        let q = output_buffer(ctx, plane_bytes)?;
+        let k = output_buffer(ctx, plane_bytes)?;
+        let output = output_buffer(ctx, plane_bytes)?;
+        check_cuda(unsafe {
+            ffi::apxinf_static_vision_qk_rope_bf16_no_v(
+                qkv_buf.ptr(),
+                position_ids.ptr().cast(),
+                q.ptr(),
+                k.ptr(),
+                tokens as i32,
+                heads as i32,
+                head_dim as i32,
+                theta,
+                ctx.stream().handle(),
+            )
+        })?;
+        let fixed_launched = try_bf16_fa4_fixed_groups_sm110(
+            ctx,
+            &q,
+            &k,
+            &v_view,
+            &output,
+            DType::BF16,
+            tokens,
+            heads,
+            head_dim,
+            3 * heads * head_dim,
+            host_offsets,
+        )?;
+        if !fixed_launched {
+            return Err(Error::Other(
+                "prepared fixed attention rejected its bindings".into(),
+            ));
+        }
+        Ok(Some(make_gpu_tensor(
+            Shape::new(vec![tokens, heads, head_dim]),
+            DType::BF16,
+            ctx.device_id(),
+            output,
+        )))
     }
-    require_finite("vision QKV RoPE FA4 skip V", &[theta])?;
-    if theta <= 0.0 {
-        return Err(Error::Other(
-            "vision QKV RoPE theta must be positive".into(),
-        ));
-    }
-    if host_offsets.first() != Some(&0)
-        || host_offsets.last() != Some(&12216)
-        || host_offsets.windows(2).any(|pair| pair[1] <= pair[0])
+    #[cfg(not(apxinf_aot_sm110))]
     {
-        return Err(Error::Other("FA4 vision offsets are invalid".into()));
-    }
-    if host_offsets.windows(2).any(|pair| pair[1] - pair[0] > 2200) {
-        return Ok(None);
-    }
-    let qkv_bytes = checked_bytes(DType::BF16, qkv.shape().dims(), "FA4 vision raw QKV")?;
-    let plane_bytes = checked_bytes(DType::BF16, &[tokens, heads, head_dim], "FA4 vision plane")?;
-    let position_bytes = tokens
-        .checked_mul(2 * std::mem::size_of::<u32>())
-        .ok_or_else(|| Error::Other("FA4 vision position size overflow".into()))?;
-    let qkv_buf = CudaBuffer::from_tensor(qkv).map_err(Error::Cuda)?;
-    require_buffers(
-        ctx,
-        "FA4 vision skip V",
-        &[
-            ("qkv", &qkv_buf, qkv_bytes),
-            ("positions", position_ids, position_bytes),
-            ("offsets", offsets, 13 * std::mem::size_of::<i32>()),
-        ],
-    )?;
-    let v_offset = 2 * heads * head_dim * DType::BF16.size_in_bytes();
-    let v_view = qkv_buf
-        .view(v_offset, qkv_bytes - v_offset)
-        .map_err(Error::Cuda)?;
-    if !fixed_groups || !prepare_bf16_fa4_fixed_groups_sm110(ctx, host_offsets, implementation)? {
-        return Ok(None);
-    }
-    let q = output_buffer(ctx, plane_bytes)?;
-    let k = output_buffer(ctx, plane_bytes)?;
-    let output = output_buffer(ctx, plane_bytes)?;
-    check_cuda(unsafe {
-        ffi::apxinf_static_vision_qk_rope_bf16_no_v(
-            qkv_buf.ptr(),
-            position_ids.ptr().cast(),
-            q.ptr(),
-            k.ptr(),
-            tokens as i32,
-            heads as i32,
-            head_dim as i32,
+        let _ = (
+            ctx,
+            qkv,
+            position_ids,
+            heads,
+            head_dim,
             theta,
-            ctx.stream().handle(),
-        )
-    })?;
-    let fixed_launched = try_bf16_fa4_fixed_groups_sm110(
-        ctx,
-        &q,
-        &k,
-        &v_view,
-        &output,
-        DType::BF16,
-        tokens,
-        heads,
-        head_dim,
-        3 * heads * head_dim,
-        host_offsets,
-        implementation,
-    )?;
-    if !fixed_launched {
-        return Err(Error::Other(
-            "prepared fixed attention rejected its bindings".into(),
-        ));
+            offsets,
+            host_offsets,
+            segments,
+            fixed_groups,
+        );
+        Ok(None)
     }
-    Ok(Some(make_gpu_tensor(
-        Shape::new(vec![tokens, heads, head_dim]),
-        DType::BF16,
-        ctx.device_id(),
-        output,
-    )))
 }
 
 pub fn segmented_mha_bf16(

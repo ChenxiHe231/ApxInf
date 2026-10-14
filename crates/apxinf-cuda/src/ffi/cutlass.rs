@@ -161,19 +161,6 @@ extern "C" {
         full_n: i32,
         stream: cudaStream_t,
     ) -> i32;
-    /// `interleaved_weight` is physical `[k, full_n]` with `[gate256,up256]`
-    /// column tiles, not the checkpoint's `[full_n, k]`.
-    #[cfg(apxinf_cutlass_gemm)]
-    pub fn apxinf_static_cutlass_bf16_dual_swiglu(
-        activation: *const c_void,
-        interleaved_weight: *const c_void,
-        output: *mut c_void,
-        m: i32,
-        n: i32,
-        k: i32,
-        full_n: i32,
-        stream: cudaStream_t,
-    ) -> i32;
     #[cfg(apxinf_cutlass_int8_sm80)]
     pub fn apxinf_static_cutlass_int8_gemm_bf16(
         activation: *const c_void,

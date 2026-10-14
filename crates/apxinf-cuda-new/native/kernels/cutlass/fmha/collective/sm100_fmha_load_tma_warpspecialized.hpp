@@ -57,7 +57,8 @@ template<
   class PipelineQ,
   class PipelineKV,
   class Mask,
-  class TileShape
+  class TileShape,
+  class ClusterShape
 >
 struct Sm100FmhaLoadTmaWarpspecialized {
 
@@ -136,7 +137,15 @@ struct Sm100FmhaLoadTmaWarpspecialized {
           get<3>(problem_shape_qk) = get<3>(problem_shape);
       }
     } else {
-      problem_shape_qk = problem_shape;
+      // TMA descriptor types are declared from an all-dynamic dummy shape.
+      // Keep the kernel's ProblemShape static, but erase only the descriptor
+      // extents here so make_tma_copy produces that same Params type.
+      get<0>(problem_shape_qk) = int(get<0>(problem_shape));
+      get<1>(problem_shape_qk) = int(get<1>(problem_shape));
+      get<2>(problem_shape_qk) = int(get<2>(problem_shape));
+      get<3,0,0>(problem_shape_qk) = int(get<3,0,0>(problem_shape));
+      get<3,0,1>(problem_shape_qk) = int(get<3,0,1>(problem_shape));
+      get<3,1>(problem_shape_qk) = int(get<3,1>(problem_shape));
     }
 #endif
 
@@ -206,7 +215,19 @@ struct Sm100FmhaLoadTmaWarpspecialized {
 
     // compute gQ, sQ
     // we load 2*get<0>(blk_coord), and 2*get<0>(blk_coord) + 1
-    ThrMMA mma_qk = typename CollectiveMmaQK::TiledMma{}.get_slice(0);
+    uint32_t cta_mma_rank = cute::block_rank_in_cluster() %
+                            cute::size(typename CollectiveMmaQK::TiledMma::AtomThrID{});
+    ThrMMA mma_qk = typename CollectiveMmaQK::TiledMma{}.get_slice(cta_mma_rank);
+    Layout cta_layout_mnk = make_layout(ClusterShape{});
+    Layout cta_layout_vmnk = tiled_divide(
+        cta_layout_mnk,
+        make_tile(typename CollectiveMmaQK::TiledMma::AtomThrID{}));
+    auto cta_coord_vmnk = cta_layout_vmnk.get_flat_coord(
+        cute::block_rank_in_cluster());
+    uint16_t mcast_mask_q = create_tma_multicast_mask<2>(
+        cta_layout_vmnk, cta_coord_vmnk);
+    uint16_t mcast_mask_kv = create_tma_multicast_mask<1>(
+        cta_layout_vmnk, cta_coord_vmnk);
     Tensor mQ_qdl_p = params.tma_load_q.get_tma_tensor(select<0,2,3>(problem_shape));
 
     int q_offs_0 = 0;
@@ -225,10 +246,10 @@ struct Sm100FmhaLoadTmaWarpspecialized {
     Tensor tSgQ_qdl = mma_qk.partition_A(gQ_qdl);
     Tensor sQ = make_tensor(make_smem_ptr(storage.smem_q.data()), SmemLayoutQ{});
     auto [tQgQ_qdl, tQsQ] = tma_partition(
-      params.tma_load_q, _0{}, make_layout(_1{}), 
+      params.tma_load_q, get<2>(cta_coord_vmnk),
+      make_layout(size<2>(cta_layout_vmnk)),
       group_modes<0,3>(sQ), group_modes<0,3>(tSgQ_qdl)
     );
-    Tensor tQgQ = tQgQ_qdl(_, _, _0{}, get<2>(blk_coord_q));
 
     // compute gK, sK
     Tensor mK_kdl_p = params.tma_load_k.get_tma_tensor(select<1,2,3>(problem_shape));
@@ -249,13 +270,13 @@ struct Sm100FmhaLoadTmaWarpspecialized {
     Tensor tSgK_kdl = mma_qk.partition_B(gK_kdl);
     Tensor sK = make_tensor(make_smem_ptr(storage.smem_k.data()), SmemLayoutK{});
     auto [tKgK_kdl, tKsK] = tma_partition(
-      params.tma_load_k, _0{}, make_layout(_1{}),
+      params.tma_load_k, get<1>(cta_coord_vmnk),
+      make_layout(size<1>(cta_layout_vmnk)),
       group_modes<0,3>(sK), group_modes<0,3>(tSgK_kdl)
     );
-    Tensor tKgK = tKgK_kdl(_, _, _0{}, get<2>(blk_coord_kv));
 
     // compute gV, sV
-    ThrMMA mma_pv = typename CollectiveMmaPV::TiledMma{}.get_slice(0);
+    ThrMMA mma_pv = typename CollectiveMmaPV::TiledMma{}.get_slice(cta_mma_rank);
     Tensor mV_dkl_p = params.tma_load_v.get_tma_tensor(select<2,1,3>(problem_shape));
 
     Tensor mV_dkl = domain_offset(make_coord(_0{}, kv_offs_0, make_coord(_0{}, _0{})), mV_dkl_p);
@@ -264,10 +285,10 @@ struct Sm100FmhaLoadTmaWarpspecialized {
     Tensor tOgV_dkl = mma_pv.partition_B(gV_dkl);
     Tensor sV = make_tensor(make_smem_ptr(storage.smem_v.data()), SmemLayoutV{});
     auto [tVgV_dkl, tVsV] = tma_partition(
-      params.tma_load_v, _0{}, make_layout(_1{}),
+      params.tma_load_v, get<1>(cta_coord_vmnk),
+      make_layout(size<1>(cta_layout_vmnk)),
       group_modes<0,3>(sV), group_modes<0,3>(tOgV_dkl)
     );
-    auto tVgV = tVgV_dkl(_, _0{}, _, get<2>(blk_coord_kv));
 
     // blk_coord in decomposed in terms of TileShape, not TileShapeQK
     // As such, it needs to be transformed as
@@ -276,22 +297,57 @@ struct Sm100FmhaLoadTmaWarpspecialized {
 
     uint32_t lane_predicate = cute::elect_one_sync();
 
-    // apxinf: how many Q sub-tiles this CTA owns. Two for the stock
-    // ThreadShape<_2,_1,_1>; one for the single-Q-stage head_dim 256 path.
-    constexpr int kNumQStages = size<0>(TileShape{}) / size<0>(TileShapeQK{});
+    constexpr int kNumQStages = PipelineQ::Stages;
+    constexpr int kNumKIterations = size<2>(TileShape{}) / size<2>(TileShapeQK{});
+    constexpr int kNumVIterations = size<2>(TileShape{}) / size<1>(TileShapePV{});
     static_assert(kNumQStages == 1 || kNumQStages == 2, "only 1 or 2 Q stages");
+    static_assert(kNumKIterations == 1 || kNumKIterations == 2,
+                  "only one or two QK K iterations");
+    static_assert(kNumVIterations == 1 || kNumVIterations == 2,
+                  "only one or two PV N iterations");
 
-    // Q1
-    int q0_index = kNumQStages * get<0>(blk_coord_q);
-    int q1_index = kNumQStages * get<0>(blk_coord_q) + 1;
-    pipeline_q.producer_acquire(pipeline_q_producer_state);
-    if (lane_predicate) {
-      auto tma_barrier = pipeline_q.producer_get_barrier(pipeline_q_producer_state);
-      copy(params.tma_load_q.with(*tma_barrier, 0), tQgQ(_, q0_index), tQsQ(_, pipeline_q_producer_state.index()));
-    }
-    ++pipeline_q_producer_state;
+    auto issue_q = [&](auto iter) {
+      pipeline_q.producer_acquire(pipeline_q_producer_state);
+      if (lane_predicate) {
+        auto tma_barrier = pipeline_q.producer_get_barrier(pipeline_q_producer_state);
+        if constexpr (kNumKIterations == 2) {
+          copy(params.tma_load_q.with(*tma_barrier, mcast_mask_q),
+               tQgQ_qdl(_, get<0>(blk_coord_q), iter, get<2>(blk_coord_q)),
+               tQsQ(_, pipeline_q_producer_state.index()));
+        } else {
+          Tensor tQgQ = tQgQ_qdl(_, _, _0{}, get<2>(blk_coord_q));
+          int q_index = kNumQStages * get<0>(blk_coord_q) + int(iter);
+          copy(params.tma_load_q.with(*tma_barrier, mcast_mask_q), tQgQ(_, q_index),
+               tQsQ(_, pipeline_q_producer_state.index()));
+        }
+      }
+      ++pipeline_q_producer_state;
+    };
 
-    // K1
+    auto issue_k = [&](auto iter, int tile) {
+      pipeline_kv.producer_acquire(pipeline_kv_producer_state);
+      if (lane_predicate) {
+        auto tma_barrier = pipeline_kv.producer_get_barrier(pipeline_kv_producer_state);
+        copy(params.tma_load_k.with(*tma_barrier, mcast_mask_kv),
+             tKgK_kdl(_, tile, iter, get<2>(blk_coord_kv)),
+             tKsK(_, pipeline_kv_producer_state.index()));
+      }
+      ++pipeline_kv_producer_state;
+    };
+
+    auto issue_v = [&](auto iter, int tile) {
+      pipeline_kv.producer_acquire(pipeline_kv_producer_state);
+      if (lane_predicate) {
+        auto tma_barrier = pipeline_kv.producer_get_barrier(pipeline_kv_producer_state);
+        copy(params.tma_load_v.with(*tma_barrier, mcast_mask_kv),
+             tVgV_dkl(_, iter, tile, get<2>(blk_coord_kv)),
+             tVsV(_, pipeline_kv_producer_state.index()));
+      }
+      ++pipeline_kv_producer_state;
+    };
+
+    issue_q(_0{});
+
     // FA4's two hd256 kernels fetch in opposite directions; both the frozen row
     // max and the O accumulation order depend on it, so the fetch order has to
     // match the softmax warp's loop (the mma and softmax warps just drain this
@@ -312,52 +368,63 @@ struct Sm100FmhaLoadTmaWarpspecialized {
     int k_index = 0;
     constexpr int k_step = 1;
 #endif
-    pipeline_kv.producer_acquire(pipeline_kv_producer_state);
-    if (lane_predicate) {
-      auto tma_barrier = pipeline_kv.producer_get_barrier(pipeline_kv_producer_state);
-      copy(params.tma_load_k.with(*tma_barrier, 0), tKgK(_, k_index), tKsK(_, pipeline_kv_producer_state.index()));
-    }
-    ++pipeline_kv_producer_state;
-
     // Q2
     if constexpr (kNumQStages == 2) {
-      pipeline_q.producer_acquire(pipeline_q_producer_state);
-      if (lane_predicate) {
-        auto tma_barrier = pipeline_q.producer_get_barrier(pipeline_q_producer_state);
-        copy(params.tma_load_q.with(*tma_barrier, 0), tQgQ(_, q1_index), tQsQ(_, pipeline_q_producer_state.index()));
-      }
-      ++pipeline_q_producer_state;
+      issue_q(_1{});
     }
 
-    // V1
-    pipeline_kv.producer_acquire(pipeline_kv_producer_state);
-    if (lane_predicate) {
-      auto tma_barrier = pipeline_kv.producer_get_barrier(pipeline_kv_producer_state);
-      copy(params.tma_load_v.with(*tma_barrier, 0), tVgV(_, k_index), tVsV(_, pipeline_kv_producer_state.index()));
-    }
-    ++pipeline_kv_producer_state;
-    k_index += k_step;
-
-    // loop:
-    mask_tile_count -= 1;
-    for (; mask_tile_count > 0; mask_tile_count -= 1) {
-
-      // Ki
-      pipeline_kv.producer_acquire(pipeline_kv_producer_state);
-      if (lane_predicate) {
-        auto tma_barrier = pipeline_kv.producer_get_barrier(pipeline_kv_producer_state);
-        copy(params.tma_load_k.with(*tma_barrier, 0), tKgK(_, k_index), tKsK(_, pipeline_kv_producer_state.index()));
+    // The 2-CTA hd256 schedule looks one QK tile ahead of PV.  Feed the shared
+    // K/V pipe in the same order as the DSL kernel:
+    //   K0, K1, V0[0], V0[1], K2, V1[0], V1[1], ..., Vend.
+    // The stock path has one V iteration, so this remains K0,K1,V0,... there.
+    if constexpr (cute::size(typename CollectiveMmaQK::TiledMma::AtomThrID{}) == 2) {
+      int v_index = k_index;
+      issue_k(_0{}, k_index);
+      if constexpr (kNumKIterations == 2) {
+        issue_k(_1{}, k_index);
       }
-      ++pipeline_kv_producer_state;
-
-      // Vi
-      pipeline_kv.producer_acquire(pipeline_kv_producer_state);
-      if (lane_predicate) {
-        auto tma_barrier = pipeline_kv.producer_get_barrier(pipeline_kv_producer_state);
-        copy(params.tma_load_v.with(*tma_barrier, 0), tVgV(_, k_index), tVsV(_, pipeline_kv_producer_state.index()));
-      }
-      ++pipeline_kv_producer_state;
       k_index += k_step;
+
+      for (int remaining = mask_tile_count - 1; remaining > 0; --remaining) {
+        issue_k(_0{}, k_index);
+        if constexpr (kNumKIterations == 2) {
+          issue_k(_1{}, k_index);
+        }
+
+        issue_v(_0{}, v_index);
+        if constexpr (kNumVIterations == 2) {
+          issue_v(_1{}, v_index);
+        }
+        v_index = k_index;
+        k_index += k_step;
+      }
+
+      issue_v(_0{}, v_index);
+      if constexpr (kNumVIterations == 2) {
+        issue_v(_1{}, v_index);
+      }
+    } else {
+      issue_k(_0{}, k_index);
+      if constexpr (kNumKIterations == 2) {
+        issue_k(_1{}, k_index);
+      }
+      issue_v(_0{}, k_index);
+      if constexpr (kNumVIterations == 2) {
+        issue_v(_1{}, k_index);
+      }
+      k_index += k_step;
+
+      for (int remaining = mask_tile_count - 1; remaining > 0; --remaining) {
+        issue_k(_0{}, k_index);
+        if constexpr (kNumKIterations == 2) {
+          issue_k(_1{}, k_index);
+        }
+        issue_v(_0{}, k_index);
+        if constexpr (kNumVIterations == 2) {
+          issue_v(_1{}, k_index);
+        }
+        k_index += k_step;
+      }
     }
   }
 };

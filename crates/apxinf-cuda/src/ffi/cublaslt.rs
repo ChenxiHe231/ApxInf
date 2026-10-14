@@ -6,9 +6,9 @@ use super::cublas::cublasStatus_t;
 use super::cuda::{cudaError_t, cudaStream_t};
 
 extern "C" {
-    #[cfg(apxinf_aot_gemm_swiglu_bf16)]
+    #[cfg(apxinf_aot_sm110)]
     pub fn apxinf_quack_m256n256_init() -> i32;
-    #[cfg(apxinf_aot_gemm_swiglu_bf16)]
+    #[cfg(apxinf_aot_sm110)]
     pub fn apxinf_quack_m256n256_forward(
         input: *const c_void,
         weight: *const c_void,

@@ -100,28 +100,11 @@ int nvfp4_quantize_swiglu(const void* src_bf16, void* dst_packed,
                           float input_scale, int row_major_scales,
                           cudaStream_t stream);
 
-// Shape-specialized CuTe DSL FC1 epilogue: NVFP4 GEMM + BF16-rounded SwiGLU
-// + NVFP4 quantization. The current AOT supports M=2048, K=5120 and
-// N(output)=17408. Inputs and metadata are device pointers.
-int nvfp4_dense_swiglu_aot(
-    const void* a, const void* b, const void* a_sf, const void* b_sf,
-    void* c, void* c_sf, const void* alpha, const void* input_global_scale,
-    const void* down_inverse_global_scale, const void* tile_groups,
-    const void* tile_limits, const void* token_map, const void* tile_count,
-    int rows, int n, int k, cudaStream_t stream);
-
-// In-tree CUDA/CUTLASS translation of the same operator, shape-generic in
+// NVFP4 GEMM + BF16-rounded SwiGLU + NVFP4 quantization, shape-generic in
 // `rows` and requiring only `n % 128 == 0 && k % 128 == 0`.
-//
-// It differs from the AOT entry point in two ways that the caller must honour:
-//   * `a_sf` must be in the GEMM atom layout, not row-major. The AOT consumes
-//     row-major activation scales; the CUTLASS block-scaled collective does
-//     not. `b_sf` and `c_sf` are the atom layout for both.
-//   * There is no grouped-GEMM metadata. The tile grid comes from the problem
-//     shape, so `tile_groups`/`tile_limits`/`token_map`/`tile_count` have no
-//     counterpart and are not taken.
-size_t nvfp4_dense_swiglu_cuda_workspace_bytes(int rows, int n, int k);
-int nvfp4_dense_swiglu_cuda(
+// All three block-scale tensors use the GEMM atom layout.
+size_t nvfp4_gemm_swiglu_workspace_bytes(int rows, int n, int k);
+int nvfp4_gemm_swiglu(
     const void* a, const void* b, const void* a_sf, const void* b_sf,
     void* c, void* c_sf, const void* alpha, const void* input_global_scale,
     const void* down_inverse_global_scale, void* workspace,

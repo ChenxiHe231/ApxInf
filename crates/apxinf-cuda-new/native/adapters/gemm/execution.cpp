@@ -594,66 +594,24 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_quantize_swiglu(
 #endif
 }
 
-extern "C" apxinf_status_t apxinf_gemm_nvfp4_dense_swiglu_aot(
-    const void* activation, const void* weight,
-    const void* activation_scales, const void* weight_scales,
-    void* output, void* output_scales, const void* alpha,
-    const void* input_global_scale, const void* down_inverse_global_scale,
-    const void* tile_groups, const void* tile_limits,
-    const void* token_map, const void* tile_count,
-    int64_t rows, int64_t n, int64_t k, apxinf_cuda_stream_t stream) {
-#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN38_DENSE_SWIGLU_AOT)
-  return apxinf::framework::abi_boundary([&] {
-    if (activation == nullptr || weight == nullptr ||
-        activation_scales == nullptr || weight_scales == nullptr ||
-        output == nullptr || output_scales == nullptr || alpha == nullptr ||
-        input_global_scale == nullptr || down_inverse_global_scale == nullptr ||
-        tile_groups == nullptr || tile_limits == nullptr || token_map == nullptr ||
-        tile_count == nullptr || rows <= 0 || n <= 0 || k <= 0 ||
-        rows > INT32_MAX || n > INT32_MAX || k > INT32_MAX) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid fused NVFP4 dense SwiGLU arguments");
-    }
-    const int status = apxinf::cuda_new::cutlass_ops::nvfp4_dense_swiglu_aot(
-        activation, weight, activation_scales, weight_scales, output,
-        output_scales, alpha, input_global_scale, down_inverse_global_scale,
-        tile_groups, tile_limits, token_map, tile_count,
-        static_cast<int>(rows), static_cast<int>(n), static_cast<int>(k),
-        static_cast<cudaStream_t>(stream));
-    if (status != 0) {
-      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                    "fused NVFP4 dense SwiGLU failed with status " +
-                        std::to_string(status));
-    }
-  });
-#else
-  (void)activation; (void)weight; (void)activation_scales;
-  (void)weight_scales; (void)output; (void)output_scales; (void)alpha;
-  (void)input_global_scale; (void)down_inverse_global_scale;
-  (void)tile_groups; (void)tile_limits; (void)token_map; (void)tile_count;
-  (void)rows; (void)n; (void)k; (void)stream;
-  return APXINF_STATUS_UNSUPPORTED;
-#endif
-}
-
-extern "C" apxinf_status_t apxinf_gemm_nvfp4_dense_swiglu_cuda(
+extern "C" apxinf_status_t apxinf_gemm_nvfp4_swiglu(
     const void* activation, const void* weight,
     const void* activation_scales, const void* weight_scales,
     void* output, void* output_scales, const void* alpha,
     const void* input_global_scale, const void* down_inverse_global_scale,
     int64_t rows, int64_t n, int64_t k, apxinf_cuda_stream_t stream) {
-#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN38_DENSE_SWIGLU_CUDA)
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_NVFP4_GEMM_SWIGLU)
   return apxinf::framework::abi_boundary([&] {
     if (activation == nullptr || weight == nullptr ||
         activation_scales == nullptr || weight_scales == nullptr ||
         output == nullptr || output_scales == nullptr || alpha == nullptr ||
         input_global_scale == nullptr || down_inverse_global_scale == nullptr ||
-        rows <= 0 || n <= 0 || k <= 0 ||
+        rows != 2048 || n != 17408 || k != 5120 ||
         rows > INT32_MAX || n > INT32_MAX || k > INT32_MAX) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid fused NVFP4 dense SwiGLU arguments");
     }
-    const int status = apxinf::cuda_new::cutlass_ops::nvfp4_dense_swiglu_cuda(
+    const int status = apxinf::cuda_new::cutlass_ops::nvfp4_gemm_swiglu(
         activation, weight, activation_scales, weight_scales, output,
         output_scales, alpha, input_global_scale, down_inverse_global_scale,
         /*workspace=*/nullptr, /*workspace_bytes=*/0, static_cast<int>(rows),
@@ -661,7 +619,7 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_dense_swiglu_cuda(
         static_cast<cudaStream_t>(stream));
     if (status != 0) {
       throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                    "fused NVFP4 dense SwiGLU (CUDA) failed with status " +
+                    "NVFP4 GEMM SwiGLU failed with status " +
                         std::to_string(status));
     }
   });

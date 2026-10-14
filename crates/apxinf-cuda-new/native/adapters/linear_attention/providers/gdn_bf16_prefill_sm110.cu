@@ -62,7 +62,7 @@ std::atomic<bool> attribute_ready{false};
 std::mutex attribute_mutex;
 }  // namespace
 
-extern "C" int32_t apxinf_static_gdn_flashinfer64_cuda_init() {
+extern "C" int32_t apxinf_gdn_bf16_prefill_sm110_init() {
   int device = -1;
   cudaError_t error = cudaGetDevice(&device);
   if (error != cudaSuccess) return status(error);
@@ -84,7 +84,7 @@ extern "C" int32_t apxinf_static_gdn_flashinfer64_cuda_init() {
   return 0;
 }
 
-extern "C" int32_t apxinf_static_gdn_flashinfer64_prefill_compact_v_cuda(
+extern "C" int32_t apxinf_gdn_bf16_prefill_sm110(
     const void* zba, const void* conv_weight, void* new_conv_state,
     const float* A_log, const void* dt_bias_bf16,
     void* raw_qk_scratch, void* q, void* k, void* v, void* a, void* b,
@@ -115,7 +115,7 @@ extern "C" int32_t apxinf_static_gdn_flashinfer64_prefill_compact_v_cuda(
   float* alpha = nullptr;
   float* beta = nullptr;
   void* descriptor_workspace = nullptr;
-  int32_t prologue = apxinf_static_gdn_bf16_prologue(zba, conv_weight, new_conv_state, A_log,
+  int32_t prologue = apxinf_gdn_bf16_prefill_prologue(zba, conv_weight, new_conv_state, A_log,
                                   dt_bias_bf16, raw_qk_scratch, q, k, v, a, b,
                                   cu_seqlens, seq, seq_pad, &alpha, &beta,
                                   &descriptor_workspace, stream);
@@ -145,6 +145,6 @@ extern "C" int32_t apxinf_static_gdn_flashinfer64_prefill_compact_v_cuda(
       workspace, static_cast<long long>(HV) * D * D, SCALE, /*num_seqs=*/1, H,
       HV, total_tiles, grid_x, stream);
   if (launch != 0) return launch;
-  return apxinf_static_gdn_bf16_state_transpose(h_output_vmajor,
+  return apxinf_gdn_bf16_prefill_state_transpose(h_output_vmajor,
                                                 final_state_kmajor, stream);
 }
