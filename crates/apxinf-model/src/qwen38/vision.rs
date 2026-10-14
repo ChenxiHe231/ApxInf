@@ -105,8 +105,15 @@ pub(crate) fn upload_pixels(ctx: &CudaContext, pixels: &Tensor) -> Result<Tensor
         DType::BF16 => Ok(on_device),
         DType::F32 => {
             let dims = on_device.shape().dims().to_vec();
-            let out = device_tensor(ctx, &dims, DType::BF16)?;
-            ops::cast_f32_to_bf16(ctx, &on_device, &out)?;
+            let mut out = device_tensor(ctx, &dims, DType::BF16)?;
+            ops::quantization(
+                ctx,
+                ops::QuantizationArgs::new(
+                    ops::QuantizationSemantic::CastF32ToBf16,
+                    &on_device,
+                    &mut out,
+                ),
+            )?;
             Ok(out)
         }
         dtype => Err(Error::Other(format!(
@@ -306,18 +313,20 @@ fn forward_device(
         };
         let qkv = gemm_bias(ctx, &normed, &block.qkv_w, &block.qkv_b)?;
         let qkv_shape = [prepared.total_patches, VISION_HEADS, VISION_HEAD_DIM];
-        let query = device_tensor(ctx, &qkv_shape, DType::BF16)?;
-        let key = device_tensor(ctx, &qkv_shape, DType::BF16)?;
-        let value = device_tensor(ctx, &qkv_shape, DType::BF16)?;
-        ops::vision_qkv_rope(
+        let mut query = device_tensor(ctx, &qkv_shape, DType::BF16)?;
+        let mut key = device_tensor(ctx, &qkv_shape, DType::BF16)?;
+        let mut value = device_tensor(ctx, &qkv_shape, DType::BF16)?;
+        ops::split_qkv_axial_rope(
             ctx,
-            &qkv,
-            None,
-            &prepared.pos_ids_dev,
-            &query,
-            &key,
-            &value,
-            10_000.0,
+            ops::AxialRopeArgs {
+                qkv: &qkv,
+                bias: None,
+                positions: &prepared.pos_ids_dev,
+                query: &mut query,
+                key: &mut key,
+                value: &mut value,
+                theta: 10_000.0,
+            },
         )?;
         let mut attn = device_tensor(ctx, &qkv_shape, DType::BF16)?;
         ops::segmented_attention(
@@ -371,8 +380,14 @@ fn forward_device(
     let merged = normalized.reshape(vec![rows / factor, VISION_HIDDEN * factor])?;
     dump_vision_stage("merger_norm", &merged)?;
     let hidden = gemm_bias(ctx, &merged, &weights.merger_fc1_w, &weights.merger_fc1_b)?;
-    let activated = device_tensor(ctx, hidden.shape().dims(), DType::BF16)?;
-    ops::gelu_exact(ctx, &hidden, &activated)?;
+    let mut activated = device_tensor(ctx, hidden.shape().dims(), DType::BF16)?;
+    let mut activation = ops::PointwiseArgs::new(
+        ops::PointwiseSemantic::BiasActivation,
+        &hidden,
+        &mut activated,
+    );
+    activation.activation = ops::PointwiseActivation::GeluExact;
+    ops::pointwise(ctx, activation)?;
     let output = gemm_bias(ctx, &activated, &weights.merger_fc2_w, &weights.merger_fc2_b)?;
     dump_vision_stage("merger_output", &output)?;
     Ok(output)
@@ -391,8 +406,8 @@ pub(crate) fn embed_and_replace(
     let hidden = embedding_table.shape().dims()[1];
     let base = device_tensor(ctx, &[token_ids.len(), hidden], DType::BF16)?;
     ops::embedding_gather(ctx, embedding_table, &ids, &base)?;
-    let mut ordinal = 0i32;
-    let row_map: Vec<i32> = token_ids
+    let mut ordinal = 0u32;
+    let row_map: Vec<u32> = token_ids
         .iter()
         .map(|&token| {
             if token == IMAGE_TOKEN_ID {
@@ -400,7 +415,7 @@ pub(crate) fn embed_and_replace(
                 ordinal += 1;
                 current
             } else {
-                -1
+                u32::MAX
             }
         })
         .collect();
@@ -411,9 +426,16 @@ pub(crate) fn embed_and_replace(
             visual.shape().dims()[0]
         )));
     }
-    let row_map = upload_i32(ctx, vec![token_ids.len()], &row_map)?;
-    let output = device_tensor(ctx, &[token_ids.len(), hidden], DType::BF16)?;
-    ops::replace_rows(ctx, &base, visual, &row_map, &output)?;
+    let row_map = upload_u32(ctx, &row_map)?;
+    let mut output = device_tensor(ctx, &[token_ids.len(), hidden], DType::BF16)?;
+    let mut gather = ops::GatherArgs::new(
+        ops::GatherSemantic::ReplaceRows,
+        &base,
+        &mut output,
+    );
+    gather.replacement = Some(visual);
+    gather.row_map = Some(&row_map);
+    ops::gather(ctx, gather)?;
     Ok(output)
 }
 

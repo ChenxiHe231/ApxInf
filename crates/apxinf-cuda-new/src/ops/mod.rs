@@ -32,18 +32,16 @@ pub use attention::{
     KvCacheAttentionArgs, KvCacheDecodeMeta, PackedQkvAttentionArgs, SegmentedAttentionArgs,
 };
 pub use attn_ops::{
-    apply_output_gate, head_rms_norm, partial_mrope, partial_rope, rotary_dim,
-    split_query_and_gate, vision_qkv_rope,
+    apply_output_gate, head_rms_norm, partial_rope, rotary_dim, split_query_and_gate,
 };
-pub use cache::{concat_rows, reserve_prefix};
+pub use cache::{concat_rows, copy_tensor, reserve_prefix};
 pub use gather::{gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry};
 pub use gdn::{
-    gdn_causal_conv_forward, gdn_causal_conv_step, gdn_decay_and_beta,
-    gdn_decay_and_beta_seq, gdn_gated_norm, gdn_gated_norm_quantize, gdn_gated_norm_seq, gdn_gated_norm_seq_f16,
-    gdn_prefill, gdn_prefill_workspace_bytes,
-    gdn_widen_f16_to_bf16, gdn_prepare_prefill, gdn_conv_prepare,
-    gdn_chunk_scan, gdn_chunk_scan_interleaved, gdn_l2_normalize_heads,
-    gdn_recurrent_step, gdn_state_elements,
+    gdn_causal_conv_forward, gdn_causal_conv_step, gdn_chunk_scan, gdn_chunk_scan_interleaved,
+    gdn_conv_prepare, gdn_decay_and_beta, gdn_decay_and_beta_seq, gdn_gated_norm,
+    gdn_gated_norm_quantize, gdn_gated_norm_seq, gdn_gated_norm_seq_f16, gdn_l2_normalize_heads,
+    gdn_prefill, gdn_prefill_workspace_bytes, gdn_prepare_prefill, gdn_recurrent_step,
+    gdn_state_elements, gdn_widen_f16_to_bf16,
 };
 pub use gemm::{
     gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu, nvfp4_dense_swiglu_aot,
@@ -52,7 +50,7 @@ pub use gemm::{
     GemmBiasResidualArgs, GemmGegluArgs, GemmPolicy, GemmQuantization, ScaleLayout, WeightVersion,
 };
 pub use mlp::{add_into, fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu};
-pub use model::{argmax, cast_f32_to_bf16, embedding_gather, gelu_exact, replace_rows};
+pub use model::{argmax, embedding_gather};
 pub use norm::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,
     bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, layer_norm, rms_norm,
@@ -62,7 +60,10 @@ pub use norm::{
 };
 pub use pointwise::{pointwise, PointwiseActivation, PointwiseArgs, PointwiseSemantic};
 pub use quantization::{quantization, QuantizationArgs, QuantizationSemantic};
-pub use rope::{decode_rope, rope, DecodeRopeArgs, RopeArgs, RopeSemantic};
+pub use rope::{
+    decode_rope, multimodal_rope, rope, split_qkv_axial_rope, AxialRopeArgs, DecodeRopeArgs,
+    MultimodalRopeArgs, RopeArgs, RopeSemantic,
+};
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
 pub fn prepare_with_session<T>(

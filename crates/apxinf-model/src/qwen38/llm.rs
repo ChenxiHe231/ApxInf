@@ -191,15 +191,7 @@ impl Qwen38 {
                 )));
             }
             let destination = prefill.hidden_rows(token_ids.len());
-            let source = CudaBuffer::from_tensor(source).map_err(Error::Cuda)?;
-            let destination = CudaBuffer::from_tensor(&destination).map_err(Error::Cuda)?;
-            destination
-                .copy_from_device_async(
-                    &source,
-                    token_ids.len() * super::config::HIDDEN * DType::BF16.size_in_bytes(),
-                    self.ctx.stream(),
-                )
-                .map_err(Error::Cuda)?;
+            ops::copy_tensor(&self.ctx, source, &destination)?;
         }
 
         let count = token_ids.len();

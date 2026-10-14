@@ -513,22 +513,26 @@ pub(crate) fn decode_step_inner(
 
                 let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
                 let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
-                ops::partial_mrope(
+                ops::multimodal_rope(
                     ctx,
-                    &query_tokens,
-                    &scratch.positions,
-                    rotary,
-                    MROPE_SECTION,
-                    ROPE_THETA,
+                    ops::MultimodalRopeArgs {
+                        data: &query_tokens,
+                        positions: &scratch.positions,
+                        rotary_dim: rotary,
+                        sections: MROPE_SECTION,
+                        theta: ROPE_THETA,
+                    },
                 )
                 .unwrap();
-                ops::partial_mrope(
+                ops::multimodal_rope(
                     ctx,
-                    &key_tokens,
-                    &scratch.positions,
-                    rotary,
-                    MROPE_SECTION,
-                    ROPE_THETA,
+                    ops::MultimodalRopeArgs {
+                        data: &key_tokens,
+                        positions: &scratch.positions,
+                        rotary_dim: rotary,
+                        sections: MROPE_SECTION,
+                        theta: ROPE_THETA,
+                    },
                 )
                 .unwrap();
 
@@ -1070,22 +1074,26 @@ pub(crate) fn prefill_step(
                 // attention call wants is added separately below.
                 let query_tokens = prefix(&scratch.query, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
                 let key_tokens = cache_rows(&cache.keys, tokens, vec![tokens, KV_HEADS, HEAD_DIM]);
-                ops::partial_mrope(
+                ops::multimodal_rope(
                     ctx,
-                    &query_tokens,
-                    &positions,
-                    rotary,
-                    MROPE_SECTION,
-                    ROPE_THETA,
+                    ops::MultimodalRopeArgs {
+                        data: &query_tokens,
+                        positions: &positions,
+                        rotary_dim: rotary,
+                        sections: MROPE_SECTION,
+                        theta: ROPE_THETA,
+                    },
                 )
                 .unwrap();
-                ops::partial_mrope(
+                ops::multimodal_rope(
                     ctx,
-                    &key_tokens,
-                    &positions,
-                    rotary,
-                    MROPE_SECTION,
-                    ROPE_THETA,
+                    ops::MultimodalRopeArgs {
+                        data: &key_tokens,
+                        positions: &positions,
+                        rotary_dim: rotary,
+                        sections: MROPE_SECTION,
+                        theta: ROPE_THETA,
+                    },
                 )
                 .unwrap();
                 verify_finite_bf16(ctx, &format!("layer{layer_index}/query"), &query_tokens);

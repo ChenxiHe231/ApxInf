@@ -16,20 +16,6 @@ apxinf_status_t apxinf_attn_partial_rope(void* data, const void* positions,
                                          float theta,
                                          apxinf_cuda_stream_t stream);
 
-/* Partial multimodal RoPE. `positions` is `[tokens, 3]` I32 in temporal,
-   height, width order. Sections count rotary frequency pairs. */
-apxinf_status_t apxinf_attn_partial_mrope(
-    void* data, const void* positions, int64_t tokens, int64_t heads,
-    int64_t head_dim, int64_t rotary_dim, int64_t section_t,
-    int64_t section_h, int64_t section_w, float theta,
-    apxinf_cuda_stream_t stream);
-
-/* Split packed BF16 vision QKV and apply 2D H/W RoPE to Q/K. */
-apxinf_status_t apxinf_attn_vision_qkv_rope(
-    const void* qkv, const void* bias, const void* positions,
-    void* query, void* key, void* value, int64_t tokens, int64_t heads,
-    int64_t head_dim, float theta, apxinf_cuda_stream_t stream);
-
 apxinf_status_t apxinf_attn_head_rms_norm(void* data, const void* weight,
                                           int64_t rows, int64_t head_dim,
                                           float epsilon,

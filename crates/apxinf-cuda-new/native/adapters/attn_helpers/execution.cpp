@@ -47,49 +47,6 @@ extern "C" apxinf_status_t apxinf_attn_partial_rope(
   });
 }
 
-extern "C" apxinf_status_t apxinf_attn_partial_mrope(
-    void* data, const void* positions, int64_t tokens, int64_t heads,
-    int64_t head_dim, int64_t rotary_dim, int64_t section_t,
-    int64_t section_h, int64_t section_w, float theta,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (data == nullptr || positions == nullptr || !extent(tokens) ||
-        !extent(heads) || !extent(head_dim) || !extent(rotary_dim) ||
-        section_t < 0 || section_h < 0 || section_w < 0 ||
-        section_t + section_h + section_w != rotary_dim / 2) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid multimodal RoPE arguments");
-    }
-    check(apxinf::cuda_new::attn_ops::partial_mrope(
-              data, positions, static_cast<int>(tokens),
-              static_cast<int>(heads), static_cast<int>(head_dim),
-              static_cast<int>(rotary_dim), static_cast<int>(section_t),
-              static_cast<int>(section_h), static_cast<int>(section_w), theta,
-              static_cast<cudaStream_t>(stream)),
-          "partial multimodal RoPE");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_attn_vision_qkv_rope(
-    const void* qkv, const void* bias, const void* positions,
-    void* query, void* key, void* value, int64_t tokens, int64_t heads,
-    int64_t head_dim, float theta, apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (qkv == nullptr || positions == nullptr || query == nullptr ||
-        key == nullptr || value == nullptr || !extent(tokens) ||
-        !extent(heads) || !extent(head_dim) || !(theta > 0.0F)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid vision QKV RoPE arguments");
-    }
-    check(apxinf::cuda_new::attn_ops::vision_qkv_rope(
-              qkv, bias, positions, query, key, value,
-              static_cast<int>(tokens), static_cast<int>(heads),
-              static_cast<int>(head_dim), theta,
-              static_cast<cudaStream_t>(stream)),
-          "vision QKV RoPE");
-  });
-}
-
 extern "C" apxinf_status_t apxinf_attn_head_rms_norm(
     void* data, const void* weight, int64_t rows, int64_t head_dim,
     float epsilon, apxinf_cuda_stream_t stream) {

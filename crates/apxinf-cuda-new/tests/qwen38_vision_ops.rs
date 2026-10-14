@@ -25,12 +25,14 @@ fn upload_bf16(ctx: &CudaContext, values: &[f32], dims: Vec<usize>) -> Tensor {
     upload(ctx, &bytes, dims, DType::BF16)
 }
 
-fn upload_i32(ctx: &CudaContext, values: &[i32], dims: Vec<usize>) -> Tensor {
+fn upload_u32(ctx: &CudaContext, values: &[u32]) -> CudaBuffer {
     let bytes: Vec<u8> = values
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect();
-    upload(ctx, &bytes, dims, DType::I32)
+    let buffer = CudaBuffer::alloc(bytes.len(), ctx.device_id()).unwrap();
+    buffer.copy_from_host(&bytes).unwrap();
+    buffer
 }
 
 fn read_bf16(tensor: &Tensor) -> Vec<f32> {
@@ -47,12 +49,26 @@ fn read_bf16(tensor: &Tensor) -> Vec<f32> {
 fn f32_cast_and_exact_gelu_match_host_reference() {
     let ctx = CudaContext::new(0).unwrap();
     let values = [-4.0, -1.25, -0.0, 0.5, 1.0, 3.25];
-    let input = upload_f32(&ctx, &values, vec![values.len()]);
-    let rounded = upload_bf16(&ctx, &vec![0.0; values.len()], vec![values.len()]);
-    let activated = upload_bf16(&ctx, &vec![0.0; values.len()], vec![values.len()]);
+    let input = upload_f32(&ctx, &values, vec![1, values.len()]);
+    let mut rounded = upload_bf16(&ctx, &vec![0.0; values.len()], vec![1, values.len()]);
+    let mut activated = upload_bf16(&ctx, &vec![0.0; values.len()], vec![1, values.len()]);
 
-    ops::cast_f32_to_bf16(&ctx, &input, &rounded).unwrap();
-    ops::gelu_exact(&ctx, &rounded, &activated).unwrap();
+    ops::quantization(
+        &ctx,
+        ops::QuantizationArgs::new(
+            ops::QuantizationSemantic::CastF32ToBf16,
+            &input,
+            &mut rounded,
+        ),
+    )
+    .unwrap();
+    let mut activation = ops::PointwiseArgs::new(
+        ops::PointwiseSemantic::BiasActivation,
+        &rounded,
+        &mut activated,
+    );
+    activation.activation = ops::PointwiseActivation::GeluExact;
+    ops::pointwise(&ctx, activation).unwrap();
     ctx.synchronize().unwrap();
 
     assert_eq!(
@@ -75,16 +91,17 @@ fn row_replacement_preserves_unselected_rows() {
     let replacement_values = [101.0, 102.0, 103.0, 104.0];
     let base = upload_bf16(&ctx, &base_values, vec![3, 4]);
     let replacement = upload_bf16(&ctx, &replacement_values, vec![1, 4]);
-    let row_map = upload_i32(&ctx, &[-1, 0, -1], vec![3]);
-    let output = upload_bf16(&ctx, &vec![0.0; 12], vec![3, 4]);
+    let row_map = upload_u32(&ctx, &[u32::MAX, 0, u32::MAX]);
+    let mut output = upload_bf16(&ctx, &vec![0.0; 12], vec![3, 4]);
 
-    ops::replace_rows(&ctx, &base, &replacement, &row_map, &output).unwrap();
+    let mut args = ops::GatherArgs::new(ops::GatherSemantic::ReplaceRows, &base, &mut output);
+    args.replacement = Some(&replacement);
+    args.row_map = Some(&row_map);
+    ops::gather(&ctx, args).unwrap();
     ctx.synchronize().unwrap();
 
     assert_eq!(
         read_bf16(&output),
-        vec![
-            0.0, 1.0, 2.0, 3.0, 101.0, 102.0, 103.0, 104.0, 8.0, 9.0, 10.0, 11.0,
-        ]
+        vec![0.0, 1.0, 2.0, 3.0, 101.0, 102.0, 103.0, 104.0, 8.0, 9.0, 10.0, 11.0,]
     );
 }

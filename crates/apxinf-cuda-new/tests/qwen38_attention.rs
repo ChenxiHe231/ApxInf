@@ -117,7 +117,17 @@ fn partial_mrope_selects_qwen35_interleaved_axes() {
     let positions = [2, 17, 41, 3, 19, 43];
     let device_positions = upload_i32(&ctx, &positions, vec![tokens, 3]);
 
-    ops::partial_mrope(&ctx, &data, &device_positions, width, sections, theta).unwrap();
+    ops::multimodal_rope(
+        &ctx,
+        ops::MultimodalRopeArgs {
+            data: &data,
+            positions: &device_positions,
+            rotary_dim: width,
+            sections,
+            theta,
+        },
+    )
+    .unwrap();
     ctx.synchronize().unwrap();
     let produced = read_bf16(&data);
 
@@ -175,13 +185,15 @@ fn partial_mrope_is_bitwise_text_compatible() {
     let multimodal_positions = upload_i32(&ctx, &triples, vec![tokens, 3]);
 
     ops::partial_rope(&ctx, &legacy, &legacy_positions, width, theta).unwrap();
-    ops::partial_mrope(
+    ops::multimodal_rope(
         &ctx,
-        &multimodal,
-        &multimodal_positions,
-        width,
-        [11, 11, 10],
-        theta,
+        ops::MultimodalRopeArgs {
+            data: &multimodal,
+            positions: &multimodal_positions,
+            rotary_dim: width,
+            sections: [11, 11, 10],
+            theta,
+        },
     )
     .unwrap();
     ctx.synchronize().unwrap();
@@ -204,31 +216,33 @@ fn vision_qkv_rope_uses_height_then_width_axes() {
     let qkv = upload_bf16(&ctx, &qkv_values, vec![tokens, 3 * projection]);
     let bias = upload_bf16(&ctx, &bias_values, vec![3 * projection]);
     let positions_dev = upload_i32(&ctx, &positions, vec![tokens, 2]);
-    let query = upload_bf16(
+    let mut query = upload_bf16(
         &ctx,
         &vec![0.0; tokens * projection],
         vec![tokens, heads, head_dim],
     );
-    let key = upload_bf16(
+    let mut key = upload_bf16(
         &ctx,
         &vec![0.0; tokens * projection],
         vec![tokens, heads, head_dim],
     );
-    let value = upload_bf16(
+    let mut value = upload_bf16(
         &ctx,
         &vec![0.0; tokens * projection],
         vec![tokens, heads, head_dim],
     );
 
-    ops::vision_qkv_rope(
+    ops::split_qkv_axial_rope(
         &ctx,
-        &qkv,
-        Some(&bias),
-        &positions_dev,
-        &query,
-        &key,
-        &value,
-        theta,
+        ops::AxialRopeArgs {
+            qkv: &qkv,
+            bias: Some(&bias),
+            positions: &positions_dev,
+            query: &mut query,
+            key: &mut key,
+            value: &mut value,
+            theta,
+        },
     )
     .unwrap();
     ctx.synchronize().unwrap();
