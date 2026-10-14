@@ -505,7 +505,7 @@ impl LlmTrait for MiniCpm5 {
         self.backend
             .from_array(logits.reshape(&[ids.len(), self.vocab_size()])?)
     }
-    fn sampling_backend(&self) -> &dyn apxinf_core::SamplingBackend {
+    fn backend(&self) -> &dyn Backend {
         &self.backend
     }
     fn reset(&mut self) {

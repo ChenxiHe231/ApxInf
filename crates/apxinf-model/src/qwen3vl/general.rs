@@ -493,7 +493,7 @@ impl LlmTrait for GeneralQwen3VL {
         Ok(logits)
     }
 
-    fn sampling_backend(&self) -> &dyn apxinf_core::SamplingBackend {
+    fn backend(&self) -> &dyn Backend {
         &*self.backend
     }
 

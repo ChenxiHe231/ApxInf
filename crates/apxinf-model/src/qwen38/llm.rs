@@ -2,11 +2,13 @@
 //! surface over the split modules: [`super::weights`], [`super::model`], [`super::model_runner`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
+use apxinf_core::{Backend, DType, Device, Error, Result, Shape, Tensor};
 use apxinf_cuda_new::{ops, CudaBuffer, CudaContext, PreparedPhase};
 use apxinf_loader::ModelConfig;
 
+use crate::accelerator::create_backend;
 use crate::llm_trait::{LlmCapabilities, LlmInput, LlmTrait};
 
 use super::config::{
@@ -25,6 +27,9 @@ use super::{backend, model, model_runner, vision, weights};
 /// comparison.
 pub struct Qwen38 {
     ctx: CudaContext,
+    /// Existing model-neutral sampling backend. Vision and language compute
+    /// remain on `ctx`; this field is used only by `LlmTrait` token sampling.
+    backend: Arc<dyn Backend>,
     model: weights::Model,
     /// Some text-only checkpoints intentionally omit the visual tower.
     vision: Option<VisionWeights>,
@@ -67,6 +72,7 @@ impl Qwen38 {
         model_runner::apply_validated_kernel_defaults();
 
         let ctx = CudaContext::new(ordinal).map_err(Error::Cuda)?;
+        let backend = create_backend(device)?;
         let vision = weights
             .contains_key("model.visual.patch_embed.proj.weight")
             .then(|| VisionWeights::load(&weights, &ctx))
@@ -86,6 +92,7 @@ impl Qwen38 {
 
         Ok(Self {
             ctx,
+            backend,
             model,
             vision,
             vision_state: vision::VisionState::default(),
@@ -345,8 +352,8 @@ impl LlmTrait for Qwen38 {
         Ok(self.logits_view())
     }
 
-    fn sampling_backend(&self) -> &dyn apxinf_core::SamplingBackend {
-        &self.ctx
+    fn backend(&self) -> &dyn Backend {
+        &*self.backend
     }
 
     fn capabilities(&self) -> LlmCapabilities {
