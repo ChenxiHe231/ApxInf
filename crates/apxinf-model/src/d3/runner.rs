@@ -12,7 +12,10 @@ use crate::d3::model::{
 use crate::d3::runtime::{DecisionInput, DecisionOutput, DecisionRuntime, DecisionScore};
 use crate::d3::vision::D3VisionScratch;
 use crate::d3::weights::bf16::D3DeviceWeights;
-use crate::d3::{D3DecisionConfig, D3PackageConfig};
+use crate::d3::{
+    D3DecisionConfig, D3PackageConfig, D3_DEFAULT_TEXT_PROFILE_LIMIT,
+    D3_DEFAULT_TEXT_PROFILE_TOKEN_BUDGET,
+};
 use crate::llm_trait::{ImageInput, LlmCapabilities};
 
 struct TextProfile {
@@ -52,26 +55,33 @@ impl D3Runner {
         config: D3PackageConfig,
         weights: D3DeviceWeights,
         policies: D3Policies,
-    ) -> Self {
-        Self {
+        text_profile_limit: Option<usize>,
+        text_profile_token_budget: Option<usize>,
+    ) -> Result<Self> {
+        let text_profile_limit = text_profile_limit.unwrap_or(D3_DEFAULT_TEXT_PROFILE_LIMIT);
+        let text_profile_token_budget =
+            text_profile_token_budget.unwrap_or(D3_DEFAULT_TEXT_PROFILE_TOKEN_BUDGET);
+        if text_profile_limit == 0 {
+            return Err(Error::Other(
+                "d3 text profile cache limit must be positive".into(),
+            ));
+        }
+        if text_profile_token_budget == 0 {
+            return Err(Error::Other(
+                "d3 text profile token budget must be positive".into(),
+            ));
+        }
+        Ok(Self {
             ctx,
             config,
             weights,
             policies,
             text_profiles: HashMap::new(),
             text_profile_order: VecDeque::new(),
-            text_profile_limit: std::env::var("APXINF_D3_TEXT_PROFILE_LIMIT")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|limit| *limit > 0)
-                .unwrap_or(usize::MAX),
-            text_profile_token_budget: std::env::var("APXINF_D3_TEXT_PROFILE_TOKEN_BUDGET")
-                .ok()
-                .and_then(|value| value.parse::<usize>().ok())
-                .filter(|budget| *budget > 0)
-                .unwrap_or(usize::MAX),
+            text_profile_limit,
+            text_profile_token_budget,
             vision_profiles: HashMap::new(),
-        }
+        })
     }
 
     fn prepare_text_profile(&mut self, token_ids: &[u32]) -> Result<()> {

@@ -4,6 +4,12 @@ use apxinf_core::{Error, Result};
 
 use crate::llm_trait::{ImageInput, LlmCapabilities};
 
+/// Safe defaults for the d3 text CUDA Graph profile cache. The full public
+/// Decision Index contains many distinct prompt lengths; leaving this cache
+/// unbounded can exhaust a 24 GiB GPU before the run completes.
+pub const D3_DEFAULT_TEXT_PROFILE_LIMIT: usize = 12;
+pub const D3_DEFAULT_TEXT_PROFILE_TOKEN_BUDGET: usize = 30_000;
+
 /// One complete prompt. Video uses the same processor tensor plus `grid_thw`
 /// contract as Qwen3.5 vision; callers concatenate temporal patches there.
 #[derive(Clone, Copy, Debug)]

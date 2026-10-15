@@ -21,5 +21,8 @@ mod runner;
 mod vision;
 
 pub use config::{D3Config, D3DecisionConfig, D3PackageConfig, D3TextConfig, D3VisionConfig};
-pub use runtime::{DecisionInput, DecisionOutput, DecisionRuntime, DecisionScore};
+pub use runtime::{
+    DecisionInput, DecisionOutput, DecisionRuntime, DecisionScore, D3_DEFAULT_TEXT_PROFILE_LIMIT,
+    D3_DEFAULT_TEXT_PROFILE_TOKEN_BUDGET,
+};
 pub use weights::{D3CheckpointWeights, D3ReadoutWeights};

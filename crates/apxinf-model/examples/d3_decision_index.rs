@@ -1,7 +1,7 @@
 //! Run pre-tokenized Decision Index requests and emit its native result format.
 //!
 //! Usage:
-//! `d3_decision_index MODEL_DIR RECORDS_JSONL RESULTS_JSONL [--autotune] [--tuning-dir DIR]`
+//! `d3_decision_index MODEL_DIR RECORDS_JSONL RESULTS_JSONL [--autotune] [--tuning-dir DIR] [--profile-limit N] [--profile-token-budget N]`
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use apxinf_core::Device;
-use apxinf_model::{AutoModel, DecisionInput, LoadOptions};
+use apxinf_model::{
+    AutoModel, DecisionInput, LoadOptions, D3_DEFAULT_TEXT_PROFILE_LIMIT,
+    D3_DEFAULT_TEXT_PROFILE_TOKEN_BUDGET,
+};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
@@ -31,12 +34,22 @@ struct Record {
     evaluation: Map<String, Value>,
 }
 
+fn positive_usize(value: String, option: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let parsed = value.parse::<usize>()?;
+    if parsed == 0 {
+        return Err(format!("{option} must be positive").into());
+    }
+    Ok(parsed)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let model_dir = PathBuf::from(args.next().ok_or("missing model directory")?);
     let records_path = PathBuf::from(args.next().ok_or("missing records JSONL")?);
     let results_path = PathBuf::from(args.next().ok_or("missing results JSONL")?);
     let mut options = LoadOptions::default();
+    options.d3_text_profile_limit = Some(D3_DEFAULT_TEXT_PROFILE_LIMIT);
+    options.d3_text_profile_token_budget = Some(D3_DEFAULT_TEXT_PROFILE_TOKEN_BUDGET);
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--autotune" => options.autotune = true,
@@ -44,6 +57,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 options.tuning_path = Some(PathBuf::from(
                     args.next().ok_or("--tuning-dir requires a directory")?,
                 ));
+            }
+            "--profile-limit" => {
+                options.d3_text_profile_limit = Some(positive_usize(
+                    args.next().ok_or("--profile-limit requires a value")?,
+                    "--profile-limit",
+                )?);
+            }
+            "--profile-token-budget" => {
+                options.d3_text_profile_token_budget = Some(positive_usize(
+                    args.next()
+                        .ok_or("--profile-token-budget requires a value")?,
+                    "--profile-token-budget",
+                )?);
             }
             _ => return Err(format!("unknown argument {argument:?}").into()),
         }
@@ -100,9 +126,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let run_started = Instant::now();
     eprintln!(
-        "resume_completed={} remaining={} total={total_records}",
+        "resume_completed={} remaining={} total={total_records} profile_limit={} profile_token_budget={}",
         completed.len(),
-        records.len()
+        records.len(),
+        options.d3_text_profile_limit.unwrap(),
+        options.d3_text_profile_token_budget.unwrap(),
     );
 
     for (index, record) in records.iter().enumerate() {

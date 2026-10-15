@@ -11,11 +11,11 @@ pub mod llama;
 pub mod llm_trait;
 #[cfg(all(feature = "mlx", target_os = "macos", target_arch = "aarch64"))]
 pub mod metal_minicpm5;
+#[cfg(all(feature = "mlx", target_os = "macos", target_arch = "aarch64"))]
+pub mod metal_qwen3;
 pub mod pi05;
 pub mod pi0fast;
 pub mod profiling;
-#[cfg(all(feature = "mlx", target_os = "macos", target_arch = "aarch64"))]
-pub mod metal_qwen3;
 #[cfg(feature = "cuda")]
 pub mod qwen38;
 pub mod qwen3vl;
@@ -30,7 +30,8 @@ pub use auto::{AutoModel, LoadOptions, LoadedModel, ModelPrecision, SyntheticWei
 pub use builtin::register_builtin_models;
 pub use d3::{
     D3Config, D3DecisionConfig, D3PackageConfig, D3TextConfig, D3VisionConfig, DecisionInput,
-    DecisionOutput, DecisionRuntime, DecisionScore,
+    DecisionOutput, DecisionRuntime, DecisionScore, D3_DEFAULT_TEXT_PROFILE_LIMIT,
+    D3_DEFAULT_TEXT_PROFILE_TOKEN_BUDGET,
 };
 pub use debug::{DebugCapture, DebugConfig};
 pub use generation_config::{GenerationConfigSource, GenerationOptions, SamplingMode};

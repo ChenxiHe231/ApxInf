@@ -63,6 +63,12 @@ pub struct LoadOptions {
     /// on recipe misses during preparation or first execution. When false,
     /// missing records resolve once to a safe inference fallback.
     pub autotune: bool,
+    /// Maximum number of fixed-length d3 text CUDA Graph profiles retained in
+    /// memory. `None` uses the d3 runtime's safe default.
+    pub d3_text_profile_limit: Option<usize>,
+    /// Sum of token capacities across retained d3 text profiles. `None` uses
+    /// the d3 runtime's safe default. A single request may exceed the budget.
+    pub d3_text_profile_token_budget: Option<usize>,
     /// Serve fewer camera views than the checkpoint declares.
     pub num_views: Option<usize>,
     /// Explicit architecture config, overriding any on-disk `config.json`.

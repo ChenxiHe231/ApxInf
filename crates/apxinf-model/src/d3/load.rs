@@ -59,6 +59,11 @@ pub(crate) fn load_with_cuda_new(
     let weights = D3DeviceWeights::from_host(&config, checkpoint, readout, &ctx)?;
     ctx.synchronize().map_err(Error::Cuda)?;
     Ok(LoadedModel::Decision(Box::new(D3Runner::new(
-        ctx, config, weights, policies,
-    ))))
+        ctx,
+        config,
+        weights,
+        policies,
+        options.d3_text_profile_limit,
+        options.d3_text_profile_token_budget,
+    )?)))
 }
