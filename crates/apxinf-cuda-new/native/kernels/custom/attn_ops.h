@@ -19,18 +19,6 @@ int partial_rope(void* data, const void* positions, int tokens, int heads,
                  int head_dim, int rotary_dim, float theta,
                  cudaStream_t stream);
 
-// Multimodal partial RoPE. `positions` is `[tokens, 3]` I32 in temporal,
-// height, width order and the section values select the interleaved axes.
-int partial_mrope(void* data, const void* positions, int tokens, int heads,
-                  int head_dim, int rotary_dim, int section_height,
-                  int section_width, float theta, cudaStream_t stream);
-
-// Qwen vision QKV split + bias + 2D RoPE. `positions` is `[tokens, 2]` I32.
-int split_vision_qkv_rope(const void* qkv, const void* bias,
-                          const void* positions, void* query, void* key,
-                          void* value, int tokens, int heads, int head_dim,
-                          float theta, cudaStream_t stream);
-
 // Per-head RMSNorm in place over `[rows, head_dim]`, for q_norm and k_norm.
 int head_rms_norm(void* data, const void* weight, int rows, int head_dim,
                   float epsilon, cudaStream_t stream);

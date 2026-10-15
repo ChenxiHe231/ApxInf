@@ -262,7 +262,17 @@ pub(crate) fn forward_multimodal_device(
     let token_tensor = prefix(&scratch.tokens, vec![tokens], DType::I32)?;
     ops::embedding_gather(ctx, &weights.embed_tokens, &token_tensor, &hidden)?;
     forward_vision_device(ctx, config, &weights.vision, policies, vision)?;
-    ops::replace_rows_bf16(ctx, &hidden, vision.visual_output(), vision.row_sources())?;
+    let row_map = CudaBuffer::from_tensor(vision.row_sources()).map_err(Error::Cuda)?;
+    let hidden_input = hidden.clone();
+    let mut hidden_output = hidden.clone();
+    let mut replace = ops::GatherArgs::new(
+        ops::GatherSemantic::ReplaceRows,
+        &hidden_input,
+        &mut hidden_output,
+    );
+    replace.replacement = Some(vision.visual_output());
+    replace.row_map = Some(&row_map);
+    ops::gather(ctx, replace)?;
     forward_language_device(
         ctx,
         config,
@@ -417,7 +427,7 @@ fn full_attention(
         vec![tokens, text.num_attention_heads, 2 * text.head_dim],
         DType::BF16,
     )?;
-    let query = prefix(
+    let mut query = prefix(
         &scratch.query,
         vec![tokens, text.num_attention_heads, text.head_dim],
         DType::BF16,
@@ -451,13 +461,15 @@ fn full_attention(
     let positions = prefix(&scratch.positions, vec![tokens], DType::I32)?;
     let rotary = ops::rotary_dim(text.head_dim, text.partial_rotary_factor);
     if let Some(mrope) = mrope_positions {
-        ops::partial_mrope(
+        ops::multimodal_rope(
             ctx,
-            &query,
-            mrope,
-            rotary,
-            text.rope_parameters.mrope_section,
-            text.rope_parameters.rope_theta,
+            ops::MultimodalRopeArgs {
+                data: &mut query,
+                positions: mrope,
+                rotary_dim: rotary,
+                sections: text.rope_parameters.mrope_section,
+                theta: text.rope_parameters.rope_theta,
+            },
         )?;
     } else {
         ops::partial_rope(
@@ -468,19 +480,21 @@ fn full_attention(
             text.rope_parameters.rope_theta,
         )?;
     }
-    let key_heads = prefix(
+    let mut key_heads = prefix(
         &scratch.key,
         vec![tokens, text.num_key_value_heads, text.head_dim],
         DType::BF16,
     )?;
     if let Some(mrope) = mrope_positions {
-        ops::partial_mrope(
+        ops::multimodal_rope(
             ctx,
-            &key_heads,
-            mrope,
-            rotary,
-            text.rope_parameters.mrope_section,
-            text.rope_parameters.rope_theta,
+            ops::MultimodalRopeArgs {
+                data: &mut key_heads,
+                positions: mrope,
+                rotary_dim: rotary,
+                sections: text.rope_parameters.mrope_section,
+                theta: text.rope_parameters.rope_theta,
+            },
         )?;
     } else {
         ops::partial_rope(

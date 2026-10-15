@@ -304,7 +304,7 @@ impl D3Runner {
 
 impl DecisionRuntime for D3Runner {
     fn capabilities(&self) -> LlmCapabilities {
-        LlmCapabilities::VISION
+        LlmCapabilities::TEXT_ONLY
     }
 
     fn decide(&mut self, input: DecisionInput<'_>) -> Result<DecisionOutput> {

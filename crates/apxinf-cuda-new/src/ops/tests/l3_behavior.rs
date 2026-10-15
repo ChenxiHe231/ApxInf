@@ -116,6 +116,40 @@ fn u32_buffer(device: usize, values: &[u32]) -> crate::CudaBuffer {
     buffer
 }
 
+#[test]
+fn gather_replace_rows_preserves_unmapped_rows() {
+    let ctx = CudaContext::new(0).unwrap();
+    let input = tensor(0, vec![3, 2], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let replacement = tensor(0, vec![1, 2], &[7.0, 8.0]);
+    let row_map = u32_buffer(0, &[u32::MAX, 0, u32::MAX]);
+    let mut output = zeros_tensor(0, vec![3, 2], apxinf_core::DType::BF16);
+    let mut args = GatherArgs::new(GatherSemantic::ReplaceRows, &input, &mut output);
+    args.replacement = Some(&replacement);
+    args.row_map = Some(&row_map);
+    gather(&ctx, args).unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(values(&output), vec![1.0, 2.0, 7.0, 8.0, 5.0, 6.0]);
+}
+
+#[test]
+fn multimodal_rope_rejects_unimplemented_section_layouts() {
+    let ctx = CudaContext::new(0).unwrap();
+    let mut data = zeros_tensor(0, vec![1, 1, 256], apxinf_core::DType::BF16);
+    let positions = zeros_tensor(0, vec![1, 3], apxinf_core::DType::I32);
+    let error = multimodal_rope(
+        &ctx,
+        MultimodalRopeArgs {
+            data: &mut data,
+            positions: &positions,
+            rotary_dim: 64,
+            sections: [10, 11, 11],
+            theta: 1_000_000.0,
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("validated d3-mini"), "{error}");
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn attention_reference(
     query: &[f32],

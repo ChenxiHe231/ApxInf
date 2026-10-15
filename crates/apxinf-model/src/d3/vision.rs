@@ -212,15 +212,20 @@ pub(crate) fn forward_vision_device(
             &mut scratch.qkv,
             &policies.gemm,
         )?;
-        ops::split_vision_qkv_rope(
+        let mut query = scratch.query.clone();
+        let mut key = scratch.key.clone();
+        let mut value = scratch.value.clone();
+        ops::split_qkv_axial_rope(
             ctx,
-            &scratch.qkv,
-            &block.qkv_b,
-            &scratch.vision_positions,
-            &scratch.query,
-            &scratch.key,
-            &scratch.value,
-            VISION_THETA,
+            ops::AxialRopeArgs {
+                qkv: &scratch.qkv,
+                bias: Some(&block.qkv_b),
+                positions: &scratch.vision_positions,
+                query: &mut query,
+                key: &mut key,
+                value: &mut value,
+                theta: VISION_THETA,
+            },
         )?;
         let offsets = CudaBuffer::from_tensor(&scratch.offsets).map_err(Error::Cuda)?;
         let mut attention_args = ops::SegmentedAttentionArgs::new(

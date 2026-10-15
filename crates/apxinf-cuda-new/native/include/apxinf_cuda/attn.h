@@ -16,16 +16,6 @@ apxinf_status_t apxinf_attn_partial_rope(void* data, const void* positions,
                                          float theta,
                                          apxinf_cuda_stream_t stream);
 
-apxinf_status_t apxinf_attn_partial_mrope(
-    void* data, const void* positions, int64_t tokens, int64_t heads,
-    int64_t head_dim, int64_t rotary_dim, int64_t section_height,
-    int64_t section_width, float theta, apxinf_cuda_stream_t stream);
-
-apxinf_status_t apxinf_attn_split_vision_qkv_rope(
-    const void* qkv, const void* bias, const void* positions, void* query,
-    void* key, void* value, int64_t tokens, int64_t heads,
-    int64_t head_dim, float theta, apxinf_cuda_stream_t stream);
-
 apxinf_status_t apxinf_attn_head_rms_norm(void* data, const void* weight,
                                           int64_t rows, int64_t head_dim,
                                           float epsilon,

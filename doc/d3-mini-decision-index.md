@@ -147,17 +147,20 @@ the run configuration is visible in logs:
   2>&1 | tee -a "$RUN_DIR/run.log"
 ```
 
-`--autotune` tunes a recipe on the first miss and reuses it from the process
-cache for later matching operations. A `--tuning-dir` is therefore not needed
-for one uninterrupted run. To reuse recipes after restarting the process, add
-`--tuning-dir "$RUN_DIR/recipes"` to every invocation.
+`--autotune` tunes a recipe on the first miss, reuses it from the process cache,
+and persists it under the runtime's default hardware/toolkit-specific recipe
+directory. A later process started from the same working directory restores
+those recipes without `--tuning-dir`. Add
+`--tuning-dir "$RUN_DIR/recipes"` only when an explicit cache location is
+preferred.
 
 ### Resume after interruption
 
 Run the exact same command again with the same records and results paths. The
 runner removes an incomplete trailing JSON line, reads completed `run_id`
-values and appends only missing requests. With no `--tuning-dir`, a new process
-retunes its missing recipes; this affects startup time, not the answers.
+values and appends only missing requests. A new process restores compatible
+recipes from the default persistent cache; it retunes only missing or
+invalidated recipes.
 
 ## 8. Score with the official scorer
 

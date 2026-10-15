@@ -59,23 +59,3 @@ extern "C" apxinf_status_t apxinf_model_argmax_bf16(
           "argmax");
   });
 }
-
-extern "C" apxinf_status_t apxinf_model_replace_rows_bf16(
-    void* destination, const void* source, const void* source_rows,
-    int64_t destination_rows, int64_t source_row_count, int64_t columns,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (destination == nullptr || source == nullptr || source_rows == nullptr ||
-        !extent(destination_rows) || !extent(source_row_count) ||
-        !extent(columns)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid row replacement arguments");
-    }
-    check(apxinf::cuda_new::model_ops::replace_rows_bf16(
-              destination, source, static_cast<const uint32_t*>(source_rows),
-              static_cast<int>(destination_rows),
-              static_cast<int>(source_row_count), static_cast<int>(columns),
-              static_cast<cudaStream_t>(stream)),
-          "row replacement");
-  });
-}
