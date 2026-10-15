@@ -74,6 +74,10 @@ impl DecisionOutput {
 pub trait DecisionRuntime {
     fn capabilities(&self) -> LlmCapabilities;
     fn decide(&mut self, input: DecisionInput<'_>) -> Result<DecisionOutput>;
+    /// Package code names in index order.
+    fn code_names(&self) -> &[String];
+    /// Token IDs for each code.
+    fn token_ids(&self) -> &[u32];
 }
 
 #[cfg(test)]
