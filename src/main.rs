@@ -583,7 +583,14 @@ fn run_decide(
         .map_err(|error| format!("Failed to load tokenizer: {error}"))?;
     println!("Vocab size: {}", tok.vocab_size());
 
-    let tokens = encode_prompt(&tok, prompt, system_prompt, None)
+    // d3_format.py requires exact Hugging Face chat-template bytes and disables
+    // the Qwen thinking preamble. The legacy no-options path normalizes blank
+    // lines, which changes the Decision 3 prompt contract.
+    let template_options = serde_json::Map::from_iter([(
+        "enable_thinking".to_string(),
+        serde_json::Value::Bool(false),
+    )]);
+    let tokens = encode_prompt(&tok, prompt, system_prompt, Some(&template_options))
         .map_err(|error| format!("Failed to encode prompt: {error}"))?;
     println!("Prompt tokens: {}", tokens.len());
 
