@@ -314,6 +314,14 @@ impl DecisionRuntime for D3Runner {
             self.decide_text(input.token_ids, input.candidate_count)
         }
     }
+
+    fn code_names(&self) -> &[String] {
+        self.config.decision.code_names()
+    }
+
+    fn token_ids(&self) -> &[u32] {
+        self.config.decision.token_ids()
+    }
 }
 
 fn probabilities(
