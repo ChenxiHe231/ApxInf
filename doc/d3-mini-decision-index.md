@@ -4,16 +4,26 @@ This guide reproduces the **public text** Decision Index 0.3 score for
 `vllm-sr/d3-mini` with ApxInf. It does not run the private tests used by the
 leaderboard's Full score or any vision benchmark.
 
-The validated result is:
+## Published baseline and validated ApxInf result
 
-- public Decision Index: **54.91** (the model card reports 54.90)
-- completed requests: **140,178 / 140,178**
-- coverage: **100%**
-- result statuses: **140,178 `ok`**, no malformed or duplicate rows
+The [official d3-mini model card](https://huggingface.co/vllm-sr/d3-mini#text-jev-decision-index-032)
+reports a **54.9** public text score and a **67.7** public vision score for Jev
+Decision Index 0.3.2. ApxInf has reproduced the public text suite only; the
+vision suite was not run.
+
+| Result | Scope | Public score | Completed | Coverage | Wall time | Median latency | P95 latency |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Official d3-mini model card | text | **54.9** | - | - | - | - | - |
+| Official d3-mini model card | vision | **67.7** | - | - | - | - | - |
+| ApxInf on Jetson Thor | text | **54.91** | **140,178 / 140,178** | **100%** | **about 14 h 53 min** | **128 ms** | **1,165.7 ms** |
+
+All **140,178** ApxInf result rows had status `ok`; there were no malformed or
+duplicate rows. The ApxInf row was produced with the `cuda` feature and
+`--autotune`. The **67.7** vision score above is the published model-card
+result, not an ApxInf reproduction.
 
 The suite takes about 7 GB of downloads and 17 GB of build space. The complete
-d3-mini package is about 9 GB. Runtime depends strongly on the GPU; the
-validated Jetson Thor run took about 14 hours 53 minutes.
+d3-mini package is about 9 GB. Runtime depends strongly on the GPU.
 
 ## 1. Check out the pull request
 
