@@ -290,6 +290,16 @@ impl D3DecisionConfig {
         }
         Ok(())
     }
+
+    /// Code names in index order.
+    pub fn code_names(&self) -> &[String] {
+        &self.codes
+    }
+
+    /// Token IDs for each code in index order.
+    pub fn token_ids(&self) -> &[u32] {
+        &self.token_ids
+    }
 }
 
 impl D3Manifest {

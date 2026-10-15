@@ -132,6 +132,22 @@ impl LoadedModel {
         self.decision_mut()?.decide(input)
     }
 
+    pub fn decision_code_names(&self) -> Result<&[String]> {
+        match self {
+            Self::Decision(model) => Ok(model.code_names()),
+            Self::Text { .. } => Err(Error::Other("loaded model is text, not decision".into())),
+            Self::Vla(_) => Err(Error::Other("loaded model is VLA, not decision".into())),
+        }
+    }
+
+    pub fn decision_token_ids(&self) -> Result<&[u32]> {
+        match self {
+            Self::Decision(model) => Ok(model.token_ids()),
+            Self::Text { .. } => Err(Error::Other("loaded model is text, not decision".into())),
+            Self::Vla(_) => Err(Error::Other("loaded model is VLA, not decision".into())),
+        }
+    }
+
     pub fn forward(&mut self, token_ids: &[u32], start_pos: u32) -> Result<Tensor> {
         self.text_mut()?.forward(token_ids, start_pos)
     }
