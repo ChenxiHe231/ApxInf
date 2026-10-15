@@ -61,7 +61,10 @@ pub use norm::{
 };
 pub use pointwise::{pointwise, PointwiseActivation, PointwiseArgs, PointwiseSemantic};
 pub use quantization::{quantization, QuantizationArgs, QuantizationSemantic};
-pub use rope::{decode_rope, rope, DecodeRopeArgs, RopeArgs, RopeSemantic};
+pub use rope::{
+    decode_rope, multimodal_rope, rope, split_qkv_axial_rope, AxialRopeArgs, DecodeRopeArgs,
+    MultimodalRopeArgs, RopeArgs, RopeSemantic,
+};
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
 pub fn prepare_with_session<T>(

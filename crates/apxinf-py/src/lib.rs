@@ -38,12 +38,12 @@ use numpy::{
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::types::{PyDict, PyList};
 
 use apxinf_core::{DType, Device, RngKey, Shape, Tensor};
 use apxinf_model::{
-    AutoModel, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation, Pi05Config,
-    SyntheticWeights, VisionObservation, VlaContract, VlaMetadata, VlaRequest,
+    AutoModel, DecisionInput, ImageLayout, LoadOptions, LoadedModel, ModelPrecision, Observation,
+    Pi05Config, SyntheticWeights, VisionObservation, VlaContract, VlaMetadata, VlaRequest,
 };
 use apxinf_tokenizer::{SentencePieceTokenizer as NativeSentencePiece, Tokenizer as NativeHf};
 
@@ -237,6 +237,136 @@ impl PackedRgbU8 {
         self.bytes
             .take()
             .ok_or_else(|| PyValueError::new_err("packed RGB holder was already consumed"))
+    }
+}
+
+/// Decision model runner (d3-mini, etc.). Loads via `AutoModel` and exposes a
+/// single `decide(token_ids, candidate_count)` method that returns scored codes.
+#[pyclass(unsendable)]
+pub struct DecisionRunner {
+    model: LoadedModel,
+    device: Device,
+    model_path: PathBuf,
+}
+
+#[pymethods]
+impl DecisionRunner {
+    /// Load a decision model checkpoint.
+    ///
+    /// * `model_path` — directory containing decision_config.json and tokenizer.json.
+    /// * `device` — `cuda:N` (default `cuda:0`). d3 is CUDA-only.
+    /// * `autotune` — tune missing GEMM recipes from the first request.
+    /// * `tuning_dir` — directory to persist tuning recipes.
+    #[staticmethod]
+    #[pyo3(signature = (model_path, device="cuda:0", autotune=false, tuning_dir=None))]
+    fn load(
+        model_path: PathBuf,
+        device: &str,
+        autotune: bool,
+        tuning_dir: Option<PathBuf>,
+    ) -> PyResult<Self> {
+        let device = parse_device(device)?;
+        let options = LoadOptions {
+            autotune,
+            tuning_path: tuning_dir,
+            ..LoadOptions::default()
+        };
+        let model = AutoModel::load_model(device, &model_path, &options).map_err(runtime_err)?;
+        // Verify this is actually a decision model.
+        model.decision_code_names().map_err(|_| {
+            PyValueError::new_err(format!(
+                "apxinf_py.DecisionRunner.load: {:?} is not a decision model",
+                model_path
+            ))
+        })?;
+        Ok(Self {
+            model,
+            device,
+            model_path,
+        })
+    }
+
+    /// Run a text decision and return scored codes.
+    ///
+    /// * `token_ids` — 1-D uint32 numpy array of tokenized prompt.
+    /// * `candidate_count` — number of leading codes to score.
+    ///
+    /// Returns a dict with:
+    /// * `selected_index` — index of the highest-probability code.
+    /// * `scores` — list of `{"code": str, "token_id": int, "probability": float}`.
+    fn decide(
+        &mut self,
+        token_ids: PyReadonlyArray1<'_, u32>,
+        candidate_count: usize,
+    ) -> PyResult<PyObject> {
+        let ids = token_ids.as_slice().map_err(|_| {
+            PyValueError::new_err(
+                "apxinf_py.DecisionRunner.decide: token_ids must be a 1-D uint32 contiguous array",
+            )
+        })?;
+        let output = self
+            .model
+            .decide(DecisionInput::text(ids, candidate_count))
+            .map_err(runtime_err)?;
+        Python::with_gil(|py| {
+            let score_dicts: Vec<PyObject> = output
+                .scores
+                .iter()
+                .map(|score| {
+                    let d = PyDict::new_bound(py);
+                    d.set_item("code", &score.code).unwrap();
+                    d.set_item("token_id", score.token_id).unwrap();
+                    d.set_item("probability", score.probability).unwrap();
+                    d.into()
+                })
+                .collect();
+            let scores = PyList::new_bound(py, &score_dicts);
+            let result = PyDict::new_bound(py);
+            result.set_item("selected_index", output.selected_index)?;
+            result.set_item("scores", scores)?;
+            Ok(result.into())
+        })
+    }
+
+    /// Available code names in the package code table.
+    #[getter]
+    fn codes(&self) -> PyResult<Vec<String>> {
+        self.model
+            .decision_code_names()
+            .map(|names| names.to_vec())
+            .map_err(runtime_err)
+    }
+
+    /// Total number of codes in the package.
+    #[getter]
+    fn num_codes(&self) -> PyResult<usize> {
+        self.model
+            .decision_code_names()
+            .map(|names| names.len())
+            .map_err(runtime_err)
+    }
+
+    #[getter]
+    fn device(&self) -> String {
+        self.device.to_string()
+    }
+
+    #[getter]
+    fn model_path(&self) -> String {
+        self.model_path.display().to_string()
+    }
+
+    fn __repr__(&self) -> String {
+        let num = self
+            .model
+            .decision_code_names()
+            .map(|names| names.len())
+            .unwrap_or(0);
+        format!(
+            "DecisionRunner(device={}, codes={num}, path={:?})",
+            self.device(),
+            self.model_path
+        )
     }
 }
 
@@ -1828,6 +1958,7 @@ fn apxinf_py(module: &Bound<'_, PyModule>) -> PyResult<()> {
         apxinf_model::qwen_drive::FIXED_SCENE_TOKENS,
     )?;
     module.add_class::<ModelRunner>()?;
+    module.add_class::<DecisionRunner>()?;
     module.add_class::<PackedRgbU8>()?;
     module.add_class::<HfTokenizer>()?;
     module.add_class::<PySentencePieceTokenizer>()?;

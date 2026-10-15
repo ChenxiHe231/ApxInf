@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 use apxinf_core::{DType, Device, Tensor};
 use apxinf_model::{
-    AutoModel, GenerationConfigSource, GenerationOptions, ImageInput, LlmInput, LoadOptions,
-    SamplingMode,
+    AutoModel, DecisionInput, GenerationConfigSource, GenerationOptions, ImageInput, LlmInput,
+    LoadOptions, SamplingMode,
 };
 use apxinf_tokenizer::{ChatMessage, Tokenizer};
 use clap::{Parser, Subcommand};
@@ -124,6 +124,41 @@ enum Commands {
         dtype: String,
     },
 
+    /// Run a decision model and print scored codes
+    Decide {
+        /// Path to HuggingFace model directory
+        #[arg(short, long)]
+        model: PathBuf,
+
+        /// Explicit registry family
+        #[arg(long)]
+        model_name: Option<String>,
+
+        /// Input prompt
+        #[arg(short, long)]
+        prompt: String,
+
+        /// System prompt for chat mode
+        #[arg(long)]
+        system: Option<String>,
+
+        /// Device to run inference on (cuda[:N])
+        #[arg(short, long, default_value = "cuda:0")]
+        device: String,
+
+        /// Number of leading codes to score (default: all codes in package)
+        #[arg(short, long)]
+        candidates: Option<usize>,
+
+        /// Enable online autotuning
+        #[arg(long)]
+        autotune: bool,
+
+        /// Directory to persist tuning recipes
+        #[arg(long)]
+        tuning_dir: Option<PathBuf>,
+    },
+
     /// Run a quick test of the engine
     Test,
 }
@@ -192,6 +227,37 @@ fn main() {
                 seed,
                 &generation_config,
                 override_generation_config.as_deref(),
+            ) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        Commands::Decide {
+            model,
+            model_name,
+            prompt,
+            system,
+            device,
+            candidates,
+            autotune,
+            tuning_dir,
+        } => {
+            let device = match parse_device(&device) {
+                Ok(device) => device,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(error) = run_decide(
+                &model,
+                model_name.as_deref(),
+                &prompt,
+                system.as_deref(),
+                device,
+                candidates,
+                autotune,
+                tuning_dir.as_ref(),
             ) {
                 eprintln!("{error}");
                 std::process::exit(1);
@@ -489,6 +555,94 @@ fn run_generate(
     println!();
     println!();
     println!("{}", output.profile.summary());
+    Ok(())
+}
+
+fn run_decide(
+    model_dir: &PathBuf,
+    model_name_override: Option<&str>,
+    prompt: &str,
+    system_prompt: Option<&str>,
+    device: Device,
+    candidates: Option<usize>,
+    autotune: bool,
+    tuning_dir: Option<&PathBuf>,
+) -> Result<(), String> {
+    println!("apxinf — decision inference engine");
+    println!();
+
+    let model_name = match model_name_override {
+        Some(name) => name.to_owned(),
+        None => AutoModel::detect_model_name(model_dir)
+            .map_err(|error| format!("Failed to detect model type: {error}"))?,
+    };
+
+    let tokenizer_path = model_dir.join("tokenizer.json");
+    println!("Loading tokenizer from {:?}...", tokenizer_path);
+    let tok = Tokenizer::from_file(&tokenizer_path)
+        .map_err(|error| format!("Failed to load tokenizer: {error}"))?;
+    println!("Vocab size: {}", tok.vocab_size());
+
+    // d3_format.py requires exact Hugging Face chat-template bytes and disables
+    // the Qwen thinking preamble. The legacy no-options path normalizes blank
+    // lines, which changes the Decision 3 prompt contract.
+    let template_options = serde_json::Map::from_iter([(
+        "enable_thinking".to_string(),
+        serde_json::Value::Bool(false),
+    )]);
+    let tokens = encode_prompt(&tok, prompt, system_prompt, Some(&template_options))
+        .map_err(|error| format!("Failed to encode prompt: {error}"))?;
+    println!("Prompt tokens: {}", tokens.len());
+
+    let options = LoadOptions {
+        model_name: Some(model_name.clone()),
+        autotune,
+        tuning_path: tuning_dir.cloned(),
+        ..LoadOptions::default()
+    };
+
+    println!("Loading {model_name} from {:?}...", model_dir);
+    let mut model = AutoModel::load_model(device, model_dir, &options)
+        .map_err(|error| format!("Failed to load model: {error}"))?;
+
+    let code_names = model
+        .decision_code_names()
+        .map_err(|error| format!("Not a decision model: {error}"))?;
+    let candidate_count = candidates.unwrap_or(code_names.len());
+    if candidate_count == 0 || candidate_count > code_names.len() {
+        return Err(format!(
+            "--candidates {candidate_count} is outside 1..={}",
+            code_names.len()
+        ));
+    }
+    println!(
+        "Codes: {} (scoring top {candidate_count})",
+        code_names.len()
+    );
+    println!("Model ready.");
+    println!();
+
+    let output = model
+        .decide(DecisionInput::text(&tokens, candidate_count))
+        .map_err(|error| format!("Decision failed: {error}"))?;
+
+    let selected = output
+        .selected()
+        .map_err(|error| format!("Invalid decision output: {error}"))?;
+    println!(
+        "selected: {}  token_id: {}  probability: {:.8}",
+        selected.code, selected.token_id, selected.probability
+    );
+    println!();
+    println!("top-5:");
+    let mut top = output.scores;
+    top.sort_by(|left, right| right.probability.total_cmp(&left.probability));
+    for score in top.iter().take(5) {
+        println!(
+            "  {:<20}  token_id={:>6}  probability={:.8}",
+            score.code, score.token_id, score.probability
+        );
+    }
     Ok(())
 }
 

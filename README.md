@@ -15,6 +15,10 @@ with an evolving agentic workflow that radically simplifies custom model develop
 The first version of ApxInf ships with highly optimized PI-0.5 VLA model on Jetson Thor &
 Orin devices, and supports BF16, FP8 and INT8 precisions.
 
+ApxInf also supports CUDA text decision inference for `vllm-sr/d3-mini`. See
+the [d3-mini Decision Index reproduction guide](doc/d3-mini-decision-index.md)
+for the validated result and benchmark procedure.
+
 
 ## Quick start
 
@@ -44,6 +48,32 @@ cargo build --release --features mlx
 See the [MLX architecture and supported profiles](doc/mlx-backend.md) and
 [native SDK setup](crates/apxinf-mlx/README.md) for build requirements,
 MiniCPM/DSpark commands and supported options.
+
+### Run a d3-mini text decision
+
+Download the complete [`vllm-sr/d3-mini`](https://huggingface.co/vllm-sr/d3-mini)
+package and build with CUDA. Construct `D3_SYSTEM_PROMPT`, `D3_USER_PROMPT` and
+token IDs with the model's
+[`d3_format.py`](https://huggingface.co/vllm-sr/d3-mini/blob/main/d3_format.py).
+
+```bash
+cargo build --release --features cuda
+./target/release/apxinf decide \
+  --model /path/to/d3-mini \
+  --system "$D3_SYSTEM_PROMPT" --prompt "$D3_USER_PROMPT" --candidates 3 \
+  --autotune
+```
+
+The Python binding exposes the same pre-tokenized runtime:
+
+```python
+import numpy as np
+import apxinf_py
+
+runner = apxinf_py.DecisionRunner.load("/path/to/d3-mini", autotune=True)
+token_ids = np.asarray(formatted_d3_token_ids, dtype=np.uint32)
+print(runner.decide(token_ids, 3))
+```
 
 ### Quickly benchmarking PI-0.5
 
@@ -110,6 +140,15 @@ actions = client.infer(observation)["actions"]
 ```
 
 ## Performance
+
+### d3-mini
+
+Text decision model, BF16, batch 1. Public Jev Decision Index 0.3, 140,178
+requests. See [reproduction details](doc/d3-mini-decision-index.md).
+
+| Hardware | Precision | Public score | Coverage | P50 | P95 |
+|---|---|---:|---:|---:|---:|
+| Jetson AGX Thor | BF16 | **54.91** | **100%** | 128 ms | 1,165.7 ms |
 
 ### PI0.5
 
