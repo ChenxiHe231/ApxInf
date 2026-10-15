@@ -15,6 +15,10 @@ with an evolving agentic workflow that radically simplifies custom model develop
 The first version of ApxInf ships with highly optimized PI-0.5 VLA model on Jetson Thor &
 Orin devices, and supports BF16, FP8 and INT8 precisions.
 
+ApxInf also supports CUDA text decision inference for `vllm-sr/d3-mini`. See
+the [d3-mini Decision Index reproduction guide](doc/d3-mini-decision-index.md)
+for the validated result and benchmark procedure.
+
 
 ## Quick start
 

@@ -31,7 +31,6 @@ d3-mini package is about 9 GB. Runtime depends strongly on the GPU.
 git clone https://github.com/infinigence/ApxInf.git
 cd ApxInf
 export APXINF_DIR="$PWD"
-git rev-parse HEAD
 ```
 
 All commands below assume a Linux NVIDIA system with a working CUDA toolkit and
