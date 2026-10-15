@@ -25,14 +25,11 @@ result, not an ApxInf reproduction.
 The suite takes about 7 GB of downloads and 17 GB of build space. The complete
 d3-mini package is about 9 GB. Runtime depends strongly on the GPU.
 
-## 1. Check out the pull request
-
-Install the GitHub CLI if needed, then:
+## 1. Clone ApxInf
 
 ```bash
 git clone https://github.com/infinigence/ApxInf.git
 cd ApxInf
-gh pr checkout 131
 export APXINF_DIR="$PWD"
 git rev-parse HEAD
 ```
