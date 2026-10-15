@@ -115,6 +115,21 @@ actions = client.infer(observation)["actions"]
 
 ## Performance
 
+### d3-mini
+
+Public text Jev Decision Index 0.3, BF16, 140,178 requests, one at a time with
+`--autotune`. ApxInf completed every request and reproduced the published public
+score (54.90). Vision inference is not enabled in this release.
+
+| Hardware | Precision | Public score | Coverage | P50 latency | P95 latency | Full-run rate |
+|---|---|---:|---:|---:|---:|---:|
+| Jetson AGX Thor | BF16 | **54.91** | **100%** (140,178 / 140,178) | 128 ms | 1,165.7 ms | ~2.62 req/s |
+
+The full run took about 14 hours 53 minutes. The rate is the end-to-end average
+over the variable-length public suite, not fixed-shape peak throughput. See the
+[reproduction guide](doc/d3-mini-decision-index.md) for the pinned dataset,
+commands, cache limits and scorer output.
+
 ### PI0.5
 
 Two views, 224x224 NHWC `uint8`, 10 flow steps, `H=10`, batch 1. Latency is
