@@ -608,7 +608,10 @@ fn run_decide(
             code_names.len()
         ));
     }
-    println!("Codes: {} (scoring top {candidate_count})", code_names.len());
+    println!(
+        "Codes: {} (scoring top {candidate_count})",
+        code_names.len()
+    );
     println!("Model ready.");
     println!();
 

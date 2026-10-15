@@ -271,17 +271,14 @@ impl DecisionRunner {
             tuning_path: tuning_dir,
             ..LoadOptions::default()
         };
-        let model =
-            AutoModel::load_model(device, &model_path, &options).map_err(runtime_err)?;
+        let model = AutoModel::load_model(device, &model_path, &options).map_err(runtime_err)?;
         // Verify this is actually a decision model.
-        model
-            .decision_code_names()
-            .map_err(|_| {
-                PyValueError::new_err(format!(
-                    "apxinf_py.DecisionRunner.load: {:?} is not a decision model",
-                    model_path
-                ))
-            })?;
+        model.decision_code_names().map_err(|_| {
+            PyValueError::new_err(format!(
+                "apxinf_py.DecisionRunner.load: {:?} is not a decision model",
+                model_path
+            ))
+        })?;
         Ok(Self {
             model,
             device,
@@ -302,9 +299,11 @@ impl DecisionRunner {
         token_ids: PyReadonlyArray1<'_, u32>,
         candidate_count: usize,
     ) -> PyResult<PyObject> {
-        let ids = token_ids
-            .as_slice()
-            .map_err(|_| PyValueError::new_err("apxinf_py.DecisionRunner.decide: token_ids must be a 1-D uint32 contiguous array"))?;
+        let ids = token_ids.as_slice().map_err(|_| {
+            PyValueError::new_err(
+                "apxinf_py.DecisionRunner.decide: token_ids must be a 1-D uint32 contiguous array",
+            )
+        })?;
         let output = self
             .model
             .decide(DecisionInput::text(ids, candidate_count))
