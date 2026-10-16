@@ -113,14 +113,14 @@ fn partial_mrope_selects_qwen35_interleaved_axes() {
     let values: Vec<f32> = (0..tokens * HEAD_DIM)
         .map(|index| ((index % 29) as f32 - 14.0) / 9.0)
         .collect();
-    let data = upload_bf16(&ctx, &values, vec![tokens, 1, HEAD_DIM]);
+    let mut data = upload_bf16(&ctx, &values, vec![tokens, 1, HEAD_DIM]);
     let positions = [2, 17, 41, 3, 19, 43];
     let device_positions = upload_i32(&ctx, &positions, vec![tokens, 3]);
 
     ops::multimodal_rope(
         &ctx,
         ops::MultimodalRopeArgs {
-            data: &data,
+            data: &mut data,
             positions: &device_positions,
             rotary_dim: width,
             sections,
@@ -175,7 +175,7 @@ fn partial_mrope_is_bitwise_text_compatible() {
         .map(|index| ((index % 31) as f32 - 15.0) / 8.0)
         .collect();
     let legacy = upload_bf16(&ctx, &values, vec![tokens, KV_HEADS, HEAD_DIM]);
-    let multimodal = upload_bf16(&ctx, &values, vec![tokens, KV_HEADS, HEAD_DIM]);
+    let mut multimodal = upload_bf16(&ctx, &values, vec![tokens, KV_HEADS, HEAD_DIM]);
     let positions: Vec<i32> = (0..tokens as i32).map(|position| position * 7).collect();
     let triples: Vec<i32> = positions
         .iter()
@@ -188,7 +188,7 @@ fn partial_mrope_is_bitwise_text_compatible() {
     ops::multimodal_rope(
         &ctx,
         ops::MultimodalRopeArgs {
-            data: &multimodal,
+            data: &mut multimodal,
             positions: &multimodal_positions,
             rotary_dim: width,
             sections: [11, 11, 10],

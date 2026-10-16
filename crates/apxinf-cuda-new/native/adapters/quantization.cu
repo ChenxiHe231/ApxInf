@@ -103,6 +103,35 @@ cudaError_t launch_cast_f16_bf16(
   return cudaGetLastError();
 }
 
+__global__ void cast_bf16_f32_kernel(
+    const __nv_bfloat16* input, float* output, int64_t count) {
+  for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < count;
+       index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    output[index] = __bfloat162float(input[index]);
+  }
+}
+
+cudaError_t launch_cast_bf16_f32(
+    const void* input, void* output, int64_t count, cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0)
+    return cudaErrorInvalidValue;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  cast_bf16_f32_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input), static_cast<float*>(output), count);
+  return cudaGetLastError();
+}
+
+__global__ void cast_f32_bf16_kernel(
+    const float* input, __nv_bfloat16* output, int64_t count) {
+  for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < count;
+       index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    output[index] = __float2bfloat16(input[index]);
+  }
+}
+
 cudaError_t launch_cast_f32_bf16(
     const void* input, void* output, int64_t count, cudaStream_t stream) {
   if (input == nullptr || output == nullptr || count <= 0)
@@ -110,8 +139,7 @@ cudaError_t launch_cast_f32_bf16(
   int blocks = static_cast<int>((count + 255) / 256);
   blocks = blocks > 4096 ? 4096 : blocks;
   cast_f32_bf16_kernel<<<blocks, 256, 0, stream>>>(
-      static_cast<const float*>(input),
-      static_cast<__nv_bfloat16*>(output), count);
+      static_cast<const float*>(input), static_cast<__nv_bfloat16*>(output), count);
   return cudaGetLastError();
 }
 
@@ -224,6 +252,22 @@ void validate_spec(const apxinf_quantization_spec_t& spec) {
                       "invalid F16-to-BF16 cast Spec");
       }
       break;
+    case APXINF_QUANTIZATION_SEMANTIC_CAST_BF16_F32:
+      if (spec.input_dtype != APXINF_DTYPE_BF16 ||
+          spec.output_dtype != APXINF_DTYPE_F32 ||
+          spec.input_cols != spec.output_cols) {
+        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                      "invalid BF16-to-F32 cast Spec");
+      }
+      break;
+    case APXINF_QUANTIZATION_SEMANTIC_CAST_F32_BF16:
+      if (spec.input_dtype != APXINF_DTYPE_F32 ||
+          spec.output_dtype != APXINF_DTYPE_BF16 ||
+          spec.input_cols != spec.output_cols) {
+        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                      "invalid F32-to-BF16 cast Spec");
+      }
+      break;
     case APXINF_QUANTIZATION_SEMANTIC_SLICE_BF16:
       if (spec.input_dtype != APXINF_DTYPE_BF16 ||
           spec.output_dtype != APXINF_DTYPE_BF16 ||
@@ -238,14 +282,6 @@ void validate_spec(const apxinf_quantization_spec_t& spec) {
           spec.input_cols != spec.output_cols) {
         throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                       "invalid rowwise INT8 Spec");
-      }
-      break;
-    case APXINF_QUANTIZATION_SEMANTIC_CAST_F32_BF16:
-      if (spec.input_dtype != APXINF_DTYPE_F32 ||
-          spec.output_dtype != APXINF_DTYPE_BF16 ||
-          spec.input_cols != spec.output_cols) {
-        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                      "invalid F32-to-BF16 cast Spec");
       }
       break;
     default:
@@ -305,6 +341,12 @@ cudaError_t launch(const apxinf_quantization_spec_t& spec,
     case APXINF_QUANTIZATION_SEMANTIC_CAST_F16_BF16:
       return launch_cast_f16_bf16(
           bindings.input, bindings.output, input_count, stream);
+    case APXINF_QUANTIZATION_SEMANTIC_CAST_BF16_F32:
+      return launch_cast_bf16_f32(
+          bindings.input, bindings.output, input_count, stream);
+    case APXINF_QUANTIZATION_SEMANTIC_CAST_F32_BF16:
+      return launch_cast_f32_bf16(
+          bindings.input, bindings.output, input_count, stream);
     case APXINF_QUANTIZATION_SEMANTIC_SLICE_BF16:
       return launch_slice_columns_bf16(bindings.input, bindings.output, rows,
                                        input_cols, output_cols, stream);
@@ -312,9 +354,6 @@ cudaError_t launch(const apxinf_quantization_spec_t& spec,
       return launch_quantize_rows_bf16_int8(
           bindings.input, bindings.output, bindings.scales, rows, input_cols,
           stream);
-    case APXINF_QUANTIZATION_SEMANTIC_CAST_F32_BF16:
-      return launch_cast_f32_bf16(
-          bindings.input, bindings.output, input_count, stream);
     default:
       return cudaErrorInvalidValue;
   }

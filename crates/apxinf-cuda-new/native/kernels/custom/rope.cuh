@@ -172,8 +172,8 @@ __global__ void split_qkv_axial_rope(
     second = __bfloat162float(__float2bfloat16(second));
     const int axis = pair < quarter ? 0 : 1;
     const int slot = axis * quarter + (pair < quarter ? pair : pair - quarter);
-    __nv_bfloat16* destination = (is_key ? key : query) +
-        (token * heads + head) * head_dim;
+    __nv_bfloat16* destination =
+        (is_key ? key : query) + (token * heads + head) * head_dim;
     destination[pair] =
         __float2bfloat16(first * cosine[slot] - second * sine[slot]);
     destination[half + pair] =
@@ -218,7 +218,8 @@ __global__ void partial_multimodal_rope(
     const float low = __bfloat162float(data[base + pair]);
     const float high = __bfloat162float(data[base + half + pair]);
     data[base + pair] = __float2bfloat16(low * cosine - high * sine);
-    data[base + half + pair] = __float2bfloat16(high * cosine + low * sine);
+    data[base + half + pair] =
+        __float2bfloat16(high * cosine + low * sine);
   }
 }
 

@@ -425,10 +425,6 @@ __global__ void geglu_quant_f16_e4m3_packed4_kernel(
 }
 
 
-__device__ __forceinline__ float gelu_erf_exact(float value) {
-  return 0.5f * value * (1.0f + erff(value * 0.7071067811865475f));
-}
-
 __global__ void bias_activation_bf16_kernel(
     const __nv_bfloat16* input, const __nv_bfloat16* bias,
     __nv_bfloat16* output, int64_t count, int cols, int activation) {
@@ -439,7 +435,8 @@ __global__ void bias_activation_bf16_kernel(
     if (bias != nullptr) value += __bfloat162float(bias[index % cols]);
     if (activation == 1) value = gelu_tanh(value);
     if (activation == 2) value = value / (1.0f + expf(-value));
-    if (activation == 3) value = gelu_erf_exact(value);
+    if (activation == 3)
+      value = 0.5f * value * (1.0f + erff(value * 0.7071067811865475f));
     output[index] = __float2bfloat16(value);
   }
 }
@@ -522,8 +519,8 @@ __global__ void bias_activation_bf16_packed2_kernel(
       second = second / (1.0f + expf(-second));
     }
     if (activation == 3) {
-      first = gelu_erf_exact(first);
-      second = gelu_erf_exact(second);
+      first = 0.5f * first * (1.0f + erff(first * 0.7071067811865475f));
+      second = 0.5f * second * (1.0f + erff(second * 0.7071067811865475f));
     }
     output2[pair_index] = __floats2bfloat162_rn(first, second);
   }
@@ -565,7 +562,9 @@ __global__ void bias_activation_bf16_packed4_kernel(
     }
     if (activation == 3) {
 #pragma unroll
-      for (int i = 0; i < 4; ++i) values[i] = gelu_erf_exact(values[i]);
+      for (int i = 0; i < 4; ++i)
+        values[i] = 0.5f * values[i] *
+                    (1.0f + erff(values[i] * 0.7071067811865475f));
     }
     output4[quad_index] = Bf16x4{
         __floats2bfloat162_rn(values[0], values[1]),

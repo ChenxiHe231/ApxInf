@@ -5,7 +5,7 @@
 /* Shares the dtype enum and status codes with the gemm family. */
 #include "gemm_types.h"
 
-/* Packed-QKV split family.
+/* RoPE / packed-QKV split family.
  *
  *   SPLIT_QKV_ROPE  qkv [tokens, q_heads*head_dim + 2*kv_heads*head_dim]
  *                   -> q [tokens, q_heads, head_dim]
@@ -46,7 +46,7 @@ typedef struct {
   uint32_t q_heads;
   uint32_t kv_heads;
   uint32_t head_dim;
-  /* PARTIAL_MROPE-only geometry, expressed in scalar dimensions/pairs. */
+  /* Multimodal geometry, expressed in scalar dimensions/pairs. */
   uint32_t rotary_dim;
   uint32_t section_t;
   uint32_t section_h;
@@ -64,6 +64,7 @@ typedef struct {
 typedef struct {
   const void* qkv;
   const void* bias;
+  /* Q output, or the in-place activation for PARTIAL_MROPE. */
   void* q;
   void* k;
   void* v;

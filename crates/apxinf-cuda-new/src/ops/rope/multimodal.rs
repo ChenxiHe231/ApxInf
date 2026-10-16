@@ -5,6 +5,8 @@ use super::launch;
 use crate::ffi::abi::rope as abi;
 use crate::CudaContext;
 
+const D3_MROPE_SECTIONS: [usize; 3] = [11, 11, 10];
+
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
 }
@@ -25,9 +27,13 @@ pub struct AxialRopeArgs<'a> {
     pub theta: f32,
 }
 
-/// Apply Qwen-style interleaved temporal/height/width RoPE in place.
+/// Apply the D3/Qwen interleaved temporal/height/width partial RoPE in place.
+///
+/// The current kernel is intentionally restricted to the d3-mini section
+/// layout `[11, 11, 10]`; unsupported layouts fail before launch rather than
+/// being interpreted as a nearby layout.
 pub struct MultimodalRopeArgs<'a> {
-    pub data: &'a Tensor,
+    pub data: &'a mut Tensor,
     pub positions: &'a Tensor,
     pub rotary_dim: usize,
     pub sections: [usize; 3],
@@ -57,7 +63,7 @@ fn normalize_axial(ctx: &CudaContext, args: AxialRopeArgs<'_>) -> Result<Normali
         || args.positions.shape().dims() != [tokens, 2]
         || !(args.theta.is_finite() && args.theta > 0.0)
     {
-        return Err(invalid("axial RoPE shape mismatch"));
+        return Err(invalid("axial RoPE shape or scalar mismatch"));
     }
     for value in [tokens, heads, head_dim] {
         i32::try_from(value).map_err(|_| invalid("axial RoPE dimension exceeds native limits"))?;
@@ -130,14 +136,19 @@ fn normalize_multimodal(ctx: &CudaContext, args: MultimodalRopeArgs<'_>) -> Resu
     let (tokens, heads, head_dim) = (dims[0], dims[1], dims[2]);
     if tokens == 0
         || heads == 0
+        || heads > 65_535
+        || head_dim % 2 != 0
         || args.rotary_dim == 0
         || args.rotary_dim > head_dim
         || args.rotary_dim % 2 != 0
+        || args.sections != D3_MROPE_SECTIONS
         || args.sections.iter().sum::<usize>() != args.rotary_dim / 2
         || args.positions.shape().dims() != [tokens, 3]
         || !(args.theta.is_finite() && args.theta > 0.0)
     {
-        return Err(invalid("invalid multimodal RoPE contract"));
+        return Err(invalid(
+            "multimodal RoPE requires the validated d3-mini [11, 11, 10] layout",
+        ));
     }
     for value in [tokens, heads, head_dim, args.rotary_dim] {
         i32::try_from(value)
@@ -157,18 +168,18 @@ fn normalize_multimodal(ctx: &CudaContext, args: MultimodalRopeArgs<'_>) -> Resu
         section_t: args.sections[0] as u32,
         section_h: args.sections[1] as u32,
         section_w: args.sections[2] as u32,
-        qkv_alignment: alignment(data.ptr()),
+        qkv_alignment: 256,
         bias_alignment: 256,
-        q_alignment: 256,
+        q_alignment: alignment(data.ptr()),
         kv_alignment: 256,
         position_alignment: alignment(positions.ptr()),
         tokens: tokens as i64,
         cache_capacity: 0,
     };
     let bindings = abi::Bindings {
-        qkv: data.ptr(),
+        qkv: std::ptr::null(),
         bias: std::ptr::null(),
-        q: std::ptr::null_mut(),
+        q: data.ptr(),
         k: std::ptr::null_mut(),
         v: std::ptr::null_mut(),
         key_input: std::ptr::null(),

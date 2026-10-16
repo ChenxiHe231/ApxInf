@@ -11,12 +11,14 @@ pub enum QuantizationSemantic {
     RowwiseE4m3,
     /// Shape-preserving F16 to BF16 conversion.
     CastF16ToBf16,
+    /// Shape-preserving BF16 to F32 conversion.
+    CastBf16ToF32,
+    /// Shape-preserving F32 to BF16 conversion.
+    CastF32ToBf16,
     /// Keep the leading columns of a contiguous BF16 matrix.
     SliceColumnsBf16,
     /// BF16 to signed INT8 with one computed F32 scale per row.
     RowwiseI8,
-    /// Shape-preserving F32 to BF16 conversion.
-    CastF32ToBf16,
 }
 
 impl QuantizationSemantic {
@@ -25,9 +27,10 @@ impl QuantizationSemantic {
             Self::FixedScaleE4m3 => 0,
             Self::RowwiseE4m3 => 1,
             Self::CastF16ToBf16 => 2,
+            Self::CastBf16ToF32 => 5,
+            Self::CastF32ToBf16 => 6,
             Self::SliceColumnsBf16 => 3,
             Self::RowwiseI8 => 4,
-            Self::CastF32ToBf16 => 5,
         }
     }
 
@@ -130,6 +133,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: QuantizationArgs<'_>) -> Result
         }
         QuantizationSemantic::FixedScaleE4m3
         | QuantizationSemantic::CastF16ToBf16
+        | QuantizationSemantic::CastBf16ToF32
         | QuantizationSemantic::CastF32ToBf16 => {
             if args.input.shape() != args.out.shape() {
                 return Err(invalid(
@@ -164,6 +168,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: QuantizationArgs<'_>) -> Result
             (DType::BF16, DType::F8E4M3)
         }
         QuantizationSemantic::CastF16ToBf16 => (DType::F16, DType::BF16),
+        QuantizationSemantic::CastBf16ToF32 => (DType::BF16, DType::F32),
         QuantizationSemantic::CastF32ToBf16 => (DType::F32, DType::BF16),
         QuantizationSemantic::SliceColumnsBf16 => {
             if output_cols > input_cols {

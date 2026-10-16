@@ -103,6 +103,13 @@ void validate_spec(const apxinf_rope_spec_t& spec) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "invalid dynamic decode RoPE Spec");
   }
+  if (spec.semantic != APXINF_ROPE_SEMANTIC_SPLIT_QKV_AXIAL &&
+      spec.semantic != APXINF_ROPE_SEMANTIC_PARTIAL_MROPE &&
+      (spec.rotary_dim != 0 || spec.section_t != 0 ||
+       spec.section_h != 0 || spec.section_w != 0)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "RoPE semantic does not take multimodal fields");
+  }
   if (spec.semantic == APXINF_ROPE_SEMANTIC_SPLIT_QKV_AXIAL &&
       (spec.dtype != APXINF_DTYPE_BF16 || spec.head_dim > 256 ||
        spec.head_dim % 4 != 0 || spec.rotary_dim != spec.head_dim ||
@@ -113,14 +120,16 @@ void validate_spec(const apxinf_rope_spec_t& spec) {
   }
   if (spec.semantic == APXINF_ROPE_SEMANTIC_PARTIAL_MROPE &&
       (spec.dtype != APXINF_DTYPE_BF16 || spec.has_bias != 0 ||
-       spec.rotary_dim == 0 || spec.rotary_dim > spec.head_dim ||
-       spec.rotary_dim % 2 != 0 ||
+       spec.q_heads > 65535 ||
+       spec.rotary_dim != 64 || spec.rotary_dim > spec.head_dim ||
+       spec.section_t != 11 || spec.section_h != 11 ||
+       spec.section_w != 10 ||
        static_cast<uint64_t>(spec.section_t) + spec.section_h +
                spec.section_w !=
            spec.rotary_dim / 2 ||
        spec.cache_capacity != 0)) {
-    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "invalid multimodal RoPE Spec");
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "unsupported multimodal RoPE section layout");
   }
 }
 
@@ -128,10 +137,18 @@ void validate_bindings(const apxinf_rope_spec_t& spec,
                        const apxinf_rope_bindings_t& bindings) {
   const bool partial_mrope =
       spec.semantic == APXINF_ROPE_SEMANTIC_PARTIAL_MROPE;
-  if (bindings.qkv == nullptr ||
-      (!partial_mrope && (bindings.q == nullptr || bindings.k == nullptr ||
-                          bindings.v == nullptr))) {
+  if ((!partial_mrope &&
+       (bindings.qkv == nullptr || bindings.q == nullptr ||
+        bindings.k == nullptr || bindings.v == nullptr)) ||
+      (partial_mrope && bindings.q == nullptr)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "missing RoPE binding");
+  }
+  if (partial_mrope &&
+      (bindings.qkv != nullptr || bindings.bias != nullptr ||
+       bindings.k != nullptr || bindings.v != nullptr ||
+       bindings.key_input != nullptr || bindings.value_input != nullptr)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "partial multimodal RoPE received unrelated bindings");
   }
   if ((spec.has_bias != 0) != (bindings.bias != nullptr)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
@@ -222,7 +239,7 @@ cudaError_t launch_partial_mrope(const apxinf_rope_spec_t& spec,
   kernels::partial_multimodal_rope<<<
       dim3(static_cast<unsigned>(spec.tokens), spec.q_heads), threads, 0,
       static_cast<cudaStream_t>(bindings.stream)>>>(
-      static_cast<__nv_bfloat16*>(const_cast<void*>(bindings.qkv)),
+      static_cast<__nv_bfloat16*>(bindings.q),
       bindings.position, static_cast<int>(spec.tokens),
       static_cast<int>(spec.q_heads), static_cast<int>(spec.head_dim),
       static_cast<int>(spec.rotary_dim), static_cast<int>(spec.section_h),

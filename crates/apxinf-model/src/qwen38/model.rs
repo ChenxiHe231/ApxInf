@@ -511,12 +511,13 @@ pub(crate) fn decode_step_inner(
                 ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
                 ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
 
-                let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
-                let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
+                let mut query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
+                let mut key_tokens =
+                    cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
                 ops::multimodal_rope(
                     ctx,
                     ops::MultimodalRopeArgs {
-                        data: &query_tokens,
+                        data: &mut query_tokens,
                         positions: &scratch.positions,
                         rotary_dim: rotary,
                         sections: MROPE_SECTION,
@@ -527,7 +528,7 @@ pub(crate) fn decode_step_inner(
                 ops::multimodal_rope(
                     ctx,
                     ops::MultimodalRopeArgs {
-                        data: &key_tokens,
+                        data: &mut key_tokens,
                         positions: &scratch.positions,
                         rotary_dim: rotary,
                         sections: MROPE_SECTION,
@@ -1072,12 +1073,14 @@ pub(crate) fn prefill_step(
                 let positions = prefix(&scratch.positions, vec![tokens, 3], DType::I32);
                 // RoPE takes [tokens, heads, head_dim]; the batch axis the
                 // attention call wants is added separately below.
-                let query_tokens = prefix(&scratch.query, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
-                let key_tokens = cache_rows(&cache.keys, tokens, vec![tokens, KV_HEADS, HEAD_DIM]);
+                let mut query_tokens =
+                    prefix(&scratch.query, vec![tokens, HEADS, HEAD_DIM], DType::BF16);
+                let mut key_tokens =
+                    cache_rows(&cache.keys, tokens, vec![tokens, KV_HEADS, HEAD_DIM]);
                 ops::multimodal_rope(
                     ctx,
                     ops::MultimodalRopeArgs {
-                        data: &query_tokens,
+                        data: &mut query_tokens,
                         positions: &positions,
                         rotary_dim: rotary,
                         sections: MROPE_SECTION,
@@ -1088,7 +1091,7 @@ pub(crate) fn prefill_step(
                 ops::multimodal_rope(
                     ctx,
                     ops::MultimodalRopeArgs {
-                        data: &key_tokens,
+                        data: &mut key_tokens,
                         positions: &positions,
                         rotary_dim: rotary,
                         sections: MROPE_SECTION,

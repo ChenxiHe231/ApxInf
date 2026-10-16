@@ -68,9 +68,16 @@ void validate_spec(const apxinf_gather_spec_t& spec) {
     }
   }
   if (spec.semantic == APXINF_GATHER_SEMANTIC_REPLACE_ROWS &&
-      spec.replacement_rows == 0) {
+      (spec.replacement_rows == 0 || spec.vocab_size != 0 ||
+       spec.tokens_per_view != 0 || spec.views != 0 ||
+       spec.image_size != 0 || spec.patch_size != 0 || spec.nhwc != 0)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "row replacement requires replacement rows");
+                  "invalid row replacement Gather Spec");
+  }
+  if (spec.semantic != APXINF_GATHER_SEMANTIC_REPLACE_ROWS &&
+      spec.replacement_rows != 0) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "Gather semantic does not take replacement rows");
   }
 }
 
@@ -93,6 +100,17 @@ void validate_bindings(const apxinf_gather_spec_t& spec,
       (bindings.replacement == nullptr || bindings.row_map == nullptr)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "row replacement requires replacement and row map");
+  }
+  if (spec.semantic == APXINF_GATHER_SEMANTIC_REPLACE_ROWS &&
+      (bindings.ids != nullptr || bindings.bias != nullptr ||
+       bindings.position != nullptr)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "row replacement received unrelated bindings");
+  }
+  if (spec.semantic != APXINF_GATHER_SEMANTIC_REPLACE_ROWS &&
+      (bindings.replacement != nullptr || bindings.row_map != nullptr)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "Gather semantic does not take row replacement bindings");
   }
   if ((spec.has_bias != 0) != (bindings.bias != nullptr)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
