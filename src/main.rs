@@ -395,9 +395,6 @@ fn run_generate(
             return Err(format!("duplicate auxiliary asset: {name}"));
         }
     }
-    if image_path.is_some() && chat_options.is_some() {
-        return Err("--chat-options currently supports text prompts only".into());
-    }
     let template_options = chat_options
         .map(|raw| {
             serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw)
@@ -437,9 +434,14 @@ fn run_generate(
     // itself always receives the model-neutral LlmInput request.
     let (tokens, prepared_image) = if let Some(image_path) = image_path {
         println!("Preprocessing image via the Hugging Face processor...");
-        let (data, shape, grid, tokens) =
-            preprocess_image(model_dir, image_path, prompt, system_prompt)
-                .map_err(|error| format!("Preprocessing failed: {error}"))?;
+        let (data, shape, grid, tokens) = preprocess_image(
+            model_dir,
+            image_path,
+            prompt,
+            system_prompt,
+            template_options.as_ref(),
+        )
+        .map_err(|error| format!("Preprocessing failed: {error}"))?;
         println!(
             "pixel_values: {:?}, grid_thw: {:?}, prompt tokens: {}",
             shape,
@@ -513,6 +515,20 @@ fn run_generate(
 
     println!();
     println!("Generating up to {effective_max_tokens} tokens...");
+    // A Qwen-style template that opens a reasoning block leaves `<think>`
+    // unterminated in the prompt. If the budget runs out before the model
+    // closes it the visible output is reasoning with no answer, which reads as
+    // a broken model rather than a truncated one, so say which it was.
+    let prompt_opens_reasoning = tok
+        .decode_with_options(&tokens, false)
+        .map(
+            |text| match (text.rfind("<think>"), text.rfind("</think>")) {
+                (Some(open), Some(close)) => close < open,
+                (Some(_), None) => true,
+                _ => false,
+            },
+        )
+        .unwrap_or(false);
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut all_tokens = tokens.clone();
@@ -559,6 +575,26 @@ fn run_generate(
 
     println!();
     println!();
+    // Hitting the budget is not the same as finishing, and the difference is
+    // invisible in the printed text. Say which one happened, and when the
+    // reasoning block is what consumed the budget, say that too.
+    if all_tokens.len().saturating_sub(tokens.len()) >= effective_max_tokens {
+        let closed_reasoning = tok
+            .decode_with_options(&all_tokens[tokens.len()..], false)
+            .map(|text| text.contains("</think>"))
+            .unwrap_or(true);
+        println!(
+            "note: generation stopped at the {effective_max_tokens}-token budget rather than at \
+             a stop token, so the output above is truncated. Raise --max-tokens."
+        );
+        if prompt_opens_reasoning && !closed_reasoning {
+            println!(
+                "      the budget ran out inside the reasoning block, so no answer was reached \
+                 at all; --chat-options '{{\"enable_thinking\": false}}' answers directly."
+            );
+        }
+        println!();
+    }
     println!("{}", output.profile.summary());
     Ok(())
 }
@@ -679,11 +715,16 @@ fn encode_prompt(
 /// Preprocess an image with the model's Hugging Face processor. Raw image
 /// decoding and chat templating stay outside the model runtime; the resulting
 /// borrowed tensor is attached to LlmInput for unified generation.
+///
+/// `template_options` are the `--chat-options` entries. They reach the
+/// processor's own `apply_chat_template`, so template variables such as
+/// `enable_thinking` and `tools` behave the same here as on the text path.
 fn preprocess_image(
     model_dir: &PathBuf,
     image_path: &PathBuf,
     prompt: &str,
     system_prompt: Option<&str>,
+    template_options: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<(Vec<half::bf16>, Vec<usize>, [u32; 3], Vec<u32>), String> {
     use std::process::Command;
 
@@ -697,7 +738,7 @@ import numpy as np
 from transformers import AutoProcessor
 from PIL import Image
 
-model_dir, image_path, prompt, system, pixel_path, metadata_path = sys.argv[1:]
+model_dir, image_path, prompt, system, options_raw, pixel_path, metadata_path = sys.argv[1:]
 processor = AutoProcessor.from_pretrained(model_dir, local_files_only=True)
 image = Image.open(image_path).convert("RGB")
 messages = []
@@ -713,12 +754,20 @@ messages.append({
         {"type": "text", "text": prompt},
     ],
 })
+# Template variables only. The call's own structural arguments stay fixed,
+# because this script depends on their exact values to read the outputs back.
+options = json.loads(options_raw) if options_raw else {}
+reserved = {"add_generation_prompt", "tokenize", "return_dict", "return_tensors"}
+conflicts = sorted(reserved & set(options))
+if conflicts:
+    raise SystemExit(f"--chat-options cannot override {conflicts}")
 inputs = processor.apply_chat_template(
     messages,
     add_generation_prompt=True,
     tokenize=True,
     return_dict=True,
     return_tensors="pt",
+    **options,
 )
 pixels = inputs["pixel_values"].cpu().numpy().astype(np.float32)
 grid = inputs["image_grid_thw"][0].cpu().numpy().tolist()
@@ -727,6 +776,11 @@ np.save(pixel_path, pixels)
 with open(metadata_path, "w") as output:
     json.dump({"grid": grid, "tokens": tokens}, output)
 "#;
+    let options_raw = match template_options {
+        Some(options) => serde_json::to_string(options)
+            .map_err(|error| format!("serialize chat options: {error}"))?,
+        None => String::new(),
+    };
     let python = std::env::var("APXINF_PYTHON").unwrap_or_else(|_| "python3".to_string());
     let output = Command::new(&python)
         .arg("-c")
@@ -735,6 +789,7 @@ with open(metadata_path, "w") as output:
         .arg(image_path)
         .arg(prompt)
         .arg(system_prompt.unwrap_or(""))
+        .arg(&options_raw)
         .arg(&pixel_path)
         .arg(&metadata_path)
         .output()
