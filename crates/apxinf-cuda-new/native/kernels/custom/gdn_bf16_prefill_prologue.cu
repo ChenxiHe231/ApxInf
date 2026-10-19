@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-// The one definition of the BF16 GDN prefill prologue and state transpose,
-// shared by the AOT and the in-tree arm. See gdn_bf16_prefill_common.cuh.
+// L0 BF16 GDN prefill prologue and state-transpose kernels, shared by the AOT
+// and in-tree provider arms.
 
-#include "gdn_bf16_prefill_common.cuh"
-
-#include "../../../kernels/custom/gdn_bf16_prefill.cuh"
+#include "gdn_bf16_prefill.h"
+#include "gdn_bf16_prefill.cuh"
 
 namespace {
 using namespace apxinf_gdn_bf16;
@@ -42,7 +41,8 @@ __global__ void pack_ab_only_kernel(const __nv_bfloat16* zba,
 }
 
 // The GDN kernel takes a LINEAR-space decay and applies `lg2` itself; see
-// kernels/flashinfer_gdn/README.md for why consuming `g` directly is wrong.
+// native/kernels/flashinfer_gdn/README.md for why consuming `g` directly is
+// wrong.
 // Padding tokens get the benign `alpha = 1, beta = 0`.
 __global__ void flash_alpha_beta(const __nv_bfloat16* a,
                                  const __nv_bfloat16* b, const float* A_log,

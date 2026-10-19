@@ -370,9 +370,7 @@ fn main() {
                 .map(|source| attention.join(source)),
             );
             sm110_sources.extend([
-                native.join(
-                    "adapters/linear_attention/providers/gdn_bf16_prefill_prologue.cu",
-                ),
+                native.join("kernels/custom/gdn_bf16_prefill_prologue.cu"),
                 native.join(
                     "adapters/linear_attention/providers/gdn_bf16_prefill_sm110.cu",
                 ),
