@@ -158,7 +158,9 @@ __global__ void swiglu_bf16_pair_interleaved_kernel(
         gate_up + static_cast<int64_t>(row) * 2 * inner;
     const float gate = __bfloat162float(row_input[gate_col]);
     const float up = __bfloat162float(row_input[gate_col + pair]);
-    output[index] = swiglu_bf16_element<RoundSilu>(gate, up);
+    float silu = gate / (1.0f + expf(-gate));
+    if (RoundSilu) silu = __bfloat162float(__float2bfloat16(silu));
+    output[index] = __float2bfloat16(silu * up);
   }
 }
 
