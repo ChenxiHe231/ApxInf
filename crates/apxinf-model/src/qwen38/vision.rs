@@ -1,8 +1,12 @@
 //! Native BF16 Qwen3.5 vision tower and image-embedding injection.
 //!
-//! Processor output enters as canonical `[patches, 1536]` F32/BF16 plus
-//! `grid_thw`. All per-request tower computation remains on CUDA. The learned
-//! 48x48 position table is interpolated on the host once per distinct grid and
+//! Scope is one image per request. Processor output enters as canonical
+//! `[patches, 1536]` F32/BF16 plus `grid_thw`, whose `t` must be 1. Several
+//! images, and a video's `t > 1`, both need Attention segmented per frame and
+//! are rejected rather than fused into one span; see `prepare`.
+//!
+//! All per-request tower computation remains on CUDA. The learned 48x48
+//! position table is interpolated on the host once per distinct grid and
 //! retained in a small device cache, matching the maintained Qwen-Drive path.
 //! Vision and language computation share the same cuda-new context and stream.
 
@@ -22,8 +26,6 @@ pub(crate) struct VisionState {
 }
 
 struct PreparedVision {
-    offsets: Vec<u32>,
-    offsets_dev: CudaBuffer,
     pos_embeds: Tensor,
     pos_ids_dev: Tensor,
     total_patches: usize,
@@ -122,8 +124,8 @@ pub(crate) fn upload_pixels(ctx: &CudaContext, pixels: &Tensor) -> Result<Tensor
     }
 }
 
-/// Run the complete vision tower over one or more concatenated image patch
-/// streams. Attention is segmented at image boundaries.
+/// Run the complete vision tower over one image's patch stream. Attention is
+/// dense over all patches, which is what a single unsegmented image is.
 pub(crate) fn forward(
     weights: &VisionWeights,
     state: &VisionState,
@@ -150,6 +152,46 @@ pub(crate) fn forward(
     Ok(output)
 }
 
+/// The single-image contract, checked before any device work.
+///
+/// The tower runs Attention through the dense semantic, which is one
+/// self-attention span. Several images, or a video's `t > 1`, need Attention
+/// segmented per frame -- Transformers builds `cu_seqlens` with
+/// `repeat_interleave(h * w, t)` -- so fusing them into one span would let
+/// patches attend across an image or frame boundary. Reject instead.
+fn single_image_grid(grid_thw: &[[u32; 3]], total_patches: usize) -> Result<(usize, usize)> {
+    let &[t, h, w] = match grid_thw {
+        [grid] => grid,
+        grids => {
+            return Err(Error::Other(format!(
+                "qwen38 image input takes one image per request, got {} grids",
+                grids.len()
+            )))
+        }
+    };
+    if t != 1 {
+        return Err(Error::Other(format!(
+            "qwen38 image input requires grid t = 1, got {t}; video needs per-frame \
+             attention segmentation and three-axis positions this path does not build"
+        )));
+    }
+    let (h, w) = (h as usize, w as usize);
+    if h == 0 || w == 0 || h % VISION_MERGE != 0 || w % VISION_MERGE != 0 {
+        return Err(Error::Other(format!(
+            "qwen38 image grid [1, {h}, {w}] is invalid for merge {VISION_MERGE}"
+        )));
+    }
+    let patches = h
+        .checked_mul(w)
+        .ok_or_else(|| Error::Other("qwen38 image grid is too large".into()))?;
+    if patches != total_patches {
+        return Err(Error::Other(format!(
+            "qwen38 image grid covers {patches} patches but pixel_values has {total_patches}"
+        )));
+    }
+    Ok((h, w))
+}
+
 fn prepare(
     weights: &VisionWeights,
     state: &VisionState,
@@ -166,42 +208,14 @@ fn prepare(
         )));
     }
 
-    let mut offsets = vec![0u32];
-    for &[t, h, w] in grid_thw {
-        let (t, h, w) = (t as usize, h as usize, w as usize);
-        if t == 0 || h == 0 || w == 0 || h % VISION_MERGE != 0 || w % VISION_MERGE != 0 {
-            return Err(Error::Other(format!(
-                "qwen38 image grid [{t}, {h}, {w}] is invalid for merge {VISION_MERGE}"
-            )));
-        }
-        let patches = t
-            .checked_mul(h)
-            .and_then(|value| value.checked_mul(w))
-            .ok_or_else(|| Error::Other("qwen38 image grid is too large".into()))?;
-        let next = offsets[offsets.len() - 1]
-            .checked_add(
-                u32::try_from(patches)
-                    .map_err(|_| Error::Other("qwen38 image patch count exceeds u32".into()))?,
-            )
-            .ok_or_else(|| Error::Other("qwen38 image patch count overflow".into()))?;
-        offsets.push(next);
-    }
     let total_patches = dims[0];
-    if offsets[offsets.len() - 1] as usize != total_patches {
-        return Err(Error::Other(format!(
-            "qwen38 image grids cover {} patches but pixel_values has {total_patches}",
-            offsets[offsets.len() - 1]
-        )));
-    }
+    single_image_grid(grid_thw, total_patches)?;
 
-    let offsets_dev = upload_u32(ctx, &offsets)?;
     let pos_embeds = compute_pos_embeds(weights, state, ctx, grid_thw)?;
     let pos_ids = vision_position_ids(grid_thw);
     let pos_ids: Vec<i32> = pos_ids.into_iter().map(|value| value as i32).collect();
     let pos_ids_dev = upload_i32(ctx, vec![total_patches, 2], &pos_ids)?;
     Ok(PreparedVision {
-        offsets,
-        offsets_dev,
         pos_embeds,
         pos_ids_dev,
         total_patches,
@@ -313,6 +327,13 @@ fn forward_device(
         };
         let qkv = gemm_bias(ctx, &normed, &block.qkv_w, &block.qkv_b)?;
         let qkv_shape = [prepared.total_patches, VISION_HEADS, VISION_HEAD_DIM];
+        // Dense Attention wants a leading batch axis; the rows are identical.
+        let batched_shape = [
+            1,
+            prepared.total_patches,
+            VISION_HEADS,
+            VISION_HEAD_DIM,
+        ];
         let mut query = device_tensor(ctx, &qkv_shape, DType::BF16)?;
         let mut key = device_tensor(ctx, &qkv_shape, DType::BF16)?;
         let mut value = device_tensor(ctx, &qkv_shape, DType::BF16)?;
@@ -328,16 +349,19 @@ fn forward_device(
                 theta: 10_000.0,
             },
         )?;
-        let mut attn = device_tensor(ctx, &qkv_shape, DType::BF16)?;
-        ops::segmented_attention(
+        let mut attn = device_tensor(ctx, &batched_shape, DType::BF16)?;
+        // Dense Attention, not `ops::segmented_attention`: a single image is
+        // one unsegmented span, and only the dense semantic has FA2 registered
+        // as a candidate. The segmented semantic carries one shape-general
+        // fallback kernel, which costs 267 ms per block at 2,500 patches
+        // against 0.94 ms here for a bitwise-comparable result.
+        ops::attention(
             ctx,
-            ops::SegmentedAttentionArgs::new(
-                &query,
-                &key,
-                &value,
+            ops::AttentionArgs::new(
+                &query.reshape(batched_shape.to_vec())?,
+                &key.reshape(batched_shape.to_vec())?,
+                &value.reshape(batched_shape.to_vec())?,
                 &mut attn,
-                &prepared.offsets_dev,
-                &prepared.offsets,
             ),
         )?;
         let attn = attn.reshape(vec![prepared.total_patches, VISION_HIDDEN])?;
@@ -635,5 +659,40 @@ mod tests {
             .err()
             .expect("one placeholder cannot represent four merged image tokens");
         assert!(error.to_string().contains("does not contain 4"));
+    }
+
+    #[test]
+    fn single_image_grid_accepts_one_merge_aligned_frame() {
+        assert_eq!(single_image_grid(&[[1, 4, 6]], 24).unwrap(), (4, 6));
+    }
+
+    #[test]
+    fn single_image_grid_rejects_multiple_images() {
+        let error = single_image_grid(&[[1, 4, 4], [1, 4, 4]], 32)
+            .err()
+            .expect("dense Attention would fuse two images into one span");
+        assert!(error.to_string().contains("one image per request"));
+    }
+
+    #[test]
+    fn single_image_grid_rejects_a_temporal_grid() {
+        let error = single_image_grid(&[[2, 4, 4]], 32)
+            .err()
+            .expect("a video's t > 1 needs per-frame segmentation");
+        assert!(error.to_string().contains("grid t = 1"));
+    }
+
+    #[test]
+    fn single_image_grid_rejects_merge_misalignment_and_patch_mismatch() {
+        assert!(single_image_grid(&[[1, 5, 4]], 20)
+            .err()
+            .expect("odd height breaks the merger reshape")
+            .to_string()
+            .contains("invalid for merge"));
+        assert!(single_image_grid(&[[1, 4, 4]], 15)
+            .err()
+            .expect("grid must cover exactly the supplied patches")
+            .to_string()
+            .contains("but pixel_values has 15"));
     }
 }
