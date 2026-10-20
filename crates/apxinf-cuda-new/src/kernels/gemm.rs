@@ -526,6 +526,10 @@ pub fn pack_bf16_swiglu_weight_host(
         .collect())
 }
 
+fn bf16_swiglu_gemm_strides(packed: bool, k: i32, full_n: i32) -> (i32, i32) {
+    (k, if packed { full_n } else { k })
+}
+
 /// Compute SwiGLU from input `[M,K]` and a gate/up weight. On Thor the fixed
 /// prefill shape uses the native CUTLASS translation; all other row counts use
 /// cuBLAS plus the same rounded activation over the same packed weight.
@@ -602,6 +606,7 @@ pub fn bf16_swiglu_checkpoint(
         ctx,
         checked_bytes(DType::BF16, &[x[0], full_n], "SwiGLU projection")?,
     )?;
+    let (lda, ldb) = bf16_swiglu_gemm_strides(packed, k, n2);
     ctx.cublas()
         .gemm_ex(
             DType::BF16,
@@ -616,9 +621,9 @@ pub fn bf16_swiglu_checkpoint(
             x[1],
             1.0,
             &xp,
-            if packed { n2 } else { k },
+            lda,
             &wp,
-            k,
+            ldb,
             0.0,
             &projection,
             n2,
@@ -1177,7 +1182,9 @@ pub fn write(
 
 #[cfg(test)]
 mod tests {
-    use super::{bf16_swiglu_packed_source_index, QWEN_DRIVE_SWIGLU_PAIR};
+    use super::{
+        bf16_swiglu_gemm_strides, bf16_swiglu_packed_source_index, QWEN_DRIVE_SWIGLU_PAIR,
+    };
 
     #[test]
     fn bf16_swiglu_pack_interleaves_gate_and_up_tiles() {
@@ -1191,5 +1198,11 @@ mod tests {
             QWEN_DRIVE_SWIGLU_PAIR * k
         );
         assert_eq!(bf16_swiglu_packed_source_index(full_n, full_n, k), 1);
+    }
+
+    #[test]
+    fn bf16_swiglu_packed_gemm_uses_each_physical_row_width() {
+        assert_eq!(bf16_swiglu_gemm_strides(false, 2560, 18432), (2560, 2560));
+        assert_eq!(bf16_swiglu_gemm_strides(true, 2560, 18432), (2560, 18432));
     }
 }
