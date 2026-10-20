@@ -11,7 +11,7 @@ use crate::qwen_drive::weights::bf16::{
     BackboneDeviceWeights, ExpertDeviceWeights, GdnInputSplitWeights, MixerWeights,
 };
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
-use kernels::{attention, elementwise, embedding, gemm, linear_attention as la};
+use kernels::{elementwise, embedding, gemm, linear_attention as la};
 use std::sync::Arc;
 const GDN_CHUNK: usize = 64;
 
@@ -1115,8 +1115,8 @@ impl BackboneBf16 {
 pub(super) mod vision {
     use apxinf_core::{Error, Result, Tensor};
 
-    use crate::qwen_drive::backend::{kernels, nvtx, transfers, Context, DeviceBuffer};
-    use kernels::{activation, attention, elementwise, fused, gemm, linear_attention as la, norm};
+    use crate::qwen_drive::backend::{kernels, nvtx, ops, transfers, Context, DeviceBuffer};
+    use kernels::{activation, elementwise, fused, gemm, linear_attention as la, norm};
 
     use crate::qwen_drive::config::QwenDriveConfig;
     use crate::qwen_drive::weights::bf16::VisionDeviceWeights;
@@ -1456,9 +1456,9 @@ pub(crate) mod expert {
     use super::FIXED_SCENE_TOKENS;
     use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-    use crate::qwen_drive::backend::{kernels, nvtx, transfers, Context, DeviceBuffer};
+    use crate::qwen_drive::backend::{kernels, nvtx, ops, transfers, Context, DeviceBuffer};
     use kernels::{
-        activation, attention, elementwise, embedding, fused, gemm, linear_attention as la, norm,
+        activation, elementwise, embedding, fused, gemm, linear_attention as la, norm,
     };
 
     use crate::qwen_drive::config::{PlanningExpertConfig, QwenDriveConfig};
