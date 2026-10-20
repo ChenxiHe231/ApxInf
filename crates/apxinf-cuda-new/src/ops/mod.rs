@@ -75,10 +75,9 @@ pub use rope::{
     MultimodalRopeArgs, RopeArgs, RopeSemantic,
 };
 pub use translated_fast_paths::{
-    bf16_swiglu_projection, bf16_swiglu_weight_layout, causal_gqa_bf16,
-    fused_gdn_prefill_bf16, noncausal_gqa_bf16, pack_bf16_swiglu_weight_host,
-    vision_segmented_attention_bf16, Bf16SwigluWeightLayout, FusedGdnPrefillArgs,
-    VisionSegmentedAttentionArgs,
+    bf16_swiglu_projection, bf16_swiglu_weight_layout, causal_gqa_bf16, fused_gdn_prefill_bf16,
+    noncausal_gqa_bf16, pack_bf16_swiglu_weight_host, vision_segmented_attention_bf16,
+    Bf16SwigluWeightLayout, FusedGdnPrefillArgs, VisionSegmentedAttentionArgs,
 };
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
