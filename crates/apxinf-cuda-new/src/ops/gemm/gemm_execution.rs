@@ -259,7 +259,10 @@ pub(crate) fn validate_candidates(
     normalized: &Normalized,
     expected: &[f32],
 ) -> Result<()> {
-    let output_width = if normalized.spec.semantic == super::contracts::Semantic::GemmGeglu as u32 {
+    let output_width = if normalized.spec.semantic == super::contracts::Semantic::GemmGeglu as u32
+        || normalized.spec.semantic
+            == super::contracts::Semantic::GemmSwiGluPairInterleaved256 as u32
+    {
         normalized.spec.n as usize / 2
     } else {
         normalized.spec.n as usize

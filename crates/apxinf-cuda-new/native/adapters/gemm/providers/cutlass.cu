@@ -21,6 +21,7 @@ struct CutlassGegluState {
   apxinf::cuda_new::cutlass_ops::Nvfp4GemmExecution* nvfp4_execution = nullptr;
 #endif
   void* packed_weight = nullptr;
+  void* padded_output = nullptr;
   size_t packed_weight_bytes = 0;
   const void* packed_weight_source = nullptr;
   uint64_t packed_weight_version = 0;
@@ -37,7 +38,9 @@ struct CutlassGegluState {
     nvfp4_execution = nullptr;
 #endif
     if (packed_weight != nullptr) cudaFree(packed_weight);
+    if (padded_output != nullptr) cudaFree(padded_output);
     packed_weight = nullptr;
+    padded_output = nullptr;
     packed_weight_source = nullptr;
     packed_weight_version = 0;
     packed_weight_ready = false;
@@ -141,6 +144,11 @@ size_t cutlass_geglu_resource_requirements(const Spec& spec) {
   return static_cast<size_t>(spec.k * spec.n) * dtype_bytes(spec.b_dtype);
 }
 
+size_t cutlass_bf16_swiglu_resource_requirements(const Spec& spec) {
+  constexpr size_t kPaddedRows = 3584;
+  return kPaddedRows * static_cast<size_t>(spec.n / 2) * sizeof(uint16_t);
+}
+
 void prepare_cutlass_fp8_gemm(Execution&) {}
 
 void prepare_cutlass_w8a8(Execution& state) {
@@ -208,6 +216,18 @@ void prepare_cutlass_geglu_sm89(Execution& state) {
   resources.packed_weight_source = bindings.b;
   resources.packed_weight_version = bindings.b_version;
   resources.packed_weight_ready = true;
+#else
+  (void)state;
+#endif
+}
+
+void prepare_cutlass_bf16_swiglu(Execution& state) {
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN_DRIVE_SM110)
+  auto owned_resources = std::make_unique<CutlassGegluState>();
+  state.resource_bytes = cutlass_bf16_swiglu_resource_requirements(state.spec);
+  check_cuda(cudaMalloc(&owned_resources->padded_output,
+                        state.resource_bytes));
+  state.provider_state = owned_resources.release();
 #else
   (void)state;
 #endif
@@ -314,6 +334,28 @@ cudaError_t launch_cutlass_bf16_geglu(Execution& state) {
 #else
   (void)state;
   (void)bindings;
+  return cudaErrorNotSupported;
+#endif
+}
+
+cudaError_t launch_cutlass_bf16_swiglu(Execution& state) {
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN_DRIVE_SM110)
+  const auto& bindings = state.bindings;
+  const auto& spec = state.spec;
+  const auto stream = static_cast<cudaStream_t>(bindings.stream);
+  auto& resources = provider(state);
+  check_cutlass_status(
+      apxinf::cuda_new::cutlass_ops::bf16_dual_geglu_detail::
+          production_dual_swiglu_bf16(
+              bindings.a, bindings.b, resources.padded_output,
+              static_cast<int>(spec.m), static_cast<int>(spec.n / 2),
+              static_cast<int>(spec.k), static_cast<int>(spec.n), stream));
+  return cudaMemcpyAsync(
+      bindings.output, resources.padded_output,
+      static_cast<size_t>(spec.m * (spec.n / 2)) * sizeof(uint16_t),
+      cudaMemcpyDeviceToDevice, stream);
+#else
+  (void)state;
   return cudaErrorNotSupported;
 #endif
 }

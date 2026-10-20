@@ -32,7 +32,7 @@ void validate_recorded_alignment(const void* pointer, uint32_t alignment,
 
 void validate_spec(const apxinf::gemm::Spec& spec) {
   if (spec.version != 6 ||
-      spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL ||
+      spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256 ||
       spec.a_dtype > APXINF_DTYPE_E2M1_PAIR ||
       spec.b_dtype > APXINF_DTYPE_E2M1_PAIR ||
       spec.accumulation_dtype > APXINF_DTYPE_I32 ||
@@ -109,14 +109,29 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "packed E2M1 operands require the NVFP4 contract");
   }
-  if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU && spec.n % 2 != 0) {
+  if ((spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ||
+       spec.semantic ==
+           APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256) &&
+      spec.n % 2 != 0) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "GEMM+GeGLU requires an even projection width");
+                  "gated GEMM requires an even projection width");
+  }
+  if (spec.semantic ==
+          APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256 &&
+      (spec.a_dtype != APXINF_DTYPE_BF16 ||
+       spec.b_dtype != APXINF_DTYPE_BF16 ||
+       spec.output_dtype != APXINF_DTYPE_BF16 || spec.n % 512 != 0 ||
+       spec.alpha_is_unit == 0 || spec.output_scale_is_unit == 0 ||
+       spec.quantization != APXINF_GEMM_QUANT_NONE)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid pair-interleaved BF16 SwiGLU contract");
   }
   if (apxinf::gemm::has_row_channel_scales(spec) &&
-      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU) {
+      (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ||
+       spec.semantic ==
+           APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256)) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
-                  "rowwise GEMM+GeGLU is not implemented");
+                  "rowwise gated GEMM is not implemented");
   }
   if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL &&
       (spec.quantization != APXINF_GEMM_QUANT_FP8_UNIT_SCALE ||
@@ -628,36 +643,6 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_swiglu(
   (void)activation; (void)weight; (void)activation_scales;
   (void)weight_scales; (void)output; (void)output_scales; (void)alpha;
   (void)input_global_scale; (void)down_inverse_global_scale;
-  (void)rows; (void)n; (void)k; (void)stream;
-  return APXINF_STATUS_UNSUPPORTED;
-#endif
-}
-
-extern "C" apxinf_status_t apxinf_gemm_bf16_swiglu(
-    const void* activation, const void* interleaved_weight, void* output,
-    int64_t rows, int64_t n, int64_t k, apxinf_cuda_stream_t stream) {
-#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN_DRIVE_SM110)
-  return apxinf::framework::abi_boundary([&] {
-    if (activation == nullptr || interleaved_weight == nullptr ||
-        output == nullptr || rows != 3387 || n != 9216 || k != 2560) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid fused BF16 SwiGLU arguments");
-    }
-    const int status =
-        apxinf::cuda_new::cutlass_ops::bf16_dual_geglu_detail::
-            production_dual_swiglu_bf16(
-                activation, interleaved_weight, output,
-                static_cast<int>(rows), static_cast<int>(n),
-                static_cast<int>(k), static_cast<int>(2 * n),
-                static_cast<cudaStream_t>(stream));
-    if (status != 0) {
-      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                    "BF16 GEMM SwiGLU failed with status " +
-                        std::to_string(status));
-    }
-  });
-#else
-  (void)activation; (void)interleaved_weight; (void)output;
   (void)rows; (void)n; (void)k; (void)stream;
   return APXINF_STATUS_UNSUPPORTED;
 #endif

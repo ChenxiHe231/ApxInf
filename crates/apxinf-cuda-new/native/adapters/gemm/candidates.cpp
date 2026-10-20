@@ -223,6 +223,18 @@ bool supports_cutlass_bf16_geglu(const Spec& spec) {
          spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU;
 }
 
+bool supports_cutlass_bf16_swiglu_sm110(const Spec& spec) {
+  return spec.m == 3387 && spec.n == 18432 && spec.k == 2560 &&
+         spec.a_dtype == APXINF_DTYPE_BF16 &&
+         spec.b_dtype == APXINF_DTYPE_BF16 &&
+         spec.output_dtype == APXINF_DTYPE_BF16 &&
+         spec.accumulation_dtype == APXINF_DTYPE_F32 &&
+         spec.alpha_is_unit != 0 && spec.output_scale_is_unit != 0 &&
+         spec.quantization == APXINF_GEMM_QUANT_NONE &&
+         spec.semantic ==
+             APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256;
+}
+
 void cutlass_configurations(const Spec&,
                             std::vector<int>& configs) {
   for (int configuration = 0; configuration < 4; ++configuration) {
@@ -444,6 +456,23 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        destroy_cutlass},
 #endif
   };
+  static const ImplementationRegistry gemm_swiglu_entries = {
+      {kProviderCublas, 1, 1, "cublas+rounded-swiglu", 0, true, true, true,
+       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
+      {kProviderCublasLt, 1, 1, "cublasLt+rounded-swiglu", 0, true, false,
+       false, supports_vendor, cublaslt_alignment,
+       cublaslt_resource_requirements, cublaslt_configurations,
+       prepare_cublaslt, launch_cublaslt, destroy_cublaslt},
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN_DRIVE_SM110)
+      {kProviderCutlass, 7, 1, "cutlass-bf16-swiglu-sm110",
+       kDeviceFeatureQwenDriveSm110, true, true, false,
+       supports_cutlass_bf16_swiglu_sm110, cutlass_geglu_alignment,
+       cutlass_bf16_swiglu_resource_requirements, one_configuration,
+       prepare_cutlass_bf16_swiglu, launch_cutlass_bf16_swiglu,
+       destroy_cutlass},
+#endif
+  };
   const ImplementationRegistry* selected = nullptr;
   switch (semantic) {
     case APXINF_GEMM_SEMANTIC_GEMM:
@@ -460,6 +489,9 @@ const ImplementationRegistry& registry(uint32_t semantic) {
       break;
     case APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL:
       selected = &gemm_bias_residual_entries;
+      break;
+    case APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256:
+      selected = &gemm_swiglu_entries;
       break;
     default:
       throw Failure(APXINF_STATUS_INTERNAL_ERROR,

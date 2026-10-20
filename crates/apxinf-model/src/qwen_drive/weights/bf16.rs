@@ -55,13 +55,9 @@ fn projection(tensor: &Tensor) -> Result<Tensor> {
     transpose_2d(tensor)
 }
 
-/// Materialize the single gate/up representation selected by cuda-new. The
-/// native Thor candidate consumes `[K,2I]` with `[gate256,up256]` column
-/// tiles; its generic decode fallback reads those same bytes directly.
-fn swiglu_layout_gate_up(backend: &dyn Backend, gate_up: Tensor) -> Result<Tensor> {
-    let Some(cuda) = backend.as_any().downcast_ref::<RuntimeBackend>() else {
-        return Ok(gate_up);
-    };
+/// Materialize cuda-new's candidate-independent `[K,2I]` gate/up encoding,
+/// with each gate256 tile followed by its matching up256 tile.
+fn swiglu_layout_gate_up(_backend: &dyn Backend, gate_up: Tensor) -> Result<Tensor> {
     let dims = gate_up.shape().dims();
     if dims.len() != 2 {
         return Err(Error::Other(
@@ -69,11 +65,6 @@ fn swiglu_layout_gate_up(backend: &dyn Backend, gate_up: Tensor) -> Result<Tenso
         ));
     }
     let (full_n, k) = (dims[0], dims[1]);
-    if ops::bf16_swiglu_weight_layout(cuda.context(), full_n * k)
-        != ops::Bf16SwigluWeightLayout::PackedPairInterleaved
-    {
-        return Ok(gate_up);
-    }
     let packed = ops::pack_bf16_swiglu_weight_host(&gate_up.to_f32_vec()?, full_n, k)?;
     Tensor::from_bf16(vec![k, full_n], &packed)
 }
