@@ -180,11 +180,8 @@ fn run(command: &mut Command, action: &str) {
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(apxinf_nvfp4_gemm_swiglu)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_qwen_drive_sm110)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_decode)");
-    // The sm110 AOT fast paths are not vendored into cuda-new; the cfg is
-    // declared so their `cfg!` guards compile and always take the generic
-    // route.
-    println!("cargo:rustc-check-cfg=cfg(apxinf_aot_sm110)");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH");
@@ -255,6 +252,9 @@ fn main() {
     let nvfp4_gemm_swiglu = native_sm110;
     if nvfp4_gemm_swiglu {
         println!("cargo:rustc-cfg=apxinf_nvfp4_gemm_swiglu");
+    }
+    if native_sm110 {
+        println!("cargo:rustc-cfg=apxinf_qwen_drive_sm110");
     }
 
     let id = env::var("APXINF_KERNEL_BUILD_ID").unwrap_or_else(|_| {
@@ -388,6 +388,7 @@ fn main() {
                 .map(|source| attention.join(source)),
             );
             sm110_sources.extend([
+                native.join("adapters/attention/providers/qwen_drive_sm110.cu"),
                 native.join("kernels/custom/gdn_bf16_prefill_prologue.cu"),
                 native.join(
                     "adapters/linear_attention/providers/gdn_bf16_prefill_sm110.cu",
@@ -617,6 +618,9 @@ fn main() {
         }
         if nvfp4_gemm_swiglu {
             command.arg("-DAPXINF_NVFP4_GEMM_SWIGLU=1");
+        }
+        if native_sm110 {
+            command.arg("-DAPXINF_QWEN_DRIVE_SM110=1");
         }
         if has_cutlass_sm89 {
             command.arg("-DAPXINF_GEMM_CUTLASS_SM89=1");

@@ -7,6 +7,29 @@ use crate::ffi::raw::cuda_runtime::{cudaError_t, cudaStream_t};
 use crate::kernels::gdn_policy::GdnLaunchPolicy;
 
 unsafe extern "C" {
+    #[cfg(apxinf_qwen_drive_sm110)]
+    pub(crate) fn apxinf_gdn_bf16_prefill_sm110_init() -> i32;
+    #[cfg(apxinf_qwen_drive_sm110)]
+    pub(crate) fn apxinf_gdn_bf16_prefill_sm110(
+        zba: *const c_void,
+        conv_weight: *const c_void,
+        new_conv_state: *mut c_void,
+        a_log: *const f32,
+        dt_bias_bf16: *const c_void,
+        raw_qk_scratch: *mut c_void,
+        q: *mut c_void,
+        k: *mut c_void,
+        v: *mut c_void,
+        a: *mut c_void,
+        b: *mut c_void,
+        h_output_vmajor: *mut f32,
+        final_state_kmajor: *mut f32,
+        output_pad: *mut c_void,
+        cu_seqlens: *mut i32,
+        seq: i32,
+        seq_pad: i32,
+        stream: cudaStream_t,
+    ) -> i32;
     pub(crate) fn apxinf_cn_broadcast_bf16_f32_rows(
         bias: *const c_void,
         output: *mut c_void,
@@ -473,6 +496,14 @@ unsafe extern "C" {
         output: *mut c_void,
         rows: i32,
         inner: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_cn_swiglu_bf16_rounded_pair_interleaved(
+        gate_up: *const c_void,
+        output: *mut c_void,
+        rows: i32,
+        inner: i32,
+        pair: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
     pub(crate) fn apxinf_cn_swiglu_bf16(

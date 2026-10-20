@@ -765,52 +765,231 @@ pub fn noncausal_gqa_bf16(
     dense_attention(ctx, q, k, v, key_tokens, kv_heads, false)
 }
 
-// ── sm110 AOT fast-path stubs ───────────────────────────────────────────────
-//
-// The legacy crate carries hand-built FA4/AOT adapters for one fixed sm_110
-// scene shape. Those objects are not vendored into cuda-new; every call site
-// treats `Ok(None)` as "take the generic route", which is the tuned cuda-new
-// operator.
+const QWEN_DRIVE_UNSUPPORTED: i32 = 0x20000;
 
-/// FA4 D256 causal GQA, sm_110 fixed-shape AOT route. Not vendored: always
-/// defers to the generic attention operator.
+fn qwen_drive_native_status(status: i32, name: &str) -> Result<bool> {
+    match status {
+        0 => Ok(true),
+        QWEN_DRIVE_UNSUPPORTED => Ok(false),
+        status => Err(Error::Other(format!(
+            "native qwen-drive {name} failed with status {status}"
+        ))),
+    }
+}
+
+/// Native CUTLASS D256 causal GQA candidate for the fixed Thor scene shape.
 pub fn try_gqa_bf16_fa4_d256_sm110(
-    _ctx: &CudaContext,
-    _q: &Tensor,
-    _k: &Tensor,
-    _v: &Tensor,
-    _key_tokens: usize,
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
 ) -> Result<Option<Tensor>> {
-    Ok(None)
+    #[cfg(apxinf_qwen_drive_sm110)]
+    {
+        use crate::ffi::abi::attention as abi;
+        let tokens = super::fixed_profile::FIXED_SCENE_TOKENS;
+        if ctx.caps().sm != 110
+            || ctx.caps().multiprocessor_count != 20
+            || q.shape().dims() != [tokens, 16, 256]
+            || k.shape().dims() != [tokens, 4, 256]
+            || v.shape() != k.shape()
+            || [q, k, v].into_iter().any(|tensor| tensor.dtype() != DType::BF16)
+            || key_tokens != tokens
+        {
+            return Ok(None);
+        }
+        let q_buffer = CudaBuffer::from_tensor(q).map_err(Error::Cuda)?;
+        let k_buffer = CudaBuffer::from_tensor(k).map_err(Error::Cuda)?;
+        let v_buffer = CudaBuffer::from_tensor(v).map_err(Error::Cuda)?;
+        if crate::workspace::may_prepare_native_resources()
+            && !qwen_drive_native_status(
+                unsafe { abi::apxinf_qwen_drive_d256_causal_init() },
+                "D256 causal init",
+            )?
+        {
+            return Ok(None);
+        }
+        let output = crate::workspace::output_buffer(ctx, q.size_in_bytes())?;
+        if !qwen_drive_native_status(
+            unsafe {
+                abi::apxinf_qwen_drive_d256_causal_forward(
+                    q_buffer.ptr(),
+                    k_buffer.ptr(),
+                    v_buffer.ptr(),
+                    output.ptr(),
+                    tokens as i32,
+                    ctx.stream().handle(),
+                )
+            },
+            "D256 causal forward",
+        )? {
+            return Ok(None);
+        }
+        return Ok(Some(output.into_tensor(q.shape().clone(), DType::BF16)));
+    }
+    #[cfg(not(apxinf_qwen_drive_sm110))]
+    {
+        let _ = (ctx, q, k, v, key_tokens);
+        Ok(None)
+    }
 }
 
-/// FA4 D256 split-batch variant of the above. Not vendored.
+/// Native CUTLASS split-batch D256 candidate for action attention.
 pub fn try_gqa_bf16_fa4_d256_splitbatch_sm110(
-    _ctx: &CudaContext,
-    _q: &Tensor,
-    _k: &Tensor,
-    _v: &Tensor,
-    _key_tokens: usize,
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
 ) -> Result<Option<Tensor>> {
-    Ok(None)
+    #[cfg(apxinf_qwen_drive_sm110)]
+    {
+        use crate::ffi::abi::attention as abi;
+        if ctx.caps().sm != 110
+            || ctx.caps().multiprocessor_count != 20
+            || q.shape().dims() != [50, 16, 256]
+            || k.shape().dims() != [3438, 4, 256]
+            || v.shape() != k.shape()
+            || [q, k, v].into_iter().any(|tensor| tensor.dtype() != DType::BF16)
+            || !(3433..=3437).contains(&key_tokens)
+        {
+            return Ok(None);
+        }
+        let q_buffer = CudaBuffer::from_tensor(q).map_err(Error::Cuda)?;
+        let k_buffer = CudaBuffer::from_tensor(k).map_err(Error::Cuda)?;
+        let v_buffer = CudaBuffer::from_tensor(v).map_err(Error::Cuda)?;
+        if crate::workspace::may_prepare_native_resources()
+            && !qwen_drive_native_status(
+                unsafe { abi::apxinf_qwen_drive_d256_split_init() },
+                "D256 split init",
+            )?
+        {
+            return Ok(None);
+        }
+        let bytes = q.size_in_bytes();
+        let q2 = crate::workspace::output_buffer(ctx, 2 * bytes)?;
+        let partial = crate::workspace::output_buffer(ctx, 2 * bytes)?;
+        let lse = crate::workspace::output_buffer(ctx, 2 * 16 * 50 * 4)?;
+        let output = crate::workspace::output_buffer(ctx, bytes)?;
+        if !qwen_drive_native_status(
+            unsafe {
+                abi::apxinf_qwen_drive_d256_split_forward(
+                    q_buffer.ptr(),
+                    k_buffer.ptr(),
+                    v_buffer.ptr(),
+                    q2.ptr(),
+                    partial.ptr(),
+                    lse.ptr().cast::<f32>(),
+                    output.ptr(),
+                    key_tokens as i32,
+                    ctx.stream().handle(),
+                )
+            },
+            "D256 split forward",
+        )? {
+            return Ok(None);
+        }
+        return Ok(Some(output.into_tensor(q.shape().clone(), DType::BF16)));
+    }
+    #[cfg(not(apxinf_qwen_drive_sm110))]
+    {
+        let _ = (ctx, q, k, v, key_tokens);
+        Ok(None)
+    }
 }
 
-/// Fused vision QKV RoPE + segmented FA4 with V passthrough, sm_110
-/// fixed-shape AOT route. Not vendored.
+/// Native strided-group attention over Q/K RoPE outputs while retaining V in
+/// the interleaved QKV allocation.
 #[allow(clippy::too_many_arguments)]
 pub fn try_vision_qkv_rope_segmented_fa4_skip_v(
-    _ctx: &CudaContext,
-    _qkv: &Tensor,
-    _position_ids: &crate::CudaBuffer,
-    _heads: usize,
-    _head_dim: usize,
-    _theta: f32,
-    _offsets: &crate::CudaBuffer,
-    _host_offsets: &[u32],
-    _segments: usize,
-    _fixed_groups: bool,
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    position_ids: &crate::CudaBuffer,
+    heads: usize,
+    head_dim: usize,
+    theta: f32,
+    offsets: &crate::CudaBuffer,
+    host_offsets: &[u32],
+    segments: usize,
+    fixed_groups: bool,
 ) -> Result<Option<Tensor>> {
-    Ok(None)
+    #[cfg(apxinf_qwen_drive_sm110)]
+    {
+        use crate::ffi::abi::attention as abi;
+        const FIXED_OFFSETS: [u32; 13] = [
+            0, 624, 1248, 1872, 4072, 4696, 5320, 5944, 8144, 8768, 9392, 10016, 12216,
+        ];
+        if ctx.caps().sm != 110
+            || ctx.caps().multiprocessor_count != 20
+            || qkv.dtype() != DType::BF16
+            || qkv.shape().dims() != [12216, 3 * 16 * 64]
+            || heads != 16
+            || head_dim != 64
+            || segments != 12
+            || !fixed_groups
+            || host_offsets != FIXED_OFFSETS
+            || offsets.len() < 13 * std::mem::size_of::<u32>()
+        {
+            return Ok(None);
+        }
+        let split = split_vision_qkv_rope_bf16(
+            ctx,
+            qkv,
+            None,
+            position_ids,
+            heads,
+            head_dim,
+            theta,
+        )?;
+        let q_buffer = CudaBuffer::from_tensor(&split.q).map_err(Error::Cuda)?;
+        let k_buffer = CudaBuffer::from_tensor(&split.k).map_err(Error::Cuda)?;
+        let qkv_buffer = CudaBuffer::from_tensor(qkv).map_err(Error::Cuda)?;
+        let v_offset = 2 * heads * head_dim * DType::BF16.size_in_bytes();
+        let v_buffer = qkv_buffer
+            .view(v_offset, qkv.size_in_bytes() - v_offset)
+            .map_err(Error::Cuda)?;
+        if crate::workspace::may_prepare_native_resources()
+            && !qwen_drive_native_status(
+                unsafe { abi::apxinf_qwen_drive_vision_groups_init() },
+                "vision groups init",
+            )?
+        {
+            return Ok(None);
+        }
+        let output = crate::workspace::output_buffer(ctx, split.q.size_in_bytes())?;
+        if !qwen_drive_native_status(
+            unsafe {
+                abi::apxinf_qwen_drive_vision_groups_forward(
+                    q_buffer.ptr(),
+                    k_buffer.ptr(),
+                    v_buffer.ptr(),
+                    output.ptr(),
+                    ctx.stream().handle(),
+                )
+            },
+            "vision groups forward",
+        )? {
+            return Ok(None);
+        }
+        return Ok(Some(output.into_tensor(split.q.shape().clone(), DType::BF16)));
+    }
+    #[cfg(not(apxinf_qwen_drive_sm110))]
+    {
+        let _ = (
+            ctx,
+            qkv,
+            position_ids,
+            heads,
+            head_dim,
+            theta,
+            offsets,
+            host_offsets,
+            segments,
+            fixed_groups,
+        );
+        Ok(None)
+    }
 }
 
 // ── gr00t attention surface ───────────────────────────────────────────────

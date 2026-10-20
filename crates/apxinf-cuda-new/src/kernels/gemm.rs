@@ -455,9 +455,80 @@ pub fn bf16_bias_gelu_tanh(
     Ok(output)
 }
 
-/// Compute SwiGLU from input `[M,K]` and gate-then-up weight `[2N,K]`.
-/// The generic route: one BF16 projection, then the rounded SwiGLU kernel —
-/// the same arithmetic as the legacy non-AOT path.
+const QWEN_DRIVE_SWIGLU_M: usize = 3387;
+const QWEN_DRIVE_SWIGLU_K: usize = 2560;
+const QWEN_DRIVE_SWIGLU_INNER: usize = 9216;
+const QWEN_DRIVE_SWIGLU_FULL_N: usize = 2 * QWEN_DRIVE_SWIGLU_INNER;
+const QWEN_DRIVE_SWIGLU_PADDED_M: usize = 3584;
+const QWEN_DRIVE_SWIGLU_PAIR: usize = 256;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bf16SwigluWeightLayout {
+    CheckpointRowMajor,
+    PackedPairInterleaved,
+}
+
+fn native_bf16_swiglu_supported(ctx: &CudaContext, weight_elements: usize) -> bool {
+    cfg!(apxinf_qwen_drive_sm110)
+        && ctx.caps().sm == 110
+        && ctx.caps().multiprocessor_count == 20
+        && weight_elements == QWEN_DRIVE_SWIGLU_FULL_N * QWEN_DRIVE_SWIGLU_K
+}
+
+/// The one physical gate/up layout to materialize for this build and device.
+/// It is independent of the live row count so prefill and decode share one
+/// resident weight.
+pub fn bf16_swiglu_weight_layout(
+    ctx: &CudaContext,
+    weight_elements: usize,
+) -> Bf16SwigluWeightLayout {
+    if native_bf16_swiglu_supported(ctx, weight_elements) {
+        Bf16SwigluWeightLayout::PackedPairInterleaved
+    } else {
+        Bf16SwigluWeightLayout::CheckpointRowMajor
+    }
+}
+
+pub fn bf16_swiglu_packed_source_index(index: usize, full_n: usize, k: usize) -> usize {
+    let half_n = full_n / 2;
+    let row_k = index / full_n;
+    let dst_col = index - row_k * full_n;
+    let tile = dst_col / (2 * QWEN_DRIVE_SWIGLU_PAIR);
+    let within = dst_col - tile * (2 * QWEN_DRIVE_SWIGLU_PAIR);
+    let src_n = if within < QWEN_DRIVE_SWIGLU_PAIR {
+        tile * QWEN_DRIVE_SWIGLU_PAIR + within
+    } else {
+        half_n + tile * QWEN_DRIVE_SWIGLU_PAIR + (within - QWEN_DRIVE_SWIGLU_PAIR)
+    };
+    src_n * k + row_k
+}
+
+pub fn pack_bf16_swiglu_weight_host(
+    source: &[f32],
+    full_n: usize,
+    k: usize,
+) -> Result<Vec<half::bf16>> {
+    if full_n == 0
+        || k == 0
+        || full_n % (2 * QWEN_DRIVE_SWIGLU_PAIR) != 0
+        || source.len() != full_n * k
+    {
+        return Err(Error::Other(format!(
+            "BF16 SwiGLU weight pack expects {full_n} x {k} values with {full_n} divisible by {}, got {}",
+            2 * QWEN_DRIVE_SWIGLU_PAIR,
+            source.len()
+        )));
+    }
+    Ok((0..source.len())
+        .map(|index| {
+            half::bf16::from_f32(source[bf16_swiglu_packed_source_index(index, full_n, k)])
+        })
+        .collect())
+}
+
+/// Compute SwiGLU from input `[M,K]` and a gate/up weight. On Thor the fixed
+/// prefill shape uses the native CUTLASS translation; all other row counts use
+/// cuBLAS plus the same rounded activation over the same packed weight.
 pub fn bf16_swiglu_checkpoint(
     ctx: &CudaContext,
     input: &Tensor,
@@ -465,15 +536,15 @@ pub fn bf16_swiglu_checkpoint(
 ) -> Result<Tensor> {
     let x = input.shape().dims();
     let w = weight.shape().dims();
-    if x.len() != 2
-        || w.len() != 2
-        || x.contains(&0)
-        || w.contains(&0)
-        || x[1] != w[1]
-        || w[0] % 2 != 0
-    {
+    if x.len() != 2 || w.len() != 2 || x.contains(&0) || w.contains(&0) {
         return Err(Error::Other(
-            "BF16 SwiGLU expects input[M,K], weight[2N,K]".into(),
+            "BF16 SwiGLU expects input[M,K] and a 2-D weight".into(),
+        ));
+    }
+    let packed = w == [QWEN_DRIVE_SWIGLU_K, QWEN_DRIVE_SWIGLU_FULL_N];
+    if !packed && (x[1] != w[1] || w[0] % 2 != 0) {
+        return Err(Error::Other(
+            "BF16 SwiGLU expects weight[2N,K] or packed weight[K,2N]".into(),
         ));
     }
     for tensor in [input, weight] {
@@ -484,27 +555,72 @@ pub fn bf16_swiglu_checkpoint(
         }
     }
     let k = i32::try_from(x[1]).map_err(|_| Error::Other("SwiGLU K exceeds i32".into()))?;
-    let n2 = i32::try_from(w[0]).map_err(|_| Error::Other("SwiGLU width exceeds i32".into()))?;
     let rows = i32::try_from(x[0]).map_err(|_| Error::Other("SwiGLU rows exceed i32".into()))?;
-    let inner =
-        i32::try_from(w[0] / 2).map_err(|_| Error::Other("SwiGLU inner exceeds i32".into()))?;
     let xp = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
     let wp = CudaBuffer::from_tensor(weight).map_err(Error::Cuda)?;
+    if packed
+        && x == [QWEN_DRIVE_SWIGLU_M, QWEN_DRIVE_SWIGLU_K]
+        && native_bf16_swiglu_supported(ctx, weight.numel())
+    {
+        let output = crate::workspace::output_buffer(
+            ctx,
+            checked_bytes(
+                DType::BF16,
+                &[QWEN_DRIVE_SWIGLU_PADDED_M, QWEN_DRIVE_SWIGLU_INNER],
+                "native SwiGLU output",
+            )?,
+        )?;
+        let prefix = QWEN_DRIVE_SWIGLU_M * QWEN_DRIVE_SWIGLU_INNER * 2;
+        let tail = (QWEN_DRIVE_SWIGLU_PADDED_M - QWEN_DRIVE_SWIGLU_M)
+            * QWEN_DRIVE_SWIGLU_INNER
+            * 2;
+        output
+            .view(prefix, tail)
+            .map_err(Error::Cuda)?
+            .memset_async(0, tail, ctx.stream())
+            .map_err(Error::Cuda)?;
+        unsafe {
+            crate::ffi::abi::status::check(
+                crate::ffi::abi::gemm::apxinf_gemm_bf16_swiglu(
+                    xp.ptr(),
+                    wp.ptr(),
+                    output.ptr(),
+                    QWEN_DRIVE_SWIGLU_M as i64,
+                    QWEN_DRIVE_SWIGLU_INNER as i64,
+                    QWEN_DRIVE_SWIGLU_K as i64,
+                    ctx.stream().handle(),
+                ),
+            )?;
+        }
+        return Ok(output.into_tensor(
+            Shape::new(vec![QWEN_DRIVE_SWIGLU_PADDED_M, QWEN_DRIVE_SWIGLU_INNER]),
+            DType::BF16,
+        ));
+    }
+
+    let full_n = if packed { w[1] } else { w[0] };
+    let n2 = i32::try_from(full_n).map_err(|_| Error::Other("SwiGLU width exceeds i32".into()))?;
+    let inner = i32::try_from(full_n / 2)
+        .map_err(|_| Error::Other("SwiGLU inner exceeds i32".into()))?;
     let projection = crate::workspace::output_buffer(
         ctx,
-        checked_bytes(DType::BF16, &[x[0], w[0]], "SwiGLU projection")?,
+        checked_bytes(DType::BF16, &[x[0], full_n], "SwiGLU projection")?,
     )?;
     ctx.cublas()
         .gemm_ex(
             DType::BF16,
             CublasTranspose::None,
-            CublasTranspose::Transpose,
+            if packed {
+                CublasTranspose::None
+            } else {
+                CublasTranspose::Transpose
+            },
             x[0],
-            w[0],
+            full_n,
             x[1],
             1.0,
             &xp,
-            k,
+            if packed { n2 } else { k },
             &wp,
             k,
             0.0,
@@ -514,19 +630,30 @@ pub fn bf16_swiglu_checkpoint(
         .map_err(Error::Cuda)?;
     let output = crate::workspace::output_buffer(
         ctx,
-        checked_bytes(DType::BF16, &[x[0], w[0] / 2], "SwiGLU output")?,
+        checked_bytes(DType::BF16, &[x[0], full_n / 2], "SwiGLU output")?,
     )?;
     unsafe {
-        raw::check_cuda(la_abi::apxinf_cn_swiglu_bf16_rounded(
-            projection.ptr(),
-            output.ptr(),
-            rows,
-            inner,
-            ctx.stream().handle(),
-        ))
+        raw::check_cuda(if packed {
+            la_abi::apxinf_cn_swiglu_bf16_rounded_pair_interleaved(
+                projection.ptr(),
+                output.ptr(),
+                rows,
+                inner,
+                QWEN_DRIVE_SWIGLU_PAIR as i32,
+                ctx.stream().handle(),
+            )
+        } else {
+            la_abi::apxinf_cn_swiglu_bf16_rounded(
+                projection.ptr(),
+                output.ptr(),
+                rows,
+                inner,
+                ctx.stream().handle(),
+            )
+        })
         .map_err(Error::Cuda)?;
     }
-    Ok(output.into_tensor(Shape::new(vec![x[0], w[0] / 2]), DType::BF16))
+    Ok(output.into_tensor(Shape::new(vec![x[0], full_n / 2]), DType::BF16))
 }
 
 /// Raw strided GEMM into a caller-owned buffer: `output = alpha * op(a) @
@@ -1050,4 +1177,26 @@ pub fn write(
     ctx.cublas()
         .gemm(dtype, m, n, k, alpha, a, b, beta, output)
         .map_err(Error::Cuda)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bf16_swiglu_packed_source_index, QWEN_DRIVE_SWIGLU_PAIR};
+
+    #[test]
+    fn bf16_swiglu_pack_interleaves_gate_and_up_tiles() {
+        let full_n = 2 * QWEN_DRIVE_SWIGLU_PAIR;
+        let k = 2;
+
+        assert_eq!(bf16_swiglu_packed_source_index(0, full_n, k), 0);
+        assert_eq!(bf16_swiglu_packed_source_index(1, full_n, k), 2);
+        assert_eq!(
+            bf16_swiglu_packed_source_index(QWEN_DRIVE_SWIGLU_PAIR, full_n, k),
+            QWEN_DRIVE_SWIGLU_PAIR * k
+        );
+        assert_eq!(
+            bf16_swiglu_packed_source_index(full_n, full_n, k),
+            1
+        );
+    }
 }

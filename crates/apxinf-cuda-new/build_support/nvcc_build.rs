@@ -2,7 +2,7 @@
 //! object cache keyed by command line + dependency list, and a bounded worker
 //! pool so independent translation units compile concurrently instead of one
 //! at a time. Both `apxinf-cuda` and `apxinf-cuda-new` include this file with
-//! `#[path]`, the same way they share `aot/link.rs`.
+//! `#[path]`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
