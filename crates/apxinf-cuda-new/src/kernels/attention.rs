@@ -23,7 +23,9 @@ pub struct QkvTensors {
 fn rank3(tensor: &Tensor, what: &str) -> Result<[usize; 3]> {
     let dims = tensor.shape().dims();
     if dims.len() != 3 {
-        return Err(Error::Other(format!("{what} requires rank-3 [tokens, heads, dim]")));
+        return Err(Error::Other(format!(
+            "{what} requires rank-3 [tokens, heads, dim]"
+        )));
     }
     Ok([dims[0], dims[1], dims[2]])
 }
@@ -40,9 +42,22 @@ fn dense_attention(
     let [query_tokens, query_heads, head_dim] = rank3(q, "attention query")?;
     let q4 = q.reshape(vec![1, query_tokens, query_heads, head_dim])?;
     // K/V may be larger caches; present exactly the valid prefix.
-    let k4 = k.reshape(vec![1, k.shape().numel() / (kv_heads * head_dim), kv_heads, head_dim])?;
-    let v4 = v.reshape(vec![1, v.shape().numel() / (kv_heads * head_dim), kv_heads, head_dim])?;
-    let mut out = ctx.allocate_output(Shape::new(vec![1, query_tokens, query_heads, head_dim]), DType::BF16)?;
+    let k4 = k.reshape(vec![
+        1,
+        k.shape().numel() / (kv_heads * head_dim),
+        kv_heads,
+        head_dim,
+    ])?;
+    let v4 = v.reshape(vec![
+        1,
+        v.shape().numel() / (kv_heads * head_dim),
+        kv_heads,
+        head_dim,
+    ])?;
+    let mut out = ctx.allocate_output(
+        Shape::new(vec![1, query_tokens, query_heads, head_dim]),
+        DType::BF16,
+    )?;
     let mut args = ops::KvCacheAttentionArgs::new(&q4, &k4, &v4, &mut out);
     args.valid_key_tokens = key_tokens;
     if causal {
@@ -201,14 +216,22 @@ fn fa2_direct(
         _ => return Ok(None),
     }
     let to_i32 = |value: usize| i32::try_from(value).ok();
-    let (Some(batch_i), Some(query_tokens_i), Some(key_tokens_i), Some(query_heads_i), Some(kv_heads_i), Some(head_dim_i)) = (
+    let (
+        Some(batch_i),
+        Some(query_tokens_i),
+        Some(key_tokens_i),
+        Some(query_heads_i),
+        Some(kv_heads_i),
+        Some(head_dim_i),
+    ) = (
         to_i32(batches),
         to_i32(query_tokens),
         to_i32(key_tokens),
         to_i32(query_heads),
         to_i32(kv_heads),
         to_i32(head_dim),
-    ) else {
+    )
+    else {
         return Ok(None);
     };
     let scale = (head_dim as f32).sqrt().recip();
@@ -227,19 +250,19 @@ fn fa2_direct(
     // decode step's GQA groups into the row dimension before planning. The
     // cuda-new vendored `fa2.cu` has no fold adapter, so plan on the caller's
     // dimensions as the non-special legacy arm did.
-    let num_splits = if fa2_splitkv_enabled(query_tokens, key_tokens, query_heads, kv_heads, head_dim)
-    {
-        plan_fa2_split_count(
-            batches,
-            query_tokens,
-            key_tokens,
-            query_heads,
-            head_dim,
-            ctx.caps().multiprocessor_count as usize,
-        )
-    } else {
-        1
-    };
+    let num_splits =
+        if fa2_splitkv_enabled(query_tokens, key_tokens, query_heads, kv_heads, head_dim) {
+            plan_fa2_split_count(
+                batches,
+                query_tokens,
+                key_tokens,
+                query_heads,
+                head_dim,
+                ctx.caps().multiprocessor_count as usize,
+            )
+        } else {
+            1
+        };
     // The vendored split-KV entry rejects `num_splits <= 1`; a one-way split
     // is the plain kernel.
     if num_splits > 1 {
@@ -448,8 +471,10 @@ pub fn mha_bf16(
     let q4 = q.reshape(vec![batches, tokens_per_batch, heads, head_dim])?;
     let k4 = k.reshape(vec![batches, tokens_per_batch, heads, head_dim])?;
     let v4 = v.reshape(vec![batches, tokens_per_batch, heads, head_dim])?;
-    let mut out =
-        ctx.allocate_output(Shape::new(vec![batches, tokens_per_batch, heads, head_dim]), DType::BF16)?;
+    let mut out = ctx.allocate_output(
+        Shape::new(vec![batches, tokens_per_batch, heads, head_dim]),
+        DType::BF16,
+    )?;
     let args = ops::AttentionArgs::new(&q4, &k4, &v4, &mut out);
     ops::attention(ctx, args)?;
     out.reshape(vec![tokens, heads, head_dim])
@@ -594,7 +619,10 @@ pub fn split_gqa_qkv_mrope_cache_bf16(
         i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
     };
     let qkv_buffer = CudaBuffer::from_tensor(qkv).map_err(Error::Cuda)?;
-    let bias_buffer = bias.map(CudaBuffer::from_tensor).transpose().map_err(Error::Cuda)?;
+    let bias_buffer = bias
+        .map(CudaBuffer::from_tensor)
+        .transpose()
+        .map_err(Error::Cuda)?;
     let q_buffer = CudaBuffer::from_tensor(&q).map_err(Error::Cuda)?;
     let k_buffer = CudaBuffer::from_tensor(&k).map_err(Error::Cuda)?;
     let v_buffer = CudaBuffer::from_tensor(&v).map_err(Error::Cuda)?;
@@ -652,7 +680,9 @@ pub fn split_vision_qkv_rope_bf16(
     }
     let tokens = dims[0];
     if position_ids.len() < tokens * 2 * std::mem::size_of::<u32>() {
-        return Err(Error::Other("vision QKV RoPE position ids too short".into()));
+        return Err(Error::Other(
+            "vision QKV RoPE position ids too short".into(),
+        ));
     }
     let shape = Shape::new(vec![tokens, heads, head_dim]);
     let q = ctx.allocate_output(shape.clone(), DType::BF16)?;
@@ -662,7 +692,10 @@ pub fn split_vision_qkv_rope_bf16(
         i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
     };
     let qkv_buffer = CudaBuffer::from_tensor(qkv).map_err(Error::Cuda)?;
-    let bias_buffer = bias.map(CudaBuffer::from_tensor).transpose().map_err(Error::Cuda)?;
+    let bias_buffer = bias
+        .map(CudaBuffer::from_tensor)
+        .transpose()
+        .map_err(Error::Cuda)?;
     let q_buffer = CudaBuffer::from_tensor(&q).map_err(Error::Cuda)?;
     let k_buffer = CudaBuffer::from_tensor(&k).map_err(Error::Cuda)?;
     let v_buffer = CudaBuffer::from_tensor(&v).map_err(Error::Cuda)?;
@@ -716,7 +749,9 @@ pub fn segmented_mha_bf16(
         ));
     }
     if offsets.len() < (segments + 1) * std::mem::size_of::<u32>() {
-        return Err(Error::Other("segmented MHA offsets buffer too short".into()));
+        return Err(Error::Other(
+            "segmented MHA offsets buffer too short".into(),
+        ));
     }
     if host_offsets.first() != Some(&0)
         || host_offsets.last().map(|&value| value as usize) != Some(shape[0])
@@ -724,7 +759,9 @@ pub fn segmented_mha_bf16(
             .windows(2)
             .any(|pair| pair[1] < pair[0] || (pair[1] - pair[0]) as usize > max_tokens)
     {
-        return Err(Error::Other("segmented MHA offsets are inconsistent".into()));
+        return Err(Error::Other(
+            "segmented MHA offsets are inconsistent".into(),
+        ));
     }
     let output = ctx.allocate_output(Shape::new(shape.to_vec()), DType::BF16)?;
     let to_i32 = |value: usize, what: &str| {
@@ -794,7 +831,9 @@ pub fn try_gqa_bf16_fa4_d256_sm110(
             || q.shape().dims() != [tokens, 16, 256]
             || k.shape().dims() != [tokens, 4, 256]
             || v.shape() != k.shape()
-            || [q, k, v].into_iter().any(|tensor| tensor.dtype() != DType::BF16)
+            || [q, k, v]
+                .into_iter()
+                .any(|tensor| tensor.dtype() != DType::BF16)
             || key_tokens != tokens
         {
             return Ok(None);
@@ -851,7 +890,9 @@ pub fn try_gqa_bf16_fa4_d256_splitbatch_sm110(
             || q.shape().dims() != [50, 16, 256]
             || k.shape().dims() != [3438, 4, 256]
             || v.shape() != k.shape()
-            || [q, k, v].into_iter().any(|tensor| tensor.dtype() != DType::BF16)
+            || [q, k, v]
+                .into_iter()
+                .any(|tensor| tensor.dtype() != DType::BF16)
             || !(3433..=3437).contains(&key_tokens)
         {
             return Ok(None);
@@ -933,15 +974,8 @@ pub fn try_vision_qkv_rope_segmented_fa4_skip_v(
         {
             return Ok(None);
         }
-        let split = split_vision_qkv_rope_bf16(
-            ctx,
-            qkv,
-            None,
-            position_ids,
-            heads,
-            head_dim,
-            theta,
-        )?;
+        let split =
+            split_vision_qkv_rope_bf16(ctx, qkv, None, position_ids, heads, head_dim, theta)?;
         let q_buffer = CudaBuffer::from_tensor(&split.q).map_err(Error::Cuda)?;
         let k_buffer = CudaBuffer::from_tensor(&split.k).map_err(Error::Cuda)?;
         let qkv_buffer = CudaBuffer::from_tensor(qkv).map_err(Error::Cuda)?;
@@ -972,7 +1006,9 @@ pub fn try_vision_qkv_rope_segmented_fa4_skip_v(
         )? {
             return Ok(None);
         }
-        return Ok(Some(output.into_tensor(split.q.shape().clone(), DType::BF16)));
+        return Ok(Some(
+            output.into_tensor(split.q.shape().clone(), DType::BF16),
+        ));
     }
     #[cfg(not(apxinf_qwen_drive_sm110))]
     {
@@ -1020,7 +1056,9 @@ pub fn noncausal(
         || n_heads == 0
         || head_dim == 0
     {
-        return Err(Error::Other("noncausal_sdpa: BF16 [query, heads, head_dim] expected".into()));
+        return Err(Error::Other(
+            "noncausal_sdpa: BF16 [query, heads, head_dim] expected".into(),
+        ));
     }
     let key_tokens = k.shape().dims().first().copied().unwrap_or(0);
     let hidden = n_heads
@@ -1114,7 +1152,9 @@ pub fn causal_gqa_prefill_bf16(
 ) -> Result<Option<Tensor>> {
     let q_shape = q.shape().dims();
     let k_shape = k.shape().dims();
-    if [q, k, v].into_iter().any(|tensor| tensor.dtype() != DType::BF16)
+    if [q, k, v]
+        .into_iter()
+        .any(|tensor| tensor.dtype() != DType::BF16)
         || q_shape.len() != 3
         || k_shape.len() != 3
         || v.shape() != k.shape()
@@ -1127,7 +1167,9 @@ pub fn causal_gqa_prefill_bf16(
         || q_shape[2] > 256
         || q_shape[2] != k_shape[2]
     {
-        return Err(Error::Other("causal BF16 GQA prefill shape mismatch".into()));
+        return Err(Error::Other(
+            "causal BF16 GQA prefill shape mismatch".into(),
+        ));
     }
     let key_tokens = k_shape[0];
     Ok(Some(causal_gqa_bf16(ctx, q, k, v, key_tokens)?))
@@ -1385,9 +1427,7 @@ pub fn suffix_causal_gqa_f16(
         || key_offset >= key_tokens
         || q_shape[0] + key_offset != key_tokens
     {
-        return Err(Error::Other(
-            "causal suffix FP16 GQA shape mismatch".into(),
-        ));
+        return Err(Error::Other("causal suffix FP16 GQA shape mismatch".into()));
     }
     let output = crate::workspace::output_buffer(ctx, q.size_in_bytes())?;
     unsafe {
@@ -1595,7 +1635,9 @@ pub fn flash_bf16_into(
     scale: f32,
     position: crate::CudaDeviceAddress,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
+    use super::contracts::{
+        check_cuda, checked_bytes, require_address, require_buffers, require_finite,
+    };
     use crate::ffi::abi::llm_decode as abi;
     require_finite("flash attention", &[scale])?;
     if heads == 0 || kv_heads == 0 || heads % kv_heads != 0 || bucket_kv_len > max_seq_len {
