@@ -138,6 +138,30 @@ __global__ void swiglu_bf16_kernel(
   }
 }
 
+// The projection produced by the native fused SwiGLU weight has columns in
+// [gate pair, up pair] tiles. Keep the same two BF16 rounding boundaries as
+// `swiglu_bf16_kernel<true>` while undoing only that physical column order.
+template <bool RoundSilu = false>
+__global__ void swiglu_bf16_pair_interleaved_kernel(
+    const __nv_bfloat16* gate_up, __nv_bfloat16* output,
+    int rows, int inner, int pair) {
+  const int64_t count = static_cast<int64_t>(rows) * inner;
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    const int row = static_cast<int>(index / inner);
+    const int col = static_cast<int>(index % inner);
+    const int tile = col / pair;
+    const int within = col - tile * pair;
+    const int gate_col = tile * 2 * pair + within;
+    const __nv_bfloat16* row_input =
+        gate_up + static_cast<int64_t>(row) * 2 * inner;
+    const float gate = __bfloat162float(row_input[gate_col]);
+    const float up = __bfloat162float(row_input[gate_col + pair]);
+    output[index] = swiglu_bf16_element<RoundSilu>(gate, up);
+  }
+}
+
 // Eight output columns per thread through 16-byte accesses. The scalar loop
 // also pays an integer divide and a modulo per element to recover (row, col);
 // with inner a multiple of eight all eight land in one row, so that arithmetic
@@ -1313,6 +1337,23 @@ extern "C" cudaError_t apxinf_cn_swiglu_bf16_rounded(
   }
   swiglu_bf16_kernel<true><<<blocks, 256, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(gate_up), static_cast<__nv_bfloat16*>(output), rows, inner);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_cn_swiglu_bf16_rounded_pair_interleaved(
+    const void* gate_up, void* output, int rows, int inner, int pair,
+    cudaStream_t stream) {
+  if (!gate_up || !output || rows <= 0 || inner <= 0 || pair <= 0 ||
+      inner % pair != 0) {
+    return cudaErrorInvalidValue;
+  }
+  const int64_t count = static_cast<int64_t>(rows) * inner;
+  const int blocks = static_cast<int>((count + 255) / 256 > 65535
+                                          ? 65535
+                                          : (count + 255) / 256);
+  swiglu_bf16_pair_interleaved_kernel<true><<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(gate_up),
+      static_cast<__nv_bfloat16*>(output), rows, inner, pair);
   return cudaGetLastError();
 }
 

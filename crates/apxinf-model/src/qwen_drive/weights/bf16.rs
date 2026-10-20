@@ -1,5 +1,5 @@
 //! BF16 weights and load-time physical layouts.
-use crate::qwen_drive::backend::RuntimeBackend;
+use crate::qwen_drive::backend::{kernels::gemm, RuntimeBackend};
 use std::collections::HashMap;
 
 use apxinf_core::{Backend, Error, Result, Tensor};
@@ -53,6 +53,30 @@ fn narrow_to_bf16(tensor: &Tensor) -> Result<Tensor> {
 /// Store checkpoint `[out, in]` weights as `[in, out]` for row-major GEMM.
 fn projection(tensor: &Tensor) -> Result<Tensor> {
     transpose_2d(tensor)
+}
+
+/// Materialize the single gate/up representation selected by cuda-new. The
+/// native Thor candidate consumes `[K,2I]` with `[gate256,up256]` column
+/// tiles; its generic decode fallback reads those same bytes directly.
+fn swiglu_layout_gate_up(backend: &dyn Backend, gate_up: Tensor) -> Result<Tensor> {
+    let Some(cuda) = backend.as_any().downcast_ref::<RuntimeBackend>() else {
+        return Ok(gate_up);
+    };
+    let dims = gate_up.shape().dims();
+    if dims.len() != 2 {
+        return Err(Error::Other(
+            "qwen_drive: gate/up weight must be 2-D".into(),
+        ));
+    }
+    let (full_n, k) = (dims[0], dims[1]);
+    if gemm::bf16_swiglu_weight_layout(cuda.context(), full_n * k)
+        != gemm::Bf16SwigluWeightLayout::PackedPairInterleaved
+    {
+        return Ok(gate_up);
+    }
+    let packed =
+        gemm::pack_bf16_swiglu_weight_host(&gate_up.to_f32_vec()?, full_n, k)?;
+    Tensor::from_bf16(vec![k, full_n], &packed)
 }
 
 fn concat_rows_bf16(parts: &[&Tensor]) -> Result<Tensor> {
@@ -339,8 +363,12 @@ impl BackboneDeviceWeights {
             )?;
             let gate = take(&mut language, &format!("{p}.mlp.gate_proj.weight"))?;
             let up_w = take(&mut language, &format!("{p}.mlp.up_proj.weight"))?;
-            // One checkpoint-row-major representation for the fused gate/up operator.
-            let gate_up_w = up(backend, &concat_rows_bf16(&[&gate, &up_w])?)?;
+            // One resident representation serves both the native fused
+            // prefill and the generic variable-row fallback.
+            let gate_up_w = up(
+                backend,
+                &swiglu_layout_gate_up(backend, concat_rows_bf16(&[&gate, &up_w])?)?,
+            )?;
             let down_w = up(
                 backend,
                 &projection(&take(&mut language, &format!("{p}.mlp.down_proj.weight"))?)?,

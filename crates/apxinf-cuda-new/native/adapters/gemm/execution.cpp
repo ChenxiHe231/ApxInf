@@ -1,6 +1,7 @@
 #include "internal.h"
 
 #ifdef APXINF_GEMM_CUTLASS
+#include "../../kernels/cutlass/ops/gemm/gemm_bf16_sm100.h"
 #include "../../kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.h"
 #endif
 
@@ -627,6 +628,36 @@ extern "C" apxinf_status_t apxinf_gemm_nvfp4_swiglu(
   (void)activation; (void)weight; (void)activation_scales;
   (void)weight_scales; (void)output; (void)output_scales; (void)alpha;
   (void)input_global_scale; (void)down_inverse_global_scale;
+  (void)rows; (void)n; (void)k; (void)stream;
+  return APXINF_STATUS_UNSUPPORTED;
+#endif
+}
+
+extern "C" apxinf_status_t apxinf_gemm_bf16_swiglu(
+    const void* activation, const void* interleaved_weight, void* output,
+    int64_t rows, int64_t n, int64_t k, apxinf_cuda_stream_t stream) {
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN_DRIVE_SM110)
+  return apxinf::framework::abi_boundary([&] {
+    if (activation == nullptr || interleaved_weight == nullptr ||
+        output == nullptr || rows != 3387 || n != 9216 || k != 2560) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid fused BF16 SwiGLU arguments");
+    }
+    const int status =
+        apxinf::cuda_new::cutlass_ops::bf16_dual_geglu_detail::
+            production_dual_swiglu_bf16(
+                activation, interleaved_weight, output,
+                static_cast<int>(rows), static_cast<int>(n),
+                static_cast<int>(k), static_cast<int>(2 * n),
+                static_cast<cudaStream_t>(stream));
+    if (status != 0) {
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                    "BF16 GEMM SwiGLU failed with status " +
+                        std::to_string(status));
+    }
+  });
+#else
+  (void)activation; (void)interleaved_weight; (void)output;
   (void)rows; (void)n; (void)k; (void)stream;
   return APXINF_STATUS_UNSUPPORTED;
 #endif

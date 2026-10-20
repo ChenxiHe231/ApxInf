@@ -919,8 +919,8 @@ impl BackboneBf16 {
         Ok(out)
     }
     pub(crate) fn new_state(&self, vision: std::rc::Rc<VisionState>) -> Result<BackboneState> {
-        // AOT module initialization is host-side work and must precede the
-        // first direct-model CUDA Graph capture.
+        // Native provider initialization and warm-up precede the first
+        // direct-model CUDA Graph capture.
         let max_seq_len = self.config.text.max_position_embeddings.min(16384);
         Ok(BackboneState {
             vision,

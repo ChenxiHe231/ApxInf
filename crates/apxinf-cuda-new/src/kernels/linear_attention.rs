@@ -33,7 +33,7 @@ pub fn try_causal_conv_gdn_prefill_bf16(
     final_state: &CudaBuffer,
     geometry: [usize; 4],
 ) -> Result<Option<Tensor>> {
-    if !cfg!(apxinf_aot_sm110)
+    if !cfg!(apxinf_qwen_drive_sm110)
         || ctx.caps().sm != 110
         || ctx.caps().multiprocessor_count != 20
         || geometry != [16, 32, 128, 128]
@@ -42,7 +42,7 @@ pub fn try_causal_conv_gdn_prefill_bf16(
     {
         return Ok(None);
     }
-    #[cfg(apxinf_aot_sm110)]
+    #[cfg(apxinf_qwen_drive_sm110)]
     {
         if new_conv_state.shape().dims() != [8192, 4]
             || a_log.shape().dims() != [32]
@@ -74,15 +74,15 @@ pub fn try_causal_conv_gdn_prefill_bf16(
             ],
         )?;
         if crate::workspace::may_prepare_native_resources() {
-            let status = unsafe { abi::apxinf_cn_gdn_flashinfer64_init() };
+            let status = unsafe { abi::apxinf_gdn_bf16_prefill_sm110_init() };
             if status != 0 {
                 return Err(Error::Other(format!(
-                    "fused GDN AOT prepare failed: {status}"
+                    "native GDN prefill prepare failed: {status}"
                 )));
             }
         }
         const PAD: usize = 3392;
-        let scratch = output_buffer(ctx, 2 * PAD * 32 * 4 + 10240)?;
+        let scratch = output_buffer(ctx, 2 * PAD * 32 * 4 + 10240 + 256)?;
         if scratch.ptr() as usize & 255 != 0 {
             return Err(Error::Other(
                 "fused GDN scratch requires 256-byte alignment".into(),
@@ -97,7 +97,7 @@ pub fn try_causal_conv_gdn_prefill_bf16(
         let output = output_buffer(ctx, PAD * 32 * 128 * 2)?;
         let offsets = output_buffer(ctx, 2 * 4)?;
         let status = unsafe {
-            abi::apxinf_cn_gdn_flashinfer64_prefill_compact_v(
+            abi::apxinf_gdn_bf16_prefill_sm110(
                 z.ptr(),
                 weight.ptr(),
                 conv_state.ptr(),
@@ -109,10 +109,10 @@ pub fn try_causal_conv_gdn_prefill_bf16(
                 v.ptr(),
                 a.ptr(),
                 b.ptr(),
-                state.ptr(),
-                final_state.ptr(),
+                state.ptr().cast::<f32>(),
+                final_state.ptr().cast::<f32>(),
                 output.ptr(),
-                offsets.ptr(),
+                offsets.ptr().cast::<i32>(),
                 3387,
                 PAD as i32,
                 ctx.stream().handle(),
@@ -120,7 +120,7 @@ pub fn try_causal_conv_gdn_prefill_bf16(
         };
         if status != 0 {
             return Err(Error::Other(format!(
-                "fused GDN AOT enqueue failed: {status}"
+                "native GDN prefill enqueue failed: {status}"
             )));
         }
         return output
@@ -130,9 +130,9 @@ pub fn try_causal_conv_gdn_prefill_bf16(
             .map(Some)
             .map_err(Error::Cuda);
     }
-    #[cfg(not(apxinf_aot_sm110))]
+    #[cfg(not(apxinf_qwen_drive_sm110))]
     let _ = (new_conv_state, a_log, dt_bias, final_state);
-    #[cfg(not(apxinf_aot_sm110))]
+    #[cfg(not(apxinf_qwen_drive_sm110))]
     Ok(None)
 }
 
