@@ -86,9 +86,9 @@ pub fn causal_gqa_bf16(
     value: &Tensor,
     key_tokens: usize,
 ) -> Result<Tensor> {
-    if let Some(output) = crate::kernels::attention::try_gqa_bf16_fa4_d256_sm110(
-        ctx, query, key, value, key_tokens,
-    )? {
+    if let Some(output) =
+        crate::kernels::attention::try_gqa_bf16_fa4_d256_sm110(ctx, query, key, value, key_tokens)?
+    {
         return Ok(output);
     }
     crate::kernels::attention::causal_gqa_bf16(ctx, query, key, value, key_tokens)
@@ -131,20 +131,18 @@ pub fn vision_segmented_attention_bf16(
     ctx: &CudaContext,
     args: VisionSegmentedAttentionArgs<'_>,
 ) -> Result<Tensor> {
-    if let Some(output) =
-        crate::kernels::attention::try_vision_qkv_rope_segmented_fa4_skip_v(
-            ctx,
-            args.qkv,
-            args.position_ids,
-            args.heads,
-            args.head_dim,
-            args.theta,
-            args.offsets,
-            args.host_offsets,
-            args.segments,
-            true,
-        )?
-    {
+    if let Some(output) = crate::kernels::attention::try_vision_qkv_rope_segmented_fa4_skip_v(
+        ctx,
+        args.qkv,
+        args.position_ids,
+        args.heads,
+        args.head_dim,
+        args.theta,
+        args.offsets,
+        args.host_offsets,
+        args.segments,
+        true,
+    )? {
         return Ok(output);
     }
 

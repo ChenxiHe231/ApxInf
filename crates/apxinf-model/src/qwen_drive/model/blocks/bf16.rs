@@ -2120,13 +2120,9 @@ pub(crate) mod expert {
                 eps,
             )?;
             let attn = match (&joint.split_key, &joint.split_value) {
-                (Some(k), Some(v)) => ops::noncausal_gqa_bf16(
-                    ctx,
-                    &q_out,
-                    k,
-                    v,
-                    input.scene_len + length,
-                )?,
+                (Some(k), Some(v)) => {
+                    ops::noncausal_gqa_bf16(ctx, &q_out, k, v, input.scene_len + length)?
+                }
                 _ => la::gqa_bf16(
                     ctx,
                     &q_out,
