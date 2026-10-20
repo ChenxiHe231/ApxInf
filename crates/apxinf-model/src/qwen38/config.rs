@@ -33,6 +33,7 @@ pub(crate) const IMAGE_TOKEN_ID: u32 = 248056;
 // original ApxInf runtime used only `model.language_model.*`.
 pub(crate) const VISION_DEPTH: usize = 27;
 pub(crate) const VISION_HIDDEN: usize = 1152;
+pub(crate) const VISION_INTERMEDIATE: usize = 4304;
 pub(crate) const VISION_HEADS: usize = 16;
 pub(crate) const VISION_HEAD_DIM: usize = VISION_HIDDEN / VISION_HEADS;
 pub(crate) const VISION_PATCH_SIZE: usize = 16;

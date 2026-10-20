@@ -126,15 +126,32 @@ pub(crate) fn upload_pixels(ctx: &CudaContext, pixels: &Tensor) -> Result<Tensor
 
 /// Run the complete vision tower over one image's patch stream. Attention is
 /// dense over all patches, which is what a single unsegmented image is.
+///
+/// `scratch` supplies stable per-shape buffers and `session` owns the prepared
+/// GEMM/Attention executions. The first call for a given scratch must pass
+/// `prepared = false` so the traversal may tune and create native resources;
+/// later calls on the same scratch replay them without allocating. Sessions do
+/// not nest, so this must not be called inside the language prefill session.
 pub(crate) fn forward(
     weights: &VisionWeights,
     state: &VisionState,
     ctx: &CudaContext,
+    scratch: &VisionScratch,
+    session: &ops::ExecutionSession,
+    prepared: bool,
     pixel_values: &Tensor,
     grid_thw: &[[u32; 3]],
 ) -> Result<Tensor> {
-    let prepared = prepare(weights, state, ctx, pixel_values, grid_thw)?;
-    let output = forward_device(weights, ctx, pixel_values, &prepared)?;
+    // Position embeddings and ids are per-grid persistent resources, built
+    // outside the session so the replayed traversal is pure compute.
+    let plan = prepare(weights, state, ctx, pixel_values, grid_thw)?;
+    let run = || forward_device(weights, ctx, scratch, pixel_values, &plan);
+    let output = if prepared {
+        ops::with_session(session, run)?
+    } else {
+        ops::prepare_with_session(session, run)?
+    };
+    ctx.synchronize().map_err(Error::Cuda)?;
     if let Ok(path) = std::env::var("APXINF_QWEN38_VISION_DUMP") {
         let values = transfers::to_cpu(&output)?.to_f32_vec()?;
         let bytes: Vec<u8> = values
@@ -222,76 +239,146 @@ fn prepare(
     })
 }
 
-fn gemm_bias(
+
+
+
+
+/// Device scratch for one patch count, allocated once and reused by every
+/// block.
+///
+/// Reuse needs no in-place operator support: each block writes only buffers it
+/// does not read. `x` alternates between two buffers because a residual add
+/// cannot write its own input, and `normed` is rewritten only after the GEMM
+/// that reads it has been enqueued. Addresses are stable for the lifetime of
+/// the scratch, which is what lets the session's GEMM/Attention execution
+/// cache hit on a repeated grid -- `ExecutionKey` includes binding pointers.
+pub(crate) struct VisionScratch {
+    patches: usize,
+    x: [Tensor; 2],
+    normed: Tensor,
+    qkv: Tensor,
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    attn: Tensor,
+    projected: Tensor,
+    mlp_hidden: Tensor,
+    mlp_out: Tensor,
+    merger_hidden: Tensor,
+    merger_activated: Tensor,
+    merger_out: Tensor,
+}
+
+impl VisionScratch {
+    pub(crate) fn patches(&self) -> usize {
+        self.patches
+    }
+
+    pub(crate) fn new(ctx: &CudaContext, patches: usize) -> Result<Self> {
+        let factor = VISION_MERGE * VISION_MERGE;
+        if patches == 0 || patches % factor != 0 {
+            return Err(Error::Other(format!(
+                "qwen38 vision scratch needs a non-zero patch count divisible by {factor}, got {patches}"
+            )));
+        }
+        let merged = patches / factor;
+        let rows = [patches, VISION_HIDDEN];
+        let heads = [patches, VISION_HEADS, VISION_HEAD_DIM];
+        let bf16 = DType::BF16;
+        Ok(Self {
+            patches,
+            x: [
+                device_tensor(ctx, &rows, bf16)?,
+                device_tensor(ctx, &rows, bf16)?,
+            ],
+            normed: device_tensor(ctx, &rows, bf16)?,
+            qkv: device_tensor(ctx, &[patches, 3 * VISION_HIDDEN], bf16)?,
+            query: device_tensor(ctx, &heads, bf16)?,
+            key: device_tensor(ctx, &heads, bf16)?,
+            value: device_tensor(ctx, &heads, bf16)?,
+            // Dense Attention wants a leading batch axis; the rows are identical.
+            attn: device_tensor(
+                ctx,
+                &[1, patches, VISION_HEADS, VISION_HEAD_DIM],
+                bf16,
+            )?,
+            projected: device_tensor(ctx, &rows, bf16)?,
+            mlp_hidden: device_tensor(ctx, &[patches, VISION_INTERMEDIATE], bf16)?,
+            mlp_out: device_tensor(ctx, &rows, bf16)?,
+            merger_hidden: device_tensor(ctx, &[merged, VISION_HIDDEN * factor], bf16)?,
+            merger_activated: device_tensor(ctx, &[merged, VISION_HIDDEN * factor], bf16)?,
+            merger_out: device_tensor(ctx, &[merged, VISION_OUT_HIDDEN], bf16)?,
+        })
+    }
+}
+
+fn gemm_bias_into(
     ctx: &CudaContext,
     input: &Tensor,
     weight: &Tensor,
     bias: &Tensor,
-) -> Result<Tensor> {
+    out: &mut Tensor,
+) -> Result<()> {
     let input_dims = input.shape().dims();
     let weight_dims = weight.shape().dims();
     if input_dims.len() != 2 || weight_dims.len() != 2 || input_dims[1] != weight_dims[0] {
         return Err(Error::Other("qwen38 vision GEMM shape mismatch".into()));
     }
-    let mut output = device_tensor(ctx, &[input_dims[0], weight_dims[1]], DType::BF16)?;
     ops::gemm_bias(
         ctx,
         ops::GemmBiasArgs {
-            gemm: ops::GemmArgs::new(input, weight, &mut output),
+            gemm: ops::GemmArgs::new(input, weight, out),
             bias,
         },
-    )?;
-    Ok(output)
+    )
 }
 
-fn gemm_bias_gelu(
+fn gemm_bias_gelu_into(
     ctx: &CudaContext,
     input: &Tensor,
     weight: &Tensor,
     bias: &Tensor,
-) -> Result<Tensor> {
+    out: &mut Tensor,
+) -> Result<()> {
     let input_dims = input.shape().dims();
     let weight_dims = weight.shape().dims();
     if input_dims.len() != 2 || weight_dims.len() != 2 || input_dims[1] != weight_dims[0] {
         return Err(Error::Other("qwen38 vision GELU GEMM shape mismatch".into()));
     }
-    let mut output = device_tensor(ctx, &[input_dims[0], weight_dims[1]], DType::BF16)?;
     ops::gemm_bias_gelu(
         ctx,
         ops::GemmBiasGeluArgs {
-            gemm: ops::GemmArgs::new(input, weight, &mut output),
+            gemm: ops::GemmArgs::new(input, weight, out),
             bias,
         },
-    )?;
-    Ok(output)
+    )
 }
 
-fn layer_norm(
+fn layer_norm_into(
     ctx: &CudaContext,
     input: &Tensor,
     weight: &Tensor,
     bias: &Tensor,
+    out: &mut Tensor,
     eps: f32,
-) -> Result<Tensor> {
-    let mut output = device_tensor(ctx, input.shape().dims(), DType::BF16)?;
+) -> Result<()> {
     ops::layer_norm(
         ctx,
-        ops::LayerNormArgs::new(input, weight, bias, &mut output, eps),
-    )?;
-    Ok(output)
+        ops::LayerNormArgs::new(input, weight, bias, out, eps),
+    )
 }
 
-fn bias_residual_layer_norm(
+#[allow(clippy::too_many_arguments)]
+fn bias_residual_layer_norm_into(
     ctx: &CudaContext,
     input: &Tensor,
     residual: &Tensor,
     weight: &Tensor,
     norm_bias: &Tensor,
+    hidden: &mut Tensor,
+    normalized: &mut Tensor,
     eps: f32,
-) -> Result<(Tensor, Tensor)> {
-    let dims = input.shape().dims();
-    let mut hidden = device_tensor(ctx, dims, DType::BF16)?;
-    let mut normalized = device_tensor(ctx, dims, DType::BF16)?;
+) -> Result<()> {
     ops::bias_residual_layer_norm(
         ctx,
         ops::BiasResidualLayerNormArgs::new(
@@ -300,43 +387,69 @@ fn bias_residual_layer_norm(
             residual,
             weight,
             norm_bias,
-            &mut hidden,
-            &mut normalized,
+            hidden,
+            normalized,
             eps,
         ),
-    )?;
-    Ok((hidden, normalized))
+    )
 }
 
 fn forward_device(
     weights: &VisionWeights,
     ctx: &CudaContext,
+    scratch: &VisionScratch,
     pixel_values: &Tensor,
     prepared: &PreparedVision,
 ) -> Result<Tensor> {
     let eps = 1e-6f32;
-    let mut x = gemm_bias(ctx, pixel_values, &weights.patch_w, &weights.patch_b)?;
-    ops::mlp::add_into(ctx, &prepared.pos_embeds, &x)?;
-    dump_vision_stage("00_patch_position", &x)?;
+    let patches = prepared.total_patches;
+    let factor = VISION_MERGE * VISION_MERGE;
+    if scratch.patches != patches {
+        return Err(Error::Other(format!(
+            "qwen38 vision scratch holds {} patches but this request has {patches}",
+            scratch.patches
+        )));
+    }
+    let Some(first) = weights.blocks.first() else {
+        return Err(Error::Other("qwen38 vision tower has no blocks".into()));
+    };
 
-    let mut normalized = None;
+    // Cloning a Tensor copies its shape and an Arc handle, not device memory,
+    // so these alias the scratch buffers at stable addresses. Cloning avoids
+    // borrowing several fields of `scratch` mutably at once.
+    let batched = [1, patches, VISION_HEADS, VISION_HEAD_DIM];
+    let mut current = scratch.x[0].clone();
+    let mut spare = scratch.x[1].clone();
+    let mut normed = scratch.normed.clone();
+    let mut qkv = scratch.qkv.clone();
+    let mut query = scratch.query.clone();
+    let mut key = scratch.key.clone();
+    let mut value = scratch.value.clone();
+    let mut attn = scratch.attn.clone();
+    let mut projected = scratch.projected.clone();
+    let mut mlp_hidden = scratch.mlp_hidden.clone();
+    let mut mlp_out = scratch.mlp_out.clone();
+
+    gemm_bias_into(
+        ctx,
+        pixel_values,
+        &weights.patch_w,
+        &weights.patch_b,
+        &mut current,
+    )?;
+    ops::mlp::add_into(ctx, &prepared.pos_embeds, &current)?;
+    dump_vision_stage("00_patch_position", &current)?;
+    layer_norm_into(
+        ctx,
+        &current,
+        &first.norm1_w,
+        &first.norm1_b,
+        &mut normed,
+        eps,
+    )?;
+
     for (block_index, block) in weights.blocks.iter().enumerate() {
-        let normed = match normalized.take() {
-            Some(value) => value,
-            None => layer_norm(ctx, &x, &block.norm1_w, &block.norm1_b, eps)?,
-        };
-        let qkv = gemm_bias(ctx, &normed, &block.qkv_w, &block.qkv_b)?;
-        let qkv_shape = [prepared.total_patches, VISION_HEADS, VISION_HEAD_DIM];
-        // Dense Attention wants a leading batch axis; the rows are identical.
-        let batched_shape = [
-            1,
-            prepared.total_patches,
-            VISION_HEADS,
-            VISION_HEAD_DIM,
-        ];
-        let mut query = device_tensor(ctx, &qkv_shape, DType::BF16)?;
-        let mut key = device_tensor(ctx, &qkv_shape, DType::BF16)?;
-        let mut value = device_tensor(ctx, &qkv_shape, DType::BF16)?;
+        gemm_bias_into(ctx, &normed, &block.qkv_w, &block.qkv_b, &mut qkv)?;
         ops::split_qkv_axial_rope(
             ctx,
             ops::AxialRopeArgs {
@@ -349,7 +462,6 @@ fn forward_device(
                 theta: 10_000.0,
             },
         )?;
-        let mut attn = device_tensor(ctx, &batched_shape, DType::BF16)?;
         // Dense Attention, not `ops::segmented_attention`: a single image is
         // one unsegmented span, and only the dense semantic has FA2 registered
         // as a candidate. The segmented semantic carries one shape-general
@@ -358,63 +470,85 @@ fn forward_device(
         ops::attention(
             ctx,
             ops::AttentionArgs::new(
-                &query.reshape(batched_shape.to_vec())?,
-                &key.reshape(batched_shape.to_vec())?,
-                &value.reshape(batched_shape.to_vec())?,
+                &query.reshape(batched.to_vec())?,
+                &key.reshape(batched.to_vec())?,
+                &value.reshape(batched.to_vec())?,
                 &mut attn,
             ),
         )?;
-        let attn = attn.reshape(vec![prepared.total_patches, VISION_HIDDEN])?;
-        let projected = gemm_bias(ctx, &attn, &block.proj_w, &block.proj_b)?;
-        let (hidden, norm2) = bias_residual_layer_norm(
+        gemm_bias_into(
+            ctx,
+            &attn.reshape(vec![patches, VISION_HIDDEN])?,
+            &block.proj_w,
+            &block.proj_b,
+            &mut projected,
+        )?;
+        // Writes `spare`, reads `current`: the residual add cannot target its
+        // own input. `normed` is free here because the QKV GEMM above consumed
+        // it, and it becomes this block's norm2 output.
+        bias_residual_layer_norm_into(
             ctx,
             &projected,
-            &x,
+            &current,
             &block.norm2_w,
             &block.norm2_b,
+            &mut spare,
+            &mut normed,
             eps,
         )?;
-        x = hidden;
+        std::mem::swap(&mut current, &mut spare);
 
-        let hidden = gemm_bias_gelu(ctx, &norm2, &block.fc1_w, &block.fc1_b)?;
-        let mlp = gemm_bias(ctx, &hidden, &block.fc2_w, &block.fc2_b)?;
+        gemm_bias_gelu_into(ctx, &normed, &block.fc1_w, &block.fc1_b, &mut mlp_hidden)?;
+        gemm_bias_into(ctx, &mlp_hidden, &block.fc2_w, &block.fc2_b, &mut mlp_out)?;
+        // The fused norm for the next block, or the merger's own norm after
+        // the last one, so no separate LayerNorm pass is needed.
         let (next_w, next_b) = weights
             .blocks
             .get(block_index + 1)
             .map(|next| (&next.norm1_w, &next.norm1_b))
             .unwrap_or((&weights.merger_norm_w, &weights.merger_norm_b));
-        let (hidden, next_normalized) =
-            bias_residual_layer_norm(ctx, &mlp, &x, next_w, next_b, eps)?;
-        x = hidden;
-        dump_vision_stage(&format!("block_{block_index:02}_output"), &x)?;
-        normalized = Some(next_normalized);
+        bias_residual_layer_norm_into(
+            ctx,
+            &mlp_out,
+            &current,
+            next_w,
+            next_b,
+            &mut spare,
+            &mut normed,
+            eps,
+        )?;
+        std::mem::swap(&mut current, &mut spare);
+        dump_vision_stage(&format!("block_{block_index:02}_output"), &current)?;
     }
 
-    let normalized = match normalized {
-        Some(value) => value,
-        None => layer_norm(ctx, &x, &weights.merger_norm_w, &weights.merger_norm_b, eps)?,
-    };
-    let rows = normalized.shape().dims()[0];
-    let factor = VISION_MERGE * VISION_MERGE;
-    if rows % factor != 0 {
-        return Err(Error::Other(format!(
-            "qwen38 image merger rows {rows} do not divide by {factor}"
-        )));
-    }
-    let merged = normalized.reshape(vec![rows / factor, VISION_HIDDEN * factor])?;
+    let merged = normed.reshape(vec![patches / factor, VISION_HIDDEN * factor])?;
     dump_vision_stage("merger_norm", &merged)?;
-    let hidden = gemm_bias(ctx, &merged, &weights.merger_fc1_w, &weights.merger_fc1_b)?;
-    let mut activated = device_tensor(ctx, hidden.shape().dims(), DType::BF16)?;
+    let mut merger_hidden = scratch.merger_hidden.clone();
+    let mut merger_activated = scratch.merger_activated.clone();
+    let mut merger_out = scratch.merger_out.clone();
+    gemm_bias_into(
+        ctx,
+        &merged,
+        &weights.merger_fc1_w,
+        &weights.merger_fc1_b,
+        &mut merger_hidden,
+    )?;
     let mut activation = ops::PointwiseArgs::new(
         ops::PointwiseSemantic::BiasActivation,
-        &hidden,
-        &mut activated,
+        &merger_hidden,
+        &mut merger_activated,
     );
     activation.activation = ops::PointwiseActivation::GeluExact;
     ops::pointwise(ctx, activation)?;
-    let output = gemm_bias(ctx, &activated, &weights.merger_fc2_w, &weights.merger_fc2_b)?;
-    dump_vision_stage("merger_output", &output)?;
-    Ok(output)
+    gemm_bias_into(
+        ctx,
+        &merger_activated,
+        &weights.merger_fc2_w,
+        &weights.merger_fc2_b,
+        &mut merger_out,
+    )?;
+    dump_vision_stage("merger_output", &merger_out)?;
+    Ok(merger_out)
 }
 
 /// Replace image-token embedding rows with visual features. The replacement

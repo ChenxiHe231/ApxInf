@@ -34,6 +34,11 @@ pub struct Qwen38 {
     /// Some text-only checkpoints intentionally omit the visual tower.
     vision: Option<VisionWeights>,
     vision_state: vision::VisionState,
+    /// Stable per-shape vision buffers and the session owning that traversal's
+    /// prepared executions. `ExecutionKey` includes binding pointers, so the
+    /// cache only hits while the scratch addresses stay put; a new patch count
+    /// replaces both together.
+    vision_session: Option<(vision::VisionScratch, ops::ExecutionSession)>,
     scratch: model::Scratch,
     prefill: Option<model::PrefillScratch>,
     /// The prepared prefill session, with the token count it was prepared for.
@@ -96,6 +101,7 @@ impl Qwen38 {
             model,
             vision,
             vision_state: vision::VisionState::default(),
+            vision_session: None,
             scratch,
             prefill: None,
             prefill_session: None,
@@ -270,13 +276,40 @@ impl Qwen38 {
             })?;
             let positions = vision::rope_positions(token_ids, grid_thw)?;
             let pixels = vision::upload_pixels(&self.ctx, pixel_values)?;
+            // Reuse the scratch and its prepared executions when the patch
+            // count repeats; a different shape needs both rebuilt, since the
+            // prepared traversal binds this scratch's addresses and GEMM
+            // shapes. The first traversal on a fresh pair must prepare.
+            let patches = pixels.shape().dims()[0];
+            let reuse = self
+                .vision_session
+                .as_ref()
+                .is_some_and(|(scratch, _)| scratch.patches() == patches);
+            if !reuse {
+                let scratch = vision::VisionScratch::new(&self.ctx, patches)?;
+                let session = ops::ExecutionSession::with_capacity(
+                    VISION_SESSION_ARENA,
+                    self.ctx.device_id(),
+                )?;
+                self.vision_session = Some((scratch, session));
+            }
+            let (scratch, session) = self
+                .vision_session
+                .as_ref()
+                .expect("vision session installed above");
             let visual = vision::forward(
                 vision_weights,
                 &self.vision_state,
                 &self.ctx,
+                scratch,
+                session,
+                reuse,
                 &pixels,
                 grid_thw,
             )?;
+            if !reuse {
+                model_runner::report_session("vision", session);
+            }
             let embeddings =
                 vision::embed_and_replace(&self.ctx, &self.model.embedding, token_ids, &visual)?;
             let max_position = positions
@@ -375,6 +408,14 @@ impl LlmTrait for Qwen38 {
         VOCAB
     }
 }
+
+/// Vision session arena. The tower's own activations live in `VisionScratch`,
+/// so this covers only what the GEMM and Attention providers sub-allocate for
+/// their own workspaces. Both this and the prefill session currently report
+/// 0.00 MiB used under `APXINF_QWEN38_GRAPH_REPORT=1`; the reservation matches
+/// the prefill session's rather than being tuned down, so a candidate that
+/// does want a workspace is not the one to discover the limit.
+const VISION_SESSION_ARENA: usize = 64 * 1024 * 1024;
 
 fn validate_kv_capacity(start: usize, len: usize, capacity: usize) -> Result<()> {
     let end = start
