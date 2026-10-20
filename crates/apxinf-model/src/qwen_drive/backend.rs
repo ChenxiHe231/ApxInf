@@ -10,7 +10,7 @@
 //! runtime swap happens entirely in these aliases.
 
 pub(crate) use apxinf_cuda_new::{
-    kernels, nvtx, transfers, tuning, CublasTranspose, CudaBuffer as DeviceBuffer,
+    kernels, nvtx, ops, transfers, tuning, CublasTranspose, CudaBuffer as DeviceBuffer,
     CudaContext as Context, CudaNewBackend as RuntimeBackend,
 };
 

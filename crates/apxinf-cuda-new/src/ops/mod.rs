@@ -13,6 +13,7 @@ mod norm;
 mod pointwise;
 mod quantization;
 mod rope;
+mod translated_fast_paths;
 
 // Keep these crate-private aliases while graph/workspace and unit tests still
 // refer to the GEMM implementation through `crate::ops`.
@@ -72,6 +73,12 @@ pub use rope::{apply_batched as rope_apply_batched, apply_mrope as rope_apply_mr
 pub use rope::{
     decode_rope, multimodal_rope, rope, split_qkv_axial_rope, AxialRopeArgs, DecodeRopeArgs,
     MultimodalRopeArgs, RopeArgs, RopeSemantic,
+};
+pub use translated_fast_paths::{
+    bf16_swiglu_projection, bf16_swiglu_weight_layout, causal_gqa_bf16,
+    fused_gdn_prefill_bf16, noncausal_gqa_bf16, pack_bf16_swiglu_weight_host,
+    vision_segmented_attention_bf16, Bf16SwigluWeightLayout, FusedGdnPrefillArgs,
+    VisionSegmentedAttentionArgs,
 };
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
