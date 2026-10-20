@@ -54,41 +54,6 @@ pub(crate) struct Bindings {
 pub(crate) type Execution = *mut c_void;
 
 unsafe extern "C" {
-    #[cfg(apxinf_qwen_drive_sm110)]
-    pub(crate) fn apxinf_qwen_drive_d256_causal_init() -> i32;
-    #[cfg(apxinf_qwen_drive_sm110)]
-    pub(crate) fn apxinf_qwen_drive_d256_causal_forward(
-        q: *const c_void,
-        k: *const c_void,
-        v: *const c_void,
-        output: *mut c_void,
-        seq: i32,
-        stream: CudaStream,
-    ) -> i32;
-    #[cfg(apxinf_qwen_drive_sm110)]
-    pub(crate) fn apxinf_qwen_drive_d256_split_init() -> i32;
-    #[cfg(apxinf_qwen_drive_sm110)]
-    pub(crate) fn apxinf_qwen_drive_d256_split_forward(
-        q: *const c_void,
-        k: *const c_void,
-        v: *const c_void,
-        q2: *mut c_void,
-        partial: *mut c_void,
-        lse: *mut f32,
-        output: *mut c_void,
-        key_tokens: i32,
-        stream: CudaStream,
-    ) -> i32;
-    #[cfg(apxinf_qwen_drive_sm110)]
-    pub(crate) fn apxinf_qwen_drive_vision_groups_init() -> i32;
-    #[cfg(apxinf_qwen_drive_sm110)]
-    pub(crate) fn apxinf_qwen_drive_vision_groups_forward(
-        q: *const c_void,
-        k: *const c_void,
-        v: *const c_void,
-        output: *mut c_void,
-        stream: CudaStream,
-    ) -> i32;
     pub(crate) fn apxinf_decode_attention_workspace_bytes() -> i64;
     pub(crate) fn apxinf_decode_attention(
         runtime: Runtime,

@@ -5,6 +5,10 @@
 #include <cstdint>
 #include <cuda_fp8.h>
 
+extern "C" cudaError_t apxinf_cn_swiglu_bf16_rounded_pair_interleaved(
+    const void* gate_up, void* output, int rows, int inner, int pair,
+    cudaStream_t stream);
+
 namespace {
 #include "../../../kernels/primitives/math.cuh"
 #include "../../../kernels/primitives/activation.cuh"
@@ -205,8 +209,23 @@ cudaError_t launch_postprocess(const Spec& spec,
         static_cast<int>(spec.n / 2),
         static_cast<cudaStream_t>(bindings.stream));
   }
+  if (spec.semantic ==
+          APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256 &&
+      spec.quantization == APXINF_GEMM_QUANT_NONE &&
+      resources.projection_dtype == APXINF_DTYPE_BF16 &&
+      spec.output_dtype == APXINF_DTYPE_BF16 && spec.alpha_is_unit != 0 &&
+      spec.output_scale_is_unit != 0 && bindings.bias == nullptr) {
+    return apxinf_cn_swiglu_bf16_rounded_pair_interleaved(
+        projection, bindings.output, static_cast<int>(spec.m),
+        static_cast<int>(spec.n / 2), 256,
+        static_cast<cudaStream_t>(bindings.stream));
+  }
   const int64_t output_width =
-      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ? spec.n / 2 : spec.n;
+      (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ||
+       spec.semantic ==
+           APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256)
+          ? spec.n / 2
+          : spec.n;
   const int64_t count = spec.m * output_width;
   const int blocks = static_cast<int>(
       std::min<int64_t>((count + 255) / 256, 4096));

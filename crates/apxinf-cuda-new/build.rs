@@ -26,6 +26,7 @@ fn write_arch_header(out: &Path, selection: &ArchSelection) -> PathBuf {
          constexpr uint64_t kDeviceFeatureFa2 = UINT64_C(1) << 2;\n\
          constexpr uint64_t kDeviceFeatureCutlassSm89Bf16Geglu = UINT64_C(1) << 3;\n\
          constexpr uint64_t kDeviceFeatureCutlassSm87W8A8 = UINT64_C(1) << 4;\n\
+         constexpr uint64_t kDeviceFeatureQwenDriveSm110 = UINT64_C(1) << 5;\n\
          struct CompiledTarget { int sm; uint64_t features; };\n\
          constexpr CompiledTarget kCompiledTargets[] = {\n",
     );

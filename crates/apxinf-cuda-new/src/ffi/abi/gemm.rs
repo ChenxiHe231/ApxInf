@@ -112,15 +112,6 @@ unsafe extern "C" {
         k: i64,
         stream: CudaStream,
     ) -> i32;
-    pub(crate) fn apxinf_gemm_bf16_swiglu(
-        activation: *const c_void,
-        interleaved_weight: *const c_void,
-        output: *mut c_void,
-        rows: i64,
-        n: i64,
-        k: i64,
-        stream: CudaStream,
-    ) -> i32;
     pub(crate) fn apxinf_gemm_nvfp4_quantize_activation(
         source_bf16: *const c_void,
         destination_packed: *mut c_void,

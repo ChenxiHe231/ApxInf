@@ -13,7 +13,6 @@ mod norm;
 mod pointwise;
 mod quantization;
 mod rope;
-mod translated_fast_paths;
 
 // Keep these crate-private aliases while graph/workspace and unit tests still
 // refer to the GEMM implementation through `crate::ops`.
@@ -43,19 +42,19 @@ pub use elementwise::{
 };
 pub use gather::{gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry};
 pub use gdn::{
-    gdn_causal_conv_forward, gdn_causal_conv_step, gdn_decay_and_beta,
-    gdn_decay_and_beta_seq, gdn_gated_norm, gdn_gated_norm_quantize, gdn_gated_norm_seq, gdn_gated_norm_seq_f16,
-    gdn_prefill, gdn_prefill_workspace_bytes,
-    gdn_widen_f16_to_bf16, gdn_prepare_prefill, gdn_conv_prepare,
-    gdn_chunk_scan, gdn_chunk_scan_interleaved, gdn_l2_normalize_heads,
-    gdn_recurrent_step, gdn_state_elements,
+    gdn_causal_conv_forward, gdn_causal_conv_step, gdn_chunk_scan, gdn_chunk_scan_interleaved,
+    gdn_conv_prepare, gdn_decay_and_beta, gdn_decay_and_beta_seq, gdn_first_prefill,
+    gdn_gated_norm, gdn_gated_norm_quantize, gdn_gated_norm_seq, gdn_gated_norm_seq_f16,
+    gdn_l2_normalize_heads, gdn_prefill, gdn_prefill_workspace_bytes, gdn_prepare_prefill,
+    gdn_recurrent_step, gdn_state_elements, gdn_widen_f16_to_bf16, GdnFirstPrefillArgs,
 };
 pub use gemm::{
-    gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu, nvfp4_gemm_swiglu,
-    nvfp4_pack_block_scales, nvfp4_quantize_activation, nvfp4_quantize_rms_norm,
-    nvfp4_quantize_swiglu, nvfp4_scale_buffer_bytes, GemmArgs, GemmBiasArgs,
+    gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu,
+    gemm_swiglu_pair_interleaved_256, nvfp4_gemm_swiglu, nvfp4_pack_block_scales,
+    nvfp4_quantize_activation, nvfp4_quantize_rms_norm, nvfp4_quantize_swiglu,
+    nvfp4_scale_buffer_bytes, pack_bf16_swiglu_weight_host, GemmArgs, GemmBiasArgs,
     GemmBiasGeluArgs, GemmBiasResidualArgs, GemmGegluArgs, GemmPolicy, GemmQuantization,
-    ScaleLayout, WeightVersion,
+    GemmSwiGluArgs, ScaleLayout, WeightVersion,
 };
 pub use mlp::{add_into, fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu};
 pub use model::{argmax, embedding_gather, vision_position, VisionPositionArgs};
@@ -68,16 +67,13 @@ pub use norm::{
 };
 pub use pointwise::{pointwise, PointwiseActivation, PointwiseArgs, PointwiseSemantic};
 pub use quantization::{quantization, QuantizationArgs, QuantizationSemantic};
-pub use rope::{apply_batched as rope_apply_batched, apply_mrope as rope_apply_mrope,
-    apply_vision_2d as rope_apply_vision_2d};
+pub use rope::{
+    apply_batched as rope_apply_batched, apply_mrope as rope_apply_mrope,
+    apply_vision_2d as rope_apply_vision_2d,
+};
 pub use rope::{
     decode_rope, multimodal_rope, rope, split_qkv_axial_rope, AxialRopeArgs, DecodeRopeArgs,
     MultimodalRopeArgs, RopeArgs, RopeSemantic,
-};
-pub use translated_fast_paths::{
-    bf16_swiglu_projection, bf16_swiglu_weight_layout, causal_gqa_bf16, fused_gdn_prefill_bf16,
-    noncausal_gqa_bf16, pack_bf16_swiglu_weight_host, vision_segmented_attention_bf16,
-    Bf16SwigluWeightLayout, FusedGdnPrefillArgs, VisionSegmentedAttentionArgs,
 };
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
