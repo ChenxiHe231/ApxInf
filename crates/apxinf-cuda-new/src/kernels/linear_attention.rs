@@ -101,7 +101,7 @@ pub fn try_causal_conv_gdn_prefill_bf16(
                 z.ptr(),
                 weight.ptr(),
                 conv_state.ptr(),
-                log.ptr(),
+                log.ptr().cast::<f32>(),
                 bias.ptr(),
                 scratch.ptr(),
                 q.ptr(),
