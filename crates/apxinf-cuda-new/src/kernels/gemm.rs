@@ -1193,8 +1193,8 @@ pub fn write(
 #[cfg(test)]
 mod tests {
     use super::{
-        bf16_swiglu_gemm_strides, bf16_swiglu_packed_source_index,
-        pack_bf16_swiglu_weight_host, QWEN_DRIVE_SWIGLU_PAIR,
+        bf16_swiglu_gemm_strides, bf16_swiglu_packed_source_index, pack_bf16_swiglu_weight_host,
+        QWEN_DRIVE_SWIGLU_PAIR,
     };
 
     #[test]
@@ -1224,9 +1224,8 @@ mod tests {
         let source: Vec<f32> = (0..full_n * k).map(|value| value as f32).collect();
         let packed = pack_bf16_swiglu_weight_host(&source, full_n, k).unwrap();
         for (index, value) in packed.iter().enumerate() {
-            let expected = half::bf16::from_f32(
-                source[bf16_swiglu_packed_source_index(index, full_n, k)],
-            );
+            let expected =
+                half::bf16::from_f32(source[bf16_swiglu_packed_source_index(index, full_n, k)]);
             assert_eq!(value.to_bits(), expected.to_bits());
         }
     }
