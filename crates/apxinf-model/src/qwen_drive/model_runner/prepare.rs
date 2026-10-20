@@ -14,8 +14,15 @@ use apxinf_core::{
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 struct WorkspaceExecution<'a> {
     workspace: &'a kernels::GraphWorkspace,
-    preparing: bool,
+    mode: WorkspaceMode,
     usage: Vec<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum WorkspaceMode {
+    Prepare,
+    Capture,
+    Eager,
 }
 fn validate_phase_usage(preflight: &[usize], captured: &[usize]) -> Result<()> {
     if preflight != captured {
@@ -39,10 +46,10 @@ mod workspace_layout_tests {
 }
 impl DirectExecution for WorkspaceExecution<'_> {
     fn run(&mut self, operation: &mut dyn FnMut() -> Result<Tensor>) -> Result<Tensor> {
-        let result = if self.preparing {
-            kernels::prepare_with_workspace(self.workspace, operation)
-        } else {
-            kernels::with_workspace(self.workspace, operation)
+        let result = match self.mode {
+            WorkspaceMode::Prepare => kernels::prepare_with_workspace(self.workspace, operation),
+            WorkspaceMode::Capture => kernels::with_workspace(self.workspace, operation),
+            WorkspaceMode::Eager => kernels::with_workspace_eager(self.workspace, operation),
         };
         self.usage.push(self.workspace.used());
         result
@@ -175,8 +182,10 @@ impl DirectPlan {
         // the same graph. Only persistent visual features and shared KV cross phases.
         let bytes = 32usize * (1 << 30);
         let workspace = kernels::GraphWorkspace::with_capacity(bytes, ctx.device_id())?;
-        let noise_workspace =
-            kernels::GraphWorkspace::with_capacity(inputs.noise.numel() * 4 + 256, ctx.device_id())?;
+        let noise_workspace = kernels::GraphWorkspace::with_capacity(
+            inputs.noise.numel() * 4 + 256,
+            ctx.device_id(),
+        )?;
         let spec = sample.observation.inference_spec();
         let image_positions = sample
             .observation
@@ -212,7 +221,7 @@ impl DirectPlan {
             // traversals reset the arena at identical phase boundaries.
             let mut preflight = WorkspaceExecution {
                 workspace: &plan.workspace,
-                preparing: true,
+                mode: WorkspaceMode::Prepare,
                 usage: Vec::new(),
             };
             let output =
@@ -237,7 +246,7 @@ impl DirectPlan {
             if policy != ExecutionPolicy::Eager {
                 let mut captured = WorkspaceExecution {
                     workspace: &plan.workspace,
-                    preparing: false,
+                    mode: WorkspaceMode::Capture,
                     usage: Vec::new(),
                 };
                 match backend.capture_graph(|| {
@@ -386,7 +395,7 @@ impl PreparedInference for DirectPlan {
                         &mut mutable.state,
                         &mut WorkspaceExecution {
                             workspace: &self.workspace,
-                            preparing: false,
+                            mode: WorkspaceMode::Eager,
                             usage: Vec::new(),
                         },
                     )

@@ -353,13 +353,12 @@ pub(crate) fn begin_capture_retention(device: usize, stream: usize) {
 /// that omitted a prepared operator would silently replay wrong results, and
 /// the per-operator mismatch check cannot see a sequence that ended early.
 /// A failed capture legitimately under-runs, so it skips the check.
-pub(crate) fn end_capture_retention(
-    capture_ok: bool,
-) -> Result<Vec<Rc<dyn Any>>> {
+pub(crate) fn end_capture_retention(capture_ok: bool) -> Result<Vec<Rc<dyn Any>>> {
     CAPTURE_ACTIVE.with(|active| active.set(false));
     CAPTURE_TARGET.with(|target| target.set(None));
     let session = CAPTURE_SESSION.with(|slot| slot.replace(std::ptr::null()));
-    let retained = CAPTURED_RESOURCES.with(|resources| std::mem::take(&mut *resources.borrow_mut()));
+    let retained =
+        CAPTURED_RESOURCES.with(|resources| std::mem::take(&mut *resources.borrow_mut()));
     if capture_ok && !session.is_null() {
         let inner = unsafe { &*session };
         let cursor = inner.sequence_cursor.get();
@@ -490,8 +489,7 @@ pub(crate) fn output_buffer(ctx: &crate::CudaContext, bytes: usize) -> Result<Cu
             // the legacy default stream is not ordered before the operator
             // that consumes this output. Keep initialization on the same
             // stream to prevent a late memset from erasing kernel results.
-            CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
-                .map_err(Error::Cuda)
+            CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream()).map_err(Error::Cuda)
         } else {
             unsafe { &*inner }
                 .workspace
@@ -508,7 +506,9 @@ pub(crate) fn output_buffer_zeroed(ctx: &crate::CudaContext, bytes: usize) -> Re
         if inner.is_null() {
             CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream()).map_err(Error::Cuda)
         } else {
-            let buffer = unsafe { &*inner }.workspace.allocate(bytes, ctx.device_id())?;
+            let buffer = unsafe { &*inner }
+                .workspace
+                .allocate(bytes, ctx.device_id())?;
             buffer
                 .memset_async(0, bytes, ctx.stream())
                 .map_err(Error::Cuda)?;
@@ -538,7 +538,9 @@ pub(crate) fn output_buffer_tail_zeroed(
             // it is not a reused arena, so the payload rows need no clearing.
             CudaBuffer::alloc(bytes, ctx.device_id()).map_err(Error::Cuda)?
         } else {
-            unsafe { &*inner }.workspace.allocate(bytes, ctx.device_id())?
+            unsafe { &*inner }
+                .workspace
+                .allocate(bytes, ctx.device_id())?
         };
         if tail > 0 && groups > 0 {
             buffer
