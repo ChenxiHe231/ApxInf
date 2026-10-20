@@ -74,8 +74,7 @@ fn swiglu_layout_gate_up(backend: &dyn Backend, gate_up: Tensor) -> Result<Tenso
     {
         return Ok(gate_up);
     }
-    let packed =
-        gemm::pack_bf16_swiglu_weight_host(&gate_up.to_f32_vec()?, full_n, k)?;
+    let packed = gemm::pack_bf16_swiglu_weight_host(&gate_up.to_f32_vec()?, full_n, k)?;
     Tensor::from_bf16(vec![k, full_n], &packed)
 }
 

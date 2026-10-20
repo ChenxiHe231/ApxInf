@@ -3,14 +3,14 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-#[path = "build_support/nvcc_build.rs"]
-mod nvcc_build;
 #[path = "build_support/attention_fingerprint.rs"]
 mod attention_fingerprint;
 #[path = "build_support/cuda_arch.rs"]
 mod cuda_arch;
 #[path = "build_support/gemm_fingerprint.rs"]
 mod gemm_fingerprint;
+#[path = "build_support/nvcc_build.rs"]
+mod nvcc_build;
 
 use cuda_arch::{
     gencode_args, is_cutlass_sm100_family, select_cuda_arch, target_features, ArchSelection,
@@ -107,9 +107,7 @@ fn copy_tree(source: &Path, destination: &Path) {
 
 fn stage_patched_fa2(native: &Path, fa2_root: &Path, out: &Path) -> PathBuf {
     let staged = out.join("fa2-direct-e4m3-patched");
-    let patch = native
-        .join("patches")
-        .join("fa2-direct-e4m3-output.patch");
+    let patch = native.join("patches").join("fa2-direct-e4m3-output.patch");
     // Re-staging rewrites every file in the tree, which bumps the mtime of the
     // patched sources the E4M3 translation units depend on. Skip it when the
     // exact source tree and patch that produced the current staging are
@@ -127,17 +125,18 @@ fn stage_patched_fa2(native: &Path, fa2_root: &Path, out: &Path) -> PathBuf {
     files.sort_unstable();
     for file in &files {
         feed(file.to_string_lossy().as_bytes());
-        feed(&std::fs::read(file).unwrap_or_else(|error| {
-            panic!("read FA2 staging input {}: {error}", file.display())
-        }));
+        feed(
+            &std::fs::read(file).unwrap_or_else(|error| {
+                panic!("read FA2 staging input {}: {error}", file.display())
+            }),
+        );
     }
-    feed(&std::fs::read(&patch).unwrap_or_else(|error| {
-        panic!("read FA2 patch {}: {error}", patch.display())
-    }));
+    feed(
+        &std::fs::read(&patch)
+            .unwrap_or_else(|error| panic!("read FA2 patch {}: {error}", patch.display())),
+    );
     let key = format!("{fingerprint:032x}");
-    if staged.is_dir()
-        && std::fs::read_to_string(&stamp).ok().as_deref() == Some(key.as_str())
-    {
+    if staged.is_dir() && std::fs::read_to_string(&stamp).ok().as_deref() == Some(key.as_str()) {
         return staged;
     }
     if staged.exists() {
@@ -390,9 +389,7 @@ fn main() {
             sm110_sources.extend([
                 native.join("adapters/attention/providers/qwen_drive_sm110.cu"),
                 native.join("kernels/custom/gdn_bf16_prefill_prologue.cu"),
-                native.join(
-                    "adapters/linear_attention/providers/gdn_bf16_prefill_sm110.cu",
-                ),
+                native.join("adapters/linear_attention/providers/gdn_bf16_prefill_sm110.cu"),
                 native.join("kernels/flashinfer_gdn/gdn_bf16_prefill_sm110_launch.cu"),
             ]);
         }
@@ -563,15 +560,8 @@ fn main() {
         )
         .enumerate()
     {
-        let (
-            source,
-            is_cutlass,
-            is_sm110,
-            is_cutlass_sm87,
-            is_cutlass_sm89,
-            is_fa2,
-            is_fa2_e4m3,
-        ) = source;
+        let (source, is_cutlass, is_sm110, is_cutlass_sm87, is_cutlass_sm89, is_fa2, is_fa2_e4m3) =
+            source;
         let object = out.join(format!(
             "gemm-{index}-{}.o",
             source.file_stem().unwrap().to_string_lossy()
@@ -589,7 +579,10 @@ fn main() {
         // kernel edit. Only the two tuning-key translation units read them;
         // putting them on every command line would invalidate the whole object
         // cache whenever one source file moves.
-        if source.file_name().is_some_and(|name| name == "tuning_key.cpp") {
+        if source
+            .file_name()
+            .is_some_and(|name| name == "tuning_key.cpp")
+        {
             if source.to_string_lossy().contains("/gemm/") {
                 command.arg(format!("-DAPXINF_GEMM_BUILD_ID=\"{id}\""));
             } else {
@@ -718,11 +711,7 @@ fn main() {
                 ]);
             }
             if file_name == Some("gdn_bf16_prefill_sm110_launch.cu") {
-                command.args([
-                    "-DHEAD_GROUP_LOG2=1",
-                    "-DNUM_O_HEADS_LOG2=5",
-                    "-DIS_GQA=0",
-                ]);
+                command.args(["-DHEAD_GROUP_LOG2=1", "-DNUM_O_HEADS_LOG2=5", "-DIS_GQA=0"]);
             }
         }
         if is_fa2 || is_fa2_e4m3 {

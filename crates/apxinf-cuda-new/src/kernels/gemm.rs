@@ -571,26 +571,22 @@ pub fn bf16_swiglu_checkpoint(
             )?,
         )?;
         let prefix = QWEN_DRIVE_SWIGLU_M * QWEN_DRIVE_SWIGLU_INNER * 2;
-        let tail = (QWEN_DRIVE_SWIGLU_PADDED_M - QWEN_DRIVE_SWIGLU_M)
-            * QWEN_DRIVE_SWIGLU_INNER
-            * 2;
+        let tail = (QWEN_DRIVE_SWIGLU_PADDED_M - QWEN_DRIVE_SWIGLU_M) * QWEN_DRIVE_SWIGLU_INNER * 2;
         output
             .view(prefix, tail)
             .map_err(Error::Cuda)?
             .memset_async(0, tail, ctx.stream())
             .map_err(Error::Cuda)?;
         unsafe {
-            crate::ffi::abi::status::check(
-                crate::ffi::abi::gemm::apxinf_gemm_bf16_swiglu(
-                    xp.ptr(),
-                    wp.ptr(),
-                    output.ptr(),
-                    QWEN_DRIVE_SWIGLU_M as i64,
-                    QWEN_DRIVE_SWIGLU_INNER as i64,
-                    QWEN_DRIVE_SWIGLU_K as i64,
-                    ctx.stream().handle(),
-                ),
-            )?;
+            crate::ffi::abi::status::check(crate::ffi::abi::gemm::apxinf_gemm_bf16_swiglu(
+                xp.ptr(),
+                wp.ptr(),
+                output.ptr(),
+                QWEN_DRIVE_SWIGLU_M as i64,
+                QWEN_DRIVE_SWIGLU_INNER as i64,
+                QWEN_DRIVE_SWIGLU_K as i64,
+                ctx.stream().handle(),
+            ))?;
         }
         return Ok(output.into_tensor(
             Shape::new(vec![QWEN_DRIVE_SWIGLU_PADDED_M, QWEN_DRIVE_SWIGLU_INNER]),
@@ -600,8 +596,8 @@ pub fn bf16_swiglu_checkpoint(
 
     let full_n = if packed { w[1] } else { w[0] };
     let n2 = i32::try_from(full_n).map_err(|_| Error::Other("SwiGLU width exceeds i32".into()))?;
-    let inner = i32::try_from(full_n / 2)
-        .map_err(|_| Error::Other("SwiGLU inner exceeds i32".into()))?;
+    let inner =
+        i32::try_from(full_n / 2).map_err(|_| Error::Other("SwiGLU inner exceeds i32".into()))?;
     let projection = crate::workspace::output_buffer(
         ctx,
         checked_bytes(DType::BF16, &[x[0], full_n], "SwiGLU projection")?,
@@ -1194,9 +1190,6 @@ mod tests {
             bf16_swiglu_packed_source_index(QWEN_DRIVE_SWIGLU_PAIR, full_n, k),
             QWEN_DRIVE_SWIGLU_PAIR * k
         );
-        assert_eq!(
-            bf16_swiglu_packed_source_index(full_n, full_n, k),
-            1
-        );
+        assert_eq!(bf16_swiglu_packed_source_index(full_n, full_n, k), 1);
     }
 }
