@@ -519,11 +519,21 @@ pub fn pack_bf16_swiglu_weight_host(
             source.len()
         )));
     }
-    Ok((0..source.len())
-        .map(|index| {
-            half::bf16::from_f32(source[bf16_swiglu_packed_source_index(index, full_n, k)])
-        })
-        .collect())
+    let half_n = full_n / 2;
+    let mut packed = Vec::with_capacity(source.len());
+    for row_k in 0..k {
+        for tile in 0..half_n / QWEN_DRIVE_SWIGLU_PAIR {
+            for half in [0, half_n] {
+                let source_row = half + tile * QWEN_DRIVE_SWIGLU_PAIR;
+                for within in 0..QWEN_DRIVE_SWIGLU_PAIR {
+                    packed.push(half::bf16::from_f32(
+                        source[(source_row + within) * k + row_k],
+                    ));
+                }
+            }
+        }
+    }
+    Ok(packed)
 }
 
 fn bf16_swiglu_gemm_strides(packed: bool, k: i32, full_n: i32) -> (i32, i32) {
@@ -1183,7 +1193,8 @@ pub fn write(
 #[cfg(test)]
 mod tests {
     use super::{
-        bf16_swiglu_gemm_strides, bf16_swiglu_packed_source_index, QWEN_DRIVE_SWIGLU_PAIR,
+        bf16_swiglu_gemm_strides, bf16_swiglu_packed_source_index,
+        pack_bf16_swiglu_weight_host, QWEN_DRIVE_SWIGLU_PAIR,
     };
 
     #[test]
@@ -1204,5 +1215,19 @@ mod tests {
     fn bf16_swiglu_packed_gemm_uses_each_physical_row_width() {
         assert_eq!(bf16_swiglu_gemm_strides(false, 2560, 18432), (2560, 2560));
         assert_eq!(bf16_swiglu_gemm_strides(true, 2560, 18432), (2560, 18432));
+    }
+
+    #[test]
+    fn bf16_swiglu_bulk_pack_matches_the_layout_mapping() {
+        let full_n = 2 * QWEN_DRIVE_SWIGLU_PAIR;
+        let k = 2;
+        let source: Vec<f32> = (0..full_n * k).map(|value| value as f32).collect();
+        let packed = pack_bf16_swiglu_weight_host(&source, full_n, k).unwrap();
+        for (index, value) in packed.iter().enumerate() {
+            let expected = half::bf16::from_f32(
+                source[bf16_swiglu_packed_source_index(index, full_n, k)],
+            );
+            assert_eq!(value.to_bits(), expected.to_bits());
+        }
     }
 }
