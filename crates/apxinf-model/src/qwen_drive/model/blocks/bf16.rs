@@ -3,7 +3,7 @@
 use super::DirectExecution;
 use crate::qwen_drive::backend::kernels::fixed_profile::FIXED_SCENE_TOKENS;
 use crate::qwen_drive::backend::{
-    kernels, nvtx, transfers, Context, CublasTranspose, DeviceBuffer, RuntimeBackend,
+    kernels, nvtx, ops, transfers, Context, CublasTranspose, DeviceBuffer, RuntimeBackend,
 };
 use crate::qwen_drive::config::QwenDriveConfig;
 use crate::qwen_drive::inputs::ExpertConditioning;
@@ -421,7 +421,7 @@ impl BackboneBf16 {
         let eps = self.config.text.rms_norm_eps;
         let (x, normed) = la::add_rms_norm_plus1(ctx, x, delta, post_norm, eps)?;
 
-        let act = gemm::bf16_swiglu_checkpoint(ctx, &normed, gate_up_w)?;
+        let act = ops::bf16_swiglu_projection(ctx, &normed, gate_up_w)?;
         let down = gemm::bf16(ctx, &act, down_w)?;
         // The operator may return padded physical rows to accelerate the down
         // projection. Only the logical request rows enter the residual path.
@@ -495,11 +495,7 @@ impl BackboneBf16 {
         let kv_len = state.cache_len + seq;
         let k_view = cache_view(&k_cache, kv_len)?;
         let v_view = cache_view(&v_cache, kv_len)?;
-        let fa4 = attention::try_gqa_bf16_fa4_d256_sm110(ctx, &q_out, &k_view, &v_view, kv_len)?;
-        let attn = match fa4 {
-            Some(output) => output,
-            None => attention::causal_gqa_bf16(ctx, &q_out, &k_view, &v_view, kv_len)?,
-        };
+        let attn = ops::causal_gqa_bf16(ctx, &q_out, &k_view, &v_view, kv_len)?;
 
         let attn = attn.reshape(vec![seq, heads * head_dim])?;
         la::sigmoid_gate_mul(ctx, &attn, &fused, heads, head_dim)?;
@@ -580,15 +576,17 @@ impl BackboneBf16 {
         let fused = if has_state {
             None
         } else {
-            la::try_causal_conv_gdn_prefill_bf16(
+            ops::fused_gdn_prefill_bf16(
                 ctx,
-                &zba,
-                &w.conv_w,
-                &state_next,
-                &w.a_log,
-                &w.dt_bias_bf16,
-                &recurrent_buffer,
-                [num_k_heads, num_v_heads, head_k, head_v],
+                ops::FusedGdnPrefillArgs {
+                    zba: &zba,
+                    conv_weight: &w.conv_w,
+                    new_conv_state: &state_next,
+                    a_log: &w.a_log,
+                    dt_bias: &w.dt_bias_bf16,
+                    final_state: &recurrent_buffer,
+                    geometry: [num_k_heads, num_v_heads, head_k, head_v],
+                },
             )?
         };
         let gdn_out = if let Some(output) = fused {
@@ -1248,55 +1246,20 @@ pub(super) mod vision {
             // nn.Linear adds bias before its final BF16 rounding.
             let qkv = gemm::bf16_bias(ctx, &normed, &block.qkv_w, &block.qkv_b)?;
 
-            const FIXED_OFFSETS: [u32; 13] = [
-                0, 624, 1248, 1872, 4072, 4696, 5320, 5944, 8144, 8768, 9392, 10016, 12216,
-            ];
-            let fixed_groups = ctx.caps().sm == 110
-                && ctx.caps().multiprocessor_count == 20
-                && total_patches == 12216
-                && heads == 16
-                && head_dim == 64
-                && prepared.segments == 12
-                && offsets.as_slice() == FIXED_OFFSETS.as_slice();
-            let direct = if fixed_groups {
-                attention::try_vision_qkv_rope_segmented_fa4_skip_v(
-                    ctx,
-                    &qkv,
-                    &pos_ids_dev,
+            let attn = ops::vision_segmented_attention_bf16(
+                ctx,
+                ops::VisionSegmentedAttentionArgs {
+                    qkv: &qkv,
+                    position_ids: pos_ids_dev,
                     heads,
                     head_dim,
-                    10000.0,
-                    &offsets_dev,
-                    &offsets,
-                    prepared.segments,
-                    fixed_groups,
-                )?
-            } else {
-                None
-            };
-            let attn = if let Some(output) = direct {
-                output
-            } else {
-                let qkv = attention::split_vision_qkv_rope_bf16(
-                    ctx,
-                    &qkv,
-                    None,
-                    &pos_ids_dev,
-                    heads,
-                    head_dim,
-                    10000.0,
-                )?;
-                attention::segmented_mha_bf16(
-                    ctx,
-                    &qkv.q,
-                    &qkv.k,
-                    &qkv.v,
-                    &offsets_dev,
-                    &offsets,
-                    prepared.segments,
+                    theta: 10000.0,
+                    offsets: offsets_dev,
+                    host_offsets: offsets,
+                    segments: prepared.segments,
                     max_tokens,
-                )?
-            };
+                },
+            )?;
             let attn = attn.reshape(vec![total_patches, hidden])?;
             let proj = gemm::bf16_bias(ctx, &attn, &block.proj_w, &block.proj_b)?;
 
@@ -2156,19 +2119,15 @@ pub(crate) mod expert {
                 rotary_dim,
                 eps,
             )?;
-            let split = match (&joint.split_key, &joint.split_value) {
-                (Some(k), Some(v)) => attention::try_gqa_bf16_fa4_d256_splitbatch_sm110(
+            let attn = match (&joint.split_key, &joint.split_value) {
+                (Some(k), Some(v)) => ops::noncausal_gqa_bf16(
                     ctx,
                     &q_out,
                     k,
                     v,
                     input.scene_len + length,
                 )?,
-                _ => None,
-            };
-            let attn = match split {
-                Some(output) => output,
-                None => la::gqa_bf16(
+                _ => la::gqa_bf16(
                     ctx,
                     &q_out,
                     &joint.key,

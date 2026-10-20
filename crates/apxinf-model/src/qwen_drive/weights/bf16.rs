@@ -1,5 +1,5 @@
 //! BF16 weights and load-time physical layouts.
-use crate::qwen_drive::backend::{kernels::gemm, RuntimeBackend};
+use crate::qwen_drive::backend::{ops, RuntimeBackend};
 use std::collections::HashMap;
 
 use apxinf_core::{Backend, Error, Result, Tensor};
@@ -69,12 +69,12 @@ fn swiglu_layout_gate_up(backend: &dyn Backend, gate_up: Tensor) -> Result<Tenso
         ));
     }
     let (full_n, k) = (dims[0], dims[1]);
-    if gemm::bf16_swiglu_weight_layout(cuda.context(), full_n * k)
-        != gemm::Bf16SwigluWeightLayout::PackedPairInterleaved
+    if ops::bf16_swiglu_weight_layout(cuda.context(), full_n * k)
+        != ops::Bf16SwigluWeightLayout::PackedPairInterleaved
     {
         return Ok(gate_up);
     }
-    let packed = gemm::pack_bf16_swiglu_weight_host(&gate_up.to_f32_vec()?, full_n, k)?;
+    let packed = ops::pack_bf16_swiglu_weight_host(&gate_up.to_f32_vec()?, full_n, k)?;
     Tensor::from_bf16(vec![k, full_n], &packed)
 }
 

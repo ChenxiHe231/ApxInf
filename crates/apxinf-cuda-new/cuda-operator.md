@@ -139,3 +139,19 @@ Attention computes `softmax(mask(scale * (Q @ K^T))) @ V`. Q/K/V have the same d
 The catalog test ensures only that semantics are neither missing nor duplicated; it cannot validate the written contracts. A new L3 semantic must also add a semantic test to `src/ops/tests/l3_behavior.rs` and an independent-reference all-candidate numerical test to `src/ops/tests/precision/precision.rs`.
 
 Tests must run through `crates/apxinf-cuda-new/test-new.sh`; a normal `cargo test` from the repository root does not automatically test this crate.
+
+## Translated Fixed-Shape Fast Paths
+
+The following public L3 adapters preserve fixed production kernels translated
+from the former offline AOT bundle. They are not additional mathematical
+families, so they do not receive separate `l3-operator` markers: each maps to
+the GEMM, attention, segmented-attention, or GDN semantics above. Model code
+calls these entries without testing CUDA architecture or production shapes.
+
+| Rust API | Semantic and miss behavior |
+| --- | --- |
+| `ops::bf16_swiglu_projection` | BF16 gate/up GEMM plus rounded SwiGLU; fixed SM110 prefill or generic GEMM decomposition |
+| `ops::causal_gqa_bf16` | Causal GQA; fixed D256 SM110 candidate or generic attention |
+| `ops::noncausal_gqa_bf16` | Non-causal GQA; fixed D256 split-batch SM110 candidate or generic attention |
+| `ops::vision_segmented_attention_bf16` | Split QKV, axial RoPE, and segmented attention; fixed 624/2200-token groups or generic composition |
+| `ops::fused_gdn_prefill_bf16` | Fused first-prefill causal convolution and GDN scan; returns `None` when the surrounding model must compose the generic stateful path |
