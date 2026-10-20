@@ -300,6 +300,50 @@ fn parse_device(spec: &str) -> Result<Device, String> {
     }
 }
 
+/// Whether generation ended because it ran out of budget rather than because
+/// it produced a stop token.
+///
+/// The generated count includes EOS: the streaming loop pushes the sampled
+/// token and fires the callback before the next iteration's EOS check, so a
+/// stop token occupying the final budgeted slot still makes the count reach
+/// the budget. Testing the count alone therefore reports a complete answer as
+/// truncated. `resolved_eos` is empty when `--no-eos-stop` suppresses stopping,
+/// in which case reaching the budget is always real truncation.
+fn truncated_at_budget(generated: &[u32], budget: usize, resolved_eos: &[u32]) -> bool {
+    generated.len() >= budget
+        && !generated
+            .last()
+            .is_some_and(|last| resolved_eos.contains(last))
+}
+
+#[cfg(test)]
+mod truncation_tests {
+    use super::truncated_at_budget;
+
+    #[test]
+    fn a_stop_token_on_the_last_budgeted_slot_is_not_truncation() {
+        // --max-tokens 1 with an immediate configured EOS: the count reaches
+        // the budget, but generation finished.
+        assert!(!truncated_at_budget(&[2], 1, &[2]));
+        assert!(!truncated_at_budget(&[7, 8, 2], 3, &[2]));
+        // Several configured stop tokens, any of which completes generation.
+        assert!(!truncated_at_budget(&[7, 3], 2, &[2, 3]));
+    }
+
+    #[test]
+    fn reaching_the_budget_without_a_stop_token_is_truncation() {
+        assert!(truncated_at_budget(&[7, 8], 2, &[2]));
+        // --no-eos-stop leaves the set empty, so the budget is the only end.
+        assert!(truncated_at_budget(&[7, 2], 2, &[]));
+    }
+
+    #[test]
+    fn stopping_under_budget_is_never_truncation() {
+        assert!(!truncated_at_budget(&[7, 2], 50, &[2]));
+        assert!(!truncated_at_budget(&[], 50, &[2]));
+    }
+}
+
 #[cfg(test)]
 mod device_tests {
     use super::{parse_device, Cli, Commands};
@@ -512,6 +556,23 @@ fn run_generate(
             .ok()
             .and_then(|defaults| defaults.max_new_tokens))
         .unwrap_or(GenerationOptions::DEFAULT_MAX_NEW_TOKENS);
+    // Resolved the same way as `generation_options.eos_token_ids` below, so the
+    // truncation note can tell budget exhaustion from a stop token. The
+    // generated count includes EOS -- the loop pushes the sampled token and
+    // fires the callback before the next iteration's EOS check -- so a stop
+    // token landing on the final budgeted slot reaches `effective_max_tokens`
+    // and a count-only test would call that truncated.
+    let resolved_eos: Vec<u32> = if !eos_stop {
+        Vec::new()
+    } else if configured_eos {
+        model
+            .generation_defaults()
+            .ok()
+            .and_then(|defaults| defaults.eos_token_ids.clone())
+            .unwrap_or_default()
+    } else {
+        eos_token_id.map(|id| vec![id]).unwrap_or_default()
+    };
 
     println!();
     println!("Generating up to {effective_max_tokens} tokens...");
@@ -578,9 +639,10 @@ fn run_generate(
     // Hitting the budget is not the same as finishing, and the difference is
     // invisible in the printed text. Say which one happened, and when the
     // reasoning block is what consumed the budget, say that too.
-    if all_tokens.len().saturating_sub(tokens.len()) >= effective_max_tokens {
+    let generated = &all_tokens[tokens.len()..];
+    if truncated_at_budget(generated, effective_max_tokens, &resolved_eos) {
         let closed_reasoning = tok
-            .decode_with_options(&all_tokens[tokens.len()..], false)
+            .decode_with_options(generated, false)
             .map(|text| text.contains("</think>"))
             .unwrap_or(true);
         println!(
