@@ -84,6 +84,8 @@ struct ExecutionSessionInner {
     /// consecutive prepares and accumulates; a prepare after a run starts a
     /// fresh sequence.
     last_was_prepare: Cell<bool>,
+    #[cfg(test)]
+    resource_descriptions: RefCell<HashMap<usize, String>>,
 }
 
 impl ExecutionSessionInner {
@@ -102,9 +104,14 @@ impl ExecutionSessionInner {
 
     fn store<K, V>(&self, key: K, value: Rc<V>)
     where
-        K: Eq + Hash + 'static,
+        K: Eq + Hash + std::fmt::Debug + 'static,
         V: Any,
     {
+        #[cfg(test)]
+        self.resource_descriptions.borrow_mut().insert(
+            Rc::as_ptr(&value).cast::<()>() as usize,
+            format!("{} {key:?}", std::any::type_name::<V>()),
+        );
         let mut caches = self.caches.borrow_mut();
         let cache = caches
             .entry(TypeId::of::<(K, V)>())
@@ -134,6 +141,8 @@ impl ExecutionSession {
                 sequence_cursor: Cell::new(0),
                 consumed_epoch: Cell::new(0),
                 last_was_prepare: Cell::new(false),
+                #[cfg(test)]
+                resource_descriptions: RefCell::new(HashMap::new()),
             }),
         }
     }
@@ -398,7 +407,7 @@ where
 
 pub(crate) fn store_execution<K, V>(key: K, value: Rc<V>)
 where
-    K: Eq + Hash + 'static,
+    K: Eq + Hash + std::fmt::Debug + 'static,
     V: Any,
 {
     ACTIVE_SESSION.with(|active| {
@@ -431,10 +440,21 @@ pub(crate) fn use_execution<T: Any>(resource: &Rc<T>) -> Result<()> {
         let cursor = inner.sequence_cursor.get();
         let sequence = inner.prepared_sequence.borrow();
         if sequence.get(cursor).copied() != Some(identity) {
+            #[cfg(test)]
+            let details = {
+                let descriptions = inner.resource_descriptions.borrow();
+                let expected = sequence
+                    .get(cursor)
+                    .and_then(|value| descriptions.get(value));
+                let actual = descriptions.get(&identity);
+                format!("; expected resource {expected:?}, actual resource {actual:?}")
+            };
+            #[cfg(not(test))]
+            let details = String::new();
             return Err(Error::Other(format!(
                 "execution session operator sequence mismatch at index {cursor} \
                  (prepared total {}); prepare and capture must use identical operators and bindings \
-                 [expected {:?}, got {identity:#x}]",
+                 [expected {:?}, got {identity:#x}]{details}",
                 sequence.len(),
                 sequence.get(cursor).map(|value| format!("{value:#x}")),
             )));
