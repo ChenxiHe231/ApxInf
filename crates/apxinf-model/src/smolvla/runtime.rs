@@ -16,7 +16,10 @@ use crate::vla::{
 
 use super::{SmolVlaConfig, SmolVlaModel};
 
-const GRAPH_WORKSPACE_CAPACITIES_BYTES: [usize; 2] = [64 << 20, 96 << 20];
+// The cuda-new migration adds a small amount of graph-persistent state.  The
+// maintained two-view workload now peaks just above 96 MiB, so keep one more
+// bounded retry instead of silently falling back to the much slower eager path.
+const GRAPH_WORKSPACE_CAPACITIES_BYTES: [usize; 3] = [64 << 20, 96 << 20, 128 << 20];
 
 pub struct SmolVlaModelRunner {
     model: Arc<SmolVlaModel>,
