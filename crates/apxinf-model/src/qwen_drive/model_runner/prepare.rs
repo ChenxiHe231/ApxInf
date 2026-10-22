@@ -14,15 +14,7 @@ use std::sync::Arc;
 use std::{cell::RefCell, rc::Rc};
 struct WorkspaceExecution<'a> {
     workspace: &'a kernels::GraphWorkspace,
-    mode: WorkspaceMode,
     usage: Vec<usize>,
-}
-
-#[derive(Clone, Copy)]
-enum WorkspaceMode {
-    Prepare,
-    Capture,
-    Eager,
 }
 fn validate_phase_usage(preflight: &[usize], captured: &[usize]) -> Result<()> {
     if preflight != captured {
@@ -46,11 +38,7 @@ mod workspace_layout_tests {
 }
 impl DirectExecution for WorkspaceExecution<'_> {
     fn run(&mut self, operation: &mut dyn FnMut() -> Result<Tensor>) -> Result<Tensor> {
-        let result = match self.mode {
-            WorkspaceMode::Prepare => kernels::prepare_with_workspace(self.workspace, operation),
-            WorkspaceMode::Capture => kernels::with_workspace(self.workspace, operation),
-            WorkspaceMode::Eager => kernels::with_workspace_eager(self.workspace, operation),
-        };
+        let result = operation();
         self.usage.push(self.workspace.used());
         result
     }
@@ -207,25 +195,24 @@ impl DirectPlan {
             let valid = validate(&plan.model, sample)?;
             let mut mutable = plan.mutable.borrow_mut();
             plan.bind(sample, &valid, &mut mutable)?;
-            // Resolve address-dependent native resources before capture; both
-            // traversals reset the arena at identical phase boundaries.
+            // Resolve address-dependent native resources before capture. The
+            // complete forward is one cuda-new session traversal; phase
+            // boundaries remain a model-level diagnostic only.
             let mut preflight = WorkspaceExecution {
                 workspace: &plan.workspace,
-                mode: WorkspaceMode::Prepare,
                 usage: Vec::new(),
             };
-            let output =
-                match plan
-                    .model
+            let output = match kernels::prepare_with_workspace(&plan.workspace, || {
+                plan.model
                     .forward_direct(&plan.inputs, &mut mutable.state, &mut preflight)
-                {
-                    Ok(output) => output,
-                    Err(error) => {
-                        // A partial RGB frame sequence can have queued work.
-                        backend.synchronize()?;
-                        return Err(error);
-                    }
-                };
+            }) {
+                Ok(output) => output,
+                Err(error) => {
+                    // A partial RGB frame sequence can have queued work.
+                    backend.synchronize()?;
+                    return Err(error);
+                }
+            };
             eprintln!(
                 "qwen_drive prepared workspace: reserved={} bytes, phase_used={:?}",
                 plan.workspace.capacity(),
@@ -240,15 +227,13 @@ impl DirectPlan {
             if policy != ExecutionPolicy::Eager {
                 let mut captured = WorkspaceExecution {
                     workspace: &plan.workspace,
-                    mode: WorkspaceMode::Capture,
                     usage: Vec::new(),
                 };
                 match backend.capture_graph(|| {
-                    let output = plan.model.forward_direct(
-                        &plan.inputs,
-                        &mut mutable.state,
-                        &mut captured,
-                    )?;
+                    let output = kernels::with_workspace(&plan.workspace, || {
+                        plan.model
+                            .forward_direct(&plan.inputs, &mut mutable.state, &mut captured)
+                    })?;
                     validate_phase_usage(&preflight.usage, &captured.usage)?;
                     Ok(output)
                 }) {
@@ -371,17 +356,17 @@ impl PreparedInference for DirectPlan {
             graph.replay()?;
             Ok(Action::new(self.output.clone()))
         } else {
-            self.model
-                .forward_direct(
+            kernels::with_workspace_eager(&self.workspace, || {
+                self.model.forward_direct(
                     &self.inputs,
                     &mut mutable.state,
                     &mut WorkspaceExecution {
                         workspace: &self.workspace,
-                        mode: WorkspaceMode::Eager,
                         usage: Vec::new(),
                     },
                 )
-                .map(Action::new)
+            })
+            .map(Action::new)
         }
     }
 }

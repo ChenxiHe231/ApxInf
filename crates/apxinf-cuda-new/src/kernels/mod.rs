@@ -33,11 +33,11 @@ impl GraphWorkspace {
     }
 
     pub fn capacity(&self) -> usize {
-        self.session.capacity()
+        self.session.workspace().capacity()
     }
 
     pub fn used(&self) -> usize {
-        self.session.used()
+        self.session.workspace().used()
     }
 }
 
@@ -112,15 +112,12 @@ pub fn with_workspace<T>(
     workspace.session.run(operation)
 }
 
-/// Bind the arena for an eager (never captured) traversal.
-///
-/// Mirrors the legacy contract: native execution resources stay installable,
-/// so GEMM plan resolution and tuning behave exactly as they do without a
-/// workspace, and the prepared operator sequence is untouched. Capture must
-/// keep using [`with_workspace`].
+/// Run an uncaptured traversal while allowing native resources to be prepared.
+/// The compatibility stays at this facade: cuda-new's core session retains its
+/// one-prepare/one-run contract instead of learning a legacy eager mode.
 pub fn with_workspace_eager<T>(
     workspace: &GraphWorkspace,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    workspace.session.eager(operation)
+    workspace.session.prepare(operation)
 }
