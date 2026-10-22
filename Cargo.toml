@@ -18,12 +18,16 @@ license = "Apache-2.0"
 
 [features]
 default = []
-# CUDA GPU inference on the apxinf-cuda-new runtime.
-cuda = ["dep:apxinf-cuda-new", "apxinf-model/cuda"]
-# Historical alias from the era when NVTX could be compiled out of the
-# legacy runtime; cuda-new's NVTX markers are no-op stubs unless the
-# profiler is attached, so this is the same as `cuda`.
-cuda-no-nvtx = ["cuda"]
+# CUDA GPU inference on the apxinf-cuda-new runtime. NVTX profiling markers
+# auto-detect the available CUDA header/library in apxinf-cuda-new's build.
+cuda = [
+    "dep:apxinf-cuda-new",
+    "apxinf-cuda-new/nvtx",
+    "apxinf-model/cuda",
+]
+# Same runtime with NVTX compiled out entirely. Keep this separate from
+# `cuda`: enabling `cuda` would also enable apxinf-cuda-new's `nvtx` feature.
+cuda-no-nvtx = ["dep:apxinf-cuda-new", "apxinf-model/cuda"]
 # Native Apple Metal execution through an explicitly configured MLX C++ SDK.
 mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "apxinf-model/mlx"]
 # Deprecated alias of `cuda`, kept so existing build commands keep working.
