@@ -179,6 +179,27 @@ cudaError_t apxinf_gr00t_silu_mul_quantize_rows_bf16_int8_packed4(
     const void* gate, const void* up, void* output, void* scales, int32_t rows,
     int32_t cols, cudaStream_t stream);
 
+cudaError_t apxinf_gr00t_cutlass_int8_gemm_bf16(
+    const void* activation, const void* weight_output_major,
+    const void* row_scales, const void* column_scales, void* output, int32_t m,
+    int32_t n, int32_t k, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_cutlass_int8_gemm_bf16_m41_n6144_k1536(
+    const void* activation, const void* weight_output_major,
+    const void* row_scales, const void* column_scales, void* output, int32_t m,
+    int32_t n, int32_t k, cudaStream_t stream);
+
+cudaError_t apxinf_gr00t_cutlass_int8_gemm_bias_bf16_m41_n4608_k1536(
+    const void* activation, const void* weight_output_major,
+    const void* row_scales, const void* column_scales, const void* bias,
+    void* output, int32_t m, int32_t n, int32_t k, cudaStream_t stream);
+
+cudaError_t
+apxinf_gr00t_cutlass_int8_gemm_bias_gelu_bf16_m41_n6144_k1536(
+    const void* activation, const void* weight_output_major,
+    const void* row_scales, const void* column_scales, const void* bias,
+    void* output, int32_t m, int32_t n, int32_t k, cudaStream_t stream);
+
 #ifdef __cplusplus
 }
 #endif

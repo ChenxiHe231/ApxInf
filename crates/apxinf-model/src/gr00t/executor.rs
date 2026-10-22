@@ -2659,7 +2659,13 @@ fn qwen_matmul<L: DeviceLinearWeights>(
         return weights.forward(input, backend);
     }
     super::calibration::observe(name, input)?;
-    kernels::gemm::bf16(backend.context(), input, bf16_weight)
+    let direct_vision_fc2 = name.starts_with("backbone.vision.blocks.") && name.ends_with(".fc2");
+    let direct_text_value = name.starts_with("backbone.text.") && name.ends_with(".value");
+    if direct_text_value || direct_vision_fc2 {
+        kernels::gemm::bf16_direct(backend.context(), input, bf16_weight)
+    } else {
+        kernels::gemm::bf16(backend.context(), input, bf16_weight)
+    }
 }
 
 fn forward_qwen_layer<L: DeviceLinearWeights>(
