@@ -368,4 +368,50 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_cutlass_int8_gemm_bf16(
+        activation: *const c_void,
+        weight_output_major: *const c_void,
+        row_scales: *const c_void,
+        column_scales: *const c_void,
+        output: *mut c_void,
+        m: i32,
+        n: i32,
+        k: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_cutlass_int8_gemm_bf16_m41_n6144_k1536(
+        activation: *const c_void,
+        weight_output_major: *const c_void,
+        row_scales: *const c_void,
+        column_scales: *const c_void,
+        output: *mut c_void,
+        m: i32,
+        n: i32,
+        k: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_cutlass_int8_gemm_bias_bf16_m41_n4608_k1536(
+        activation: *const c_void,
+        weight_output_major: *const c_void,
+        row_scales: *const c_void,
+        column_scales: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        m: i32,
+        n: i32,
+        k: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_gr00t_cutlass_int8_gemm_bias_gelu_bf16_m41_n6144_k1536(
+        activation: *const c_void,
+        weight_output_major: *const c_void,
+        row_scales: *const c_void,
+        column_scales: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        m: i32,
+        n: i32,
+        k: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
 }
