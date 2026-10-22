@@ -149,16 +149,6 @@ impl GeneralLlama {
 impl LlmTrait for GeneralLlama {
     fn load(config: ModelConfig, weights: HashMap<String, Tensor>, device: Device) -> Result<Self> {
         let llama_weights = LlamaWeights::from_map(&config, weights)?;
-        // Llama is a migrated family: on CUDA it always runs on the cuda-new
-        // runtime (matching the AutoModel route), which is also what the
-        // decode graph downcasts to. Other devices keep the generic path.
-        #[cfg(feature = "cuda")]
-        let backend = if matches!(device, Device::Cuda(_)) {
-            crate::accelerator::create_cuda_new_backend(device)?
-        } else {
-            create_backend(device)?
-        };
-        #[cfg(not(feature = "cuda"))]
         let backend = create_backend(device)?;
         Self::new(config, llama_weights, backend)
     }
@@ -276,34 +266,18 @@ impl LlmTrait for GeneralLlama {
 ///   `[hidden, 2*intermediate]`. One GEMM + a fused `silu_mul` kernel
 ///   replaces two GEMMs + silu + mul.
 ///
-/// Packing goes through cuda-new's column-concat kernel directly (the
-/// `Backend::concat_2d` trait method on the cuda-new backend concatenates
-/// rows, which is the wrong axis for weight fusion). No-op on non-CUDA
-/// backends — the decode falls back to separate GEMMs.
+/// Both are D2D copies on CUDA; unsupported backends skip the fused weights.
 fn pack_fused_weights(weights: &mut LlamaWeights, backend: &dyn Backend) {
     for layer in &mut weights.layers {
         // qkv_packed: concat [hidden, hidden] + [hidden, kv_proj] + [hidden, kv_proj]
-        if let Some(packed) = concat_columns(backend, &[&layer.wq, &layer.wk, &layer.wv]) {
+        if let Ok(packed) = backend.concat_2d(&[&layer.wq, &layer.wk, &layer.wv]) {
             layer.qkv_packed = Some(packed);
         }
         // gate_up_packed: concat [hidden, inter] + [hidden, inter]
-        if let Some(packed) = concat_columns(backend, &[&layer.w_gate, &layer.w_up]) {
+        if let Ok(packed) = backend.concat_2d(&[&layer.w_gate, &layer.w_up]) {
             layer.gate_up_packed = Some(packed);
         }
     }
-}
-
-/// Column-concatenate BF16 weight matrices on the cuda-new backend.
-/// Returns `None` (skip packing) on any other backend or dtype.
-#[cfg(feature = "cuda")]
-fn concat_columns(backend: &dyn Backend, tensors: &[&Tensor]) -> Option<Tensor> {
-    let cb = crate::accelerator::downcast_cuda_new(backend)?;
-    apxinf_cuda_new::kernels::elementwise::concat_columns_bf16(cb.context(), tensors).ok()
-}
-
-#[cfg(not(feature = "cuda"))]
-fn concat_columns(_backend: &dyn Backend, _tensors: &[&Tensor]) -> Option<Tensor> {
-    None
 }
 
 /// Transfer all weights in `weights` to the backend's device.

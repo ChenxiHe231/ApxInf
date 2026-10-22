@@ -103,7 +103,10 @@ fn dynamic_linear_prequantized(
         weight.as_kernel_view(),
         None,
     )?;
-    if keep_padded_output {
+    // Most WallOSS projection widths are already 16-aligned. In that case
+    // the GEMM output already has the logical width, and launching a separate
+    // slice/copy kernel only adds graph nodes and replay latency.
+    if keep_padded_output || output.shape().dims()[1] == weight.output_features {
         Ok(output)
     } else {
         kernels::quantization::slice_columns_bf16(context, &output, weight.output_features)
@@ -659,8 +662,7 @@ pub(super) fn action_stack<W: TransformerWeights>(
     }
     let hidden = kernels::norm::rms_bf16(context, &hidden, final_norm, config.rms_norm_eps)
         .map_err(|e| Error::Other(format!("action final rms: {e}")))?;
-    velocity(context, action_weights, &hidden)
-        .map_err(|e| Error::Other(format!("velocity: {e}")))
+    velocity(context, action_weights, &hidden).map_err(|e| Error::Other(format!("velocity: {e}")))
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -1,6 +1,6 @@
 //! Native-BF16 GR00T device weights.
 
-use apxinf_core::{Backend, Result, Tensor};
+use apxinf_core::{Result, Tensor};
 
 use super::action_weights::Gr00tLinearWeights;
 use super::backend::{kernels, RuntimeBackend};

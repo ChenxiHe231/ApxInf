@@ -25,6 +25,7 @@ extern "C" int apxinf_attention_d256_split_batch_forward(
     int, int, int, int, int, float, cudaStream_t, void*, int);
 
 extern "C" size_t apxinf_attention_strided_groups_state_size();
+extern "C" void apxinf_attention_strided_groups_state_destroy(void*);
 extern "C" int apxinf_attention_strided_groups_forward(
     const void*, const void*, const void*, void*, int, int, int, int, int,
     int, int, float, cudaStream_t, void*, int);
@@ -123,6 +124,12 @@ struct CandidateVisionState {
   void* length_624 = nullptr;
   void* length_2200 = nullptr;
 };
+
+void destroy_vision_group_state(void* state) noexcept {
+  if (state == nullptr) return;
+  apxinf_attention_strided_groups_state_destroy(state);
+  std::free(state);
+}
 
 void destroy_candidate_split(CandidateSplitState* state) {
   if (state == nullptr) return;
@@ -312,8 +319,8 @@ void prepare_qwen_vision_segmented(Execution& execution) {
   state->length_624 = std::calloc(1, bytes);
   state->length_2200 = std::calloc(1, bytes);
   if (state->length_624 == nullptr || state->length_2200 == nullptr) {
-    std::free(state->length_624);
-    std::free(state->length_2200);
+    destroy_vision_group_state(state->length_624);
+    destroy_vision_group_state(state->length_2200);
     throw Failure(APXINF_STATUS_PROVIDER_ERROR,
                   "Qwen vision attention state allocation failed");
   }
@@ -324,8 +331,8 @@ void prepare_qwen_vision_segmented(Execution& execution) {
         static_cast<cudaStream_t>(execution.bindings.stream), 1,
         state->length_624, state->length_2200, 16 * 64);
     if (status != 0) {
-      std::free(state->length_624);
-      std::free(state->length_2200);
+      destroy_vision_group_state(state->length_624);
+      destroy_vision_group_state(state->length_2200);
       throw Failure(APXINF_STATUS_PROVIDER_ERROR,
                     "Qwen vision attention preparation failed with status " +
                         std::to_string(status));
@@ -351,8 +358,8 @@ cudaError_t launch_qwen_vision_segmented(Execution& execution) {
 void destroy_qwen_vision_segmented(Execution& execution) noexcept {
   auto* state = static_cast<CandidateVisionState*>(execution.provider_state);
   if (state == nullptr) return;
-  std::free(state->length_624);
-  std::free(state->length_2200);
+  destroy_vision_group_state(state->length_624);
+  destroy_vision_group_state(state->length_2200);
   delete state;
   execution.provider_state = nullptr;
 }

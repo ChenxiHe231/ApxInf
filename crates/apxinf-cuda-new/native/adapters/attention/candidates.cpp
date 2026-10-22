@@ -159,7 +159,10 @@ bool supports_qwen_d256_split(const Spec& spec) {
 }
 
 bool supports_qwen_vision_segmented(const Spec& spec) {
-  constexpr uint64_t kOffsetsHash = UINT64_C(0xe556f08918b16a73);
+  // README 12-frame fixture: each camera contributes three 624-token frames
+  // and one 2200-token frame, in camera-major order. Keep the fingerprint in
+  // sync with the host_offsets consumed by the fixed-stride launcher below.
+  constexpr uint64_t kOffsetsHash = UINT64_C(0x5febecb608d78843);
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED &&
          spec.dtype == APXINF_DTYPE_BF16 &&
          spec.output_dtype == APXINF_DTYPE_BF16 &&

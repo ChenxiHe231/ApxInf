@@ -94,6 +94,68 @@ fn device_tensor(ctx: &Context, shape: &[usize], dtype: DType) -> Result<Tensor>
         .map_err(Error::Cuda)
 }
 
+fn dump_attention_probe(
+    ctx: &Context,
+    layer: usize,
+    tensors: &[(&str, &Tensor)],
+) -> Result<()> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static DUMP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+    let Some(directory) = std::env::var_os("APXINF_QWEN_DRIVE_DUMP_ATTN_DIR") else {
+        return Ok(());
+    };
+    // A D2H copy on the host's default stream is not ordered with this model's
+    // non-default CUDA stream. Restrict probes to the explicit eager diagnostic
+    // mode, where the caller synchronizes before reading each tensor; never
+    // inspect data while a graph is being captured.
+    if std::env::var_os("APXINF_QWEN_DRIVE_FORCE_EAGER").is_none() {
+        return Ok(());
+    }
+    ctx.synchronize().map_err(Error::Cuda)?;
+    let selected = std::env::var("APXINF_QWEN_DRIVE_DUMP_ATTN_LAYER").unwrap_or_default();
+    if !selected
+        .split(',')
+        .filter_map(|value| value.trim().parse::<usize>().ok())
+        .any(|value| value == layer)
+    {
+        return Ok(());
+    }
+    let call_index = DUMP_COUNT.fetch_add(1, Ordering::AcqRel);
+
+    let directory = std::path::PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        Error::Other(format!("qwen_drive: create attention probe directory: {error}"))
+    })?;
+    let mut manifest = String::from("{\n  \"dtype\": \"bf16\",\n  \"tensors\": {\n");
+    for (index, (name, tensor)) in tensors.iter().enumerate() {
+        let bytes = tensor.size_in_bytes();
+        let mut host = vec![0u8; bytes];
+        DeviceBuffer::from_tensor(tensor)
+            .map_err(Error::Cuda)?
+            .copy_to_host(&mut host)
+            .map_err(Error::Other)?;
+        let filename = format!("layer{layer}_call{call_index}_{name}.bf16");
+        std::fs::write(directory.join(&filename), &host).map_err(|error| {
+            Error::Other(format!("qwen_drive: write attention probe tensor: {error}"))
+        })?;
+        if index != 0 {
+            manifest.push_str(",\n");
+        }
+        manifest.push_str(&format!(
+            "    \"{name}\": {{\"file\": \"{filename}\", \"shape\": {:?}, \"bytes\": {bytes}}}",
+            tensor.shape().dims()
+        ));
+    }
+    manifest.push_str("\n  }\n}\n");
+    std::fs::write(
+        directory.join(format!("layer{layer}_call{call_index}_manifest.json")),
+        manifest,
+    )
+        .map_err(|error| Error::Other(format!("qwen_drive: write attention probe manifest: {error}")))?;
+    Ok(())
+}
+
 fn causal_gqa_l3(ctx: &Context, query: &Tensor, key: &Tensor, value: &Tensor) -> Result<Tensor> {
     let q = query.shape().dims();
     let k = key.shape().dims();
@@ -536,6 +598,19 @@ impl BackboneBf16 {
         let kv_len = state.cache_len + seq;
         let k_view = cache_view(&k_cache, kv_len)?;
         let v_view = cache_view(&v_cache, kv_len)?;
+        dump_attention_probe(
+            ctx,
+            layer_idx,
+            &[
+                ("normed", &normed),
+                ("fused_qkv", &fused),
+                ("q_post_rope", &q_out),
+                ("k_post_rope", &k_view),
+                ("v", &v_view),
+                ("rope_cos", cos),
+                ("rope_sin", sin),
+            ],
+        )?;
         let attn = causal_gqa_l3(ctx, &q_out, &k_view, &v_view)?;
 
         let attn = attn.reshape(vec![seq, heads * head_dim])?;
@@ -893,6 +968,17 @@ impl BackboneBf16 {
 
             gdn_out
         };
+        dump_attention_probe(
+            ctx,
+            layer_idx,
+            &[
+                ("gdn_normed", &normed),
+                ("gdn_zba", &zba),
+                ("gdn_out", &gdn_out),
+                ("gdn_conv_state", &state_next),
+                ("gdn_recurrent_state", &recurrent),
+            ],
+        )?;
         if let LayerCache::Gdn { flip, .. } = &mut state.caches[layer_idx] {
             *flip = !*flip;
         }
@@ -1099,6 +1185,7 @@ impl BackboneBf16 {
             &pixels,
             grids,
         )?;
+        dump_attention_probe(self.ctx(), 0, &[("text_embed", &x), ("vision", &vis)])?;
         let image_token = self.config.image_token_id;
         let count = token_ids.iter().filter(|&&t| t == image_token).count();
         if count != vis.shape().dims()[0] {
@@ -1262,9 +1349,11 @@ pub(super) mod vision {
         // Patch embedding: [N, patch_vec] @ [patch_vec, hidden] + bias.
         let mut x = gemm::bf16(ctx, pixel_values, &weights.patch_w)?;
         x = elementwise::bias_bf16(ctx, &x, Some(&weights.patch_b))?;
+        super::dump_attention_probe(ctx, 100, &[("patch_embed", &x)])?;
 
         // Bilinear-interpolated learned position embeddings (host canonicalization).
         x = elementwise::add(ctx, &x, &prepared.pos_embeds)?;
+        super::dump_attention_probe(ctx, 101, &[("positioned", &x)])?;
 
         let mut normalized = None;
         // 2D rope position ids in the merge-block-major patch order.
@@ -1275,9 +1364,15 @@ pub(super) mod vision {
                 Some(value) => value,
                 None => norm::layer_bf16(ctx, &x, &block.norm1_w, &block.norm1_b, eps)?,
             };
+            if block_idx == 0 {
+                super::dump_attention_probe(ctx, 102, &[("block0_norm1", &normed)])?;
+            }
 
             // nn.Linear adds bias before its final BF16 rounding.
             let qkv = gemm::bf16_bias(ctx, &normed, &block.qkv_w, &block.qkv_b)?;
+            if block_idx == 0 {
+                super::dump_attention_probe(ctx, 103, &[("block0_qkv", &qkv)])?;
+            }
 
             let shape = Shape::new(vec![total_patches, heads, head_dim]);
             let mut query = ctx.allocate_output(shape.clone(), DType::BF16)?;
@@ -1295,6 +1390,17 @@ pub(super) mod vision {
                     theta: 10000.0,
                 },
             )?;
+            if block_idx == 0 {
+                super::dump_attention_probe(
+                    ctx,
+                    104,
+                    &[
+                        ("block0_query", &query),
+                        ("block0_key", &key),
+                        ("block0_value", &value),
+                    ],
+                )?;
+            }
             let mut attn = ctx.allocate_output(shape, DType::BF16)?;
             ops::segmented_attention(
                 ctx,
@@ -1307,8 +1413,14 @@ pub(super) mod vision {
                     offsets,
                 ),
             )?;
+            if block_idx == 0 {
+                super::dump_attention_probe(ctx, 105, &[("block0_attention", &attn)])?;
+            }
             let attn = attn.reshape(vec![total_patches, hidden])?;
             let proj = gemm::bf16_bias(ctx, &attn, &block.proj_w, &block.proj_b)?;
+            if block_idx == 0 {
+                super::dump_attention_probe(ctx, 106, &[("block0_proj", &proj)])?;
+            }
 
             let residual_norm = fused::bias_residual_layer_bf16(
                 ctx,
@@ -1319,6 +1431,16 @@ pub(super) mod vision {
                 &block.norm2_b,
                 eps,
             )?;
+            if block_idx == 0 {
+                super::dump_attention_probe(
+                    ctx,
+                    107,
+                    &[
+                        ("block0_attn_residual", &residual_norm.hidden),
+                        ("block0_norm2", &residual_norm.normalized),
+                    ],
+                )?;
+            }
             x = residual_norm.hidden;
             let normed = residual_norm.normalized;
 
@@ -1331,7 +1453,13 @@ pub(super) mod vision {
 
                 activation::gelu_tanh(ctx, &h)?
             };
+            if block_idx == 0 {
+                super::dump_attention_probe(ctx, 108, &[("block0_fc1_gelu", &h)])?;
+            }
             let h2 = gemm::bf16_bias(ctx, &h, &block.fc2_w, &block.fc2_b)?;
+            if block_idx == 0 {
+                super::dump_attention_probe(ctx, 109, &[("block0_fc2", &h2)])?;
+            }
 
             let (next_w, next_b) = weights
                 .blocks
@@ -1340,6 +1468,16 @@ pub(super) mod vision {
                 .unwrap_or((&weights.merger_norm_w, &weights.merger_norm_b));
             let residual_norm =
                 fused::bias_residual_layer_bf16(ctx, &h2, None, &x, next_w, next_b, eps)?;
+            if block_idx == 0 {
+                super::dump_attention_probe(
+                    ctx,
+                    110,
+                    &[
+                        ("block0_output", &residual_norm.hidden),
+                        ("block0_next_norm", &residual_norm.normalized),
+                    ],
+                )?;
+            }
             x = residual_norm.hidden;
             normalized = Some(residual_norm.normalized);
         }
@@ -1349,6 +1487,7 @@ pub(super) mod vision {
             Some(value) => value,
             None => norm::layer_bf16(ctx, &x, &weights.merger_norm_w, &weights.merger_norm_b, eps)?,
         };
+        super::dump_attention_probe(ctx, 111, &[("merger_normed", &normed)])?;
         // Merging rows is a reshape and nothing else: the merger takes `merge*merge`
         // consecutive rows as one row of `cols * merge * merge`, which is the same
         // contiguous elements in the same order. On a GPU tensor `reshape` only
@@ -1366,8 +1505,11 @@ pub(super) mod vision {
         }
         let merged = normed.reshape(vec![rows / factor, cols * factor])?;
         let h = gemm::bf16_bias(ctx, &merged, &weights.merger_fc1_w, &weights.merger_fc1_b)?;
+        super::dump_attention_probe(ctx, 112, &[("merger_fc1", &h)])?;
         let h = la::gelu_exact(ctx, &h)?;
+        super::dump_attention_probe(ctx, 113, &[("merger_gelu", &h)])?;
         let primary = gemm::bf16_bias(ctx, &h, &weights.merger_fc2_w, &weights.merger_fc2_b)?;
+        super::dump_attention_probe(ctx, 114, &[("vision_output", &primary)])?;
         Ok(primary)
     }
 
@@ -2413,7 +2555,7 @@ impl DirectInputs {
         })?;
         execution.run(&mut || {
             let _stage = nvtx::range("qwen_drive/language");
-            let embedded = kernels::embedding::lookup(
+            let text_embed = kernels::embedding::lookup(
                 ctx,
                 &b.weights.embed_tokens,
                 &self.tokens,
@@ -2421,9 +2563,18 @@ impl DirectInputs {
             )?;
             let embedded = kernels::elementwise::replace_rows_bf16(
                 ctx,
-                &embedded,
+                &text_embed,
                 &self.visual_output,
                 &self.rows,
+            )?;
+            dump_attention_probe(
+                ctx,
+                0,
+                &[
+                    ("text_embed", &text_embed),
+                    ("vision", &self.visual_output),
+                    ("joined_hidden", &embedded),
+                ],
             )?;
             b.run_text_device(state, embedded, self.token_count, &self.cos, &self.sin)?;
             // Language-to-planner handoff is the persistent shared KV prefix.

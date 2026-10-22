@@ -763,6 +763,73 @@ pub fn segmented_mha_bf16(
             "segmented MHA offsets are inconsistent".into(),
         ));
     }
+
+    // Match the legacy segmented fast path: launch the tuned/direct FA2
+    // implementation for each contiguous segment. The generic candidate is
+    // a correctness fallback, but its one-CTA-per-query kernel serializes the
+    // softmax and is particularly slow for WallOSS's 80-wide vision heads.
+    // All scratch and output allocations use the session workspace so graph
+    // capture/replay keeps stable addresses.
+    if crate::FA2_DECODE
+        && std::env::var_os("APXINF_DISABLE_FA2_DIRECT").is_none()
+        && (1..=256).contains(&shape[2])
+    {
+        use crate::workspace::output_buffer;
+
+        let heads = shape[1];
+        let head_dim = shape[2];
+        let row_bytes = heads
+            .checked_mul(head_dim)
+            .and_then(|elements| elements.checked_mul(DType::BF16.size_in_bytes()))
+            .ok_or_else(|| Error::Other("segmented MHA row size overflow".into()))?;
+        let output = output_buffer(ctx, q.size_in_bytes())?;
+        let q_buffer = CudaBuffer::from_tensor(q).map_err(Error::Cuda)?;
+        let k_buffer = CudaBuffer::from_tensor(k).map_err(Error::Cuda)?;
+        let v_buffer = CudaBuffer::from_tensor(v).map_err(Error::Cuda)?;
+
+        for bounds in host_offsets.windows(2) {
+            let start = bounds[0] as usize;
+            let tokens = (bounds[1] - bounds[0]) as usize;
+            if tokens == 0 {
+                continue;
+            }
+            let bytes = tokens
+                .checked_mul(row_bytes)
+                .ok_or_else(|| Error::Other("segmented MHA slice size overflow".into()))?;
+            let segment = |buffer: &CudaBuffer| -> Result<Tensor> {
+                buffer
+                    .view(start * row_bytes, bytes)
+                    .map_err(Error::Cuda)?
+                    .as_tensor(Shape::new(vec![tokens, heads, head_dim]), DType::BF16)
+                    .map_err(Error::Cuda)
+            };
+            let (sq, sk, sv) = (segment(&q_buffer)?, segment(&k_buffer)?, segment(&v_buffer)?);
+            let Some(attended) = fa2_direct(
+                ctx, &sq, &sk, &sv, 1, tokens, tokens, heads, heads, head_dim, false,
+            )? else {
+                return Err(Error::Other(format!(
+                    "direct FA2 unexpectedly rejected segmented attention with {tokens} tokens"
+                )));
+            };
+            crate::transfers::copy_tensor_2d_to_buffer(
+                ctx,
+                &attended,
+                &output,
+                start * row_bytes,
+                row_bytes,
+                row_bytes,
+                row_bytes,
+                tokens,
+            )?;
+        }
+        return Ok(make_gpu_tensor(
+            q.shape().clone(),
+            DType::BF16,
+            ctx.device_id(),
+            output,
+        ));
+    }
+
     let output = ctx.allocate_output(Shape::new(shape.to_vec()), DType::BF16)?;
     let to_i32 = |value: usize, what: &str| {
         i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))

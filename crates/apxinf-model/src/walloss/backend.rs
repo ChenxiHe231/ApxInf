@@ -5,6 +5,7 @@
 //! cuda-new backend. The executor and runtime files are unchanged — the
 //! runtime swap happens entirely in these aliases.
 
+pub(crate) use apxinf_cuda_new::profiler::CudaEventTimer;
 pub(crate) use apxinf_cuda_new::{
     kernels, transfers, CudaBuffer as DeviceBuffer, CudaContext as Context,
     CudaNewBackend as RuntimeBackend,

@@ -204,7 +204,7 @@ impl WallossPreparedInference {
                     request,
                 )?;
                 self.bind(&host, request)?;
-                kernels::with_workspace_eager(&self.workspace, forward)?
+                kernels::prepare_with_workspace(&self.workspace, forward)?
             }
             None => kernels::prepare_with_workspace(&self.workspace, forward)?,
         };
@@ -253,7 +253,7 @@ impl WallossPreparedInference {
         let mib = |bytes: usize| bytes as f64 / f64::from(1u32 << 20);
         profile.insert(
             "workspace_peak_live_mib".to_string(),
-            mib(self.workspace.peak_used()),
+            mib(self.workspace.used()),
         );
         profile.insert(
             "workspace_capacity_mib".to_string(),

@@ -258,6 +258,27 @@ cudaError_t launch_cutlass_fp8_gemm(Execution& state) {
 #endif
 }
 
+cudaError_t launch_cutlass_fp8_rowwise_gemm(Execution& state) {
+  const auto& bindings = state.bindings;
+#ifdef APXINF_GEMM_CUTLASS
+  const auto& spec = state.spec;
+  const auto stream = static_cast<cudaStream_t>(bindings.stream);
+  check_cutlass_status(
+      apxinf::cuda_new::cutlass_ops::fp8_rowwise_gemm_bf16(
+          bindings.a, bindings.b,
+          static_cast<const float*>(bindings.a_scales),
+          static_cast<const float*>(bindings.b_scales), bindings.bias,
+          bindings.output, static_cast<int>(spec.m),
+          static_cast<int>(spec.n), static_cast<int>(spec.k),
+          state.configuration, stream));
+  return cudaSuccess;
+#else
+  (void)state;
+  (void)bindings;
+  return cudaErrorNotSupported;
+#endif
+}
+
 cudaError_t launch_cutlass_w8a8(Execution& state) {
 #ifdef APXINF_GEMM_CUTLASS_SM87_W8A8
   const auto& bindings = state.bindings;

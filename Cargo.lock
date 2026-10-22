@@ -101,6 +101,7 @@ dependencies = [
  "apxinf-core",
  "apxinf-loader",
  "apxinf-tokenizer",
+ "cc",
  "half",
  "serde_json",
 ]
