@@ -31,6 +31,7 @@ bool supports_vendor(const Spec& spec) {
 
 bool supports_native_fp8(const Spec& spec) {
   return supports_vendor(spec) && spec.a_dtype == APXINF_DTYPE_E4M3 &&
+         spec.quantization != APXINF_GEMM_QUANT_FP8_ROW_CHANNEL &&
          spec.k % 16 == 0 && spec.n % 16 == 0;
 }
 

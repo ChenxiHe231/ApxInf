@@ -166,7 +166,7 @@ fn plan_fa2_split_count(
 /// contiguous `[*, kv_heads, head_dim]` storage, exactly like the legacy
 /// `apxinf_static_fa2_bf16*` path.
 #[allow(clippy::too_many_arguments)]
-fn fa2_direct(
+fn fa2_direct_buffer(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -178,7 +178,8 @@ fn fa2_direct(
     kv_heads: usize,
     head_dim: usize,
     causal: bool,
-) -> Result<Option<Tensor>> {
+    output: Option<CudaBuffer>,
+) -> Result<Option<CudaBuffer>> {
     use super::contracts::check_cuda;
     use crate::ffi::abi::attention as abi;
     use crate::workspace::output_buffer;
@@ -235,7 +236,21 @@ fn fa2_direct(
         return Ok(None);
     };
     let scale = (head_dim as f32).sqrt().recip();
-    let output = output_buffer(ctx, q.size_in_bytes())?;
+    let output = match output {
+        Some(output) if output.device() == ctx.device_id() && output.len() == q.size_in_bytes() => {
+            output
+        }
+        Some(output) => {
+            return Err(Error::Other(format!(
+                "FA2 output buffer mismatch: expected CUDA {} and {} bytes, got CUDA {} and {} bytes",
+                ctx.device_id(),
+                q.size_in_bytes(),
+                output.device(),
+                output.len()
+            )));
+        }
+        None => output_buffer(ctx, q.size_in_bytes())?,
+    };
     let lse_elements = batches
         .checked_mul(query_heads)
         .and_then(|value| value.checked_mul(query_tokens))
@@ -324,12 +339,38 @@ fn fa2_direct(
             )
         })?;
     }
-    Ok(Some(make_gpu_tensor(
-        q.shape().clone(),
-        DType::BF16,
-        ctx.device_id(),
-        output,
-    )))
+    Ok(Some(output))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fa2_direct(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    batches: usize,
+    query_tokens: usize,
+    key_tokens: usize,
+    query_heads: usize,
+    kv_heads: usize,
+    head_dim: usize,
+    causal: bool,
+) -> Result<Option<Tensor>> {
+    Ok(fa2_direct_buffer(
+        ctx,
+        q,
+        k,
+        v,
+        batches,
+        query_tokens,
+        key_tokens,
+        query_heads,
+        kv_heads,
+        head_dim,
+        causal,
+        None,
+    )?
+    .map(|output| make_gpu_tensor(q.shape().clone(), DType::BF16, ctx.device_id(), output)))
 }
 
 #[cfg(test)]
@@ -803,24 +844,31 @@ pub fn segmented_mha_bf16(
                     .as_tensor(Shape::new(vec![tokens, heads, head_dim]), DType::BF16)
                     .map_err(Error::Cuda)
             };
-            let (sq, sk, sv) = (segment(&q_buffer)?, segment(&k_buffer)?, segment(&v_buffer)?);
-            let Some(attended) = fa2_direct(
-                ctx, &sq, &sk, &sv, 1, tokens, tokens, heads, heads, head_dim, false,
-            )? else {
+            let (sq, sk, sv) = (
+                segment(&q_buffer)?,
+                segment(&k_buffer)?,
+                segment(&v_buffer)?,
+            );
+            let output_segment = output.view(start * row_bytes, bytes).map_err(Error::Cuda)?;
+            let Some(_) = fa2_direct_buffer(
+                ctx,
+                &sq,
+                &sk,
+                &sv,
+                1,
+                tokens,
+                tokens,
+                heads,
+                heads,
+                head_dim,
+                false,
+                Some(output_segment),
+            )?
+            else {
                 return Err(Error::Other(format!(
                     "direct FA2 unexpectedly rejected segmented attention with {tokens} tokens"
                 )));
             };
-            crate::transfers::copy_tensor_2d_to_buffer(
-                ctx,
-                &attended,
-                &output,
-                start * row_bytes,
-                row_bytes,
-                row_bytes,
-                row_bytes,
-                tokens,
-            )?;
         }
         return Ok(make_gpu_tensor(
             q.shape().clone(),

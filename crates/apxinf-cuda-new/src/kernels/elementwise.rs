@@ -83,8 +83,12 @@ pub fn bias_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> R
     let Some(bias) = value else {
         return Ok(input.clone());
     };
-    let output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    ops::elementwise_add_bias(ctx, input, bias, &output)?;
+    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
+    let mut args =
+        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
+    args.bias = Some(bias);
+    args.activation = ops::PointwiseActivation::None;
+    ops::pointwise(ctx, args)?;
     Ok(output)
 }
 
@@ -109,8 +113,10 @@ pub fn gather_rows_bf16(
     let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
     let input_buffer = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
-    let rows_i64 = i64::try_from(rows).map_err(|_| Error::Other("gather rows exceed i64".into()))?;
-    let cols_i64 = i64::try_from(cols).map_err(|_| Error::Other("gather cols exceed i64".into()))?;
+    let rows_i64 =
+        i64::try_from(rows).map_err(|_| Error::Other("gather rows exceed i64".into()))?;
+    let cols_i64 =
+        i64::try_from(cols).map_err(|_| Error::Other("gather cols exceed i64".into()))?;
     unsafe {
         status::check(abi::apxinf_elementwise_gather_rows_bf16(
             input_buffer.ptr(),
@@ -148,10 +154,8 @@ pub fn replace_rows_bf16(
     let replacement_buffer =
         CudaBuffer::from_tensor(replacement).map_err(apxinf_core::Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(apxinf_core::Error::Cuda)?;
-    let rows_i64 =
-        i64::try_from(rows).map_err(|_| invalid("row replacement rows exceed i64"))?;
-    let cols_i64 =
-        i64::try_from(cols).map_err(|_| invalid("row replacement cols exceed i64"))?;
+    let rows_i64 = i64::try_from(rows).map_err(|_| invalid("row replacement rows exceed i64"))?;
+    let cols_i64 = i64::try_from(cols).map_err(|_| invalid("row replacement cols exceed i64"))?;
     unsafe {
         status::check(abi::apxinf_elementwise_replace_rows_bf16(
             base_buffer.ptr(),
@@ -175,8 +179,7 @@ pub fn euler_update_bf16(
     dt: f32,
 ) -> Result<Tensor> {
     let mut output = ctx.allocate_output(Shape::new(state.shape().dims().to_vec()), DType::BF16)?;
-    let mut args =
-        ops::PointwiseArgs::new(ops::PointwiseSemantic::EulerUpdate, state, &mut output);
+    let mut args = ops::PointwiseArgs::new(ops::PointwiseSemantic::EulerUpdate, state, &mut output);
     args.secondary = Some(velocity);
     args.dt = dt;
     ops::pointwise(ctx, args)?;
@@ -295,7 +298,7 @@ pub fn scatter_rows_bf16_prepared(
     source: &Tensor,
     add: bool,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::gr00t as gr00t;
+    use crate::ffi::abi::gr00t;
     use crate::ffi::raw::cuda_runtime as raw;
     let (destination_rows, columns) =
         matrix_shape(destination, "prepared row scatter destination")?;
@@ -427,11 +430,7 @@ pub fn concat_columns_bf16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Ten
     let row_bytes = total_cols
         .checked_mul(DType::BF16.size_in_bytes())
         .ok_or_else(|| Error::Other("column concatenation row size overflow".into()))?;
-    let output = bf16_output(
-        ctx,
-        rows,
-        total_cols,
-    )?;
+    let output = bf16_output(ctx, rows, total_cols)?;
     let mut column_offset = 0usize;
     for tensor in tensors {
         let tensor_cols = tensor.shape().dims()[1];
@@ -463,7 +462,7 @@ pub fn bias_qkv_in_place_bf16(
     key_bias: &Tensor,
     value_bias: &Tensor,
 ) -> Result<(Tensor, Tensor, Tensor)> {
-    use crate::ffi::abi::gr00t as gr00t;
+    use crate::ffi::abi::gr00t;
     use crate::ffi::raw::cuda_runtime as raw;
     let (rows, cols) = matrix_shape(&query, "fused QKV bias")?;
     let expected_device = Device::Cuda(ctx.device_id());
@@ -706,11 +705,7 @@ pub fn add_into(
                 count as u32,
                 ctx.stream().handle(),
             ),
-            dtype => {
-                return Err(Error::Other(format!(
-                    "decode add does not support {dtype}"
-                )))
-            }
+            dtype => return Err(Error::Other(format!("decode add does not support {dtype}"))),
         }
     };
     check_cuda(status)
