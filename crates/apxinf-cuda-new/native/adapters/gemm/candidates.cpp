@@ -109,6 +109,13 @@ AlignmentRequirements cutlass_fp8_alignment(const Spec&) {
   return requirements;
 }
 
+AlignmentRequirements cutlass_fp8_rowwise_alignment(const Spec& spec) {
+  auto requirements = cutlass_fp8_alignment(spec);
+  requirements.a_scales = alignof(float);
+  requirements.b_scales = alignof(float);
+  return requirements;
+}
+
 AlignmentRequirements cutlass_geglu_alignment(const Spec& spec) {
   AlignmentRequirements requirements{};
   if (spec.a_dtype == APXINF_DTYPE_E4M3) {
@@ -179,6 +186,30 @@ bool supports_cutlass_fp8(const Spec& spec) {
          spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE &&
          spec.n % 16 == 0 &&
          spec.k % 16 == 0 && spec.output_scale_is_unit != 0;
+}
+
+bool supports_cutlass_fp8_rowwise(const Spec& spec) {
+  // Dynamic row/channel FP8 is the WallOSS path: CUTLASS consumes the row and
+  // channel scales in its epilogue, avoiding the generic GEMM + finish pass.
+  // The kernel has no separate scalar-alpha or output-scale input.
+  return (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM ||
+          spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS) &&
+         spec.a_dtype == APXINF_DTYPE_E4M3 &&
+         spec.b_dtype == APXINF_DTYPE_E4M3 &&
+         spec.output_dtype == APXINF_DTYPE_BF16 &&
+         spec.accumulation_dtype == APXINF_DTYPE_F32 &&
+         spec.quantization == APXINF_GEMM_QUANT_FP8_ROW_CHANNEL &&
+         spec.alpha_is_unit != 0 && spec.output_scale_is_unit != 0 &&
+         spec.n % 16 == 0 && spec.k % 16 == 0;
+}
+
+void cutlass_fp8_rowwise_configurations(const Spec&,
+                                         std::vector<int>& configs) {
+  // These are the legacy CUTLASS rowwise tactics, now autotuned and persisted
+  // through the regular GEMM candidate/recipe lifecycle.
+  for (int tactic = 0; tactic < 15; ++tactic) {
+    configs.push_back(tactic);
+  }
 }
 
 bool supports_cutlass_fp8_geglu(const Spec& spec) {
@@ -403,6 +434,12 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_cutlass_fp8, cutlass_fp8_alignment,
        cutlass_fp8_resource_requirements, cutlass_configurations,
        prepare_cutlass_fp8_gemm, launch_cutlass_fp8_gemm, destroy_cutlass},
+      {kProviderCutlass, 7, 1, "cutlass-fp8-row-channel",
+       kDeviceFeatureCutlassSm100, true, true, false,
+       supports_cutlass_fp8_rowwise, cutlass_fp8_rowwise_alignment,
+       cutlass_fp8_resource_requirements, cutlass_fp8_rowwise_configurations,
+       prepare_cutlass_fp8_gemm, launch_cutlass_fp8_rowwise_gemm,
+       destroy_cutlass},
       {kProviderCutlass, 4, 1, "cutlass-nvfp4-blockscaled",
        kDeviceFeatureCutlassSm100, true, true, false,
        supports_cutlass_nvfp4, cutlass_nvfp4_alignment,

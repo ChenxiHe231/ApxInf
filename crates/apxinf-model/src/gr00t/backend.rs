@@ -6,16 +6,13 @@
 //! runtime swap happens entirely in these aliases.
 
 #[cfg(feature = "cuda")]
-pub(crate) use apxinf_cuda_new::{
-    kernels, tuning, transfers, CudaBuffer as DeviceBuffer, CudaContext as Context,
-    CudaNewBackend as RuntimeBackend,
-};
-#[cfg(feature = "cuda")]
 pub(crate) use crate::accelerator::downcast_cuda_new_arc as downcast_arc;
 #[cfg(feature = "cuda")]
-pub(crate) use apxinf_cuda_new::tuning::TuningMode;
-#[cfg(feature = "cuda")]
 pub(crate) use apxinf_cuda_new::CudaNewBackend as CudaBackend;
+#[cfg(feature = "cuda")]
+pub(crate) use apxinf_cuda_new::{
+    kernels, transfers, CudaBuffer as DeviceBuffer, CudaNewBackend as RuntimeBackend,
+};
 
 /// The model opts into packed8 only for its measured BF16 epilogues.
 const fn use_packed8_bias_activation(

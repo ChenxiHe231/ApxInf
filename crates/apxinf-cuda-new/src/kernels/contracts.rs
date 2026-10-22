@@ -140,7 +140,7 @@ pub(super) fn matrix_tensor(
 }
 
 pub(super) fn bf16_output(ctx: &CudaContext, rows: usize, cols: usize) -> Result<CudaBuffer> {
-    crate::workspace::output_buffer(
+    crate::workspace::output_buffer_uninitialized(
         ctx,
         rows.checked_mul(cols)
             .and_then(|elements| elements.checked_mul(DType::BF16.size_in_bytes()))
@@ -149,7 +149,7 @@ pub(super) fn bf16_output(ctx: &CudaContext, rows: usize, cols: usize) -> Result
 }
 
 pub(super) fn f16_output(ctx: &CudaContext, rows: usize, cols: usize) -> Result<CudaBuffer> {
-    crate::workspace::output_buffer(
+    crate::workspace::output_buffer_uninitialized(
         ctx,
         rows.checked_mul(cols)
             .and_then(|elements| elements.checked_mul(DType::F16.size_in_bytes()))
@@ -158,7 +158,7 @@ pub(super) fn f16_output(ctx: &CudaContext, rows: usize, cols: usize) -> Result<
 }
 
 pub(super) fn fp8_output(ctx: &CudaContext, rows: usize, cols: usize) -> Result<CudaBuffer> {
-    crate::workspace::output_buffer(
+    crate::workspace::output_buffer_uninitialized(
         ctx,
         rows.checked_mul(cols)
             .ok_or_else(|| Error::Other("FP8 output size overflow".into()))?,

@@ -55,6 +55,7 @@ pub struct CudaBuffer {
     len: usize,
     device: usize,
     owner: Arc<dyn std::any::Any + Send + Sync>,
+    retained_owner: Arc<dyn std::any::Any + Send + Sync>,
 }
 
 // SAFETY: CUDA device pointers can be sent between threads.
@@ -76,7 +77,8 @@ impl CudaBuffer {
             ptr,
             len: num_bytes,
             device,
-            owner,
+            owner: Arc::clone(&owner),
+            retained_owner: owner,
         })
     }
 
@@ -287,6 +289,35 @@ impl CudaBuffer {
             len,
             device: self.device,
             owner: Arc::clone(&self.owner),
+            retained_owner: Arc::clone(&self.retained_owner),
+        })
+    }
+
+    /// Create a view with a custom owner. The owner must retain this
+    /// allocation (directly or indirectly) for as long as the view is live.
+    pub(crate) fn view_with_owner(
+        &self,
+        byte_offset: usize,
+        len: usize,
+        owner: Arc<dyn std::any::Any + Send + Sync>,
+        retained_owner: Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Result<Self, String> {
+        let end = byte_offset
+            .checked_add(len)
+            .ok_or_else(|| "CUDA buffer view range overflow".to_string())?;
+        if end > self.len {
+            return Err(format!(
+                "CUDA buffer view [{byte_offset}..{end}] exceeds {} bytes",
+                self.len
+            ));
+        }
+        let ptr = unsafe { (self.ptr as *mut u8).add(byte_offset) as *mut c_void };
+        Ok(Self {
+            ptr,
+            len,
+            device: self.device,
+            owner,
+            retained_owner,
         })
     }
 
@@ -304,12 +335,32 @@ impl CudaBuffer {
             .owner()
             .cloned()
             .ok_or_else(|| "CUDA tensor storage has no owning allocation".to_string())?;
+        if let Some(parent) = owner.downcast_ref::<CudaBuffer>() {
+            let offset = (handle.ptr() as usize)
+                .checked_sub(parent.ptr as usize)
+                .ok_or_else(|| "CUDA tensor pointer precedes its owning buffer".to_string())?;
+            return parent.view(offset, handle.len());
+        }
         Ok(Self {
             ptr: handle.ptr() as *mut c_void,
             len: handle.len(),
             device,
+            retained_owner: Arc::clone(&owner),
             owner,
         })
+    }
+
+    /// Retain the backing allocation without pinning a workspace suballocation.
+    /// Native executions hold raw pointers for graph replay; the graph-owned
+    /// arena keeps those addresses valid while the tensor lease controls reuse.
+    pub(crate) fn retained_for_execution(&self) -> Self {
+        Self {
+            ptr: self.ptr,
+            len: self.len,
+            device: self.device,
+            owner: Arc::clone(&self.retained_owner),
+            retained_owner: Arc::clone(&self.retained_owner),
+        }
     }
 
     /// Turn an owned CUDA allocation into a Tensor while preserving ownership.

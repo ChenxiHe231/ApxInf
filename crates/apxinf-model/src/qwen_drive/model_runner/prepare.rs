@@ -1,6 +1,6 @@
 //! Prepared execution: stable inputs, workspaces, capture and resource lifetime.
 use super::runner::{rgb_bf16_lut, validate, Validated, ValidatedVision};
-use crate::qwen_drive::backend::{kernels, nvtx, transfers, tuning, DeviceBuffer};
+use crate::qwen_drive::backend::{kernels, nvtx, transfers, DeviceBuffer};
 use crate::qwen_drive::model::{
     DirectExecution, DirectInputs, PlanningState, QwenDriveModel, RawRgbInput, VisionState,
 };
@@ -8,10 +8,10 @@ use crate::vla::{
     Action, ExecutionMode, ExecutionPolicy, InferenceSpec, InitialLatent, PreparationStatus,
     PreparedInference, VlaRequest,
 };
-use apxinf_core::{
-    Backend, DType, Device, Error, Graph, NormalGenerator, Result, SamplingBackend, Tensor,
-};
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use apxinf_core::{DType, Device, Error, Graph, NormalGenerator, Result, SamplingBackend, Tensor};
+#[cfg(test)]
+use std::sync::Arc;
+use std::{cell::RefCell, rc::Rc};
 struct WorkspaceExecution<'a> {
     workspace: &'a kernels::GraphWorkspace,
     mode: WorkspaceMode,
@@ -78,15 +78,9 @@ pub(super) struct DirectPlan {
     raw_resize: Option<Vec<crate::vla::RawRgbResizeFrame>>,
     steps: usize,
     prompt_len: usize,
-    tuning: Arc<tuning::TuningSession>,
-    generation: u64,
     fallback: Option<String>,
 }
 impl DirectPlan {
-    pub(super) fn is_current(&self) -> bool {
-        let current = self.model.backend().context().tuning();
-        Arc::ptr_eq(&current, &self.tuning) && current.generation() == self.generation
-    }
     pub(super) fn matches(&self, request: &VlaRequest<'_>, valid: &Validated<'_>) -> bool {
         self.spec.matches(request.observation)
             && request
@@ -108,9 +102,7 @@ impl DirectPlan {
                 .all(|(&image, &id)| image == (id == self.model.config().image_token_id))
     }
     pub(super) fn execution_mode(&self) -> &'static str {
-        if !self.is_current() {
-            "invalidated"
-        } else if self.graph.is_some() {
+        if self.graph.is_some() {
             "graph"
         } else if self.fallback.is_some() {
             "eager-fallback"
@@ -208,12 +200,10 @@ impl DirectPlan {
             raw_resize,
             steps,
             prompt_len: valid.prompt_len,
-            tuning: ctx.tuning().clone(),
-            generation: ctx.tuning().generation(),
             fallback: None,
             model,
         };
-        tuning::without_autotune(|| -> Result<()> {
+        {
             let valid = validate(&plan.model, sample)?;
             let mut mutable = plan.mutable.borrow_mut();
             plan.bind(sample, &valid, &mut mutable)?;
@@ -242,7 +232,11 @@ impl DirectPlan {
                 preflight.usage
             );
             backend.synchronize()?;
-            plan.output = output;
+            // The preflight result is not externally visible. Retaining its
+            // workspace lease while capturing the same traversal changes the
+            // deterministic allocation addresses and misses pointer-bound
+            // native execution entries (notably GEMM output bindings).
+            drop(output);
             if policy != ExecutionPolicy::Eager {
                 let mut captured = WorkspaceExecution {
                     workspace: &plan.workspace,
@@ -272,10 +266,7 @@ impl DirectPlan {
                     Err(error) => return Err(error),
                 }
             }
-            Ok(())
-        })?;
-        plan.tuning = ctx.tuning();
-        plan.generation = plan.tuning.generation();
+        }
         Ok(plan)
     }
     fn bind(
@@ -353,9 +344,6 @@ impl PreparedInference for DirectPlan {
         &self.spec
     }
     fn status(&self) -> PreparationStatus {
-        if !self.is_current() {
-            return PreparationStatus::Invalidated;
-        }
         PreparationStatus::Ready {
             mode: if self.graph.is_some() {
                 ExecutionMode::Graph
@@ -366,11 +354,6 @@ impl PreparedInference for DirectPlan {
         }
     }
     fn run(&self, request: &VlaRequest<'_>) -> Result<Action> {
-        if !self.is_current() {
-            return Err(Error::Other(
-                "qwen_drive prepared plan is stale after a tactic update".into(),
-            ));
-        }
         let valid = validate(&self.model, request)?;
         if !self.matches(request, &valid) {
             return Err(Error::Other("qwen_drive prepared profile mismatch; prepare again for changed shape, image-token positions, grids or steps".into()));
@@ -379,29 +362,27 @@ impl PreparedInference for DirectPlan {
             .mutable
             .try_borrow_mut()
             .map_err(|_| Error::Other("qwen_drive prepared plan is already executing".into()))?;
-        tuning::without_autotune(|| {
-            {
-                let _bind = nvtx::range("qwen_drive/bind");
-                self.bind(request, &valid, &mut mutable)?;
-            }
-            if let Some(graph) = &self.graph {
-                let _replay = nvtx::range("qwen_drive/graph/replay_launch");
-                graph.replay()?;
-                Ok(Action::new(self.output.clone()))
-            } else {
-                self.model
-                    .forward_direct(
-                        &self.inputs,
-                        &mut mutable.state,
-                        &mut WorkspaceExecution {
-                            workspace: &self.workspace,
-                            mode: WorkspaceMode::Eager,
-                            usage: Vec::new(),
-                        },
-                    )
-                    .map(Action::new)
-            }
-        })
+        {
+            let _bind = nvtx::range("qwen_drive/bind");
+            self.bind(request, &valid, &mut mutable)?;
+        }
+        if let Some(graph) = &self.graph {
+            let _replay = nvtx::range("qwen_drive/graph/replay_launch");
+            graph.replay()?;
+            Ok(Action::new(self.output.clone()))
+        } else {
+            self.model
+                .forward_direct(
+                    &self.inputs,
+                    &mut mutable.state,
+                    &mut WorkspaceExecution {
+                        workspace: &self.workspace,
+                        mode: WorkspaceMode::Eager,
+                        usage: Vec::new(),
+                    },
+                )
+                .map(Action::new)
+        }
     }
 }
 
@@ -594,19 +575,9 @@ mod tests {
         }
         assert_eq!(host(graph.run(&generated).unwrap()), first);
         assert_eq!(host(graph.run(&request).unwrap()), reference[0]);
-        let generation = backend.context().tuning().generation();
         runner.clear_prepared().unwrap();
         drop(runner);
         // Explicit plan owns weights/state even after the originating runner drops.
         assert_eq!(host(graph.run(&request).unwrap()), reference[0]);
-        assert_eq!(backend.context().tuning().generation(), generation);
-        backend
-            .context()
-            .install_tuning(tuning::TuningSession::inference(
-                tuning::TacticStore::default(),
-            ))
-            .unwrap();
-        assert_eq!(graph.status(), PreparationStatus::Invalidated);
-        assert!(graph.run(&request).is_err());
     }
 }

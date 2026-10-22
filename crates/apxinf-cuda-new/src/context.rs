@@ -70,7 +70,6 @@ pub struct CudaContext {
     caps: CudaDeviceCaps,
     cublas: crate::cublas::CublasHandle,
     library_versions: CudaLibraryVersions,
-    tuning: std::sync::RwLock<Arc<crate::tuning::TuningSession>>,
 }
 
 impl CudaContext {
@@ -118,12 +117,8 @@ impl CudaContext {
             stream,
             runtime,
             caps,
-            library_versions: CudaLibraryVersions::query(&cublas).unwrap_or(CudaLibraryVersions {
-                cuda: "0".into(),
-                cublas: "0".into(),
-            }),
+            library_versions: CudaLibraryVersions::query(&cublas)?,
             cublas,
-            tuning: std::sync::RwLock::new(crate::tuning::default_session()),
         })
     }
 
@@ -152,23 +147,6 @@ impl CudaContext {
     /// CUDA runtime and cuBLAS library versions.
     pub fn library_versions(&self) -> &CudaLibraryVersions {
         &self.library_versions
-    }
-    /// The installed tuning session (plan-invalidation identity; cuda-new
-    /// operators tune through recipes, not through this session).
-    pub fn tuning(&self) -> Arc<crate::tuning::TuningSession> {
-        self.tuning
-            .read()
-            .expect("CUDA tuning session lock is poisoned")
-            .clone()
-    }
-    /// Install a session before model prepare. Prepared plans keyed on the
-    /// previous session observe the identity change and rebuild.
-    pub fn install_tuning(&self, session: crate::tuning::TuningSession) -> Result<(), String> {
-        *self
-            .tuning
-            .write()
-            .map_err(|_| "CUDA tuning session lock is poisoned".to_string())? = Arc::new(session);
-        Ok(())
     }
     pub fn caps(&self) -> &CudaDeviceCaps {
         &self.caps

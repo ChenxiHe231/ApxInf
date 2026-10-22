@@ -1,6 +1,6 @@
 //! W8A8 INT8 GR00T device weights for Orin-class GPUs.
 
-use apxinf_core::{Backend, DType, Error, Result, Tensor};
+use apxinf_core::{DType, Error, Result, Tensor};
 
 use super::action_weights::Gr00tLinearWeights;
 use super::backend::{kernels, DeviceBuffer, RuntimeBackend};

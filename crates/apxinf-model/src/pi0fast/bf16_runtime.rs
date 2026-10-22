@@ -19,7 +19,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use super::backend::{kernels, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
-use apxinf_core::{Backend, Error, Result, Tensor};
+use apxinf_core::{Error, Result, Tensor};
 use kernels::{cache, elementwise, embedding, gemm, norm, sampling, GraphWorkspace};
 
 use super::calibration::Pi0FastCalibrationObserver;

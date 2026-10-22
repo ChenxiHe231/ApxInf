@@ -16,21 +16,37 @@
 
 use apxinf_core::Result;
 
-use crate::ops::ExecutionSession;
-
 /// The workspace an executor passes to `prepare_with_workspace` / `with_workspace`.
 ///
-/// cuda-new folds the bump arena and the prepared-execution cache into one
-/// [`ExecutionSession`]; the legacy crate split them into `GraphWorkspace` plus
-/// free functions. Aliasing collapses the split so executor code is unchanged.
-pub use crate::ops::ExecutionSession as GraphWorkspace;
+/// This compatibility type deliberately does not alias cuda-new's public
+/// `ExecutionSession`. It keeps the legacy workspace-shaped API at the model
+/// boundary while containing the native prepared-execution session internally.
+pub struct GraphWorkspace {
+    session: crate::ops::ExecutionSession,
+}
+
+impl GraphWorkspace {
+    pub fn with_capacity(capacity_bytes: usize, device: usize) -> Result<Self> {
+        Ok(Self {
+            session: crate::ops::ExecutionSession::with_capacity(capacity_bytes, device)?,
+        })
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.session.capacity()
+    }
+
+    pub fn used(&self) -> usize {
+        self.session.used()
+    }
+}
 
 /// Create a workspace with a fixed byte capacity.
 ///
 /// The legacy API named the constructor on the workspace type itself; cuda-new
 /// names it on the session. This keeps the call spelling.
-pub fn new_workspace(capacity_bytes: usize, device: usize) -> Result<ExecutionSession> {
-    ExecutionSession::with_capacity(capacity_bytes, device)
+pub fn new_workspace(capacity_bytes: usize, device: usize) -> Result<GraphWorkspace> {
+    GraphWorkspace::with_capacity(capacity_bytes, device)
 }
 
 pub mod activation;
@@ -82,18 +98,18 @@ pub fn scratch_buffer_tail_zeroed(
 
 /// Prepare a fixed-shape traversal that may allocate and tune.
 pub fn prepare_with_workspace<T>(
-    session: &ExecutionSession,
+    workspace: &GraphWorkspace,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    session.prepare(operation)
+    workspace.session.prepare(operation)
 }
 
 /// Run a prepared traversal without allocating or tuning.
 pub fn with_workspace<T>(
-    session: &ExecutionSession,
+    workspace: &GraphWorkspace,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    session.run(operation)
+    workspace.session.run(operation)
 }
 
 /// Bind the arena for an eager (never captured) traversal.
@@ -103,8 +119,8 @@ pub fn with_workspace<T>(
 /// workspace, and the prepared operator sequence is untouched. Capture must
 /// keep using [`with_workspace`].
 pub fn with_workspace_eager<T>(
-    session: &ExecutionSession,
+    workspace: &GraphWorkspace,
     operation: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    session.eager(operation)
+    workspace.session.eager(operation)
 }

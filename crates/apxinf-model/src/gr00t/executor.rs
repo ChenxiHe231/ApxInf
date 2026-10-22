@@ -22,7 +22,7 @@ use super::backbone::vision_weights::transfer_vision_weights;
 use super::backbone::{
     transfer_text_weights, Qwen3VLConfig, Qwen3VLTextWeights, Qwen3VLVisionWeights,
 };
-use super::backend::{kernels, transfers, DeviceBuffer, RuntimeBackend, TuningMode};
+use super::backend::{kernels, transfers, DeviceBuffer, RuntimeBackend};
 use super::device_weights::DeviceLinearWeights;
 use super::geometry::{
     build_backbone_token_groups, dit_attention_source, Gr00tBackboneTokenGroups,
@@ -540,17 +540,6 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             // and selected embodiment tensors. Destroy an obsolete graph
             // before replacing any of those resources.
             drop(self.captured_graph.take());
-            if self.backend.context().tuning().mode() == TuningMode::AutoTune {
-                // Online tuning requires the real request operands and is
-                // intentionally disabled while sizing or capturing a graph.
-                // Traverse once eagerly, just as the shared PI0.5 runtime
-                // does, so every exact GEMM shape is persisted before graph
-                // preparation freezes the selected plans.
-                self.prepare_fixed_inputs(observation, None)?;
-                let tuned_output = self.infer_device(observation)?;
-                self.backend.synchronize()?;
-                drop(tuned_output);
-            }
             match self.capture_graph(observation) {
                 Ok(graph) => {
                     let result = graph.run(observation, &*self.backend, &self.config);

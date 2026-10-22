@@ -1170,6 +1170,7 @@ fn execution_session_reuses_one_native_execution_across_forward_traversals() {
     let session = ExecutionSession::with_capacity(4096, 0).unwrap();
 
     super::execution::reset_execution_create_count();
+    super::execution::reset_execution_sync_count();
     prepare_with_session(&session, || {
         let mut args = GemmArgs::new(&a, &b, &mut out);
         args.policy.online_tune = false;
@@ -1177,6 +1178,11 @@ fn execution_session_reuses_one_native_execution_across_forward_traversals() {
     })
     .unwrap();
     assert_eq!(super::execution::execution_create_count(), 1);
+    assert_eq!(
+        super::execution::execution_sync_count(),
+        0,
+        "prepare should queue work on the session stream and let the session boundary synchronize"
+    );
     super::execution::reset_execution_sync_count();
 
     for _ in 0..2 {

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use apxinf_core::{Backend, Error, Result, Tensor};
+use apxinf_core::{Error, Result, Tensor};
 use serde::Deserialize;
 
 use super::action_weights::Gr00tLinearWeights;

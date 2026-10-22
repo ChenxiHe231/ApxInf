@@ -18,120 +18,7 @@ use apxinf_core::{
 };
 
 use crate::ops;
-use crate::CudaContext;
-
-/// A `[1, capacity, n_kv_heads, head_dim]` BF16 KV cache for one model.
-///
-/// The layout is the view [`crate::ops::kv_cache_attention`] consumes, so no
-/// relayout is needed per step. Append writes through
-/// [`crate::ops::cache_append`]; the cache never exposes its raw order, which
-/// keeps the storage detail private to this file.
-pub struct CudaKvCache {
-    ctx: std::sync::Arc<CudaContext>,
-    keys: Vec<Tensor>,
-    values: Vec<Tensor>,
-    n_kv_heads: usize,
-    head_dim: usize,
-    max_seq_len: usize,
-    seq_len: usize,
-}
-
-impl CudaKvCache {
-    fn new(
-        ctx: std::sync::Arc<CudaContext>,
-        n_layers: usize,
-        n_kv_heads: usize,
-        head_dim: usize,
-        max_seq_len: usize,
-    ) -> Result<Self> {
-        let shape = Shape::new(vec![1, max_seq_len, n_kv_heads, head_dim]);
-        let mut keys = Vec::with_capacity(n_layers);
-        let mut values = Vec::with_capacity(n_layers);
-        for _ in 0..n_layers {
-            keys.push(ctx.allocate_output(shape.clone(), DType::BF16)?);
-            values.push(ctx.allocate_output(shape.clone(), DType::BF16)?);
-        }
-        Ok(Self {
-            ctx,
-            keys,
-            values,
-            n_kv_heads,
-            head_dim,
-            max_seq_len,
-            seq_len: 0,
-        })
-    }
-
-    /// Key tensor for one layer, `[1, capacity, kv_heads, head_dim]`.
-    pub fn key(&self, layer_idx: usize) -> &Tensor {
-        &self.keys[layer_idx]
-    }
-
-    /// Value tensor for one layer, `[1, capacity, kv_heads, head_dim]`.
-    pub fn value(&self, layer_idx: usize) -> &Tensor {
-        &self.values[layer_idx]
-    }
-
-    fn append_impl(&mut self, layer_idx: usize, k: &Tensor, v: &Tensor, append_len: usize) -> Result<()> {
-        ops::cache_append(
-            &self.ctx,
-            &self.keys[layer_idx],
-            k,
-            self.n_kv_heads,
-            self.head_dim,
-            self.max_seq_len,
-            self.seq_len,
-            append_len,
-        )?;
-        ops::cache_append(
-            &self.ctx,
-            &self.values[layer_idx],
-            v,
-            self.n_kv_heads,
-            self.head_dim,
-            self.max_seq_len,
-            self.seq_len,
-            append_len,
-        )
-    }
-}
-
-impl KvCache for CudaKvCache {
-    fn append(&mut self, layer_idx: usize, k: &Tensor, v: &Tensor, append_len: usize) -> Result<()> {
-        self.append_impl(layer_idx, k, v, append_len)
-    }
-
-    fn advance(&mut self, n: usize) {
-        self.seq_len += n;
-    }
-
-    fn seq_len(&self) -> usize {
-        self.seq_len
-    }
-
-    fn clear(&mut self) -> Result<()> {
-        // The decode graph retains these addresses across requests, so the
-        // buffers are zeroed in place rather than reallocated.
-        for tensor in self.keys.iter().chain(self.values.iter()) {
-            let buffer = crate::CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?;
-            buffer.zero().map_err(Error::Cuda)?;
-        }
-        self.seq_len = 0;
-        Ok(())
-    }
-
-    fn n_layers(&self) -> usize {
-        self.keys.len()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
+use crate::{CudaContext, CudaKvCache};
 
 /// The cuda-new backend returned to `dyn Backend` consumers.
 pub struct CudaNewBackend {
@@ -185,46 +72,36 @@ impl CudaNewBackend {
         &self,
         operation: impl FnOnce() -> Result<T>,
     ) -> Result<(Box<dyn Graph>, T)> {
+        struct CaptureScope<'a> {
+            backend: &'a CudaNewBackend,
+            active: bool,
+        }
+        impl Drop for CaptureScope<'_> {
+            fn drop(&mut self) {
+                if self.active {
+                    crate::graph::abort(self.backend.context());
+                }
+            }
+        }
         use apxinf_core::Backend as _;
         self.begin_capture()?;
-        let output = match operation() {
-            Ok(output) => output,
-            Err(error) => {
-                let _ = self.end_capture();
-                return Err(error);
-            }
+        let mut scope = CaptureScope {
+            backend: self,
+            active: true,
         };
+        let output = operation()?;
+        scope.active = false;
         Ok((self.end_capture()?, output))
     }
 }
 
-fn rank2(tensor: &Tensor, what: &str) -> Result<[usize; 2]> {
-    let dims = tensor.shape().dims();
-    if dims.len() != 2 {
-        return Err(Error::Other(format!("{what} requires a rank-2 tensor")));
-    }
-    Ok([dims[0], dims[1]])
-}
-
 impl Backend for CudaNewBackend {
     fn rms_norm(&self, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        let [rows, width] = rank2(input, "rms_norm")?;
-        let mut output = self.ctx.allocate_output(Shape::new(vec![rows, width]), DType::BF16)?;
-        // Plain `x/rms * weight`, matching the legacy `CudaBackend::rms_norm`.
-        // `ops::mlp::rms_norm` is a separate Qwen3.5 zero-centered `(1 + weight)`
-        // norm and would be wrong for the LLM/VLM families that route here.
-        ops::rms_norm(
-            &self.ctx,
-            ops::RmsNormArgs::new(input, weight, &mut output, eps),
-        )?;
-        Ok(output)
+        crate::kernels::norm::rms_bf16(&self.ctx, input, weight, eps)
     }
 
     fn silu(&self, input: &Tensor) -> Result<Tensor> {
-        let dims = input.shape().clone();
-        let output = self.ctx.allocate_output(dims, DType::BF16)?;
-        ops::elementwise_activation(&self.ctx, input, &output, ops::ElementwiseActivation::Silu)?;
-        Ok(output)
+        crate::kernels::activation::silu(&self.ctx, input)
     }
 
     fn add(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
@@ -242,22 +119,11 @@ impl Backend for CudaNewBackend {
     }
 
     fn scale(&self, input: &Tensor, factor: f32) -> Result<Tensor> {
-        let dims = input.shape().clone();
-        let output = self.ctx.allocate_output(dims, DType::BF16)?;
-        ops::elementwise_scale(&self.ctx, input, &output, factor)?;
-        Ok(output)
+        crate::kernels::elementwise::scale(&self.ctx, input, factor)
     }
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        let [m, k] = rank2(a, "matmul a")?;
-        let [k2, n] = rank2(b, "matmul b")?;
-        if k != k2 {
-            return Err(Error::MatmulDimMismatch { m, k1: k, k2, n });
-        }
-        let mut output = self.ctx.allocate_output(Shape::new(vec![m, n]), DType::BF16)?;
-        let args = ops::GemmArgs::new(a, b, &mut output);
-        ops::gemm(&self.ctx, args)?;
-        Ok(output)
+        crate::kernels::gemm::matmul(&self.ctx, a, b)
     }
 
     fn rope(
@@ -280,10 +146,18 @@ impl Backend for CudaNewBackend {
         sections: [usize; 3],
         pos_ids: &[u32],
     ) -> Result<Tensor> {
-        ops::rope_apply_mrope(&self.ctx, input, n_heads, head_dim, theta, sections, pos_ids)
+        ops::rope_apply_mrope(
+            &self.ctx, input, n_heads, head_dim, theta, sections, pos_ids,
+        )
     }
 
-    fn layer_norm(&self, input: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Result<Tensor> {
+    fn layer_norm(
+        &self,
+        input: &Tensor,
+        weight: &Tensor,
+        bias: &Tensor,
+        eps: f32,
+    ) -> Result<Tensor> {
         let dims = input.shape().clone();
         let mut output = self.ctx.allocate_output(dims, DType::BF16)?;
         let args = ops::LayerNormArgs::new(input, weight, bias, &mut output, eps);
@@ -292,15 +166,7 @@ impl Backend for CudaNewBackend {
     }
 
     fn gelu_tanh(&self, input: &Tensor) -> Result<Tensor> {
-        let dims = input.shape().clone();
-        let output = self.ctx.allocate_output(dims, DType::BF16)?;
-        ops::elementwise_activation(
-            &self.ctx,
-            input,
-            &output,
-            ops::ElementwiseActivation::GeluTanh,
-        )?;
-        Ok(output)
+        crate::kernels::activation::gelu_tanh(&self.ctx, input)
     }
 
     fn add_bias(&self, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
@@ -322,14 +188,55 @@ impl Backend for CudaNewBackend {
     }
 
     fn concat_2d(&self, tensors: &[&Tensor]) -> Result<Tensor> {
+        use apxinf_core::Shape;
         if tensors.is_empty() {
             return Err(Error::Other("concat_2d: empty input".into()));
         }
-        let mut result = tensors[0].clone();
-        for tensor in &tensors[1..] {
-            result = ops::concat_rows(&self.ctx, &result, tensor)?;
+        let dtype = tensors[0].dtype();
+        let dims = tensors[0].shape().dims();
+        if dims.len() != 2 {
+            return Err(Error::Other(format!(
+                "concat_2d: expected 2D, got {}D",
+                dims.len()
+            )));
         }
-        Ok(result)
+        let rows = dims[0];
+        let total_cols = tensors.iter().try_fold(0usize, |total, tensor| {
+            let dims = tensor.shape().dims();
+            if dims.len() != 2 || dims[0] != rows || tensor.dtype() != dtype {
+                return Err(Error::Other("concat_2d: shape/dtype mismatch".into()));
+            }
+            total
+                .checked_add(dims[1])
+                .ok_or_else(|| Error::Other("concat_2d: column count overflow".into()))
+        })?;
+        let elem = dtype.size_in_bytes();
+        let dst_pitch = total_cols
+            .checked_mul(elem)
+            .ok_or_else(|| Error::Other("concat_2d: destination pitch overflow".into()))?;
+        let bytes = rows
+            .checked_mul(dst_pitch)
+            .ok_or_else(|| Error::Other("concat_2d: output size overflow".into()))?;
+        let output = crate::workspace::output_buffer(&self.ctx, bytes)?;
+        let mut col_offset = 0usize;
+        for tensor in tensors {
+            let cols = tensor.shape().dims()[1];
+            let width = cols
+                .checked_mul(elem)
+                .ok_or_else(|| Error::Other("concat_2d: source pitch overflow".into()))?;
+            crate::transfers::copy_tensor_2d_to_buffer(
+                &self.ctx,
+                tensor,
+                &output,
+                col_offset * elem,
+                dst_pitch,
+                width,
+                width,
+                rows,
+            )?;
+            col_offset += cols;
+        }
+        Ok(output.into_tensor(Shape::new(vec![rows, total_cols]), dtype))
     }
 
     fn vision_sdpa(
@@ -342,16 +249,26 @@ impl Backend for CudaNewBackend {
         _head_dim: usize,
     ) -> Result<Tensor> {
         // [seq, heads, dim] -> [1, seq, heads, dim] dense non-causal attention.
-        let q4 = q.reshape(vec![1, q.shape().dims()[0], q.shape().dims()[1], q.shape().dims()[2]])?;
-        let k4 = k.reshape(vec![1, k.shape().dims()[0], k.shape().dims()[1], k.shape().dims()[2]])?;
-        let v4 = v.reshape(vec![1, v.shape().dims()[0], v.shape().dims()[1], v.shape().dims()[2]])?;
-        let mut out = self
-            .ctx
-            .allocate_output(q4.shape().clone(), DType::BF16)?;
-        ops::attention(
-            &self.ctx,
-            ops::AttentionArgs::new(&q4, &k4, &v4, &mut out),
-        )?;
+        let q4 = q.reshape(vec![
+            1,
+            q.shape().dims()[0],
+            q.shape().dims()[1],
+            q.shape().dims()[2],
+        ])?;
+        let k4 = k.reshape(vec![
+            1,
+            k.shape().dims()[0],
+            k.shape().dims()[1],
+            k.shape().dims()[2],
+        ])?;
+        let v4 = v.reshape(vec![
+            1,
+            v.shape().dims()[0],
+            v.shape().dims()[1],
+            v.shape().dims()[2],
+        ])?;
+        let mut out = self.ctx.allocate_output(q4.shape().clone(), DType::BF16)?;
+        ops::attention(&self.ctx, ops::AttentionArgs::new(&q4, &k4, &v4, &mut out))?;
         let dims = out.shape().dims().to_vec();
         Ok(out.reshape(vec![dims[1], dims[2] * dims[3]])?)
     }
@@ -365,8 +282,8 @@ impl Backend for CudaNewBackend {
             .iter()
             .flat_map(|&id| (id as i32).to_ne_bytes())
             .collect();
-        let ids_buffer = crate::CudaBuffer::alloc(ids_i32.len(), self.ctx.device_id())
-            .map_err(Error::Cuda)?;
+        let ids_buffer =
+            crate::CudaBuffer::alloc(ids_i32.len(), self.ctx.device_id()).map_err(Error::Cuda)?;
         ids_buffer.copy_from_host(&ids_i32).map_err(Error::Cuda)?;
         let ids_tensor = ids_buffer
             .as_tensor(Shape::new(vec![ids.len()]), DType::I32)
@@ -486,7 +403,9 @@ impl CudaNewBackend {
         }
         let seq_len = q_dims[0];
         if seq_len == 0 || kv_len < seq_len {
-            return Err(Error::Other("attention kv_len is smaller than the query".into()));
+            return Err(Error::Other(
+                "attention kv_len is smaller than the query".into(),
+            ));
         }
         let q4 = q.reshape(vec![1, seq_len, n_heads, head_dim])?;
         let key = cache.key(layer_idx);
@@ -512,5 +431,73 @@ impl apxinf_core::SamplingBackend for CudaNewBackend {
 
     fn create_normal_generator(&self, output: Tensor) -> Result<Box<dyn NormalGenerator>> {
         crate::sampling::create_normal_generator(&self.ctx, output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::Arc;
+
+    use apxinf_core::{Backend, Shape, Tensor};
+    use half::bf16;
+
+    use super::*;
+
+    #[test]
+    fn concat_2d_concatenates_columns() {
+        let _guard = crate::CUDA_TEST_LOCK.lock().unwrap();
+        let backend = CudaNewBackend::new(Arc::new(CudaContext::new(0).unwrap()));
+        let left = Tensor::from_bf16(
+            Shape::new(vec![2, 2]),
+            &[
+                bf16::from_f32(1.0),
+                bf16::from_f32(2.0),
+                bf16::from_f32(3.0),
+                bf16::from_f32(4.0),
+            ],
+        )
+        .unwrap();
+        let right = Tensor::from_bf16(
+            Shape::new(vec![2, 1]),
+            &[bf16::from_f32(5.0), bf16::from_f32(6.0)],
+        )
+        .unwrap();
+        let left = backend.to_device(&left).unwrap();
+        let right = backend.to_device(&right).unwrap();
+
+        let output = backend.concat_2d(&[&left, &right]).unwrap();
+        backend.synchronize().unwrap();
+        let output = backend.to_cpu(&output).unwrap();
+
+        assert_eq!(output.shape().dims(), [2, 3]);
+        let actual: Vec<f32> = output
+            .as_bf16()
+            .unwrap()
+            .iter()
+            .map(|value| value.to_f32())
+            .collect();
+        assert_eq!(actual, [1.0, 2.0, 5.0, 3.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn capture_graph_aborts_after_panic() {
+        let _guard = crate::CUDA_TEST_LOCK.lock().unwrap();
+        let backend = CudaNewBackend::new(Arc::new(CudaContext::new(0).unwrap()));
+        let panicked = catch_unwind(AssertUnwindSafe(|| {
+            let _ = backend.capture_graph::<()>(|| panic!("capture failure"));
+        }));
+        assert!(panicked.is_err());
+
+        let buffer = crate::CudaBuffer::alloc(16, backend.device_id()).unwrap();
+        let (graph, ()) = backend
+            .capture_graph(|| {
+                buffer
+                    .zero_async(backend.context().stream())
+                    .map_err(Error::Cuda)
+            })
+            .unwrap();
+        graph.replay().unwrap();
+        backend.synchronize().unwrap();
     }
 }

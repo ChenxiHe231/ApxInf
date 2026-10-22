@@ -183,6 +183,7 @@ size_t cutlass_geglu_resource_requirements(const Spec& spec);
 size_t cutlass_bf16_swiglu_resource_requirements(const Spec& spec);
 void destroy_cutlass(Execution& execution) noexcept;
 cudaError_t launch_cutlass_fp8_gemm(Execution& execution);
+cudaError_t launch_cutlass_fp8_rowwise_gemm(Execution& execution);
 cudaError_t launch_cutlass_w8a8(Execution& execution);
 cudaError_t launch_cutlass_fp8_geglu(Execution& execution);
 cudaError_t launch_cutlass_bf16_geglu(Execution& execution);

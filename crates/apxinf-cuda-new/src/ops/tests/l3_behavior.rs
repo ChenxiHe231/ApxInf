@@ -482,6 +482,31 @@ fn gemm_bias_has_its_own_semantic_api() {
 }
 
 #[test]
+fn gemm_bias_rounds_once_after_bias_for_bf16_output() {
+    use apxinf_core::DType;
+
+    let ctx = CudaContext::new(0).unwrap();
+    let a = tensor(0, vec![1, 1], &[1.0078125]);
+    let b = tensor(0, vec![1, 1], &[1.0078125]);
+    let bias = tensor(0, vec![1], &[0.00390625]);
+    let mut out = zeros_tensor(0, vec![1, 1], DType::BF16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.policy.online_tune = false;
+    gemm_bias(
+        &ctx,
+        GemmBiasArgs {
+            gemm: args,
+            bias: &bias,
+        },
+    )
+    .unwrap();
+
+    // round_bf16(a*b + bias) is 1.0234375. Rounding a*b to BF16 first
+    // lands on a tie after adding bias and incorrectly returns 1.015625.
+    assert_eq!(values(&out), [1.0234375]);
+}
+
+#[test]
 fn packed_qkv_attention_uses_static_metadata_and_replays_numeric_output() {
     let ctx = CudaContext::new(0).unwrap();
     let (batch, tokens, heads, head_dim) = (2, 256, 16, 72);

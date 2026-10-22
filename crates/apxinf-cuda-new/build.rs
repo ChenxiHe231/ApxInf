@@ -178,10 +178,50 @@ fn run(command: &mut Command, action: &str) {
     assert!(status.success(), "{action} failed with {status}");
 }
 
+fn configure_nvtx(cuda: &str, library_directories: &[PathBuf]) {
+    if env::var_os("CARGO_FEATURE_NVTX").is_none() {
+        return;
+    }
+    let header = PathBuf::from(cuda).join("include/nvtx3/nvToolsExt.h");
+    if header.is_file() {
+        let adapter =
+            PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("native/adapters/nvtx.c");
+        println!("cargo:rerun-if-changed={}", adapter.display());
+        println!("cargo:rerun-if-changed={}", header.display());
+        cc::Build::new()
+            .file(adapter)
+            .include(PathBuf::from(cuda).join("include"))
+            .compile("apxinf_nvtx");
+        println!("cargo:rustc-link-lib=dl");
+        println!("cargo:rustc-cfg=nvtx_header");
+        return;
+    }
+    let has_v3 = library_directories.iter().any(|directory| {
+        directory.join("libnvtx3interop.so").is_file()
+            || directory.join("libnvtx3interop.so.1").is_file()
+    });
+    let has_v2 = library_directories.iter().any(|directory| {
+        directory.join("libnvToolsExt.so").is_file()
+            || directory.join("libnvToolsExt.so.1").is_file()
+    });
+    if has_v3 {
+        println!("cargo:rustc-cfg=nvtx_v3");
+    } else if has_v2 {
+        println!("cargo:rustc-cfg=nvtx_v2");
+    } else {
+        println!(
+            "cargo:warning=NVTX unavailable: no NVTX3 header or legacy library; markers disabled"
+        );
+    }
+}
+
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(apxinf_nvfp4_gemm_swiglu)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_qwen_drive_sm110)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_decode)");
+    println!("cargo:rustc-check-cfg=cfg(nvtx_header)");
+    println!("cargo:rustc-check-cfg=cfg(nvtx_v2)");
+    println!("cargo:rustc-check-cfg=cfg(nvtx_v3)");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH");
@@ -213,6 +253,7 @@ fn main() {
     for directory in &library_directories {
         println!("cargo:rustc-link-search=native={}", directory.display());
     }
+    configure_nvtx(&cuda, &library_directories);
 
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
     let host = env::var("HOST").unwrap_or_default();
@@ -708,6 +749,8 @@ fn main() {
                     "-DAPXINF_FMHA_KV_STAGES=4",
                     "-DAPXINF_SKIP_PAD_QSTAGE=1",
                     "-DAPXINF_P_CHUNKS16=1",
+                    // The captured WallOSS/Qwen vision gates pin the separate
+                    // RN rescale to preserve the translated row-sum arithmetic.
                     "-DAPXINF_ROWSUM_RESCALE_RN=1",
                 ]);
             }
