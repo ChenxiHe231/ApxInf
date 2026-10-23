@@ -1,4 +1,4 @@
-//! Legacy `kernels::fused` names over cuda-new norm operators.
+//! Fused residual, normalization, and quantization operators.
 
 use apxinf_core::{DType, Result, Shape, Tensor};
 

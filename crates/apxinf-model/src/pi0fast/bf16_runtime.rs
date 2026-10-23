@@ -18,9 +18,9 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
-use super::backend::{kernels, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
+use super::backend::{ops, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
 use apxinf_core::{Error, Result, Tensor};
-use kernels::{cache, elementwise, embedding, gemm, norm, sampling, GraphWorkspace};
+use ops::{cache, elementwise, embedding, gemm, norm, sampling, ExecutionSession};
 
 use super::calibration::Pi0FastCalibrationObserver;
 use super::{
@@ -30,7 +30,7 @@ use super::{
 
 /// Conservative arena reservation for one `infer` traversal.
 ///
-/// [`GraphWorkspace`] is a bump arena: every buffer `output_buffer` hands out
+/// [`ExecutionSession`] is a bump arena: every buffer `output_buffer` hands out
 /// during a call stays live until the scope ends, so the capacity has to cover
 /// the *sum* of the call's intermediates rather than their peak. The estimate
 /// follows `infer_arena` op by op and is deliberately generous; an
@@ -111,7 +111,7 @@ pub struct Pi0FastBf16Runtime {
     lm_head_remap: CudaBuffer,
     /// Persistent arena for the per-call intermediates. Without it every
     /// intermediate is a raw `cudaMalloc`/`cudaFree` pair.
-    arena: Mutex<Option<GraphWorkspace>>,
+    arena: Mutex<Option<ExecutionSession>>,
 }
 
 impl Pi0FastBf16Runtime {
@@ -158,9 +158,9 @@ impl Pi0FastBf16Runtime {
             .as_ref()
             .is_none_or(|workspace| workspace.capacity() < capacity)
         {
-            *arena = Some(GraphWorkspace::new(capacity, self.ctx().device_id())?);
+            *arena = Some(ExecutionSession::with_capacity(capacity, self.ctx().device_id())?);
         }
-        kernels::with_workspace_eager(arena.as_ref().expect("arena is populated above"), operation)
+        ops::prepare_with_session(arena.as_ref().expect("arena is populated above"), operation)
     }
 
     /// Bytes of the arena the last call used.
@@ -252,7 +252,7 @@ impl Pi0FastBf16Runtime {
             &self.config,
             &self.weights,
         )?);
-        let _guard = kernels::gemm::install_bf16_observer(observer.clone())?;
+        let _guard = ops::gemm::install_bf16_observer(observer.clone())?;
         let _ = self.infer(patches, token_ids, token_count, stop_token)?;
         self.backend.synchronize()?;
         observer.records()

@@ -1,4 +1,5 @@
 pub(crate) mod contracts;
+mod fixed;
 mod gemm;
 mod gemm_bias;
 mod gemm_bias_residual;
@@ -9,6 +10,7 @@ mod gemm_swiglu;
 mod nvfp4_scales;
 
 pub use contracts::{GemmArgs, GemmPolicy, GemmQuantization, WeightVersion};
+pub use fixed::*;
 pub use gemm::gemm;
 pub use gemm_bias::{gemm_bias, GemmBiasArgs};
 pub use gemm_bias_residual::{gemm_bias_residual, GemmBiasResidualArgs};

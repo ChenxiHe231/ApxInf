@@ -8,9 +8,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::backend::{kernels, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
+use super::backend::{ops, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
 use apxinf_core::{Error, Result, Tensor};
-use kernels::{cache, elementwise, embedding, norm, sampling, GraphWorkspace};
+use ops::{cache, elementwise, embedding, norm, sampling, ExecutionSession};
 
 use super::bf16_executor::vision_patch_embed_f32_bf16;
 use super::fp8_executor::fp8_projection;
@@ -95,7 +95,7 @@ pub struct Pi0FastFp8Runtime {
     /// Maps the pruned LM-head columns back to global token ids; see
     /// [`super::action_head_remap`].
     lm_head_remap: CudaBuffer,
-    arena: Mutex<Option<GraphWorkspace>>,
+    arena: Mutex<Option<ExecutionSession>>,
 }
 
 impl Pi0FastFp8Runtime {
@@ -149,9 +149,9 @@ impl Pi0FastFp8Runtime {
             .as_ref()
             .is_none_or(|workspace| workspace.capacity() < capacity)
         {
-            *arena = Some(GraphWorkspace::new(capacity, self.ctx().device_id())?);
+            *arena = Some(ExecutionSession::with_capacity(capacity, self.ctx().device_id())?);
         }
-        kernels::with_workspace_eager(arena.as_ref().expect("arena is populated above"), operation)
+        ops::prepare_with_session(arena.as_ref().expect("arena is populated above"), operation)
     }
 
     pub fn max_sequence(&self, token_count: usize) -> usize {

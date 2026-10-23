@@ -1,9 +1,9 @@
 //! One BF16 Blocks implementation: vision, hybrid backbone and planning expert.
 //! Layer mathematics and physical state descriptions; no graph capture policy.
 use super::DirectExecution;
-use crate::qwen_drive::backend::kernels::fixed_profile::FIXED_SCENE_TOKENS;
+use crate::qwen_drive::FIXED_SCENE_TOKENS;
 use crate::qwen_drive::backend::{
-    kernels, nvtx, ops, transfers, Context, CublasTranspose, DeviceBuffer, RuntimeBackend,
+    nvtx, ops, transfers, Context, CublasTranspose, DeviceBuffer, RuntimeBackend,
 };
 use crate::qwen_drive::config::QwenDriveConfig;
 use crate::qwen_drive::inputs::ExpertConditioning;
@@ -11,7 +11,7 @@ use crate::qwen_drive::weights::bf16::{
     BackboneDeviceWeights, ExpertDeviceWeights, GdnInputSplitWeights, MixerWeights,
 };
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
-use kernels::{elementwise, embedding, gemm, linear_attention as la};
+use ops::{elementwise, embedding, gemm, linear_attention as la};
 use std::sync::Arc;
 const GDN_CHUNK: usize = 64;
 
@@ -88,7 +88,7 @@ fn device_tensor(ctx: &Context, shape: &[usize], dtype: DType) -> Result<Tensor>
     let bytes = elements
         .checked_mul(dtype.size_in_bytes())
         .ok_or_else(|| Error::Other("qwen_drive: tensor size overflow".into()))?;
-    let buffer = kernels::scratch_buffer(ctx, bytes.max(1))?;
+    let buffer = ops::scratch_buffer(ctx, bytes.max(1))?;
     buffer
         .as_tensor(Shape::new(shape.to_vec()), dtype)
         .map_err(Error::Cuda)
@@ -200,12 +200,12 @@ fn noncausal_kv_gqa_l3(
 }
 
 fn alloc_zeros(ctx: &Context, bytes: usize) -> Result<DeviceBuffer> {
-    kernels::scratch_buffer_zeroed(ctx, bytes.max(1))
+    ops::scratch_buffer_zeroed(ctx, bytes.max(1))
 }
 
 /// Scan scratch shaped `[heads, seq_pad, width]`.
 ///
-/// The prep kernels write one row per token and leave the rows that round the
+/// The prep ops write one row per token and leave the rows that round the
 /// sequence up to a chunk multiple, so those rows are the only ones the arena
 /// has to clear. At the shipped prefill that is 7 rows of 3392, and clearing
 /// all of them instead was 25.6 ms a request.
@@ -217,9 +217,9 @@ fn alloc_scan_scratch(
     width_bytes: usize,
 ) -> Result<DeviceBuffer> {
     if seq_pad == seq {
-        return kernels::scratch_buffer(ctx, (heads * seq_pad * width_bytes).max(1));
+        return ops::scratch_buffer(ctx, (heads * seq_pad * width_bytes).max(1));
     }
-    kernels::scratch_buffer_tail_zeroed(ctx, heads, seq_pad * width_bytes, seq * width_bytes)
+    ops::scratch_buffer_tail_zeroed(ctx, heads, seq_pad * width_bytes, seq * width_bytes)
 }
 
 /// Fixed tuned GDN input projection into the original packed row stride.
@@ -840,7 +840,7 @@ impl BackboneBf16 {
                     ctx,
                     num_v_heads * chunks * GDN_CHUNK * GDN_CHUNK * DType::F32.size_in_bytes(),
                 )?;
-                // t, vt and kcd are written through __float2bfloat16 by the kernels
+                // t, vt and kcd are written through __float2bfloat16 by the ops
                 // that produce them and read by the scan alone, so they are held at
                 // the width they carry. a stays fp32: the triangular inverse works
                 // on it in place.
@@ -854,7 +854,7 @@ impl BackboneBf16 {
                 let bf16_bytes = DType::BF16.size_in_bytes();
                 let vt_buf = scan(head_v * bf16_bytes)?;
                 let kcd_buf = scan(head_k * bf16_bytes)?;
-                // Covers the q/k/v/beta/g preparation kernels and the scan's own
+                // Covers the q/k/v/beta/g preparation ops and the scan's own
                 // zeroed allocations, which sit between conv_silu and cumsum.
 
                 la::gdn_cumsum(ctx, &g_buf, &g_cum, seq_pad, num_v_heads, GDN_CHUNK)?;
@@ -1240,8 +1240,8 @@ impl BackboneBf16 {
 pub(super) mod vision {
     use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-    use crate::qwen_drive::backend::{kernels, nvtx, ops, transfers, Context, DeviceBuffer};
-    use kernels::{activation, elementwise, fused, gemm, linear_attention as la, norm};
+    use crate::qwen_drive::backend::{nvtx, ops, transfers, Context, DeviceBuffer};
+    use ops::{activation, elementwise, fused, gemm, linear_attention as la, norm};
 
     use crate::qwen_drive::config::QwenDriveConfig;
     use crate::qwen_drive::weights::bf16::VisionDeviceWeights;
@@ -1645,8 +1645,8 @@ pub(crate) mod expert {
     use super::FIXED_SCENE_TOKENS;
     use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-    use crate::qwen_drive::backend::{kernels, nvtx, transfers, Context, DeviceBuffer};
-    use kernels::{activation, elementwise, embedding, fused, gemm, linear_attention as la, norm};
+    use crate::qwen_drive::backend::{ops, nvtx, transfers, Context, DeviceBuffer};
+    use ops::{activation, elementwise, embedding, fused, gemm, linear_attention as la, norm};
 
     use crate::qwen_drive::config::{PlanningExpertConfig, QwenDriveConfig};
     use crate::qwen_drive::inputs::ExpertConditioning;
@@ -1677,7 +1677,7 @@ pub(crate) mod expert {
         let bytes = elements
             .checked_mul(dtype.size_in_bytes())
             .ok_or_else(|| Error::Other("qwen_drive expert: tensor size overflow".into()))?;
-        let buffer = kernels::scratch_buffer(ctx, bytes.max(1))?;
+        let buffer = ops::scratch_buffer(ctx, bytes.max(1))?;
         buffer
             .as_tensor(Shape::new(shape.to_vec()), dtype)
             .map_err(Error::Cuda)
@@ -1862,7 +1862,7 @@ pub(crate) mod expert {
                 "qwen_drive expert: invalid condition batch shape".into(),
             ));
         }
-        let conditions_buffer = kernels::scratch_buffer(ctx, bytes)?;
+        let conditions_buffer = ops::scratch_buffer(ctx, bytes)?;
         let conditions = conditions_buffer
             .as_tensor(Shape::new(vec![steps, hidden_size]), DType::BF16)
             .map_err(Error::Cuda)?;
@@ -2400,8 +2400,8 @@ pub(crate) struct DirectInputs {
 pub(crate) struct RawRgbInput {
     pub bytes: DeviceBuffer,
     pub lut: DeviceBuffer,
-    pub frames: Vec<kernels::preprocess::RgbRectFrame>,
-    pub resize: Option<kernels::pillow_bicubic::PillowBicubicRgbPlan>,
+    pub frames: Vec<ops::preprocess::RgbRectFrame>,
+    pub resize: Option<ops::pillow_bicubic::PillowBicubicRgbPlan>,
 }
 
 fn tensor(ctx: &Context, shape: &[usize], dtype: DType) -> Result<Tensor> {
@@ -2537,7 +2537,7 @@ impl DirectInputs {
                     .as_ref()
                     .map(|resize| resize.final_rgb())
                     .unwrap_or(&rgb.bytes);
-                kernels::preprocess::rgb_u8_to_temporal2_merge2_rect_bf16(
+                ops::preprocess::rgb_u8_to_temporal2_merge2_rect_bf16(
                     ctx,
                     rgb_buffer,
                     &self.pixels,
@@ -2555,13 +2555,13 @@ impl DirectInputs {
         })?;
         execution.run(&mut || {
             let _stage = nvtx::range("qwen_drive/language");
-            let text_embed = kernels::embedding::lookup(
+            let text_embed = ops::embedding::lookup(
                 ctx,
                 &b.weights.embed_tokens,
                 &self.tokens,
                 self.token_count,
             )?;
-            let embedded = kernels::elementwise::replace_rows_bf16(
+            let embedded = ops::elementwise::replace_rows_bf16(
                 ctx,
                 &text_embed,
                 &self.visual_output,

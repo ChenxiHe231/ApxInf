@@ -1,4 +1,4 @@
-//! Legacy `kernels::norm` names over cuda-new norm operators.
+//! Allocating and caller-owned normalization operators.
 
 use apxinf_core::{DType, Result, Shape, Tensor};
 
@@ -8,7 +8,7 @@ use crate::{ops, CudaContext};
 /// `[cols]` scale.
 ///
 /// Routes to `ops::norm::rms_norm` (the plain `x/rms * weight` contract the
-/// legacy `kernels::norm::rms_bf16` implements). The `ops::mlp::rms_norm`
+/// legacy plain RMS wrapper implements). The `ops::mlp::rms_norm`
 /// operator is a different, Gemma/Qwen3.5-convention norm that applies
 /// `(1 + weight)` and must not be used here.
 pub fn rms_bf16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
@@ -39,7 +39,7 @@ pub fn rms_quantize_rows_bf16_e4m3(
     weight: &Tensor,
     eps: f32,
     output_cols: usize,
-) -> Result<super::quantization::DynamicFp8Tensor> {
+) -> Result<crate::ops::quantization::DynamicFp8Tensor> {
     use crate::ffi::abi::{quant_fused as abi, status};
     use crate::CudaBuffer;
     let dims = input.shape().dims();
@@ -76,7 +76,7 @@ pub fn rms_quantize_rows_bf16_e4m3(
             ctx.stream().handle(),
         ))?;
     }
-    Ok(super::quantization::DynamicFp8Tensor { values, scales })
+    Ok(crate::ops::quantization::DynamicFp8Tensor { values, scales })
 }
 
 /// `adaptive_layer`: adaptive LayerNorm — `norm(x) * (1 + scale) + shift`,
@@ -281,13 +281,13 @@ pub fn layer_quant_bf16_e4m3(
 
 // ── smolvla FP16 surface ────────────────────────────────────────────────────
 //
-// Ported verbatim from the legacy `kernels::norm` FP16 wrappers over the
+// Ported verbatim from the legacy FP16 normalization wrappers over the
 // `apxinf_transformer_f16_*` launchers (native/adapters/norm/fixed_f16.cu).
 
 /// `rms_f16`: RMS-normalize a `[rows, cols]` FP16 activation with a plain
 /// `[cols]` scale (the Xavier FP16 path).
 pub fn rms_f16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    use super::contracts::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
+    use crate::ops::validation::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
     use crate::ffi::abi::transformer_f16 as abi;
     use apxinf_core::Error;
     let (rows, cols) = matrix_shape(input, "RMSNorm")?;
@@ -301,7 +301,7 @@ pub fn rms_f16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> 
     }
     let output = f16_output(ctx, rows, cols)?;
     unsafe {
-        super::contracts::check_cuda(abi::apxinf_transformer_f16_rms_norm_f16(
+        crate::ops::validation::check_cuda(abi::apxinf_transformer_f16_rms_norm_f16(
             gpu_ptr(input)?,
             gpu_ptr(weight)?,
             output.ptr(),
@@ -327,7 +327,7 @@ pub fn layer_f16(
     bias: &Tensor,
     eps: f32,
 ) -> Result<Tensor> {
-    use super::contracts::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
+    use crate::ops::validation::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
     use crate::ffi::abi::transformer_f16 as abi;
     use apxinf_core::Error;
     let (rows, cols) = matrix_shape(input, "LayerNorm")?;
@@ -343,7 +343,7 @@ pub fn layer_f16(
     }
     let output = f16_output(ctx, rows, cols)?;
     unsafe {
-        super::contracts::check_cuda(abi::apxinf_transformer_f16_layer_norm_f16(
+        crate::ops::validation::check_cuda(abi::apxinf_transformer_f16_layer_norm_f16(
             gpu_ptr(input)?,
             gpu_ptr(weight)?,
             gpu_ptr(bias)?,
@@ -376,7 +376,7 @@ pub fn rms_into(
     rows: usize,
     eps: f32,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_buffers, require_finite};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers, require_finite};
     use crate::ffi::abi::llm_decode as abi;
     use apxinf_core::Error;
     require_finite("RMSNorm", &[eps])?;
@@ -438,7 +438,7 @@ pub fn residual_add_rms_bf16_into(
     rows: usize,
     eps: f32,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_buffers, require_finite};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers, require_finite};
     use crate::ffi::abi::llm_decode as abi;
     require_finite("residual RMSNorm", &[eps])?;
     let matrix = checked_bytes(DType::BF16, &[rows, cols], "residual RMSNorm")?;

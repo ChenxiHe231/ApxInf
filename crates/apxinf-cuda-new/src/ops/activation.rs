@@ -1,4 +1,4 @@
-//! Legacy `kernels::activation` names over cuda-new pointwise operators.
+//! Activation operators and direct-launch specializations.
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
@@ -361,12 +361,12 @@ pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor
 
 // ── smolvla FP16 surface ────────────────────────────────────────────────────
 //
-// Ported verbatim from the legacy `kernels::activation` FP16 wrappers over the
+// Ported verbatim from the legacy FP16 activation wrappers over the
 // `apxinf_transformer_f16_*` launchers (native/adapters/activation/fixed_f16.cu).
 
 /// `swiglu_f16`: FP16 SwiGLU over packed `[rows, 2*inner]` gate/up halves.
 pub fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
-    use super::contracts::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
+    use super::validation::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
     use crate::ffi::abi::transformer_f16 as abi;
     let (rows, twice_inner) = matrix_shape(gate_up, "SwiGLU")?;
     if gate_up.dtype() != DType::F16 || twice_inner % 2 != 0 {
@@ -399,7 +399,7 @@ pub fn bias_gelu_f16(
     input: &Tensor,
     value: Option<&Tensor>,
 ) -> Result<Tensor> {
-    use super::contracts::{
+    use super::validation::{
         check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
     };
     use crate::ffi::abi::transformer_f16 as abi;
@@ -432,7 +432,7 @@ pub fn bias_gelu_f16(
 
 /// `bias_silu_f16`: optional-bias SiLU over an FP16 matrix.
 pub fn bias_silu_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
-    use super::contracts::{
+    use super::validation::{
         check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
     };
     use crate::ffi::abi::transformer_f16 as abi;
@@ -477,7 +477,7 @@ pub fn silu_into(
     output: &crate::CudaBuffer,
     count: usize,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_buffers};
+    use super::validation::{check_cuda, checked_bytes, require_buffers};
     use crate::ffi::abi::llm_decode as abi;
     let bytes = checked_bytes(dtype, &[count], "decode SiLU")?;
     require_buffers(
@@ -516,7 +516,7 @@ pub fn silu_mul_bf16_into(
     output: &crate::CudaBuffer,
     intermediate: usize,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_buffers};
+    use super::validation::{check_cuda, checked_bytes, require_buffers};
     use crate::ffi::abi::llm_decode as abi;
     require_buffers(
         ctx,

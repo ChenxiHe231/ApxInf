@@ -17,8 +17,7 @@ use apxinf_core::{
     TokenSampler, TokenSamplingSpec,
 };
 
-use crate::ops;
-use crate::{kernels, CudaContext, CudaKvCache};
+use crate::{ops, CudaContext, CudaKvCache};
 
 /// The cuda-new backend returned to `dyn Backend` consumers.
 pub struct CudaNewBackend {
@@ -111,18 +110,18 @@ impl CudaNewBackend {
 
 impl Backend for CudaNewBackend {
     fn rms_norm(&self, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        crate::kernels::norm::rms_bf16(&self.ctx, input, weight, eps)
+        ops::norm::rms_bf16(&self.ctx, input, weight, eps)
     }
 
     fn silu(&self, input: &Tensor) -> Result<Tensor> {
-        crate::kernels::activation::silu(&self.ctx, input)
+        ops::activation::silu(&self.ctx, input)
     }
 
     fn add(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         // Dtype-dispatching like the legacy backend: smolvla's Xavier FP16
         // path adds residuals through `Backend::add`. BF16 keeps the exact
         // cuda-new operator route it had before.
-        crate::kernels::elementwise::add(&self.ctx, a, b)
+        ops::elementwise::add(&self.ctx, a, b)
     }
 
     fn mul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
@@ -133,11 +132,11 @@ impl Backend for CudaNewBackend {
     }
 
     fn scale(&self, input: &Tensor, factor: f32) -> Result<Tensor> {
-        crate::kernels::elementwise::scale(&self.ctx, input, factor)
+        ops::elementwise::scale(&self.ctx, input, factor)
     }
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        crate::kernels::gemm::matmul(&self.ctx, a, b)
+        ops::gemm::matmul(&self.ctx, a, b)
     }
 
     fn rope(
@@ -180,7 +179,7 @@ impl Backend for CudaNewBackend {
     }
 
     fn gelu_tanh(&self, input: &Tensor) -> Result<Tensor> {
-        crate::kernels::activation::gelu_tanh(&self.ctx, input)
+        ops::activation::gelu_tanh(&self.ctx, input)
     }
 
     fn add_bias(&self, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
@@ -435,7 +434,7 @@ impl CudaNewBackend {
                 "attention kv_len is smaller than the query".into(),
             ));
         }
-        kernels::attention::sdpa(
+        ops::attention::sdpa(
             &self.ctx,
             q,
             kv,

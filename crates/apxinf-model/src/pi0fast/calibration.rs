@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use apxinf_core::{Error, Result, Tensor};
-use apxinf_cuda_new::kernels::gemm::Bf16ActivationObserver;
+use apxinf_cuda_new::ops::gemm::Bf16ActivationObserver;
 
 use super::backend::RuntimeBackend;
 use super::fp8_calibration::Pi0FastCalibrationPlan;

@@ -38,13 +38,13 @@ fn scan_scratch(
     width_bytes: usize,
 ) -> Result<CudaBuffer> {
     if seq_pad == seq {
-        return crate::kernels::scratch_buffer(ctx, (heads * seq_pad * width_bytes).max(1));
+        return crate::ops::scratch_buffer(ctx, (heads * seq_pad * width_bytes).max(1));
     }
-    crate::kernels::scratch_buffer_tail_zeroed(ctx, heads, seq_pad * width_bytes, seq * width_bytes)
+    crate::ops::scratch_buffer_tail_zeroed(ctx, heads, seq_pad * width_bytes, seq * width_bytes)
 }
 
 fn zeroed(ctx: &CudaContext, bytes: usize) -> Result<CudaBuffer> {
-    crate::kernels::scratch_buffer_zeroed(ctx, bytes.max(1))
+    crate::ops::scratch_buffer_zeroed(ctx, bytes.max(1))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -75,7 +75,7 @@ pub fn gdn_first_prefill(ctx: &CudaContext, args: GdnFirstPrefillArgs<'_>) -> Re
         return Err(invalid("invalid first-prefill GDN contract"));
     }
     let final_state = CudaBuffer::from_tensor(args.final_state).map_err(Error::Cuda)?;
-    if let Some(fast) = crate::kernels::linear_attention::try_causal_conv_gdn_prefill_bf16(
+    if let Some(fast) = crate::ops::linear_attention::try_causal_conv_gdn_prefill_bf16(
         ctx,
         args.zba,
         args.conv_weight,
@@ -93,7 +93,7 @@ pub fn gdn_first_prefill(ctx: &CudaContext, args: GdnFirstPrefillArgs<'_>) -> Re
         return Ok(());
     }
 
-    use crate::kernels::linear_attention as la;
+    use crate::ops::linear_attention as la;
     let conv_out =
         ctx.allocate_output(apxinf_core::Shape::new(vec![seq, conv_width]), DType::BF16)?;
     la::causal_conv1d_silu_bf16(

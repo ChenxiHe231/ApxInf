@@ -1,7 +1,7 @@
 //! Planning request validation, device input binding and mutable execution state.
 use super::prepare::DirectPlan;
 use crate::qwen_drive::{
-    backend::{kernels, transfers, Context, DeviceBuffer},
+    backend::{ops, transfers, Context, DeviceBuffer},
     inputs::ExpertConditioning,
     model::{PlanningInput, PlanningState, QwenDriveModel, ReasoningInput, VisionState},
 };
@@ -46,7 +46,7 @@ impl QwenDriveModelRunner {
                 let ctx = backend.context();
                 let resize = valid
                     .resize_frames()
-                    .map(|frames| kernels::pillow_bicubic::PillowBicubicRgbPlan::new(ctx, &frames))
+                    .map(|frames| ops::pillow_bicubic::PillowBicubicRgbPlan::new(ctx, &frames))
                     .transpose()?;
                 let raw = if let Some(plan) = &resize {
                     plan.raw().clone()
@@ -72,7 +72,7 @@ impl QwenDriveModelRunner {
                     }
                 }
                 let rgb = resize.as_ref().map(|plan| plan.final_rgb()).unwrap_or(&raw);
-                if let Err(error) = kernels::preprocess::rgb_u8_to_temporal2_merge2_rect_bf16(
+                if let Err(error) = ops::preprocess::rgb_u8_to_temporal2_merge2_rect_bf16(
                     ctx,
                     rgb,
                     &output,
@@ -112,7 +112,7 @@ impl QwenDriveModelRunner {
                 backend
                     .create_normal_generator(noise.clone())?
                     .generate(rng)?;
-                kernels::elementwise::scale(backend.context(), &noise, c.noise_init_std)?
+                ops::elementwise::scale(backend.context(), &noise, c.noise_init_std)?
             }
         };
         let input = PlanningInput {
@@ -275,20 +275,20 @@ pub(super) struct Validated<'a> {
     pub prompt_len: usize,
 }
 impl Validated<'_> {
-    pub fn rgb_frames(&self) -> Vec<kernels::preprocess::RgbRectFrame> {
+    pub fn rgb_frames(&self) -> Vec<ops::preprocess::RgbRectFrame> {
         self.grids
             .iter()
-            .map(|g| kernels::preprocess::RgbRectFrame {
+            .map(|g| ops::preprocess::RgbRectFrame {
                 grid_h: g[1] as usize,
                 grid_w: g[2] as usize,
             })
             .collect()
     }
-    pub fn resize_frames(&self) -> Option<Vec<kernels::pillow_bicubic::RgbResizeFrame>> {
+    pub fn resize_frames(&self) -> Option<Vec<ops::pillow_bicubic::RgbResizeFrame>> {
         self.raw_resize.map(|frames| {
             frames
                 .iter()
-                .map(|f| kernels::pillow_bicubic::RgbResizeFrame {
+                .map(|f| ops::pillow_bicubic::RgbResizeFrame {
                     source_width: f.source_width,
                     source_height: f.source_height,
                     stage_width: f.stage_width,
@@ -331,7 +331,7 @@ pub(super) fn validate<'a>(
         ));
     }
     // Without a mask every token is real; a mask may pad the prompt out to a
-    // fixed length so the shape-specialised kernels stay reachable.
+    // fixed length so the shape-specialised ops stay reachable.
     let mut prompt_len = observation.token_ids.len();
     if let Some(mask) = request.metadata.attention_mask {
         if mask.len() != observation.token_ids.len() {

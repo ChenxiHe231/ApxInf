@@ -1,4 +1,4 @@
-//! Legacy `kernels::attention` names over cuda-new attention operators.
+//! Fixed and direct-launch attention operators.
 //!
 //! The legacy helpers take `[tokens, heads, head_dim]` tensors; the cuda-new
 //! Attention contract is rank-4 `[batch, tokens, heads, head_dim]`. These
@@ -152,7 +152,7 @@ fn scale_legacy(ctx: &CudaContext, input: Tensor, factor: f32) -> Result<Tensor>
     let count = u32::try_from(input.numel())
         .map_err(|_| Error::Other("attention score count exceeds u32".into()))?;
     unsafe {
-        super::contracts::check_cuda(match dtype {
+        crate::ops::validation::check_cuda(match dtype {
             DType::F32 => abi::apxinf_llmdec_scale_f32(
                 input_buffer.ptr(),
                 output.ptr(),
@@ -195,7 +195,7 @@ fn softmax_causal_legacy(
     let rows =
         u32::try_from(dims[0]).map_err(|_| Error::Other("attention rows exceed u32".into()))?;
     unsafe {
-        super::contracts::check_cuda(match input.dtype() {
+        crate::ops::validation::check_cuda(match input.dtype() {
             DType::F32 => abi::apxinf_llmdec_attention_softmax_f32(
                 input_buffer.ptr(),
                 output.ptr(),
@@ -384,7 +384,7 @@ fn fa2_direct_buffer(
     causal: bool,
     output: Option<CudaBuffer>,
 ) -> Result<Option<CudaBuffer>> {
-    use super::contracts::check_cuda;
+    use crate::ops::validation::check_cuda;
     use crate::ffi::abi::attention as abi;
     use crate::workspace::output_buffer;
 
@@ -1307,7 +1307,7 @@ pub fn try_noncausal_batched_equal(
 // FP16 entries are the cuBLAS-composed Xavier kernels, ported verbatim into
 // native/adapters/attention/fixed_f16.cu.
 
-use super::contracts::{gpu_ptr, make_gpu_tensor, matrix_shape};
+use crate::ops::validation::{gpu_ptr, make_gpu_tensor, matrix_shape};
 
 fn row_view(
     ctx: &CudaContext,
@@ -1410,7 +1410,7 @@ pub fn prefix_gqa_bf16(
     let head_width = q_shape[1] * q_shape[2];
     let shared_rows = shared_output.reshape(vec![shared_tokens, head_width])?;
     let state_rows = state_output.reshape(vec![key_tokens - shared_tokens, head_width])?;
-    super::elementwise::concat_rows_bf16(ctx, &shared_rows, &state_rows)?
+    crate::ops::elementwise::concat_rows_bf16(ctx, &shared_rows, &state_rows)?
         .reshape(vec![key_tokens, q_shape[1], q_shape[2]])
 }
 
@@ -1579,7 +1579,7 @@ pub fn prefix_gqa_f16(
     let head_width = q_shape[1] * q_shape[2];
     let shared_rows = shared_output.reshape(vec![shared_tokens, head_width])?;
     let state_rows = state_output.reshape(vec![key_tokens - shared_tokens, head_width])?;
-    super::elementwise::concat_rows_f16(ctx, &shared_rows, &state_rows)?
+    crate::ops::elementwise::concat_rows_f16(ctx, &shared_rows, &state_rows)?
         .reshape(vec![key_tokens, q_shape[1], q_shape[2]])
 }
 
@@ -1621,7 +1621,7 @@ pub fn vision_mha_f16(
         let view_output = full_gqa_f16(ctx, &view_q, &view_k, &view_v, tokens_per_view)?
             .reshape(vec![tokens_per_view, head_width])?;
         output = Some(match output {
-            Some(output) => super::elementwise::concat_rows_f16(ctx, &output, &view_output)?,
+            Some(output) => crate::ops::elementwise::concat_rows_f16(ctx, &output, &view_output)?,
             None => view_output,
         });
     }
@@ -1752,7 +1752,7 @@ pub fn sdpa(
             )
             .map_err(Error::Cuda)?;
             unsafe {
-                super::contracts::check_cuda(abi::apxinf_llmdec_kv_cache_gather_bf16(
+                crate::ops::validation::check_cuda(abi::apxinf_llmdec_kv_cache_gather_bf16(
                     src.ptr(),
                     dst.ptr(),
                     seq_len as u32,
@@ -1832,7 +1832,7 @@ pub fn softmax_f32_into(
     heads: usize,
     position: crate::CudaDeviceAddress,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_address, require_buffers};
     use crate::ffi::abi::llm_decode as abi;
     let bytes = checked_bytes(DType::F32, &[heads, cols], "attention softmax")?;
     require_buffers(
@@ -1870,7 +1870,7 @@ pub fn flash_bf16_into(
     scale: f32,
     position: crate::CudaDeviceAddress,
 ) -> Result<()> {
-    use super::contracts::{
+    use crate::ops::validation::{
         check_cuda, checked_bytes, require_address, require_buffers, require_finite,
     };
     use crate::ffi::abi::llm_decode as abi;

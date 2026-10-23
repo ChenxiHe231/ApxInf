@@ -1,4 +1,4 @@
-//! Legacy `kernels::sampling` names over cuda-new device selection kernels.
+//! Device-side token selection operators.
 
 use apxinf_core::{DType, Error, Result, Tensor};
 

@@ -1,8 +1,8 @@
 //! Native-BF16 π0-FAST transformer-layer execution.
 
-use super::backend::{kernels, Context};
+use super::backend::{ops, Context};
 use apxinf_core::{Result, Tensor};
-use kernels::{activation, attention, embedding, fused, gemm, norm, rope};
+use ops::{activation, attention, embedding, fused, gemm, norm, rope};
 
 use super::{
     Bf16DeviceLanguageLayer, Bf16DeviceVisionBlock, Pi0FastLanguageConfig,
