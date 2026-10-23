@@ -115,7 +115,7 @@ cudaError_t launch_cutlass(Execution& execution);
 void destroy_cutlass(Execution& execution) noexcept;
 #endif
 
-#if defined(APXINF_QWEN_DRIVE_SM110)
+#if defined(APXINF_SEGMENTED_ATTENTION_SM110)
 size_t qwen_d256_causal_resource_requirements(const Spec& spec,
                                                int configuration);
 void prepare_qwen_d256_causal(Execution& execution);

@@ -37,7 +37,7 @@ pub fn geglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
 /// qwen_drive checkpoint path needs; routing this name there would shift
 /// every result by up to 1 ULP.
 pub fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
-    use crate::ffi::abi::vla_la as abi;
+    use crate::ffi::abi::hybrid as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
     let dims = gate_up.shape().dims();
@@ -51,7 +51,7 @@ pub fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     let input_buffer = CudaBuffer::from_tensor(gate_up).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_cn_swiglu_bf16(
+        raw::check_cuda(abi::apxinf_hybrid_swiglu_bf16(
             input_buffer.ptr(),
             output_buffer.ptr(),
             r,
@@ -104,7 +104,7 @@ pub fn bias_relu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>)
 /// equally-shaped inputs. Mirrors the legacy `silu_mul_separate_bf16` path,
 /// whose SiLU intermediate rounds to BF16 before the multiply.
 pub fn silu_mul_bf16(ctx: &CudaContext, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
     if gate.dtype() != DType::BF16 || up.dtype() != DType::BF16 {
@@ -122,7 +122,7 @@ pub fn silu_mul_bf16(ctx: &CudaContext, gate: &Tensor, up: &Tensor) -> Result<Te
     let up_buffer = CudaBuffer::from_tensor(up).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_silu_mul_separate_bf16(
+        raw::check_cuda(abi::apxinf_transformer_bf16_silu_mul_separate_bf16(
             gate_buffer.ptr(),
             up_buffer.ptr(),
             output_buffer.ptr(),
@@ -142,7 +142,7 @@ pub fn silu_mul_quant_bf16_e4m3(
     up: &Tensor,
     scale: f32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
     if gate.dtype() != DType::BF16 || up.dtype() != DType::BF16 {
@@ -160,7 +160,7 @@ pub fn silu_mul_quant_bf16_e4m3(
     let up_buffer = CudaBuffer::from_tensor(up).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_silu_mul_quant_bf16_e4m3(
+        raw::check_cuda(abi::apxinf_transformer_bf16_silu_mul_quant_bf16_e4m3(
             gate_buffer.ptr(),
             up_buffer.ptr(),
             output_buffer.ptr(),
@@ -181,7 +181,7 @@ pub fn bias_gelu_quant_bf16_e4m3(
     bias: &Tensor,
     scale: f32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
     let dims = input.shape().dims();
@@ -210,7 +210,7 @@ pub fn bias_gelu_quant_bf16_e4m3(
     let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_bias_gelu_quant_bf16_e4m3(
+        raw::check_cuda(abi::apxinf_transformer_bf16_bias_gelu_quant_bf16_e4m3(
             input_buffer.ptr(),
             bias_buffer.ptr(),
             output_buffer.ptr(),
@@ -227,7 +227,7 @@ pub fn bias_gelu_quant_bf16_e4m3(
 /// `bias_gelu_bf16_packed8`: broadcast bias then tanh-GELU through a 16-byte
 /// packed-8 IO path. Requires a BF16 matrix with a width divisible by eight.
 pub fn bias_gelu_bf16_packed8(ctx: &CudaContext, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
     let dims = input.shape().dims();
@@ -253,7 +253,7 @@ pub fn bias_gelu_bf16_packed8(ctx: &CudaContext, input: &Tensor, bias: &Tensor) 
     let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_bias_gelu_bf16_packed8(
+        raw::check_cuda(abi::apxinf_transformer_bf16_bias_gelu_bf16_packed8(
             input_buffer.ptr(),
             bias_buffer.ptr(),
             output_buffer.ptr(),
@@ -331,7 +331,7 @@ pub fn swiglu_quantize_rows_bf16_e4m3(
 /// `swiglu_bf16_rounded`: SwiGLU whose SiLU intermediate rounds to BF16
 /// before the multiply — matching an unfused activation-then-multiply.
 pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
-    use crate::ffi::abi::vla_la as abi;
+    use crate::ffi::abi::hybrid as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
     let dims = gate_up.shape().dims();
@@ -347,7 +347,7 @@ pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor
     let input_buffer = CudaBuffer::from_tensor(gate_up).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_cn_swiglu_bf16_rounded(
+        raw::check_cuda(abi::apxinf_hybrid_swiglu_bf16_rounded(
             input_buffer.ptr(),
             output_buffer.ptr(),
             r,
@@ -362,12 +362,12 @@ pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor
 // ── smolvla FP16 surface ────────────────────────────────────────────────────
 //
 // Ported verbatim from the legacy `kernels::activation` FP16 wrappers over the
-// `apxinf_smolvla_*` launchers (native/adapters/smolvla/ops.cu).
+// `apxinf_transformer_f16_*` launchers (native/adapters/activation/fixed_f16.cu).
 
 /// `swiglu_f16`: FP16 SwiGLU over packed `[rows, 2*inner]` gate/up halves.
 pub fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     use super::contracts::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
-    use crate::ffi::abi::smolvla as abi;
+    use crate::ffi::abi::transformer_f16 as abi;
     let (rows, twice_inner) = matrix_shape(gate_up, "SwiGLU")?;
     if gate_up.dtype() != DType::F16 || twice_inner % 2 != 0 {
         return Err(Error::Other(
@@ -377,7 +377,7 @@ pub fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     let inner = twice_inner / 2;
     let output = f16_output(ctx, rows, inner)?;
     unsafe {
-        check_cuda(abi::apxinf_smolvla_swiglu_f16(
+        check_cuda(abi::apxinf_transformer_f16_swiglu_f16(
             gpu_ptr(gate_up)?,
             output.ptr(),
             rows as i32,
@@ -402,7 +402,7 @@ pub fn bias_gelu_f16(
     use super::contracts::{
         check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
     };
-    use crate::ffi::abi::smolvla as abi;
+    use crate::ffi::abi::transformer_f16 as abi;
     let (rows, cols) = matrix_shape(input, "bias GELU")?;
     if input.dtype() != DType::F16
         || value.is_some_and(|bias| bias.dtype() != DType::F16 || bias.shape().dims() != [cols])
@@ -413,7 +413,7 @@ pub fn bias_gelu_f16(
     }
     let output = f16_output(ctx, rows, cols)?;
     unsafe {
-        check_cuda(abi::apxinf_smolvla_bias_gelu_f16(
+        check_cuda(abi::apxinf_transformer_f16_bias_gelu_f16(
             gpu_ptr(input)?,
             optional_ptr(value)?,
             output.ptr(),
@@ -435,7 +435,7 @@ pub fn bias_silu_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -
     use super::contracts::{
         check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
     };
-    use crate::ffi::abi::smolvla as abi;
+    use crate::ffi::abi::transformer_f16 as abi;
     let (rows, cols) = matrix_shape(input, "bias SiLU")?;
     if input.dtype() != DType::F16
         || bias.is_some_and(|x| x.dtype() != DType::F16 || x.shape().dims() != [cols])
@@ -446,7 +446,7 @@ pub fn bias_silu_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -
     }
     let output = f16_output(ctx, rows, cols)?;
     unsafe {
-        check_cuda(abi::apxinf_smolvla_bias_silu_f16(
+        check_cuda(abi::apxinf_transformer_f16_bias_silu_f16(
             gpu_ptr(input)?,
             optional_ptr(bias)?,
             output.ptr(),

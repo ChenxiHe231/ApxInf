@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* Fused rowwise-quantizing epilogues (walloss family). Each writes an E4M3
+/* Fused rowwise-quantizing epilogues. Each writes an E4M3
    activation plus one F32 scale per row; padding columns are zero. */
 
 apxinf_status_t apxinf_quant_rms_norm_rows_bf16_e4m3(

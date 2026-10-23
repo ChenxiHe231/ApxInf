@@ -55,8 +55,7 @@ pub(crate) fn create_cuda_new_backend(device: Device) -> Result<Arc<dyn Backend>
             "the cuda-new backend requires a CUDA device".into(),
         ));
     };
-    let ctx = Arc::new(apxinf_cuda_new::CudaContext::new(id).map_err(Error::Cuda)?);
-    Ok(Arc::new(apxinf_cuda_new::CudaNewBackend::new(ctx)))
+    Ok(Arc::new(apxinf_cuda_new::CudaNewBackend::new(id)?))
 }
 
 /// Recover the concrete cuda-new backend from an `Arc<dyn Backend>`.

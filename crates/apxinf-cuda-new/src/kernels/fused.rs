@@ -172,7 +172,7 @@ pub fn adaln_gate_residual_rms_bf16(
     shift: &Tensor,
     eps: f32,
 ) -> Result<ResidualNormTensors> {
-    use crate::ffi::abi::vla_la as abi;
+    use crate::ffi::abi::hybrid as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
     use apxinf_core::{Device, Error};
@@ -215,7 +215,7 @@ pub fn adaln_gate_residual_rms_bf16(
     let normalized_buffer =
         CudaBuffer::from_tensor(&normalized).map_err(apxinf_core::Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_cn_adaln_gate_residual_rms_bf16(
+        raw::check_cuda(abi::apxinf_hybrid_adaln_gate_residual_rms_bf16(
             bufs[0].ptr(),
             bufs[1].ptr(),
             bufs[2].ptr(),
@@ -243,7 +243,7 @@ pub fn bias_then_residual_bf16(
     bias: Option<&Tensor>,
     residual: &Tensor,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::CudaBuffer;
     use apxinf_core::Error;
     let dims = projection.shape().dims();
@@ -267,7 +267,7 @@ pub fn bias_then_residual_bf16(
     let bias_buffer = bias.map(CudaBuffer::from_tensor).transpose().map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_gr00t_bias_then_residual_bf16(
+        status::check(abi::apxinf_transformer_bf16_bias_then_residual_bf16(
             projection_buffer.ptr(),
             bias_buffer
                 .as_ref()
@@ -290,7 +290,7 @@ pub fn bias_residual_bf16_packed4(
     bias: &Tensor,
     residual: &Tensor,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::CudaBuffer;
     use apxinf_core::Error;
     let dims = projection.shape().dims();
@@ -315,7 +315,7 @@ pub fn bias_residual_bf16_packed4(
     let residual_buffer = CudaBuffer::from_tensor(residual).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_gr00t_bias_residual_bf16_packed4(
+        status::check(abi::apxinf_transformer_bf16_bias_residual_bf16_packed4(
             projection_buffer.ptr(),
             bias_buffer.ptr(),
             residual_buffer.ptr(),
@@ -336,7 +336,7 @@ pub fn bias_then_residual_bf16_packed4(
     bias: Option<&Tensor>,
     residual: &Tensor,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::CudaBuffer;
     use apxinf_core::Error;
     let dims = projection.shape().dims();
@@ -360,7 +360,7 @@ pub fn bias_then_residual_bf16_packed4(
     let bias_buffer = bias.map(CudaBuffer::from_tensor).transpose().map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_gr00t_bias_then_residual_bf16_packed4(
+        status::check(abi::apxinf_transformer_bf16_bias_then_residual_bf16_packed4(
             projection_buffer.ptr(),
             bias_buffer
                 .as_ref()
@@ -434,7 +434,7 @@ pub fn bias_then_residual_adaptive_layer_bf16_cached_1536(
     modulation: &Tensor,
     eps: f32,
 ) -> Result<ResidualNormTensors> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::CudaBuffer;
     use apxinf_core::Error;
     let dims = projection.shape().dims();
@@ -466,7 +466,7 @@ pub fn bias_then_residual_adaptive_layer_bf16_cached_1536(
     let normalized_buffer = CudaBuffer::from_tensor(&normalized).map_err(Error::Cuda)?;
     unsafe {
         status::check(
-            abi::apxinf_gr00t_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
+            abi::apxinf_transformer_bf16_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
                 projection_buffer.ptr(),
                 projection_bias_buffer.ptr(),
                 residual_buffer.ptr(),
@@ -496,7 +496,7 @@ pub fn bias_residual_layer_quant_bf16_e4m3(
     eps: f32,
     scale: f32,
 ) -> Result<ResidualNormTensors> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::CudaBuffer;
     use apxinf_core::Error;
     let dims = projection.shape().dims();
@@ -532,7 +532,7 @@ pub fn bias_residual_layer_quant_bf16_e4m3(
     let hidden_buffer = CudaBuffer::from_tensor(&hidden).map_err(Error::Cuda)?;
     let normalized_buffer = CudaBuffer::from_tensor(&normalized).map_err(Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_gr00t_bias_residual_layer_norm_quant_bf16_e4m3(
+        status::check(abi::apxinf_transformer_bf16_bias_residual_layer_norm_quant_bf16_e4m3(
             projection_buffer.ptr(),
             bias_buffer
                 .as_ref()
@@ -564,7 +564,7 @@ fn residual_layer_cached(
     eps: f32,
     width: usize,
 ) -> Result<ResidualNormTensors> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::CudaBuffer;
     use apxinf_core::Error;
     let dims = projection.shape().dims();
@@ -601,7 +601,7 @@ fn residual_layer_cached(
     let normalized_buffer = CudaBuffer::from_tensor(&normalized).map_err(Error::Cuda)?;
     unsafe {
         let code = if width == 1024 {
-            abi::apxinf_gr00t_bias_residual_layer_norm_bf16_cached_1024(
+            abi::apxinf_transformer_bf16_bias_residual_layer_norm_bf16_cached_1024(
                 projection_buffer.ptr(),
                 bias_buffer
                     .as_ref()
@@ -617,7 +617,7 @@ fn residual_layer_cached(
                 ctx.stream().handle(),
             )
         } else {
-            abi::apxinf_gr00t_bias_then_residual_layer_norm_bf16_cached_1536(
+            abi::apxinf_transformer_bf16_bias_then_residual_layer_norm_bf16_cached_1536(
                 projection_buffer.ptr(),
                 bias_buffer
                     .as_ref()

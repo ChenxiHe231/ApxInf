@@ -217,7 +217,7 @@ fn configure_nvtx(cuda: &str, library_directories: &[PathBuf]) {
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(apxinf_nvfp4_gemm_swiglu)");
-    println!("cargo:rustc-check-cfg=cfg(apxinf_qwen_drive_sm110)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_segmented_attention_sm110)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_decode)");
     println!("cargo:rustc-check-cfg=cfg(nvtx_header)");
     println!("cargo:rustc-check-cfg=cfg(nvtx_v2)");
@@ -295,7 +295,7 @@ fn main() {
         println!("cargo:rustc-cfg=apxinf_nvfp4_gemm_swiglu");
     }
     if native_sm110 {
-        println!("cargo:rustc-cfg=apxinf_qwen_drive_sm110");
+        println!("cargo:rustc-cfg=apxinf_segmented_attention_sm110");
     }
 
     let id = env::var("APXINF_KERNEL_BUILD_ID").unwrap_or_else(|_| {
@@ -346,11 +346,28 @@ fn main() {
         "elementwise/ops.cpp",
         "cache/ops.cpp",
         "quant_fused/ops.cpp",
-        "vla_attn/ops.cpp",
-        "vla_la/ops.cu",
-        "gr00t/ops.cu",
+        "attention/multimodal.cpp",
+        "activation/fixed_bf16.cu",
+        "activation/fixed_f16.cu",
+        "activation/fixed_hybrid_bf16.cu",
+        "attention/fixed_bf16.cu",
+        "attention/fixed_f16.cu",
+        "elementwise/fixed_bf16.cu",
+        "elementwise/fixed_f16.cu",
+        "elementwise/fixed_hybrid.cu",
+        "embedding/fixed_bf16.cu",
+        "gemm/fixed_w8a8.cu",
+        "linear_attention/fixed_gdn.cu",
+        "norm/fixed_bf16.cu",
+        "norm/fixed_f16.cu",
+        "norm/fixed_hybrid_bf16.cu",
+        "norm/fused_bf16.cu",
+        "preprocess/fixed_bf16.cu",
+        "preprocess/fixed_f16.cu",
+        "quantization/fixed_bf16.cu",
+        "rope/fixed_bf16.cu",
+        "rope/fixed_f16.cu",
         "llm_decode/ops.cu",
-        "smolvla/ops.cu",
         "preprocess/ops.cpp",
         "linear_attention/execution.cpp",
         "attn_helpers/execution.cpp",
@@ -368,7 +385,7 @@ fn main() {
     generic_sources.push(native.join("kernels/custom/elementwise_ops.cu"));
     generic_sources.push(native.join("kernels/custom/cache_ops.cu"));
     generic_sources.push(native.join("kernels/custom/quant_ops.cu"));
-    generic_sources.push(native.join("kernels/custom/vla_attn_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/multimodal_attention_ops.cu"));
     generic_sources.push(native.join("kernels/custom/preprocess_ops.cu"));
     generic_sources.push(native.join("kernels/custom/gdn_ops.cu"));
     generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_tma.cpp"));
@@ -429,7 +446,7 @@ fn main() {
                 .map(|source| attention.join(source)),
             );
             sm110_sources.extend([
-                native.join("adapters/attention/providers/qwen_drive_sm110.cu"),
+                native.join("adapters/attention/providers/segmented_sm110.cu"),
                 native.join("kernels/custom/gdn_bf16_prefill_prologue.cu"),
                 native.join("adapters/linear_attention/providers/gdn_bf16_prefill_sm110.cu"),
                 native.join("kernels/flashinfer_gdn/gdn_bf16_prefill_sm110_launch.cu"),
@@ -655,7 +672,7 @@ fn main() {
             command.arg("-DAPXINF_NVFP4_GEMM_SWIGLU=1");
         }
         if native_sm110 {
-            command.arg("-DAPXINF_QWEN_DRIVE_SM110=1");
+            command.arg("-DAPXINF_SEGMENTED_ATTENTION_SM110=1");
         }
         if has_cutlass_sm89 {
             command.arg("-DAPXINF_GEMM_CUTLASS_SM89=1");

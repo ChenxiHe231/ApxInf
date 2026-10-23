@@ -104,7 +104,7 @@ pub fn sinusoidal_bf16(
     scale: f32,
     frequency_step: f32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::vla_la as abi;
+    use crate::ffi::abi::hybrid as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     let shape = positions.shape().dims();
     if shape.len() != 1
@@ -127,7 +127,7 @@ pub fn sinusoidal_bf16(
     let positions_buffer = CudaBuffer::from_tensor(positions).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_cn_sinusoidal_embedding_bf16(
+        raw::check_cuda(abi::apxinf_hybrid_sinusoidal_embedding_bf16(
             positions_buffer.ptr(),
             output_buffer.ptr(),
             rows,

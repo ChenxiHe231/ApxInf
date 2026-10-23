@@ -26,6 +26,10 @@ pub struct GraphWorkspace {
 }
 
 impl GraphWorkspace {
+    pub fn new(capacity_bytes: usize, device: usize) -> Result<Self> {
+        Self::with_capacity(capacity_bytes, device)
+    }
+
     pub fn with_capacity(capacity_bytes: usize, device: usize) -> Result<Self> {
         Ok(Self {
             session: crate::ops::ExecutionSession::with_capacity(capacity_bytes, device)?,
@@ -46,7 +50,7 @@ impl GraphWorkspace {
 /// The legacy API named the constructor on the workspace type itself; cuda-new
 /// names it on the session. This keeps the call spelling.
 pub fn new_workspace(capacity_bytes: usize, device: usize) -> Result<GraphWorkspace> {
-    GraphWorkspace::with_capacity(capacity_bytes, device)
+    GraphWorkspace::new(capacity_bytes, device)
 }
 
 pub mod activation;

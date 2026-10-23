@@ -1,20 +1,19 @@
-//! CUDA KV cache used by the portable backend adapter.
-//!
-//! The cache layout is isolated here because cuda-new's attention operator
-//! consumes sequence-major `[1, capacity, heads, dim]` tensors. The portable
-//! backend and model code only see the `KvCache` contract.
+//! CUDA GPU-backed KV cache for transformer attention.
 
+use apxinf_core::{Error, KvCache, Result, Tensor};
 use std::any::Any;
-use std::sync::Arc;
 
-use apxinf_core::{DType, Error, KvCache, Result, Shape, Tensor};
+use crate::{kernels, CudaBuffer, CudaContext};
 
-use crate::{ops, CudaContext};
-
+/// KV cache stored in CUDA buffers.
+///
+/// Buffer layout: `[n_kv_heads, max_seq_len, head_dim]` per layer. Storage is
+/// sized at four bytes per element, matching the legacy backend contract: the
+/// same stable allocation can hold either F32 or BF16 cache data and remains
+/// valid across captured graph replays.
 pub struct CudaKvCache {
-    ctx: Arc<CudaContext>,
-    keys: Vec<Tensor>,
-    values: Vec<Tensor>,
+    k_buffers: Vec<CudaBuffer>,
+    v_buffers: Vec<CudaBuffer>,
     n_kv_heads: usize,
     head_dim: usize,
     max_seq_len: usize,
@@ -23,23 +22,27 @@ pub struct CudaKvCache {
 
 impl CudaKvCache {
     pub(crate) fn new(
-        ctx: Arc<CudaContext>,
+        device_id: usize,
         n_layers: usize,
         n_kv_heads: usize,
         head_dim: usize,
         max_seq_len: usize,
     ) -> Result<Self> {
-        let shape = Shape::new(vec![1, max_seq_len, n_kv_heads, head_dim]);
-        let mut keys = Vec::with_capacity(n_layers);
-        let mut values = Vec::with_capacity(n_layers);
-        for _ in 0..n_layers {
-            keys.push(ctx.allocate_output(shape.clone(), DType::BF16)?);
-            values.push(ctx.allocate_output(shape.clone(), DType::BF16)?);
-        }
+        let layer_bytes = n_kv_heads
+            .checked_mul(max_seq_len)
+            .and_then(|value| value.checked_mul(head_dim))
+            .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| Error::Other("KV cache allocation size overflow".into()))?;
+
+        let k_buffers = (0..n_layers)
+            .map(|_| CudaBuffer::alloc_zeros(layer_bytes, device_id).map_err(Error::Cuda))
+            .collect::<Result<Vec<_>>>()?;
+        let v_buffers = (0..n_layers)
+            .map(|_| CudaBuffer::alloc_zeros(layer_bytes, device_id).map_err(Error::Cuda))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            ctx,
-            keys,
-            values,
+            k_buffers,
+            v_buffers,
             n_kv_heads,
             head_dim,
             max_seq_len,
@@ -47,12 +50,44 @@ impl CudaKvCache {
         })
     }
 
-    pub fn key(&self, layer_idx: usize) -> &Tensor {
-        &self.keys[layer_idx]
+    /// Append K/V data for multiple positions using the legacy head-major
+    /// cache contract.
+    pub fn append(
+        &self,
+        ctx: &CudaContext,
+        layer_idx: usize,
+        k_new: &Tensor,
+        v_new: &Tensor,
+        append_len: usize,
+    ) -> Result<()> {
+        kernels::cache::append(
+            ctx,
+            &self.k_buffers[layer_idx],
+            k_new,
+            self.n_kv_heads,
+            self.head_dim,
+            self.max_seq_len,
+            self.seq_len,
+            append_len,
+        )?;
+        kernels::cache::append(
+            ctx,
+            &self.v_buffers[layer_idx],
+            v_new,
+            self.n_kv_heads,
+            self.head_dim,
+            self.max_seq_len,
+            self.seq_len,
+            append_len,
+        )
     }
 
-    pub fn value(&self, layer_idx: usize) -> &Tensor {
-        &self.values[layer_idx]
+    pub fn k_buffer(&self, layer_idx: usize) -> &CudaBuffer {
+        &self.k_buffers[layer_idx]
+    }
+
+    pub fn v_buffer(&self, layer_idx: usize) -> &CudaBuffer {
+        &self.v_buffers[layer_idx]
     }
 }
 
@@ -64,26 +99,12 @@ impl KvCache for CudaKvCache {
         v: &Tensor,
         append_len: usize,
     ) -> Result<()> {
-        ops::cache_append(
-            &self.ctx,
-            &self.keys[layer_idx],
-            k,
-            self.n_kv_heads,
-            self.head_dim,
-            self.max_seq_len,
-            self.seq_len,
-            append_len,
-        )?;
-        ops::cache_append(
-            &self.ctx,
-            &self.values[layer_idx],
-            v,
-            self.n_kv_heads,
-            self.head_dim,
-            self.max_seq_len,
-            self.seq_len,
-            append_len,
-        )
+        // The portable trait has no stream/context argument. Keep the legacy
+        // contract: Backend::kv_append owns the CUDA launch context.
+        let _ = (layer_idx, k, v, append_len);
+        Err(Error::Other(
+            "use CudaKvCache::append(ctx, ...) through CudaNewBackend::kv_append".into(),
+        ))
     }
 
     fn advance(&mut self, n: usize) {
@@ -95,8 +116,9 @@ impl KvCache for CudaKvCache {
     }
 
     fn clear(&mut self) -> Result<()> {
-        for tensor in self.keys.iter().chain(self.values.iter()) {
-            let buffer = crate::CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?;
+        // Captured decode graphs retain these addresses. Zero in place rather
+        // than replacing the allocations.
+        for buffer in self.k_buffers.iter().chain(&self.v_buffers) {
             buffer.zero().map_err(Error::Cuda)?;
         }
         self.seq_len = 0;
@@ -104,7 +126,7 @@ impl KvCache for CudaKvCache {
     }
 
     fn n_layers(&self) -> usize {
-        self.keys.len()
+        self.k_buffers.len()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -113,5 +135,93 @@ impl KvCache for CudaKvCache {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use apxinf_core::{Shape, Tensor};
+    use half::bf16;
+
+    use super::*;
+
+    #[test]
+    fn append_preserves_legacy_head_major_layout_for_bf16_and_f32() {
+        let _guard = crate::CUDA_TEST_LOCK.lock().unwrap();
+        let ctx = CudaContext::new(0).unwrap();
+
+        let bf16_values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].map(bf16::from_f32);
+        let bf16_host = Tensor::from_bf16(Shape::new(vec![2, 2, 2]), &bf16_values).unwrap();
+        let bf16_input = crate::transfers::to_cuda(&bf16_host, 0).unwrap();
+        let bf16_cache = CudaKvCache::new(0, 1, 2, 2, 3).unwrap();
+        bf16_cache
+            .append(&ctx, 0, &bf16_input, &bf16_input, 2)
+            .unwrap();
+        ctx.synchronize().unwrap();
+        let mut bf16_bytes = vec![0; bf16_cache.k_buffer(0).len()];
+        bf16_cache
+            .k_buffer(0)
+            .copy_to_host(&mut bf16_bytes)
+            .unwrap();
+        let actual_bf16 = bf16_bytes[..24]
+            .chunks_exact(2)
+            .map(|bytes| bf16::from_bits(u16::from_ne_bytes([bytes[0], bytes[1]])).to_f32())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_bf16,
+            vec![1.0, 2.0, 5.0, 6.0, 0.0, 0.0, 3.0, 4.0, 7.0, 8.0, 0.0, 0.0]
+        );
+
+        let f32_values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let f32_host = Tensor::from_f32(Shape::new(vec![2, 2, 2]), &f32_values).unwrap();
+        let f32_input = crate::transfers::to_cuda(&f32_host, 0).unwrap();
+        let f32_cache = CudaKvCache::new(0, 1, 2, 2, 3).unwrap();
+        f32_cache
+            .append(&ctx, 0, &f32_input, &f32_input, 2)
+            .unwrap();
+        ctx.synchronize().unwrap();
+        let mut f32_bytes = vec![0; f32_cache.k_buffer(0).len()];
+        f32_cache.k_buffer(0).copy_to_host(&mut f32_bytes).unwrap();
+        let actual_f32 = f32_bytes
+            .chunks_exact(4)
+            .map(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_f32,
+            vec![1.0, 2.0, 5.0, 6.0, 0.0, 0.0, 3.0, 4.0, 7.0, 8.0, 0.0, 0.0]
+        );
+
+        let decode_host =
+            Tensor::from_f32(Shape::new(vec![2, 2]), &[9.0, 10.0, 11.0, 12.0]).unwrap();
+        let decode_input = crate::transfers::to_cuda(&decode_host, 0).unwrap();
+        let decode_input = CudaBuffer::from_tensor(&decode_input).unwrap();
+        let decode_cache = CudaKvCache::new(0, 1, 2, 2, 3).unwrap();
+        let position = crate::HostMappedBuffer::alloc(4, 0).unwrap();
+        position.write_u32(1).unwrap();
+        kernels::cache::append_at(
+            &ctx,
+            apxinf_core::DType::F32,
+            decode_cache.k_buffer(0),
+            &decode_input,
+            2,
+            2,
+            3,
+            position.address(),
+        )
+        .unwrap();
+        ctx.synchronize().unwrap();
+        let mut decode_bytes = vec![0; decode_cache.k_buffer(0).len()];
+        decode_cache
+            .k_buffer(0)
+            .copy_to_host(&mut decode_bytes)
+            .unwrap();
+        let actual_decode = decode_bytes
+            .chunks_exact(4)
+            .map(|bytes| f32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_decode,
+            vec![0.0, 0.0, 9.0, 10.0, 0.0, 0.0, 0.0, 0.0, 11.0, 12.0, 0.0, 0.0]
+        );
     }
 }

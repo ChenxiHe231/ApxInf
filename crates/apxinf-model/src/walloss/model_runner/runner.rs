@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use apxinf_core::{Backend, Error, Result, Tensor};
+use apxinf_core::{Error, Result, Tensor};
 
 use crate::vla::{
     Action, ExecutionMode, ExecutionPolicy, InferenceSpec, InitialLatent, PreparationStatus,
@@ -405,12 +405,7 @@ mod tests {
     #[ignore = "requires CUDA and APXINF_WALLOSS_TEST_MODEL checkpoint"]
     fn long_prefix_preparation_has_sufficient_workspace() {
         let path = std::env::var("APXINF_WALLOSS_TEST_MODEL").expect("checkpoint is required");
-        let context = Arc::new(
-            apxinf_cuda_new::CudaContext::new(0)
-                .map_err(Error::Cuda)
-                .unwrap(),
-        );
-        let backend = Arc::new(RuntimeBackend::new(context));
+        let backend = Arc::new(RuntimeBackend::new(0).unwrap());
         let runner = super::super::super::load::load_model_runner(
             std::path::Path::new(&path),
             backend,
@@ -439,12 +434,7 @@ mod tests {
     #[ignore = "requires CUDA and APXINF_WALLOSS_TEST_MODEL checkpoint"]
     fn rejected_requests_preserve_cached_plan_and_actions() {
         let path = std::env::var("APXINF_WALLOSS_TEST_MODEL").expect("checkpoint is required");
-        let context = Arc::new(
-            apxinf_cuda_new::CudaContext::new(0)
-                .map_err(Error::Cuda)
-                .unwrap(),
-        );
-        let backend = Arc::new(RuntimeBackend::new(context));
+        let backend = Arc::new(RuntimeBackend::new(0).unwrap());
         let runner = super::super::super::load::load_model_runner(
             std::path::Path::new(&path),
             backend.clone(),

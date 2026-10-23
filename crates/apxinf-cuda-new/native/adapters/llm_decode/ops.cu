@@ -6,14 +6,10 @@
 // the apxinf_llmdec_ prefix because the legacy crate links into the same
 // binary and its own launchers are already present.
 //
-// Arithmetic is copied verbatim. The one deliberate adaptation is the KV
-// cache ADDRESSING in the three cache-touching kernels (append, rope-K-write,
-// flash decode): the legacy kernels index a head-major
-// [kv_heads, max_seq, head_dim] cache, but cuda-new's `CudaKvCache` — which
-// prefill fills through `ops::cache_append` and reads through
-// `ops::kv_cache_attention` — is token-major [1, max_seq, kv_heads, head_dim].
-// The per-(head, position, element) values and their accumulation order are
-// unchanged; only the linear index of each cache element differs.
+// Arithmetic and KV-cache addressing are copied verbatim. The portable
+// backend cache remains head-major [kv_heads, max_seq, head_dim], exactly as
+// in the legacy crate. Token-major cuda-new L3 attention owns a separate
+// tensor cache contract and does not share these launchers.
 //
 // Kernels that do not touch the cache (decode RoPE for Q, decode mRoPE) are
 // reused from native/kernels/primitives/rope.cuh — already byte-identical
@@ -37,12 +33,35 @@ namespace {
 // ports; the cache-writing variants below are NOT taken from here.
 #include "../../kernels/primitives/rope.cuh"
 
-// ── Token-major KV cache kernels ──────────────────────────────────────────
-//
-// cuda-new's `CudaKvCache` is token-major [1, max_seq, kv_heads, head_dim]
-// (shared with prefill `ops::cache_append` and `ops::kv_cache_attention`).
-// These are the legacy decode cache kernels with only the cache element
-// index rewritten for that layout; the per-element arithmetic is unchanged.
+// ── Head-major KV cache kernels ───────────────────────────────────────────
+
+__global__ void llmdec_kv_cache_append_f32_kernel(
+    float* cache, const float* new_data,
+    uint32_t n_kv_heads, uint32_t head_dim, uint32_t max_seq_len,
+    uint32_t seq_len, uint32_t append_len)
+{
+    uint32_t d = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t h = blockIdx.y;
+    uint32_t s = blockIdx.z;
+    if (d >= head_dim || h >= n_kv_heads || s >= append_len) return;
+    uint32_t src_idx = s * n_kv_heads * head_dim + h * head_dim + d;
+    uint32_t dst_idx = h * max_seq_len * head_dim + (seq_len + s) * head_dim + d;
+    cache[dst_idx] = new_data[src_idx];
+}
+
+__global__ void llmdec_kv_cache_append_bf16_kernel(
+    __nv_bfloat16* cache, const __nv_bfloat16* new_data,
+    uint32_t n_kv_heads, uint32_t head_dim, uint32_t max_seq_len,
+    uint32_t seq_len, uint32_t append_len)
+{
+    uint32_t d = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t h = blockIdx.y;
+    uint32_t s = blockIdx.z;
+    if (d >= head_dim || h >= n_kv_heads || s >= append_len) return;
+    uint32_t src_idx = s * n_kv_heads * head_dim + h * head_dim + d;
+    uint32_t dst_idx = h * max_seq_len * head_dim + (seq_len + s) * head_dim + d;
+    cache[dst_idx] = new_data[src_idx];
+}
 
 __global__ void llmdec_kv_cache_append_decode_f32_kernel(
     float* cache, const float* new_data,
@@ -55,7 +74,7 @@ __global__ void llmdec_kv_cache_append_decode_f32_kernel(
 
     uint32_t pos = *pos_ptr;
     uint32_t src_idx = h * head_dim + d;
-    uint32_t dst_idx = pos * n_kv_heads * head_dim + h * head_dim + d;
+    uint32_t dst_idx = h * max_seq_len * head_dim + pos * head_dim + d;
     cache[dst_idx] = new_data[src_idx];
 }
 
@@ -70,11 +89,11 @@ __global__ void llmdec_kv_cache_append_decode_bf16_kernel(
 
     uint32_t pos = *pos_ptr;
     uint32_t src_idx = h * head_dim + d;
-    uint32_t dst_idx = pos * n_kv_heads * head_dim + h * head_dim + d;
+    uint32_t dst_idx = h * max_seq_len * head_dim + pos * head_dim + d;
     cache[dst_idx] = new_data[src_idx];
 }
 
-// Fused single-token RoPE + K-cache write, token-major destination.
+// Fused single-token RoPE + K-cache write, head-major destination.
 __global__ void llmdec_rope_k_write_bf16_kernel(
     const __nv_bfloat16* k_in,
     __nv_bfloat16* k_cache,
@@ -96,7 +115,7 @@ __global__ void llmdec_rope_k_write_bf16_kernel(
     float x0 = __bfloat162float(k_in[src_base + pair_idx]);
     float x1 = __bfloat162float(k_in[src_base + half + pair_idx]);
 
-    uint32_t dst_base = pos * n_kv_heads * head_dim + head_idx * head_dim;
+    uint32_t dst_base = head_idx * max_seq_len * head_dim + pos * head_dim;
     k_cache[dst_base + pair_idx]        = __float2bfloat16(x0 * cos_val - x1 * sin_val);
     k_cache[dst_base + half + pair_idx] = __float2bfloat16(x0 * sin_val + x1 * cos_val);
 }
@@ -168,6 +187,22 @@ __global__ void mul_bf16_kernel(
     if (gid >= count) return;
     float x = __bfloat162float(a[gid]) * __bfloat162float(b[gid]);
     output[gid] = __float2bfloat16(x);
+}
+
+__global__ void scale_f32_kernel(
+    const float* input, float* output, uint32_t count, float scale)
+{
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < count) output[gid] = input[gid] * scale;
+}
+
+__global__ void scale_bf16_kernel(
+    const __nv_bfloat16* input, __nv_bfloat16* output,
+    uint32_t count, float scale)
+{
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid < count)
+        output[gid] = __float2bfloat16(__bfloat162float(input[gid]) * scale);
 }
 
 // ── Embedding — legacy kernels/custom/embedding.cuh ──────────────────────
@@ -312,7 +347,54 @@ __global__ void rms_norm_add_bf16_kernel(
     }
 }
 
-// ── Attention softmax decode (f32) — legacy kernels/custom/attention.cuh ─
+// ── Attention softmax — legacy kernels/custom/attention.cuh ─────────────
+
+__global__ void attention_softmax_f32_kernel(
+    const float* scores, float* output,
+    uint32_t cols, uint32_t rows, uint32_t kv_offset, uint32_t n_heads)
+{
+    uint32_t n_col_blocks = (cols + blockDim.x - 1) / blockDim.x;
+    uint32_t row = blockIdx.x / n_col_blocks;
+    uint32_t col = (blockIdx.x % n_col_blocks) * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+    uint32_t seq_pos = row / n_heads;
+    uint32_t valid_cols = min(seq_pos + kv_offset + 1, cols);
+    float max_val = -INFINITY;
+    for (uint32_t c = 0; c < valid_cols; c++)
+        max_val = fmaxf(max_val, scores[row * cols + c]);
+    float sum_exp = 0.0f;
+    for (uint32_t c = 0; c < valid_cols; c++)
+        sum_exp += expf(scores[row * cols + c] - max_val);
+    if (col < cols) {
+        output[row * cols + col] = col < valid_cols
+            ? expf(scores[row * cols + col] - max_val) / sum_exp
+            : 0.0f;
+    }
+}
+
+__global__ void attention_softmax_bf16_kernel(
+    const __nv_bfloat16* scores, __nv_bfloat16* output,
+    uint32_t cols, uint32_t rows, uint32_t kv_offset, uint32_t n_heads)
+{
+    uint32_t n_col_blocks = (cols + blockDim.x - 1) / blockDim.x;
+    uint32_t row = blockIdx.x / n_col_blocks;
+    uint32_t col = (blockIdx.x % n_col_blocks) * blockDim.x + threadIdx.x;
+    if (row >= rows) return;
+    uint32_t seq_pos = row / n_heads;
+    uint32_t valid_cols = min(seq_pos + kv_offset + 1, cols);
+    float max_val = -INFINITY;
+    for (uint32_t c = 0; c < valid_cols; c++)
+        max_val = fmaxf(max_val, __bfloat162float(scores[row * cols + c]));
+    float sum_exp = 0.0f;
+    for (uint32_t c = 0; c < valid_cols; c++)
+        sum_exp += expf(__bfloat162float(scores[row * cols + c]) - max_val);
+    if (col < cols) {
+        float value = col < valid_cols
+            ? expf(__bfloat162float(scores[row * cols + col]) - max_val) / sum_exp
+            : 0.0f;
+        output[row * cols + col] = __float2bfloat16(value);
+    }
+}
 
 __global__ void attention_softmax_decode_f32_kernel(
     const float* scores, float* output,
@@ -340,10 +422,25 @@ __global__ void attention_softmax_decode_f32_kernel(
     }
 }
 
+// Gather a head-major BF16 cache prefix into token-major dense storage for
+// the unchanged FlashAttention prefill path.
+__global__ void kv_cache_gather_bf16_kernel(
+    const __nv_bfloat16* __restrict__ src,
+    __nv_bfloat16* __restrict__ dst,
+    uint32_t tokens, uint32_t n_kv_heads, uint32_t head_dim,
+    uint32_t max_seq_len, uint32_t kv_offset)
+{
+    uint32_t flat = blockIdx.x * blockDim.x + threadIdx.x;
+    uint32_t total = tokens * n_kv_heads * head_dim;
+    if (flat >= total) return;
+    uint32_t d = flat % head_dim;
+    uint32_t h = (flat / head_dim) % n_kv_heads;
+    uint32_t tok = flat / (n_kv_heads * head_dim);
+    uint32_t src_pos = kv_offset + tok;
+    dst[flat] = src[((size_t)h * max_seq_len + src_pos) * head_dim + d];
+}
+
 // ── Flash-decoding (split-K) — legacy kernels/custom/attention.cuh ───────
-//
-// Identical online-softmax arithmetic and warp-merge order; only the K/V
-// cache element addressing is token-major (see file header).
 
 #ifndef LLMDEC_SPLITK_WARPS
 #define LLMDEC_SPLITK_WARPS 16
@@ -381,11 +478,10 @@ __global__ void flash_attn_decode_bf16_splitk_kernel(
     #pragma unroll
     for (int i = 0; i < ELEMS_PER_THREAD; i++) q_reg[i] = q_sm[i * 32 + lane];
 
-    // Token-major cache: row stride between consecutive positions of one
-    // head is n_kv_heads * HEAD_DIM; the head offset is kv_head * HEAD_DIM.
-    const uint32_t kv_stride = n_kv_heads * HEAD_DIM;
-    const __nv_bfloat16* k_base = k_cache + kv_head * HEAD_DIM;
-    const __nv_bfloat16* v_base = v_cache + kv_head * HEAD_DIM;
+    const __nv_bfloat16* k_base =
+        k_cache + kv_head * max_seq_len * HEAD_DIM;
+    const __nv_bfloat16* v_base =
+        v_cache + kv_head * max_seq_len * HEAD_DIM;
 
     // Each warp's private online-softmax over its strided timesteps.
     float m = -INFINITY;
@@ -398,7 +494,7 @@ __global__ void flash_attn_decode_bf16_splitk_kernel(
         float dot = 0.0f;
         #pragma unroll
         for (int i = 0; i < ELEMS_PER_THREAD; i++) {
-            float kv = __bfloat162float(k_base[t * kv_stride + i * 32 + lane]);
+            float kv = __bfloat162float(k_base[t * HEAD_DIM + i * 32 + lane]);
             dot += q_reg[i] * kv;
         }
         for (int off = 16; off > 0; off >>= 1)
@@ -411,7 +507,7 @@ __global__ void flash_attn_decode_bf16_splitk_kernel(
         l = l * exp_m + p;
         #pragma unroll
         for (int i = 0; i < ELEMS_PER_THREAD; i++)
-            acc[i] = acc[i] * exp_m + p * __bfloat162float(v_base[t * kv_stride + i * 32 + lane]);
+            acc[i] = acc[i] * exp_m + p * __bfloat162float(v_base[t * HEAD_DIM + i * 32 + lane]);
         m = m_new;
     }
 
@@ -529,6 +625,24 @@ extern "C" cudaError_t apxinf_llmdec_mul_bf16(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_llmdec_scale_f32(
+    const void* input, void* output, uint32_t count, float scale, void* stream)
+{
+    dim3 grid((count + LLMDEC_BLOCK_SIZE - 1) / LLMDEC_BLOCK_SIZE, 1, 1);
+    scale_f32_kernel<<<grid, LLMDEC_BLOCK_SIZE, 0, (cudaStream_t)stream>>>(
+        (const float*)input, (float*)output, count, scale);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_llmdec_scale_bf16(
+    const void* input, void* output, uint32_t count, float scale, void* stream)
+{
+    dim3 grid((count + LLMDEC_BLOCK_SIZE - 1) / LLMDEC_BLOCK_SIZE, 1, 1);
+    scale_bf16_kernel<<<grid, LLMDEC_BLOCK_SIZE, 0, (cudaStream_t)stream>>>(
+        (const __nv_bfloat16*)input, (__nv_bfloat16*)output, count, scale);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_llmdec_embedding_f32(
     const void* table, const void* ids, void* output,
     uint32_t embed_dim, uint32_t seq_len, void* stream)
@@ -590,6 +704,33 @@ extern "C" cudaError_t apxinf_llmdec_rms_norm_add_bf16(
         (__nv_bfloat16*)x_inout, (const __nv_bfloat16*)delta,
         (const __nv_bfloat16*)weight, (__nv_bfloat16*)output,
         cols, rows, eps);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_llmdec_attention_softmax_f32(
+    const void* scores, void* output,
+    uint32_t cols, uint32_t rows, uint32_t kv_offset,
+    uint32_t n_heads, void* stream)
+{
+    uint32_t n_col_blocks = (cols + LLMDEC_BLOCK_SIZE - 1) / LLMDEC_BLOCK_SIZE;
+    dim3 grid(n_col_blocks * rows, 1, 1);
+    dim3 block(LLMDEC_BLOCK_SIZE, 1, 1);
+    attention_softmax_f32_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+        (const float*)scores, (float*)output, cols, rows, kv_offset, n_heads);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_llmdec_attention_softmax_bf16(
+    const void* scores, void* output,
+    uint32_t cols, uint32_t rows, uint32_t kv_offset,
+    uint32_t n_heads, void* stream)
+{
+    uint32_t n_col_blocks = (cols + LLMDEC_BLOCK_SIZE - 1) / LLMDEC_BLOCK_SIZE;
+    dim3 grid(n_col_blocks * rows, 1, 1);
+    dim3 block(LLMDEC_BLOCK_SIZE, 1, 1);
+    attention_softmax_bf16_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+        (const __nv_bfloat16*)scores, (__nv_bfloat16*)output,
+        cols, rows, kv_offset, n_heads);
     return cudaGetLastError();
 }
 
@@ -698,6 +839,34 @@ extern "C" cudaError_t apxinf_llmdec_kv_cache_append_decode_f32(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_llmdec_kv_cache_append_f32(
+    void* cache, const void* new_data,
+    uint32_t n_kv_heads, uint32_t head_dim, uint32_t max_seq_len,
+    uint32_t seq_len, uint32_t append_len, void* stream)
+{
+    dim3 grid((head_dim + LLMDEC_BLOCK_SIZE - 1) / LLMDEC_BLOCK_SIZE,
+              n_kv_heads, append_len);
+    dim3 block(LLMDEC_BLOCK_SIZE, 1, 1);
+    llmdec_kv_cache_append_f32_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+        (float*)cache, (const float*)new_data,
+        n_kv_heads, head_dim, max_seq_len, seq_len, append_len);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_llmdec_kv_cache_append_bf16(
+    void* cache, const void* new_data,
+    uint32_t n_kv_heads, uint32_t head_dim, uint32_t max_seq_len,
+    uint32_t seq_len, uint32_t append_len, void* stream)
+{
+    dim3 grid((head_dim + LLMDEC_BLOCK_SIZE - 1) / LLMDEC_BLOCK_SIZE,
+              n_kv_heads, append_len);
+    dim3 block(LLMDEC_BLOCK_SIZE, 1, 1);
+    llmdec_kv_cache_append_bf16_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+        (__nv_bfloat16*)cache, (const __nv_bfloat16*)new_data,
+        n_kv_heads, head_dim, max_seq_len, seq_len, append_len);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_llmdec_kv_cache_append_decode_bf16(
     void* cache, const void* new_data,
     uint32_t n_kv_heads, uint32_t head_dim, uint32_t max_seq_len,
@@ -708,5 +877,18 @@ extern "C" cudaError_t apxinf_llmdec_kv_cache_append_decode_bf16(
     llmdec_kv_cache_append_decode_bf16_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
         (__nv_bfloat16*)cache, (const __nv_bfloat16*)new_data,
         n_kv_heads, head_dim, max_seq_len, (const uint32_t*)pos_ptr);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_llmdec_kv_cache_gather_bf16(
+    const void* src, void* dst,
+    uint32_t tokens, uint32_t n_kv_heads, uint32_t head_dim,
+    uint32_t max_seq_len, uint32_t kv_offset, void* stream)
+{
+    uint32_t total = tokens * n_kv_heads * head_dim;
+    uint32_t blocks = (total + LLMDEC_BLOCK_SIZE - 1) / LLMDEC_BLOCK_SIZE;
+    kv_cache_gather_bf16_kernel<<<blocks, LLMDEC_BLOCK_SIZE, 0, (cudaStream_t)stream>>>(
+        (const __nv_bfloat16*)src, (__nv_bfloat16*)dst,
+        tokens, n_kv_heads, head_dim, max_seq_len, kv_offset);
     return cudaGetLastError();
 }

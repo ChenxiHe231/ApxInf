@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-/* Temporal-merged BF16 image preprocessing (walloss family). */
+/* Temporal-merged BF16 image preprocessing. */
 
 apxinf_status_t apxinf_preprocess_temporal_merged_patches_bf16(
     const void* images, void* patches, int32_t views, int32_t image_height,

@@ -5,10 +5,10 @@
 
 #include <cstdint>
 
-// VLA attention primitives ported bit-identically from the legacy walloss
+// Multimodal attention primitives ported bit-identically from the legacy
 // kernels: fused QKV split + mRoPE with KV-cache write, fused vision QKV
 // split + 2D RoPE, and segmented (per-image) dense MHA.
-namespace apxinf::cuda_new::vla_attn_ops {
+namespace apxinf::cuda_new::multimodal_attention_ops {
 
 // Split a packed `[tokens, (q_heads + 2*kv_heads) * head_dim]` projection,
 // add the optional bias, rotate Q/K by mRoPE (three position ids per token,
@@ -40,4 +40,4 @@ int segmented_mha_bf16(const void* q, const void* k, const void* v,
                        int max_tokens, int heads, int head_dim,
                        cudaStream_t stream);
 
-}  // namespace apxinf::cuda_new::vla_attn_ops
+}  // namespace apxinf::cuda_new::multimodal_attention_ops

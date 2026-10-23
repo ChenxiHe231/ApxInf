@@ -15,7 +15,7 @@ use super::contracts::{
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
 use crate::device_caps::CudaArchFamily;
-use crate::ffi::abi::vla_la as abi;
+use crate::ffi::abi::hybrid as abi;
 use crate::kernels::gdn_policy::{wmma, GdnLaunchPolicy};
 use crate::workspace::output_buffer;
 
@@ -33,7 +33,7 @@ pub fn try_causal_conv_gdn_prefill_bf16(
     final_state: &CudaBuffer,
     geometry: [usize; 4],
 ) -> Result<Option<Tensor>> {
-    if !cfg!(apxinf_qwen_drive_sm110)
+    if !cfg!(apxinf_segmented_attention_sm110)
         || ctx.caps().sm != 110
         || ctx.caps().multiprocessor_count != 20
         || geometry != [16, 32, 128, 128]
@@ -42,7 +42,7 @@ pub fn try_causal_conv_gdn_prefill_bf16(
     {
         return Ok(None);
     }
-    #[cfg(apxinf_qwen_drive_sm110)]
+    #[cfg(apxinf_segmented_attention_sm110)]
     {
         if new_conv_state.shape().dims() != [8192, 4]
             || a_log.shape().dims() != [32]
@@ -130,9 +130,9 @@ pub fn try_causal_conv_gdn_prefill_bf16(
             .map(Some)
             .map_err(Error::Cuda);
     }
-    #[cfg(not(apxinf_qwen_drive_sm110))]
+    #[cfg(not(apxinf_segmented_attention_sm110))]
     let _ = (new_conv_state, a_log, dt_bias, final_state);
-    #[cfg(not(apxinf_qwen_drive_sm110))]
+    #[cfg(not(apxinf_segmented_attention_sm110))]
     Ok(None)
 }
 
@@ -179,7 +179,7 @@ pub fn cast_f32_to_bf16(ctx: &CudaContext, input: &Tensor, output: &Tensor) -> R
         return Err(Error::Other("cast f32->bf16 shape/dtype mismatch".into()));
     }
     unsafe {
-        check_cuda(abi::apxinf_cn_cast_f32_bf16(
+        check_cuda(abi::apxinf_hybrid_cast_f32_bf16(
             gpu_ptr(input)?,
             gpu_ptr(output)?,
             input.numel() as i64,
@@ -197,7 +197,7 @@ pub fn cast_bf16_to_f32(ctx: &CudaContext, input: &Tensor, output: &Tensor) -> R
         return Err(Error::Other("cast bf16->f32 shape/dtype mismatch".into()));
     }
     unsafe {
-        check_cuda(abi::apxinf_cn_cast_bf16_f32(
+        check_cuda(abi::apxinf_hybrid_cast_bf16_f32(
             gpu_ptr(input)?,
             gpu_ptr(output)?,
             input.numel() as i64,
@@ -242,7 +242,7 @@ pub fn causal_conv1d_silu_bf16(
         expect_bf16(state, "causal conv1d")?;
     }
     unsafe {
-        check_cuda(abi::apxinf_cn_causal_conv1d_silu_bf16(
+        check_cuda(abi::apxinf_hybrid_causal_conv1d_silu_bf16(
             gpu_ptr(x)?,
             gpu_ptr(weight)?,
             optional_ptr(state)?,
@@ -321,7 +321,7 @@ pub fn gdn_qk_prep(
     )?;
     let scale = (1.0f64 / (head_k_dim as f64).sqrt()) as f32;
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_qk_prep_bf16(
+        check_cuda(abi::apxinf_hybrid_gdn_qk_prep_bf16(
             gpu_ptr(conv_out)?,
             q.ptr(),
             k.ptr(),
@@ -381,7 +381,7 @@ pub fn gdn_qk_prep_qk_bf16(
     )?;
     let scale = (1.0f64 / (head_k_dim as f64).sqrt()) as f32;
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_qk_prep_qk_bf16(
+        check_cuda(abi::apxinf_hybrid_gdn_qk_prep_qk_bf16(
             gpu_ptr(conv_out)?,
             q.ptr(),
             k.ptr(),
@@ -458,7 +458,7 @@ pub fn gdn_vb_prep(
         .wrapping_add(a_col * element)
         .cast();
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_vb_prep_bf16(
+        check_cuda(abi::apxinf_hybrid_gdn_vb_prep_bf16(
             gpu_ptr(conv_out)?,
             b_ptr,
             a_ptr,
@@ -538,7 +538,7 @@ pub fn gdn_gate_prep(
     let b_ptr = gpu_ptr(zba)?.cast::<u8>().wrapping_add(b_offset).cast();
     let a_ptr = gpu_ptr(zba)?.cast::<u8>().wrapping_add(a_offset).cast();
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_gate_prep_bf16(
+        check_cuda(abi::apxinf_hybrid_gdn_gate_prep_bf16(
             b_ptr,
             a_ptr,
             gpu_ptr(dt_bias)?,
@@ -575,7 +575,7 @@ pub fn gdn_cumsum(
         ],
     )?;
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_cumsum_f32(
+        check_cuda(abi::apxinf_hybrid_gdn_cumsum_f32(
             g.ptr(),
             g_cum.ptr(),
             seq_pad as i32,
@@ -621,7 +621,7 @@ pub fn gdn_attn_raw(
     )?;
     let policy = GdnLaunchPolicy::for_device(ctx.caps());
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_attn_raw_f32(
+        check_cuda(abi::apxinf_hybrid_gdn_attn_raw_f32(
             q.ptr(),
             k.ptr(),
             beta.ptr(),
@@ -680,7 +680,7 @@ pub fn gdn_attn_raw_solve_f1_qk_bf16(
         ],
     )?;
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_attn_raw_solve_f1_qk_bf16(
+        check_cuda(abi::apxinf_hybrid_gdn_attn_raw_solve_f1_qk_bf16(
             q.ptr(),
             k.ptr(),
             beta.ptr(),
@@ -714,7 +714,7 @@ pub fn gdn_tri_solve(
         &[("a", a, f32_bytes(matrices * chunk_size * chunk_size)?)],
     )?;
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_tri_solve_f32(
+        check_cuda(abi::apxinf_hybrid_gdn_tri_solve_f32(
             a.ptr(),
             matrices as i32,
             chunk_size as i32,
@@ -770,7 +770,7 @@ pub fn gdn_chunk_gemm(
     )?;
     let policy = GdnLaunchPolicy::for_device(ctx.caps());
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_chunk_gemm_f32(
+        check_cuda(abi::apxinf_hybrid_gdn_chunk_gemm_f32(
             a.ptr(),
             v.ptr(),
             k.ptr(),
@@ -864,7 +864,7 @@ pub fn gdn_chunk_gemm_tri_k_bf16_direct_v(
     let head_v_dim_i32 = ffi_i32(head_v_dim)?;
     let chunk_size_i32 = ffi_i32(chunk_size)?;
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_chunk_gemm_tri_k_bf16_direct_v(
+        check_cuda(abi::apxinf_hybrid_gdn_chunk_gemm_tri_k_bf16_direct_v(
             a.ptr(),
             conv_ptr,
             k.ptr(),
@@ -947,7 +947,7 @@ pub fn gdn_chunk_state(
     )?;
     let policy = GdnLaunchPolicy::for_device(ctx.caps());
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_chunk_state_f32(
+        check_cuda(abi::apxinf_hybrid_gdn_chunk_state_f32(
             q.ptr(),
             k.ptr(),
             g_cum.ptr(),
@@ -1033,7 +1033,7 @@ pub fn gdn_chunk_state_qk_bf16(
         ],
     )?;
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_chunk_state_qk_bf16(
+        check_cuda(abi::apxinf_hybrid_gdn_chunk_state_qk_bf16(
             q.ptr(),
             k.ptr(),
             g_cum.ptr(),
@@ -1094,7 +1094,7 @@ pub fn gdn_recurrent(
     )?;
     let policy = GdnLaunchPolicy::for_device(ctx.caps());
     unsafe {
-        check_cuda(abi::apxinf_cn_gdn_recurrent_f32(
+        check_cuda(abi::apxinf_hybrid_gdn_recurrent_f32(
             q.ptr(),
             k.ptr(),
             v.ptr(),
@@ -1142,7 +1142,7 @@ pub fn gated_rms_silu(
     let output = bf16_output(ctx, rows, cols)?;
     let z_ptr = gpu_ptr(z)?;
     unsafe {
-        check_cuda(abi::apxinf_cn_gated_rms_silu_bf16(
+        check_cuda(abi::apxinf_hybrid_gated_rms_silu_bf16(
             gpu_ptr(x)?,
             z_ptr,
             gpu_ptr(weight)?,
@@ -1193,7 +1193,7 @@ pub fn add_rms_norm_plus1(
     let sum = bf16_output(ctx, rows, cols)?;
     let output = bf16_output(ctx, rows, cols)?;
     unsafe {
-        check_cuda(abi::apxinf_cn_add_rms_norm_plus1_bf16(
+        check_cuda(abi::apxinf_hybrid_add_rms_norm_plus1_bf16(
             gpu_ptr(a)?,
             gpu_ptr(b)?,
             gpu_ptr(weight)?,
@@ -1226,7 +1226,7 @@ pub fn rms_norm_plus1(
     expect_bf16(weight, "rms norm plus1")?;
     let output = bf16_output(ctx, rows, cols)?;
     unsafe {
-        check_cuda(abi::apxinf_cn_rms_norm_plus1_bf16(
+        check_cuda(abi::apxinf_hybrid_rms_norm_plus1_bf16(
             gpu_ptr(input)?,
             gpu_ptr(weight)?,
             output.ptr(),
@@ -1291,7 +1291,7 @@ pub fn full_attn_prepare(
         expect_bf16(tensor, "full attention prepare")?;
     }
     unsafe {
-        check_cuda(abi::apxinf_cn_full_attn_prepare_bf16(
+        check_cuda(abi::apxinf_hybrid_full_attn_prepare_bf16(
             gpu_ptr(fused)?,
             gpu_ptr(q_norm_w)?,
             gpu_ptr(k_norm_w)?,
@@ -1335,7 +1335,7 @@ pub fn sigmoid_gate_mul(
     expect_bf16(attn, "sigmoid gate")?;
     expect_bf16(fused, "sigmoid gate")?;
     unsafe {
-        check_cuda(abi::apxinf_cn_sigmoid_gate_mul_bf16(
+        check_cuda(abi::apxinf_hybrid_sigmoid_gate_mul_bf16(
             gpu_ptr(attn)?,
             gpu_ptr(fused)?,
             rows as i32,
@@ -1371,7 +1371,7 @@ pub fn adaln_rms_norm(
     }
     let output = bf16_output(ctx, rows, cols)?;
     unsafe {
-        check_cuda(abi::apxinf_cn_adaln_rms_norm_bf16(
+        check_cuda(abi::apxinf_hybrid_adaln_rms_norm_bf16(
             gpu_ptr(x)?,
             gpu_ptr(weight)?,
             gpu_ptr(scale)?,
@@ -1407,7 +1407,7 @@ pub fn adaln_gate_residual(
     }
     let output = bf16_output(ctx, rows, cols)?;
     unsafe {
-        check_cuda(abi::apxinf_cn_adaln_gate_residual_bf16(
+        check_cuda(abi::apxinf_hybrid_adaln_gate_residual_bf16(
             gpu_ptr(proj)?,
             gpu_ptr(residual)?,
             gpu_ptr(gate)?,
@@ -1472,7 +1472,7 @@ pub fn expert_qkv_prepare(
         expect_bf16(tensor, "expert qkv prepare")?;
     }
     unsafe {
-        check_cuda(abi::apxinf_cn_expert_qkv_prepare_bf16(
+        check_cuda(abi::apxinf_hybrid_expert_qkv_prepare_bf16(
             gpu_ptr(fused)?,
             gpu_ptr(q_norm_w)?,
             gpu_ptr(k_norm_w)?,
@@ -1502,7 +1502,7 @@ pub fn expert_sigmoid_gate_mul(ctx: &CudaContext, attn: &Tensor, gate: &Tensor) 
     expect_bf16(attn, "expert sigmoid gate")?;
     expect_bf16(gate, "expert sigmoid gate")?;
     unsafe {
-        check_cuda(abi::apxinf_cn_expert_sigmoid_gate_mul_bf16(
+        check_cuda(abi::apxinf_hybrid_expert_sigmoid_gate_mul_bf16(
             gpu_ptr(attn)?,
             gpu_ptr(gate)?,
             attn.numel() as i64,
@@ -1534,7 +1534,7 @@ pub fn fourier_features(
     let out_width = point_dim * num_features * 2;
     let output = bf16_output(ctx, rows, out_width)?;
     unsafe {
-        check_cuda(abi::apxinf_cn_fourier_features_bf16(
+        check_cuda(abi::apxinf_hybrid_fourier_features_bf16(
             gpu_ptr(waypoints)?,
             gpu_ptr(freqs)?,
             output.ptr(),
@@ -1573,7 +1573,7 @@ pub fn concat7_cols(ctx: &CudaContext, srcs: [&Tensor; 7], broadcast_mask: u32) 
     }
     let output = bf16_output(ctx, first_rows, 7 * cols)?;
     unsafe {
-        check_cuda(abi::apxinf_cn_concat7_cols_bf16(
+        check_cuda(abi::apxinf_hybrid_concat7_cols_bf16(
             gpu_ptr(srcs[0])?,
             gpu_ptr(srcs[1])?,
             gpu_ptr(srcs[2])?,
@@ -1616,7 +1616,7 @@ pub fn flow_update(
         return Err(Error::Other("flow update shape mismatch".into()));
     }
     unsafe {
-        check_cuda(abi::apxinf_cn_flow_update_f32(
+        check_cuda(abi::apxinf_hybrid_flow_update_f32(
             gpu_ptr(w)?,
             gpu_ptr(endpoint)?,
             remaining,
@@ -1648,7 +1648,7 @@ pub fn suppress_logits(
         .wrapping_add(row * cols * DType::BF16.size_in_bytes())
         .cast();
     unsafe {
-        check_cuda(abi::apxinf_cn_suppress_logits_bf16(
+        check_cuda(abi::apxinf_hybrid_suppress_logits_bf16(
             row_ptr,
             ids.ptr().cast(),
             count as i32,
@@ -1662,7 +1662,7 @@ pub fn gelu_exact(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
     expect_bf16(input, "gelu exact")?;
     let output = output_buffer(ctx, input.size_in_bytes())?;
     unsafe {
-        check_cuda(abi::apxinf_cn_gelu_exact_bf16(
+        check_cuda(abi::apxinf_hybrid_gelu_exact_bf16(
             gpu_ptr(input)?,
             output.ptr(),
             input.numel() as i64,

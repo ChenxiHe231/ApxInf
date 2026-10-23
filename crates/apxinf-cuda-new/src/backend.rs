@@ -18,7 +18,7 @@ use apxinf_core::{
 };
 
 use crate::ops;
-use crate::{CudaContext, CudaKvCache};
+use crate::{kernels, CudaContext, CudaKvCache};
 
 /// The cuda-new backend returned to `dyn Backend` consumers.
 pub struct CudaNewBackend {
@@ -32,7 +32,21 @@ unsafe impl Send for CudaNewBackend {}
 unsafe impl Sync for CudaNewBackend {}
 
 impl CudaNewBackend {
-    pub fn new(ctx: std::sync::Arc<CudaContext>) -> Self {
+    /// Construct a backend for a CUDA device.
+    ///
+    /// This preserves the constructor contract exposed by the legacy CUDA
+    /// backend so model code does not need to learn how the runtime owns its
+    /// context.
+    pub fn new(device_id: usize) -> Result<Self> {
+        let ctx = CudaContext::new(device_id).map_err(Error::Cuda)?;
+        Ok(Self::from_context(std::sync::Arc::new(ctx)))
+    }
+
+    /// Construct a backend around an existing context.
+    ///
+    /// This is reserved for execution paths that intentionally share one
+    /// stream between direct cuda-new operators and portable `Backend` calls.
+    pub fn from_context(ctx: std::sync::Arc<CudaContext>) -> Self {
         Self { ctx }
     }
 
@@ -298,12 +312,21 @@ impl Backend for CudaNewBackend {
         kv: &mut dyn KvCache,
         layer_idx: usize,
         n_heads: usize,
-        _n_kv_heads: usize,
+        n_kv_heads: usize,
         head_dim: usize,
         kv_len: usize,
-        _max_seq_len: usize,
+        max_seq_len: usize,
     ) -> Result<Tensor> {
-        self.sdpa(q, kv, layer_idx, n_heads, head_dim, kv_len)
+        self.sdpa(
+            q,
+            kv,
+            layer_idx,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            kv_len,
+            max_seq_len,
+        )
     }
 
     fn sdpa_prefill(
@@ -312,12 +335,21 @@ impl Backend for CudaNewBackend {
         kv: &mut dyn KvCache,
         layer_idx: usize,
         n_heads: usize,
-        _n_kv_heads: usize,
+        n_kv_heads: usize,
         head_dim: usize,
         kv_len: usize,
-        _max_seq_len: usize,
+        max_seq_len: usize,
     ) -> Result<Tensor> {
-        self.sdpa(q, kv, layer_idx, n_heads, head_dim, kv_len)
+        self.sdpa(
+            q,
+            kv,
+            layer_idx,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            kv_len,
+            max_seq_len,
+        )
     }
 
     fn create_kv_cache(
@@ -329,7 +361,7 @@ impl Backend for CudaNewBackend {
     ) -> Box<dyn KvCache> {
         Box::new(
             CudaKvCache::new(
-                self.ctx.clone(),
+                self.ctx.device_id(),
                 n_layers,
                 n_kv_heads,
                 head_dim,
@@ -347,7 +379,11 @@ impl Backend for CudaNewBackend {
         v: &Tensor,
         append_len: usize,
     ) -> Result<()> {
-        kv.append(layer_idx, k, v, append_len)
+        let cache = kv
+            .as_any()
+            .downcast_ref::<CudaKvCache>()
+            .ok_or_else(|| Error::Other("expected a cuda-new KV cache".into()))?;
+        cache.append(&self.ctx, layer_idx, k, v, append_len)
     }
 
     fn synchronize(&self) -> Result<()> {
@@ -388,39 +424,29 @@ impl CudaNewBackend {
         kv: &mut dyn KvCache,
         layer_idx: usize,
         n_heads: usize,
+        n_kv_heads: usize,
         head_dim: usize,
         kv_len: usize,
+        max_seq_len: usize,
     ) -> Result<Tensor> {
-        let cache = kv
-            .as_any()
-            .downcast_ref::<CudaKvCache>()
-            .ok_or_else(|| Error::Other("expected a cuda-new KV cache".into()))?;
-        let q_dims = q.shape().dims().to_vec();
-        if q_dims.len() != 3 || q_dims[1] != n_heads || q_dims[2] != head_dim {
-            return Err(Error::Other(format!(
-                "attention query must be [seq, {n_heads}, {head_dim}], got {q_dims:?}"
-            )));
-        }
-        let seq_len = q_dims[0];
+        let seq_len = q.shape().dims()[0];
         if seq_len == 0 || kv_len < seq_len {
             return Err(Error::Other(
                 "attention kv_len is smaller than the query".into(),
             ));
         }
-        let q4 = q.reshape(vec![1, seq_len, n_heads, head_dim])?;
-        let key = cache.key(layer_idx);
-        let value = cache.value(layer_idx);
-        let mut out = self.ctx.allocate_output(q4.shape().clone(), DType::BF16)?;
-        // Causal mask: query token i occupies cache position query_start + i,
-        // so both fresh prefill (query_start 0) and decode (query_start
-        // kv_len-1) use the same causal contract.
-        let mut args = ops::KvCacheAttentionArgs::new(&q4, key, value, &mut out);
-        args.valid_key_tokens = kv_len;
-        args.query_start = kv_len - seq_len;
-        args.mask = ops::AttentionMask::Causal;
-        args.scale = 1.0 / (head_dim as f32).sqrt();
-        ops::kv_cache_attention(&self.ctx, args)?;
-        Ok(out.reshape(vec![seq_len, n_heads * head_dim])?)
+        kernels::attention::sdpa(
+            &self.ctx,
+            q,
+            kv,
+            layer_idx,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            kv_len,
+            max_seq_len,
+            (kv_len - seq_len) as u32,
+        )
     }
 }
 
@@ -437,17 +463,56 @@ impl apxinf_core::SamplingBackend for CudaNewBackend {
 #[cfg(test)]
 mod tests {
     use std::panic::{catch_unwind, AssertUnwindSafe};
-    use std::sync::Arc;
-
-    use apxinf_core::{Backend, Shape, Tensor};
+    use apxinf_core::{Backend, CpuBackend, Shape, Tensor};
     use half::bf16;
 
     use super::*;
 
     #[test]
+    fn portable_f32_sdpa_matches_cpu_with_head_major_cache() {
+        let _guard = crate::CUDA_TEST_LOCK.lock().unwrap();
+        let backend = CudaNewBackend::new(0).unwrap();
+        let cpu = CpuBackend;
+        let q = Tensor::from_f32(
+            Shape::new(vec![2, 2, 2]),
+            &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0, -1.0, 1.0],
+        )
+        .unwrap();
+        let k = Tensor::from_f32(Shape::new(vec![2, 1, 2]), &[1.0, 0.0, 0.0, 1.0]).unwrap();
+        let v = Tensor::from_f32(Shape::new(vec![2, 1, 2]), &[2.0, 4.0, 6.0, 8.0]).unwrap();
+
+        let mut cpu_cache = cpu.create_kv_cache(1, 1, 2, 4);
+        cpu.kv_append(&mut *cpu_cache, 0, &k, &v, 2).unwrap();
+        let expected = cpu
+            .sdpa_prefill(&q, &mut *cpu_cache, 0, 2, 1, 2, 2, 4)
+            .unwrap()
+            .to_f32_vec()
+            .unwrap();
+
+        let q_gpu = backend.to_device(&q).unwrap();
+        let k_gpu = backend.to_device(&k).unwrap();
+        let v_gpu = backend.to_device(&v).unwrap();
+        let mut gpu_cache = backend.create_kv_cache(1, 1, 2, 4);
+        backend
+            .kv_append(&mut *gpu_cache, 0, &k_gpu, &v_gpu, 2)
+            .unwrap();
+        let output = backend
+            .sdpa_prefill(&q_gpu, &mut *gpu_cache, 0, 2, 1, 2, 2, 4)
+            .unwrap();
+        backend.synchronize().unwrap();
+        let actual = backend.to_cpu(&output).unwrap().to_f32_vec().unwrap();
+        let max_error = actual
+            .iter()
+            .zip(&expected)
+            .map(|(actual, expected)| (actual - expected).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_error < 1e-5, "F32 SDPA max error: {max_error}");
+    }
+
+    #[test]
     fn concat_2d_concatenates_columns() {
         let _guard = crate::CUDA_TEST_LOCK.lock().unwrap();
-        let backend = CudaNewBackend::new(Arc::new(CudaContext::new(0).unwrap()));
+        let backend = CudaNewBackend::new(0).unwrap();
         let left = Tensor::from_bf16(
             Shape::new(vec![2, 2]),
             &[
@@ -483,7 +548,7 @@ mod tests {
     #[test]
     fn capture_graph_aborts_after_panic() {
         let _guard = crate::CUDA_TEST_LOCK.lock().unwrap();
-        let backend = CudaNewBackend::new(Arc::new(CudaContext::new(0).unwrap()));
+        let backend = CudaNewBackend::new(0).unwrap();
         let panicked = catch_unwind(AssertUnwindSafe(|| {
             let _ = backend.capture_graph::<()>(|| panic!("capture failure"));
         }));

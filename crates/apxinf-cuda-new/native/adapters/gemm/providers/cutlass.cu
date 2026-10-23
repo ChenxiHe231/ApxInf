@@ -222,7 +222,7 @@ void prepare_cutlass_geglu_sm89(Execution& state) {
 }
 
 void prepare_cutlass_bf16_swiglu(Execution& state) {
-#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN_DRIVE_SM110)
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_SEGMENTED_ATTENTION_SM110)
   auto owned_resources = std::make_unique<CutlassGegluState>();
   state.resource_bytes = cutlass_bf16_swiglu_resource_requirements(state.spec);
   check_cuda(cudaMalloc(&owned_resources->padded_output,
@@ -360,7 +360,7 @@ cudaError_t launch_cutlass_bf16_geglu(Execution& state) {
 }
 
 cudaError_t launch_cutlass_bf16_swiglu(Execution& state) {
-#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN_DRIVE_SM110)
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_SEGMENTED_ATTENTION_SM110)
   const auto& bindings = state.bindings;
   const auto& spec = state.spec;
   const auto stream = static_cast<cudaStream_t>(bindings.stream);

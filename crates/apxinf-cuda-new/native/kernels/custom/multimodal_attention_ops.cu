@@ -6,11 +6,11 @@
 // + 2D RoPE, and the segmented dense MHA. Arithmetic order, rounding points
 // and tie-breaks are preserved exactly.
 
-#include "vla_attn_ops.h"
+#include "multimodal_attention_ops.h"
 
 #include <cuda_bf16.h>
 
-namespace apxinf::cuda_new::vla_attn_ops {
+namespace apxinf::cuda_new::multimodal_attention_ops {
 namespace {
 
 constexpr int kThreads = 256;
@@ -285,4 +285,4 @@ int segmented_mha_bf16(const void* q, const void* k, const void* v,
   return static_cast<int>(cudaGetLastError());
 }
 
-}  // namespace apxinf::cuda_new::vla_attn_ops
+}  // namespace apxinf::cuda_new::multimodal_attention_ops

@@ -35,6 +35,12 @@ cudaError_t apxinf_llmdec_mul_f32(
 cudaError_t apxinf_llmdec_mul_bf16(
     const void* a, const void* b, void* output, uint32_t count, void* stream);
 
+cudaError_t apxinf_llmdec_scale_f32(
+    const void* input, void* output, uint32_t count, float scale, void* stream);
+
+cudaError_t apxinf_llmdec_scale_bf16(
+    const void* input, void* output, uint32_t count, float scale, void* stream);
+
 cudaError_t apxinf_llmdec_embedding_f32(
     const void* table, const void* ids, void* output,
     uint32_t embed_dim, uint32_t seq_len, void* stream);
@@ -58,6 +64,16 @@ cudaError_t apxinf_llmdec_rms_norm_add_bf16(
 cudaError_t apxinf_llmdec_attention_softmax_decode_f32(
     const void* scores, void* output,
     uint32_t cols, uint32_t n_heads, const void* pos_ptr, void* stream);
+
+cudaError_t apxinf_llmdec_attention_softmax_f32(
+    const void* scores, void* output,
+    uint32_t cols, uint32_t rows, uint32_t kv_offset,
+    uint32_t n_heads, void* stream);
+
+cudaError_t apxinf_llmdec_attention_softmax_bf16(
+    const void* scores, void* output,
+    uint32_t cols, uint32_t rows, uint32_t kv_offset,
+    uint32_t n_heads, void* stream);
 
 cudaError_t apxinf_llmdec_flash_attn_decode_bf16(
     const void* q, const void* k_cache, const void* v_cache, void* out,
@@ -91,10 +107,25 @@ cudaError_t apxinf_llmdec_kv_cache_append_decode_f32(
     uint32_t n_kv_heads, uint32_t head_dim, uint32_t max_seq_len,
     const void* pos_ptr, void* stream);
 
+cudaError_t apxinf_llmdec_kv_cache_append_f32(
+    void* cache, const void* new_data,
+    uint32_t n_kv_heads, uint32_t head_dim, uint32_t max_seq_len,
+    uint32_t seq_len, uint32_t append_len, void* stream);
+
+cudaError_t apxinf_llmdec_kv_cache_append_bf16(
+    void* cache, const void* new_data,
+    uint32_t n_kv_heads, uint32_t head_dim, uint32_t max_seq_len,
+    uint32_t seq_len, uint32_t append_len, void* stream);
+
 cudaError_t apxinf_llmdec_kv_cache_append_decode_bf16(
     void* cache, const void* new_data,
     uint32_t n_kv_heads, uint32_t head_dim, uint32_t max_seq_len,
     const void* pos_ptr, void* stream);
+
+cudaError_t apxinf_llmdec_kv_cache_gather_bf16(
+    const void* src, void* dst,
+    uint32_t tokens, uint32_t n_kv_heads, uint32_t head_dim,
+    uint32_t max_seq_len, uint32_t kv_offset, void* stream);
 
 #ifdef __cplusplus
 }
