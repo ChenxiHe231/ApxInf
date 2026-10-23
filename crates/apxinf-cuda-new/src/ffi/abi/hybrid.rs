@@ -1,5 +1,5 @@
 //! Raw bindings for the linear-attention / hybrid-recurrent custom operators
-//! (qwen_drive family), ported from the legacy crate with the apxinf_cn_ prefix.
+//! ported from the legacy crate with the apxinf_hybrid_ prefix.
 
 use std::ffi::c_void;
 
@@ -7,9 +7,9 @@ use crate::ffi::raw::cuda_runtime::{cudaError_t, cudaStream_t};
 use crate::kernels::gdn_policy::GdnLaunchPolicy;
 
 unsafe extern "C" {
-    #[cfg(apxinf_qwen_drive_sm110)]
+    #[cfg(apxinf_segmented_attention_sm110)]
     pub(crate) fn apxinf_gdn_bf16_prefill_sm110_init() -> i32;
-    #[cfg(apxinf_qwen_drive_sm110)]
+    #[cfg(apxinf_segmented_attention_sm110)]
     pub(crate) fn apxinf_gdn_bf16_prefill_sm110(
         zba: *const c_void,
         conv_weight: *const c_void,
@@ -30,20 +30,20 @@ unsafe extern "C" {
         seq_pad: i32,
         stream: cudaStream_t,
     ) -> i32;
-    pub(crate) fn apxinf_cn_broadcast_bf16_f32_rows(
+    pub(crate) fn apxinf_hybrid_broadcast_bf16_f32_rows(
         bias: *const c_void,
         output: *mut c_void,
         rows: i32,
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_cast_f32_bf16(
+    pub(crate) fn apxinf_hybrid_cast_f32_bf16(
         input: *const c_void,
         output: *mut c_void,
         count: i64,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_cast_bf16_f32(
+    pub(crate) fn apxinf_hybrid_cast_bf16_f32(
         input: *const c_void,
         output: *mut c_void,
         count: i64,
@@ -51,7 +51,7 @@ unsafe extern "C" {
     ) -> cudaError_t;
     // FIX (implement_r8): tiled block-per-row softmax (fp32 in, bf16 out) for the
     // route-3 composed vision attention; defined in adapters/custom_kernels.cu.
-    pub(crate) fn apxinf_cn_row_softmax_f32_bf16(
+    pub(crate) fn apxinf_hybrid_row_softmax_f32_bf16(
         input: *const c_void,
         output: *mut c_void,
         cols: u32,
@@ -63,7 +63,7 @@ unsafe extern "C" {
     // adapters/custom_kernels.cu with the attention.cuh row = seq_pos*n_heads + head
     // contract (valid_cols = min(seq_pos + kv_offset + 1, cols), masked cells exact 0.0f).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_row_softmax_causal_f32(
+    pub(crate) fn apxinf_hybrid_row_softmax_causal_f32(
         input: *const c_void,
         output: *mut c_void,
         cols: u32,
@@ -73,7 +73,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_causal_conv1d_silu_bf16(
+    pub(crate) fn apxinf_hybrid_causal_conv1d_silu_bf16(
         x: *const c_void,
         weight: *const c_void,
         state: *const c_void,
@@ -86,7 +86,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_qk_prep_bf16(
+    pub(crate) fn apxinf_hybrid_gdn_qk_prep_bf16(
         conv_out: *const c_void,
         q_out: *mut c_void,
         k_out: *mut c_void,
@@ -102,7 +102,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_qk_prep_qk_bf16(
+    pub(crate) fn apxinf_hybrid_gdn_qk_prep_qk_bf16(
         conv_out: *const c_void,
         q_out: *mut c_void,
         k_out: *mut c_void,
@@ -118,7 +118,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_vb_prep_bf16(
+    pub(crate) fn apxinf_hybrid_gdn_vb_prep_bf16(
         conv_out: *const c_void,
         b_proj: *const c_void,
         a_proj: *const c_void,
@@ -136,7 +136,7 @@ unsafe extern "C" {
         head_v_dim: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_gdn_gate_prep_bf16(
+    pub(crate) fn apxinf_hybrid_gdn_gate_prep_bf16(
         b_proj: *const c_void,
         a_proj: *const c_void,
         dt_bias: *const c_void,
@@ -149,7 +149,7 @@ unsafe extern "C" {
         ba_row_stride: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_gdn_cumsum_f32(
+    pub(crate) fn apxinf_hybrid_gdn_cumsum_f32(
         g: *const c_void,
         g_cum: *mut c_void,
         seq_pad: i32,
@@ -158,7 +158,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_attn_raw_f32(
+    pub(crate) fn apxinf_hybrid_gdn_attn_raw_f32(
         q: *const c_void,
         k: *const c_void,
         beta: *const c_void,
@@ -174,7 +174,7 @@ unsafe extern "C" {
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_attn_raw_solve_f1_qk_bf16(
+    pub(crate) fn apxinf_hybrid_gdn_attn_raw_solve_f1_qk_bf16(
         q: *const c_void,
         k: *const c_void,
         beta: *const c_void,
@@ -188,14 +188,14 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_tri_solve_f32(
+    pub(crate) fn apxinf_hybrid_gdn_tri_solve_f32(
         a: *mut c_void,
         matrices: i32,
         chunk_size: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_chunk_gemm_f32(
+    pub(crate) fn apxinf_hybrid_gdn_chunk_gemm_f32(
         a: *const c_void,
         v: *const c_void,
         k: *const c_void,
@@ -213,7 +213,7 @@ unsafe extern "C" {
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_chunk_gemm_tri_k_bf16_direct_v(
+    pub(crate) fn apxinf_hybrid_gdn_chunk_gemm_tri_k_bf16_direct_v(
         a: *const c_void,
         conv_out: *const c_void,
         k: *const c_void,
@@ -233,7 +233,7 @@ unsafe extern "C" {
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_chunk_state_f32(
+    pub(crate) fn apxinf_hybrid_gdn_chunk_state_f32(
         q: *const c_void,
         k: *const c_void,
         g_cum: *const c_void,
@@ -254,7 +254,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_chunk_state_qk_bf16(
+    pub(crate) fn apxinf_hybrid_gdn_chunk_state_qk_bf16(
         q: *const c_void,
         k: *const c_void,
         g_cum: *const c_void,
@@ -274,7 +274,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gdn_recurrent_f32(
+    pub(crate) fn apxinf_hybrid_gdn_recurrent_f32(
         q: *const c_void,
         k: *const c_void,
         v: *const c_void,
@@ -289,7 +289,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_gated_rms_silu_bf16(
+    pub(crate) fn apxinf_hybrid_gated_rms_silu_bf16(
         x: *const c_void,
         z: *const c_void,
         weight: *const c_void,
@@ -303,7 +303,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_add_rms_norm_plus1_bf16(
+    pub(crate) fn apxinf_hybrid_add_rms_norm_plus1_bf16(
         a: *const c_void,
         b: *const c_void,
         weight: *const c_void,
@@ -314,7 +314,7 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_rms_norm_plus1_bf16(
+    pub(crate) fn apxinf_hybrid_rms_norm_plus1_bf16(
         input: *const c_void,
         weight: *const c_void,
         output: *mut c_void,
@@ -324,7 +324,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_full_attn_prepare_bf16(
+    pub(crate) fn apxinf_hybrid_full_attn_prepare_bf16(
         fused: *const c_void,
         q_norm_w: *const c_void,
         k_norm_w: *const c_void,
@@ -344,7 +344,7 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_sigmoid_gate_mul_bf16(
+    pub(crate) fn apxinf_hybrid_sigmoid_gate_mul_bf16(
         attn: *mut c_void,
         fused: *const c_void,
         rows: i32,
@@ -354,7 +354,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_adaln_rms_norm_bf16(
+    pub(crate) fn apxinf_hybrid_adaln_rms_norm_bf16(
         x: *const c_void,
         weight: *const c_void,
         scale: *const c_void,
@@ -365,7 +365,7 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_adaln_gate_residual_bf16(
+    pub(crate) fn apxinf_hybrid_adaln_gate_residual_bf16(
         proj: *const c_void,
         residual: *const c_void,
         gate: *const c_void,
@@ -375,7 +375,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_expert_qkv_prepare_bf16(
+    pub(crate) fn apxinf_hybrid_expert_qkv_prepare_bf16(
         fused: *const c_void,
         q_norm_w: *const c_void,
         k_norm_w: *const c_void,
@@ -394,13 +394,13 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_expert_sigmoid_gate_mul_bf16(
+    pub(crate) fn apxinf_hybrid_expert_sigmoid_gate_mul_bf16(
         attn: *mut c_void,
         gate: *const c_void,
         count: i64,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_fourier_features_bf16(
+    pub(crate) fn apxinf_hybrid_fourier_features_bf16(
         waypoints: *const c_void,
         freqs: *const c_void,
         out: *mut c_void,
@@ -410,7 +410,7 @@ unsafe extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_cn_concat7_cols_bf16(
+    pub(crate) fn apxinf_hybrid_concat7_cols_bf16(
         s0: *const c_void,
         s1: *const c_void,
         s2: *const c_void,
@@ -424,7 +424,7 @@ unsafe extern "C" {
         broadcast_mask: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_flow_update_f32(
+    pub(crate) fn apxinf_hybrid_flow_update_f32(
         w: *mut c_void,
         endpoint: *const c_void,
         remaining: f32,
@@ -432,19 +432,19 @@ unsafe extern "C" {
         count: i64,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_suppress_logits_bf16(
+    pub(crate) fn apxinf_hybrid_suppress_logits_bf16(
         logits: *mut c_void,
         ids: *const u32,
         count: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_gelu_exact_bf16(
+    pub(crate) fn apxinf_hybrid_gelu_exact_bf16(
         input: *const c_void,
         output: *mut c_void,
         count: i64,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_sinusoidal_embedding_bf16(
+    pub(crate) fn apxinf_hybrid_sinusoidal_embedding_bf16(
         positions: *const c_void,
         output: *mut c_void,
         rows: i32,
@@ -453,7 +453,7 @@ unsafe extern "C" {
         frequency_step: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_rgb_u8_to_temporal2_merge2_rect_bf16(
+    pub(crate) fn apxinf_hybrid_rgb_u8_to_temporal2_merge2_rect_bf16(
         rgb: *const c_void,
         patches: *mut c_void,
         lut: *const c_void,
@@ -461,7 +461,7 @@ unsafe extern "C" {
         grid_w: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_pillow_bicubic_u8_axis(
+    pub(crate) fn apxinf_hybrid_pillow_bicubic_u8_axis(
         input: *const c_void,
         output: *mut c_void,
         input_offsets: *const c_void,
@@ -477,7 +477,7 @@ unsafe extern "C" {
         horizontal: bool,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_adaln_gate_residual_rms_bf16(
+    pub(crate) fn apxinf_hybrid_adaln_gate_residual_rms_bf16(
         projection: *const c_void,
         residual: *const c_void,
         gate: *const c_void,
@@ -491,14 +491,14 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_swiglu_bf16_rounded(
+    pub(crate) fn apxinf_hybrid_swiglu_bf16_rounded(
         gate_up: *const c_void,
         output: *mut c_void,
         rows: i32,
         inner: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_swiglu_bf16_rounded_pair_interleaved(
+    pub(crate) fn apxinf_hybrid_swiglu_bf16_rounded_pair_interleaved(
         gate_up: *const c_void,
         output: *mut c_void,
         rows: i32,
@@ -506,7 +506,7 @@ unsafe extern "C" {
         pair: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_cn_swiglu_bf16(
+    pub(crate) fn apxinf_hybrid_swiglu_bf16(
         gate_up: *const c_void,
         output: *mut c_void,
         rows: i32,

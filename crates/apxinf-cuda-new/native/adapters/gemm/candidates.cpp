@@ -168,7 +168,7 @@ void cublaslt_configurations(const Spec&,
 #ifdef APXINF_GEMM_CUTLASS
 bool supports_cutlass_fp8(const Spec& spec) {
   // Keep the translated CUTLASS kernel on its original F16 contract.  Its
-  // templated BF16 epilogue passes isolated synthetic checks, but cold GR00T
+  // templated BF16 epilogue passes isolated synthetic checks, but cold
   // tuning can select tactics that either fault under repeated graph
   // preflight or drift badly on production inputs (cosine 0.9517 versus the
   // migration baseline).  cuBLASLt provides the stable BF16 candidate until
@@ -183,7 +183,7 @@ bool supports_cutlass_fp8(const Spec& spec) {
 }
 
 bool supports_cutlass_fp8_rowwise(const Spec& spec) {
-  // Dynamic row/channel FP8 is the WallOSS path: CUTLASS consumes the row and
+  // Dynamic row/channel FP8: CUTLASS consumes the row and
   // channel scales in its epilogue, avoiding the generic GEMM + finish pass.
   // The kernel has no separate scalar-alpha or output-scale input.
   return (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM ||
@@ -495,7 +495,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        false, supports_vendor, cublaslt_alignment,
        cublaslt_resource_requirements, cublaslt_configurations,
        prepare_cublaslt, launch_cublaslt, destroy_cublaslt},
-#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_QWEN_DRIVE_SM110)
+#if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_SEGMENTED_ATTENTION_SM110)
       {kProviderCutlass, 7, 1, "cutlass-bf16-swiglu-sm110",
        kDeviceFeatureQwenDriveSm110, true, true, false,
        supports_cutlass_bf16_swiglu_sm110, cutlass_geglu_alignment,

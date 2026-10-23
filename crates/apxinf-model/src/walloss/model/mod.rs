@@ -425,12 +425,7 @@ mod tests {
     /// every replay, so a request's new bytes reach the model.
     #[test]
     fn captured_rgb_preprocess_observes_updated_input_bytes() {
-        let context = std::sync::Arc::new(
-            apxinf_cuda_new::CudaContext::new(0)
-                .map_err(apxinf_core::Error::Cuda)
-                .unwrap(),
-        );
-        let backend = RuntimeBackend::new(context);
+        let backend = RuntimeBackend::new(0).unwrap();
         let bytes = VIEWS * HEIGHT * WIDTH * 3;
         let rows = VIEWS * (HEIGHT / PATCH) * (WIDTH / PATCH);
         let width = 3 * TEMPORAL * PATCH * PATCH;

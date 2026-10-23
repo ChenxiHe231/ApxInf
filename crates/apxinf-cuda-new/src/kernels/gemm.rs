@@ -319,7 +319,7 @@ pub fn gemm_fp8_dynamic_bf16(
 
 use super::contracts::{checked_bytes, require_buffers, require_finite};
 use crate::cublas::CublasTranspose;
-use crate::ffi::abi::vla_la as la_abi;
+use crate::ffi::abi::hybrid as la_abi;
 use crate::ffi::raw::cuda_runtime as raw;
 use crate::CudaBuffer;
 use apxinf_core::Device;
@@ -431,7 +431,7 @@ pub fn bf16_addmm_checkpoint(
         .into_tensor(Shape::new(shape.to_vec()), DType::F32);
     let cp = CudaBuffer::from_tensor(&accumulator).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(la_abi::apxinf_cn_broadcast_bf16_f32_rows(
+        raw::check_cuda(la_abi::apxinf_hybrid_broadcast_bf16_f32_rows(
             bp.ptr(),
             cp.ptr(),
             m,
@@ -614,7 +614,7 @@ fn w8a8_activation_from(
 /// `quantize_w8a8_activation`: dynamically row-quantize a BF16 activation to
 /// I8 with per-row F32 scales.
 pub fn quantize_w8a8_activation(ctx: &CudaContext, activation: &Tensor) -> Result<W8A8Activation> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     let dims = activation.shape().dims();
     if activation.dtype() != DType::BF16 || dims.len() != 2 || dims[0] == 0 || dims[1] == 0 {
@@ -626,7 +626,7 @@ pub fn quantize_w8a8_activation(ctx: &CudaContext, activation: &Tensor) -> Resul
     let mut result = w8a8_activation_from(ctx, rows, input_dim)?;
     let input_buffer = CudaBuffer::from_tensor(activation).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_quantize_rows_bf16_int8(
+        raw::check_cuda(abi::apxinf_transformer_bf16_quantize_rows_bf16_int8(
             input_buffer.ptr(),
             result.quantized.ptr(),
             result.row_scales.ptr(),
@@ -646,7 +646,7 @@ pub fn bias_gelu_quantize_w8a8_activation(
     activation: &Tensor,
     bias: &Tensor,
 ) -> Result<W8A8Activation> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     let dims = activation.shape().dims();
     if activation.dtype() != DType::BF16
@@ -665,7 +665,7 @@ pub fn bias_gelu_quantize_w8a8_activation(
     let input_buffer = CudaBuffer::from_tensor(activation).map_err(Error::Cuda)?;
     let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_bias_gelu_quantize_rows_bf16_int8(
+        raw::check_cuda(abi::apxinf_transformer_bf16_bias_gelu_quantize_rows_bf16_int8(
             input_buffer.ptr(),
             bias_buffer.ptr(),
             result.quantized.ptr(),
@@ -687,7 +687,7 @@ pub fn adaptive_layer_norm_quantize_w8a8_activation(
     modulation: &Tensor,
     eps: f32,
 ) -> Result<(Tensor, W8A8Activation)> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     let dims = input.shape().dims();
     if input.dtype() != DType::BF16
@@ -711,7 +711,7 @@ pub fn adaptive_layer_norm_quantize_w8a8_activation(
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
         raw::check_cuda(
-            abi::apxinf_gr00t_adaptive_layer_norm_quantize_rows_bf16_int8(
+            abi::apxinf_transformer_bf16_adaptive_layer_norm_quantize_rows_bf16_int8(
                 input_buffer.ptr(),
                 modulation_buffer.ptr(),
                 output_buffer.ptr(),
@@ -737,7 +737,7 @@ pub fn layer_norm_quantize_w8a8_activation(
     bias: &Tensor,
     eps: f32,
 ) -> Result<(Tensor, W8A8Activation)> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     let dims = input.shape().dims();
     if input.dtype() != DType::BF16
@@ -762,7 +762,7 @@ pub fn layer_norm_quantize_w8a8_activation(
     let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_layer_norm_quantize_rows_bf16_int8(
+        raw::check_cuda(abi::apxinf_transformer_bf16_layer_norm_quantize_rows_bf16_int8(
             input_buffer.ptr(),
             weight_buffer.ptr(),
             bias_buffer.ptr(),
@@ -805,7 +805,7 @@ fn quantize_w8a8_silu_mul_impl(
     up: &Tensor,
     packed4: bool,
 ) -> Result<W8A8Activation> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     if gate.dtype() != DType::BF16 || up.dtype() != DType::BF16 || gate.shape() != up.shape() {
         return Err(Error::Other(
@@ -824,7 +824,7 @@ fn quantize_w8a8_silu_mul_impl(
     let up_buffer = CudaBuffer::from_tensor(up).map_err(Error::Cuda)?;
     unsafe {
         let code = if packed4 {
-            abi::apxinf_gr00t_silu_mul_quantize_rows_bf16_int8_packed4(
+            abi::apxinf_transformer_bf16_silu_mul_quantize_rows_bf16_int8_packed4(
                 gate_buffer.ptr(),
                 up_buffer.ptr(),
                 result.quantized.ptr(),
@@ -834,7 +834,7 @@ fn quantize_w8a8_silu_mul_impl(
                 ctx.stream().handle(),
             )
         } else {
-            abi::apxinf_gr00t_silu_mul_quantize_rows_bf16_int8(
+            abi::apxinf_transformer_bf16_silu_mul_quantize_rows_bf16_int8(
                 gate_buffer.ptr(),
                 up_buffer.ptr(),
                 result.quantized.ptr(),
@@ -872,7 +872,7 @@ fn w8a8_gemm(
     weight: W8A8WeightView<'_>,
     bias: Option<&Tensor>,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::gr00t as abi;
+    use crate::ffi::abi::transformer_bf16 as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     if activation.input_dim != weight.input_dim
         || weight.scale_mode != W8A8ScaleMode::DynamicRowPerOutputChannel
@@ -898,7 +898,7 @@ fn w8a8_gemm(
     // fast path stays in C++ and introduces no Rust-side tuning state.
     if ctx.caps().sm == 87 && k % 16 == 0 && n % 8 == 0 {
         let cutlass_result = unsafe {
-            raw::check_cuda(abi::apxinf_gr00t_cutlass_int8_gemm_bf16(
+            raw::check_cuda(abi::apxinf_transformer_bf16_cutlass_int8_gemm_bf16(
                 activation.quantized.ptr(),
                 weight.values_i8.ptr(),
                 activation.row_scales.ptr(),
@@ -937,7 +937,7 @@ fn w8a8_gemm(
         )
         .map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_dequantize_int32_bf16(
+        raw::check_cuda(abi::apxinf_transformer_bf16_dequantize_int32_bf16(
             accumulators.ptr(),
             activation.row_scales.ptr(),
             weight_scales.ptr(),
@@ -1003,7 +1003,7 @@ pub fn try_gemm_quantized_w8a8_m41_n6144_k1536(
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
         crate::ffi::raw::cuda_runtime::check_cuda(
-            crate::ffi::abi::gr00t::apxinf_gr00t_cutlass_int8_gemm_bf16_m41_n6144_k1536(
+            crate::ffi::abi::transformer_bf16::apxinf_transformer_bf16_cutlass_int8_gemm_bf16_m41_n6144_k1536(
                 activation.quantized.ptr(),
                 weight.values_i8.ptr(),
                 activation.row_scales.ptr(),
@@ -1050,7 +1050,7 @@ pub fn try_gemm_quantized_w8a8_bias(
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
         crate::ffi::raw::cuda_runtime::check_cuda(
-            crate::ffi::abi::gr00t::apxinf_gr00t_cutlass_int8_gemm_bias_bf16_m41_n4608_k1536(
+            crate::ffi::abi::transformer_bf16::apxinf_transformer_bf16_cutlass_int8_gemm_bias_bf16_m41_n4608_k1536(
                 activation.quantized.ptr(),
                 weight.values_i8.ptr(),
                 activation.row_scales.ptr(),
@@ -1102,7 +1102,7 @@ pub fn try_gemm_quantized_w8a8_bias_gelu_quantized(
     let activated_buffer = CudaBuffer::from_tensor(&activated).map_err(Error::Cuda)?;
     unsafe {
         crate::ffi::raw::cuda_runtime::check_cuda(
-            crate::ffi::abi::gr00t::apxinf_gr00t_cutlass_int8_gemm_bias_gelu_bf16_m41_n6144_k1536(
+            crate::ffi::abi::transformer_bf16::apxinf_transformer_bf16_cutlass_int8_gemm_bias_gelu_bf16_m41_n6144_k1536(
                 activation.quantized.ptr(),
                 weight.values_i8.ptr(),
                 activation.row_scales.ptr(),

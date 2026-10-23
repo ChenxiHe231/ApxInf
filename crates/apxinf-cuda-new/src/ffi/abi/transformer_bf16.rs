@@ -1,20 +1,20 @@
-//! Raw bindings for the GR00T-family fused activation primitives, ported from
-//! the legacy crate with the apxinf_gr00t_ prefix. Defined in
-//! native/adapters/gr00t/ops.cu.
+//! Raw bindings for BF16 transformer fixed primitives, ported from
+//! the legacy crate with the apxinf_transformer_bf16_ prefix. Defined in
+//! semantic native/adapters operator-family files.
 
 use std::ffi::c_void;
 
 use crate::ffi::raw::cuda_runtime::{cudaError_t, cudaStream_t};
 
 unsafe extern "C" {
-    pub(crate) fn apxinf_gr00t_silu_mul_separate_bf16(
+    pub(crate) fn apxinf_transformer_bf16_silu_mul_separate_bf16(
         gate: *const c_void,
         up: *const c_void,
         output: *mut c_void,
         count: u32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_silu_mul_quant_bf16_e4m3(
+    pub(crate) fn apxinf_transformer_bf16_silu_mul_quant_bf16_e4m3(
         gate: *const c_void,
         up: *const c_void,
         output: *mut c_void,
@@ -22,7 +22,7 @@ unsafe extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_gelu_quant_bf16_e4m3(
+    pub(crate) fn apxinf_transformer_bf16_bias_gelu_quant_bf16_e4m3(
         input: *const c_void,
         bias: *const c_void,
         output: *mut c_void,
@@ -31,7 +31,7 @@ unsafe extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_gelu_bf16_packed8(
+    pub(crate) fn apxinf_transformer_bf16_bias_gelu_bf16_packed8(
         input: *const c_void,
         bias: *const c_void,
         output: *mut c_void,
@@ -39,7 +39,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_scatter_rows_bf16(
+    pub(crate) fn apxinf_transformer_bf16_scatter_rows_bf16(
         source: *const c_void,
         rows: *const c_void,
         output: *mut c_void,
@@ -48,7 +48,7 @@ unsafe extern "C" {
         add: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_qkv_in_place_bf16(
+    pub(crate) fn apxinf_transformer_bf16_bias_qkv_in_place_bf16(
         query: *mut c_void,
         key: *mut c_void,
         value: *mut c_void,
@@ -59,7 +59,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_adaptive_layer_norm_bf16(
+    pub(crate) fn apxinf_transformer_bf16_adaptive_layer_norm_bf16(
         input: *const c_void,
         modulation: *const c_void,
         output: *mut c_void,
@@ -68,7 +68,7 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_adaptive_layer_norm_quant_bf16_e4m3(
+    pub(crate) fn apxinf_transformer_bf16_adaptive_layer_norm_quant_bf16_e4m3(
         input: *const c_void,
         modulation: *const c_void,
         output: *mut c_void,
@@ -79,7 +79,7 @@ unsafe extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_rms_norm_quant_bf16_e4m3(
+    pub(crate) fn apxinf_transformer_bf16_rms_norm_quant_bf16_e4m3(
         input: *const c_void,
         weight: *const c_void,
         output: *mut c_void,
@@ -89,7 +89,7 @@ unsafe extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_layer_norm_quant_bf16_e4m3(
+    pub(crate) fn apxinf_transformer_bf16_layer_norm_quant_bf16_e4m3(
         input: *const c_void,
         weight: *const c_void,
         bias: *const c_void,
@@ -100,7 +100,7 @@ unsafe extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_then_residual_bf16(
+    pub(crate) fn apxinf_transformer_bf16_bias_then_residual_bf16(
         projection: *const c_void,
         bias: *const c_void,
         residual: *const c_void,
@@ -109,7 +109,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_residual_bf16_packed4(
+    pub(crate) fn apxinf_transformer_bf16_bias_residual_bf16_packed4(
         projection: *const c_void,
         bias: *const c_void,
         residual: *const c_void,
@@ -118,7 +118,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_then_residual_bf16_packed4(
+    pub(crate) fn apxinf_transformer_bf16_bias_then_residual_bf16_packed4(
         projection: *const c_void,
         bias: *const c_void,
         residual: *const c_void,
@@ -127,7 +127,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_residual_layer_norm_bf16_cached_1024(
+    pub(crate) fn apxinf_transformer_bf16_bias_residual_layer_norm_bf16_cached_1024(
         projection: *const c_void,
         projection_bias: *const c_void,
         residual: *const c_void,
@@ -140,7 +140,7 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_then_residual_layer_norm_bf16_cached_1536(
+    pub(crate) fn apxinf_transformer_bf16_bias_then_residual_layer_norm_bf16_cached_1536(
         projection: *const c_void,
         projection_bias: *const c_void,
         residual: *const c_void,
@@ -153,7 +153,7 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
+    pub(crate) fn apxinf_transformer_bf16_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
         projection: *const c_void,
         projection_bias: *const c_void,
         residual: *const c_void,
@@ -165,7 +165,7 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_residual_layer_norm_quant_bf16_e4m3(
+    pub(crate) fn apxinf_transformer_bf16_bias_residual_layer_norm_quant_bf16_e4m3(
         projection: *const c_void,
         projection_bias: *const c_void,
         residual: *const c_void,
@@ -179,7 +179,7 @@ unsafe extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_rope_mrope_bf16(
+    pub(crate) fn apxinf_transformer_bf16_rope_mrope_bf16(
         input: *const c_void,
         output: *mut c_void,
         head_dim: u32,
@@ -191,7 +191,7 @@ unsafe extern "C" {
         sec_w: u32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_build_vision_rotation_table_f32(
+    pub(crate) fn apxinf_transformer_bf16_build_vision_rotation_table_f32(
         pos_ids: *const c_void,
         rotation_table: *mut c_void,
         head_dim: u32,
@@ -199,7 +199,7 @@ unsafe extern "C" {
         theta: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_rope_vision_2d_pair_bf16(
+    pub(crate) fn apxinf_transformer_bf16_rope_vision_2d_pair_bf16(
         q: *const c_void,
         k: *const c_void,
         q_out: *mut c_void,
@@ -211,7 +211,7 @@ unsafe extern "C" {
         pos_ids: *const c_void,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_qk_rms_norm_mrope_bf16_with_threads(
+    pub(crate) fn apxinf_transformer_bf16_qk_rms_norm_mrope_bf16_with_threads(
         query_input: *const c_void,
         query_weight: *const c_void,
         query_output: *mut c_void,
@@ -230,7 +230,7 @@ unsafe extern "C" {
         block_threads: u32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_qkv_split_bias_vision_rope_bf16(
+    pub(crate) fn apxinf_transformer_bf16_qkv_split_bias_vision_rope_bf16(
         qkv: *const c_void,
         bias: *const c_void,
         q_out: *mut c_void,
@@ -243,7 +243,7 @@ unsafe extern "C" {
         pos_ids: *const c_void,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_qkv_split_bias_vision_rope_precomputed_bf16(
+    pub(crate) fn apxinf_transformer_bf16_qkv_split_bias_vision_rope_precomputed_bf16(
         qkv: *const c_void,
         bias: *const c_void,
         q_out: *mut c_void,
@@ -255,7 +255,7 @@ unsafe extern "C" {
         rotation_table: *const c_void,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_qkv_split_bias_vision_rope_precomputed_vec2_bf16(
+    pub(crate) fn apxinf_transformer_bf16_qkv_split_bias_vision_rope_precomputed_vec2_bf16(
         qkv: *const c_void,
         bias: *const c_void,
         q_out: *mut c_void,
@@ -267,7 +267,7 @@ unsafe extern "C" {
         rotation_table: *const c_void,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_split_strided_qkv_bf16(
+    pub(crate) fn apxinf_transformer_bf16_split_strided_qkv_bf16(
         qkv: *const c_void,
         q: *mut c_void,
         k: *mut c_void,
@@ -276,14 +276,14 @@ unsafe extern "C" {
         hidden: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_quantize_bf16_e4m3_packed8(
+    pub(crate) fn apxinf_transformer_bf16_quantize_bf16_e4m3_packed8(
         input: *const c_void,
         output: *mut c_void,
         count: i64,
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_concat_rows_quantize_bf16_e4m3(
+    pub(crate) fn apxinf_transformer_bf16_concat_rows_quantize_bf16_e4m3(
         first: *const c_void,
         second: *const c_void,
         output: *mut c_void,
@@ -293,7 +293,7 @@ unsafe extern "C" {
         scale: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_dequantize_int32_bf16(
+    pub(crate) fn apxinf_transformer_bf16_dequantize_int32_bf16(
         accumulators: *const c_void,
         row_scales: *const c_void,
         column_scales: *const c_void,
@@ -302,7 +302,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_quantize_rows_bf16_int8(
+    pub(crate) fn apxinf_transformer_bf16_quantize_rows_bf16_int8(
         input: *const c_void,
         output: *mut c_void,
         scales: *mut c_void,
@@ -310,7 +310,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_quantize_rows_bf16_int8_packed4(
+    pub(crate) fn apxinf_transformer_bf16_quantize_rows_bf16_int8_packed4(
         input: *const c_void,
         output: *mut c_void,
         scales: *mut c_void,
@@ -318,7 +318,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_bias_gelu_quantize_rows_bf16_int8(
+    pub(crate) fn apxinf_transformer_bf16_bias_gelu_quantize_rows_bf16_int8(
         input: *const c_void,
         bias: *const c_void,
         output: *mut c_void,
@@ -327,7 +327,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_adaptive_layer_norm_quantize_rows_bf16_int8(
+    pub(crate) fn apxinf_transformer_bf16_adaptive_layer_norm_quantize_rows_bf16_int8(
         input: *const c_void,
         modulation: *const c_void,
         output: *mut c_void,
@@ -338,7 +338,7 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_layer_norm_quantize_rows_bf16_int8(
+    pub(crate) fn apxinf_transformer_bf16_layer_norm_quantize_rows_bf16_int8(
         input: *const c_void,
         weight: *const c_void,
         bias: *const c_void,
@@ -350,7 +350,7 @@ unsafe extern "C" {
         eps: f32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_silu_mul_quantize_rows_bf16_int8(
+    pub(crate) fn apxinf_transformer_bf16_silu_mul_quantize_rows_bf16_int8(
         gate: *const c_void,
         up: *const c_void,
         output: *mut c_void,
@@ -359,7 +359,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_silu_mul_quantize_rows_bf16_int8_packed4(
+    pub(crate) fn apxinf_transformer_bf16_silu_mul_quantize_rows_bf16_int8_packed4(
         gate: *const c_void,
         up: *const c_void,
         output: *mut c_void,
@@ -368,7 +368,7 @@ unsafe extern "C" {
         cols: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_cutlass_int8_gemm_bf16(
+    pub(crate) fn apxinf_transformer_bf16_cutlass_int8_gemm_bf16(
         activation: *const c_void,
         weight_output_major: *const c_void,
         row_scales: *const c_void,
@@ -379,7 +379,7 @@ unsafe extern "C" {
         k: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_cutlass_int8_gemm_bf16_m41_n6144_k1536(
+    pub(crate) fn apxinf_transformer_bf16_cutlass_int8_gemm_bf16_m41_n6144_k1536(
         activation: *const c_void,
         weight_output_major: *const c_void,
         row_scales: *const c_void,
@@ -390,7 +390,7 @@ unsafe extern "C" {
         k: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_cutlass_int8_gemm_bias_bf16_m41_n4608_k1536(
+    pub(crate) fn apxinf_transformer_bf16_cutlass_int8_gemm_bias_bf16_m41_n4608_k1536(
         activation: *const c_void,
         weight_output_major: *const c_void,
         row_scales: *const c_void,
@@ -402,7 +402,7 @@ unsafe extern "C" {
         k: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
-    pub(crate) fn apxinf_gr00t_cutlass_int8_gemm_bias_gelu_bf16_m41_n6144_k1536(
+    pub(crate) fn apxinf_transformer_bf16_cutlass_int8_gemm_bias_gelu_bf16_m41_n6144_k1536(
         activation: *const c_void,
         weight_output_major: *const c_void,
         row_scales: *const c_void,

@@ -69,9 +69,7 @@ impl LlamaModel {
         match device {
             Device::Cpu => Ok(()),
             Device::Cuda(device_id) => {
-                let ctx = apxinf_cuda_new::CudaContext::new(device_id)
-                    .map_err(|e| Error::Cuda(format!("CUDA init: {e}")))?;
-                let backend = Arc::new(CudaNewBackend::new(Arc::new(ctx)));
+                let backend = Arc::new(CudaNewBackend::new(device_id)?);
 
                 self.weights.token_embedding = cuda_ops::to_cuda(&self.weights.token_embedding, device_id)?;
                 self.weights.output_norm_weight = cuda_ops::to_cuda(&self.weights.output_norm_weight, device_id)?;

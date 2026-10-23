@@ -53,6 +53,20 @@ unsafe extern "C" {
         count: u32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub(crate) fn apxinf_llmdec_scale_f32(
+        input: *const c_void,
+        output: *mut c_void,
+        count: u32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_llmdec_scale_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        count: u32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub(crate) fn apxinf_llmdec_embedding_f32(
         table: *const c_void,
         ids: *const c_void,
@@ -103,6 +117,24 @@ unsafe extern "C" {
         cols: u32,
         n_heads: u32,
         pos_ptr: *const c_void,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_llmdec_attention_softmax_f32(
+        scores: *const c_void,
+        output: *mut c_void,
+        cols: u32,
+        rows: u32,
+        kv_offset: u32,
+        n_heads: u32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_llmdec_attention_softmax_bf16(
+        scores: *const c_void,
+        output: *mut c_void,
+        cols: u32,
+        rows: u32,
+        kv_offset: u32,
+        n_heads: u32,
         stream: cudaStream_t,
     ) -> cudaError_t;
     pub(crate) fn apxinf_llmdec_flash_attn_decode_bf16(
@@ -167,6 +199,26 @@ unsafe extern "C" {
         pos_ptr: *const c_void,
         stream: cudaStream_t,
     ) -> cudaError_t;
+    pub(crate) fn apxinf_llmdec_kv_cache_append_f32(
+        cache: *mut c_void,
+        new_data: *const c_void,
+        n_kv_heads: u32,
+        head_dim: u32,
+        max_seq_len: u32,
+        seq_len: u32,
+        append_len: u32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_llmdec_kv_cache_append_bf16(
+        cache: *mut c_void,
+        new_data: *const c_void,
+        n_kv_heads: u32,
+        head_dim: u32,
+        max_seq_len: u32,
+        seq_len: u32,
+        append_len: u32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
     pub(crate) fn apxinf_llmdec_kv_cache_append_decode_bf16(
         cache: *mut c_void,
         new_data: *const c_void,
@@ -174,6 +226,16 @@ unsafe extern "C" {
         head_dim: u32,
         max_seq_len: u32,
         pos_ptr: *const c_void,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+    pub(crate) fn apxinf_llmdec_kv_cache_gather_bf16(
+        src: *const c_void,
+        dst: *mut c_void,
+        tokens: u32,
+        n_kv_heads: u32,
+        head_dim: u32,
+        max_seq_len: u32,
+        kv_offset: u32,
         stream: cudaStream_t,
     ) -> cudaError_t;
 }

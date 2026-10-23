@@ -68,7 +68,7 @@ impl Qwen38 {
         // `dyn Backend`; everything else already runs on `ctx` through
         // `apxinf_cuda_new::ops`. Sharing one context between the model and
         // the backend keeps the sampler on the same stream and device.
-        let backend: Arc<dyn Backend> = Arc::new(CudaNewBackend::new(ctx.clone()));
+        let backend: Arc<dyn Backend> = Arc::new(CudaNewBackend::from_context(ctx.clone()));
 
         let capacity = kv_capacity.next_power_of_two();
         let gdn_states: Vec<model::GdnState> = (0..LAYERS - LAYERS / FULL_ATTENTION_INTERVAL)

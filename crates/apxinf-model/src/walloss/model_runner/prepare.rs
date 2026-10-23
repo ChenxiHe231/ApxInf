@@ -161,7 +161,7 @@ impl WallossPreparedInference {
         let requirements = model
             .model()
             .workspace_requirements(patch_rows, prefix_tokens)?;
-        let workspace = kernels::GraphWorkspace::with_capacity(requirements.bytes, device)?;
+        let workspace = kernels::GraphWorkspace::new(requirements.bytes, device)?;
         let mut plan = Self {
             spec,
             shape,

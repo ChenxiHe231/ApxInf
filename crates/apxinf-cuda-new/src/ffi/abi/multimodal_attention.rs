@@ -1,9 +1,11 @@
+//! Fixed multimodal-attention ABI.
+
 use std::ffi::c_void;
 
 use super::types::CudaStream;
 
 unsafe extern "C" {
-    pub(crate) fn apxinf_vla_gqa_qkv_mrope_cache_bf16(
+    pub(crate) fn apxinf_multimodal_attention_gqa_qkv_mrope_cache_bf16(
         qkv: *const c_void,
         bias: *const c_void,
         position_ids: *const c_void,
@@ -20,7 +22,7 @@ unsafe extern "C" {
         cache_offset: i32,
         stream: CudaStream,
     ) -> i32;
-    pub(crate) fn apxinf_vla_vision_qkv_rope_bf16(
+    pub(crate) fn apxinf_multimodal_attention_vision_qkv_rope_bf16(
         qkv: *const c_void,
         bias: *const c_void,
         position_ids: *const c_void,
@@ -33,7 +35,7 @@ unsafe extern "C" {
         theta: f32,
         stream: CudaStream,
     ) -> i32;
-    pub(crate) fn apxinf_vla_segmented_mha_bf16(
+    pub(crate) fn apxinf_multimodal_attention_segmented_mha_bf16(
         q: *const c_void,
         k: *const c_void,
         v: *const c_void,

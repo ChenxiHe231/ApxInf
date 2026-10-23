@@ -134,7 +134,7 @@ pub fn apply_mrope(
     sections: [usize; 3],
     pos_ids: &CudaBuffer,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::ffi::raw::cuda_runtime as raw;
     let dims = input.shape().dims();
     let seq_len = if dims.len() == 2 { 1 } else { dims[0] };
@@ -145,7 +145,7 @@ pub fn apply_mrope(
     let input_buffer = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_rope_mrope_bf16(
+        raw::check_cuda(abi::apxinf_transformer_bf16_rope_mrope_bf16(
             input_buffer.ptr(),
             output_buffer.ptr(),
             u32::try_from(head_dim).map_err(|_| Error::Other("head dim exceeds u32".into()))?,
@@ -171,7 +171,7 @@ pub fn prepare_vision_2d_rotation_table(
     theta: f32,
     pos_ids: &CudaBuffer,
 ) -> Result<CudaBuffer> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::ffi::raw::cuda_runtime as raw;
     if seq_len == 0 || head_dim == 0 || head_dim % 2 != 0 || theta <= 0.0 {
         return Err(Error::Other(
@@ -197,7 +197,7 @@ pub fn prepare_vision_2d_rotation_table(
     )?;
     let table = CudaBuffer::alloc(table_bytes, ctx.device_id()).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_build_vision_rotation_table_f32(
+        raw::check_cuda(abi::apxinf_transformer_bf16_build_vision_rotation_table_f32(
             pos_ids.ptr(),
             table.ptr(),
             u32::try_from(head_dim).map_err(|_| Error::Other("head dim exceeds u32".into()))?,
@@ -221,7 +221,7 @@ pub fn apply_vision_2d_pair(
     theta: f32,
     pos_ids: &CudaBuffer,
 ) -> Result<(Tensor, Tensor)> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::ffi::raw::cuda_runtime as raw;
     if q.dtype() != DType::BF16 || k.dtype() != DType::BF16 {
         return Err(Error::Other("rope_vision_2d_pair: only BF16 supported".into()));
@@ -262,7 +262,7 @@ pub fn apply_vision_2d_pair(
     let q_out_buffer = CudaBuffer::from_tensor(&q_out).map_err(Error::Cuda)?;
     let k_out_buffer = CudaBuffer::from_tensor(&k_out).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_rope_vision_2d_pair_bf16(
+        raw::check_cuda(abi::apxinf_transformer_bf16_rope_vision_2d_pair_bf16(
             q_buffer.ptr(),
             k_buffer.ptr(),
             q_out_buffer.ptr(),
@@ -299,7 +299,7 @@ pub fn rms_norm_apply_mrope_qk_with_block_threads(
     pos_ids: &CudaBuffer,
     block_threads: u32,
 ) -> Result<(Tensor, Tensor)> {
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::ffi::raw::cuda_runtime as raw;
     if query.dtype() != DType::BF16
         || key.dtype() != DType::BF16
@@ -351,7 +351,7 @@ pub fn rms_norm_apply_mrope_qk_with_block_threads(
     let q_out_buffer = CudaBuffer::from_tensor(&q_out).map_err(Error::Cuda)?;
     let k_out_buffer = CudaBuffer::from_tensor(&k_out).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_gr00t_qk_rms_norm_mrope_bf16_with_threads(
+        raw::check_cuda(abi::apxinf_transformer_bf16_qk_rms_norm_mrope_bf16_with_threads(
             q_buffer.ptr(),
             qw_buffer.ptr(),
             q_out_buffer.ptr(),
@@ -427,7 +427,7 @@ fn vision_split_impl(
 ) -> Result<QkvTensors> {
     let (qkv_buffer, bias_buffer, q, k, v) =
         vision_split_common(ctx, qkv, bias, n_heads, head_dim)?;
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::ffi::raw::cuda_runtime as raw;
     require_finite("vision fused QKV 2D-RoPE", &[theta])?;
     let (seq_len, _, _) = (qkv.shape().dims()[0], n_heads, head_dim);
@@ -435,7 +435,7 @@ fn vision_split_impl(
     let k_buffer = CudaBuffer::from_tensor(&k).map_err(Error::Cuda)?;
     let v_buffer = CudaBuffer::from_tensor(&v).map_err(Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_gr00t_qkv_split_bias_vision_rope_bf16(
+        status::check(abi::apxinf_transformer_bf16_qkv_split_bias_vision_rope_bf16(
             qkv_buffer.ptr(),
             bias_buffer.ptr(),
             q_buffer.ptr(),
@@ -465,7 +465,7 @@ fn vision_split_precomputed_impl(
     let (seq_len, _, _) = (qkv.shape().dims()[0], n_heads, head_dim);
     let (qkv_buffer, bias_buffer, q, k, v) =
         vision_split_common(ctx, qkv, bias, n_heads, head_dim)?;
-    use crate::ffi::abi::{gr00t as abi, status};
+    use crate::ffi::abi::{transformer_bf16 as abi, status};
     use crate::ffi::raw::cuda_runtime as raw;
     let rotation_bytes = seq_len
         .checked_mul(head_dim / 2)
@@ -481,13 +481,13 @@ fn vision_split_precomputed_impl(
     let v_buffer = CudaBuffer::from_tensor(&v).map_err(Error::Cuda)?;
     unsafe {
         let code = if vec2 {
-            abi::apxinf_gr00t_qkv_split_bias_vision_rope_precomputed_vec2_bf16(
+            abi::apxinf_transformer_bf16_qkv_split_bias_vision_rope_precomputed_vec2_bf16(
                 qkv_buffer.ptr(), bias_buffer.ptr(), q_buffer.ptr(), k_buffer.ptr(),
                 v_buffer.ptr(), to_u32(head_dim, "head dim")?, to_u32(n_heads, "head count")?,
                 to_u32(seq_len, "sequence")?, rotation_table.ptr(), ctx.stream().handle(),
             )
         } else {
-            abi::apxinf_gr00t_qkv_split_bias_vision_rope_precomputed_bf16(
+            abi::apxinf_transformer_bf16_qkv_split_bias_vision_rope_precomputed_bf16(
                 qkv_buffer.ptr(), bias_buffer.ptr(), q_buffer.ptr(), k_buffer.ptr(),
                 v_buffer.ptr(), to_u32(head_dim, "head dim")?, to_u32(n_heads, "head count")?,
                 to_u32(seq_len, "sequence")?, rotation_table.ptr(), ctx.stream().handle(),
@@ -564,7 +564,7 @@ pub fn apply_batched(
 
 /// `apply_half_split_f16`: the half-split RoPE convention used by SmolVLA
 /// FP16 cross-attention. Ported verbatim from the legacy wrapper over the
-/// `apxinf_smolvla_rope_half_split_f16` launcher.
+/// `apxinf_transformer_f16_rope_half_split_f16` launcher.
 pub fn apply_half_split_f16(
     ctx: &CudaContext,
     input: &Tensor,
@@ -573,7 +573,7 @@ pub fn apply_half_split_f16(
     rope_theta: f32,
     pos_offset: u32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::smolvla as abi;
+    use crate::ffi::abi::transformer_f16 as abi;
     let dims = input.shape().dims();
     let seq_len = if dims.len() == 2 { 1 } else { dims[0] };
     let out_buf = crate::workspace::output_buffer(ctx, input.size_in_bytes())?;
@@ -590,7 +590,7 @@ pub fn apply_half_split_f16(
     }
 
     unsafe {
-        super::contracts::check_cuda(abi::apxinf_smolvla_rope_half_split_f16(
+        super::contracts::check_cuda(abi::apxinf_transformer_f16_rope_half_split_f16(
             gpu_ptr(input)?,
             out_buf.ptr(),
             head_dim as u32,

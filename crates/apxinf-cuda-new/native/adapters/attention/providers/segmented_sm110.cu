@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// L1 bindings for Qwen-Drive's SM110 attention candidates. The translated
+// L1 bindings for the SM110 segmented-attention candidates. The translated
 // CUTLASS kernels own the arithmetic; this file owns execution-scoped provider
 // state, fixed geometry, and split-batch glue.
 

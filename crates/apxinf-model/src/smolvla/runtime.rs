@@ -293,7 +293,7 @@ impl SmolVlaCapturedGraph {
         let mut last_workspace_error = None;
         for capacity in GRAPH_WORKSPACE_CAPACITIES_BYTES {
             let workspace =
-                kernels::GraphWorkspace::with_capacity(capacity, device_id)?;
+                kernels::GraphWorkspace::new(capacity, device_id)?;
             let preflight = kernels::prepare_with_workspace(&workspace, || {
                 model.infer_fixed(
                     raw_images.as_ref(),

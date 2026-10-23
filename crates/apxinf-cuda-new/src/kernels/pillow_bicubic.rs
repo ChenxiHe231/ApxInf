@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use apxinf_core::{Error, Result};
 
 use crate::{buffer::CudaBuffer, context::CudaContext};
-use crate::ffi::abi::vla_la as abi;
+use crate::ffi::abi::hybrid as abi;
 use crate::ffi::raw::cuda_runtime as ffi;
 
 /// Dimensions selected by the caller. `stage` is the first uint8 image; the
@@ -343,7 +343,7 @@ impl PillowBicubicRgbPlan {
                         horizontal: bool|
              -> Result<()> {
                 unsafe {
-                    ffi::check_cuda(abi::apxinf_cn_pillow_bicubic_u8_axis(
+                    ffi::check_cuda(abi::apxinf_hybrid_pillow_bicubic_u8_axis(
                         input.ptr().cast(),
                         output.ptr(),
                         input_offsets.ptr().cast(),

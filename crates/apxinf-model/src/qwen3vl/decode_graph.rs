@@ -159,19 +159,6 @@ fn device_logits(ws: &DecodeWorkspace, vocab: usize) -> Result<Tensor> {
         .map_err(Error::Cuda)
 }
 
-/// Borrow one layer's K/V cache storage as raw device buffers.
-///
-/// cuda-new's `CudaKvCache` owns its storage as tensors; the decode kernels
-/// take buffers. `from_tensor` only re-wraps the existing GPU storage handle
-/// (no allocation), so this is graph-safe. The cache layout is token-major
-/// `[1, max_seq, n_kv_heads, head_dim]` — the llm_decode kernels address it
-/// accordingly (unlike the legacy head-major cache).
-fn cache_buffers(cache: &CudaKVCache, layer: usize) -> Result<(CudaBuffer, CudaBuffer)> {
-    let k = CudaBuffer::from_tensor(cache.key(layer)).map_err(Error::Cuda)?;
-    let v = CudaBuffer::from_tensor(cache.value(layer)).map_err(Error::Cuda)?;
-    Ok((k, v))
-}
-
 // ── Decode forward (graph body) ──────────────────────────────────────────
 
 fn decode_forward_capturable(
@@ -341,11 +328,10 @@ fn decode_forward_capturable(
         // I'll extend the workspace with `cache_pos_buf`.
         // (See DecodeGraph::decode below for how the caller populates it.)
         let cache_position = cache_pos_view(ws)?;
-        let (k_cache, v_cache) = cache_buffers(cache, i)?;
         kernels::cache::append_at(
             ctx,
             dtype,
-            &k_cache,
+            cache.k_buffer(i),
             &ws.k_rope,
             n_kv_heads,
             head_dim,
@@ -355,7 +341,7 @@ fn decode_forward_capturable(
         kernels::cache::append_at(
             ctx,
             dtype,
-            &v_cache,
+            cache.v_buffer(i),
             &v_view,
             n_kv_heads,
             head_dim,
@@ -367,8 +353,8 @@ fn decode_forward_capturable(
         kernels::attention::flash_bf16_into(
             ctx,
             &ws.q_rope,
-            &k_cache,
-            &v_cache,
+            cache.k_buffer(i),
+            cache.v_buffer(i),
             &ws.attn_out,
             n_heads,
             n_kv_heads,

@@ -12,7 +12,7 @@ constexpr uint32_t kProviderFa2 = 2;
 #if defined(APXINF_ATTENTION_CUTLASS)
 constexpr uint32_t kProviderCutlass = 3;
 #endif
-#if defined(APXINF_QWEN_DRIVE_SM110)
+#if defined(APXINF_SEGMENTED_ATTENTION_SM110)
 constexpr uint32_t kProviderQwenDriveSm110 = 4;
 #endif
 
@@ -134,7 +134,7 @@ AlignmentRequirements cutlass_alignment(const Spec&) {
 }
 #endif
 
-#if defined(APXINF_QWEN_DRIVE_SM110)
+#if defined(APXINF_SEGMENTED_ATTENTION_SM110)
 bool supports_qwen_d256_causal(const Spec& spec) {
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
          spec.dtype == APXINF_DTYPE_BF16 &&
@@ -183,7 +183,7 @@ AlignmentRequirements qwen_d256_alignment(const Spec&) {
 
 const ImplementationRegistry& registry(uint32_t semantic) {
   static const ImplementationRegistry dense_entries = {
-#if defined(APXINF_QWEN_DRIVE_SM110)
+#if defined(APXINF_SEGMENTED_ATTENTION_SM110)
       {kProviderQwenDriveSm110, 1, 1, "qwen-d256-causal-sm110",
        apxinf::gemm::kDeviceFeatureQwenDriveSm110, true, true, false,
        supports_qwen_d256_causal, qwen_d256_alignment,
@@ -221,7 +221,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        launch_custom, destroy_custom},
   };
   static const ImplementationRegistry kv_cache_entries = {
-#if defined(APXINF_QWEN_DRIVE_SM110)
+#if defined(APXINF_SEGMENTED_ATTENTION_SM110)
       {kProviderQwenDriveSm110, 2, 1, "qwen-d256-split-sm110",
        apxinf::gemm::kDeviceFeatureQwenDriveSm110, true, true, false,
        supports_qwen_d256_split, qwen_d256_alignment,
@@ -246,7 +246,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        launch_custom, destroy_custom},
   };
   static const ImplementationRegistry segmented_entries = {
-#if defined(APXINF_QWEN_DRIVE_SM110)
+#if defined(APXINF_SEGMENTED_ATTENTION_SM110)
       {kProviderQwenDriveSm110, 3, 1, "qwen-vision-segmented-sm110",
        apxinf::gemm::kDeviceFeatureQwenDriveSm110, true, true, false,
        supports_qwen_vision_segmented, qwen_d256_alignment,
