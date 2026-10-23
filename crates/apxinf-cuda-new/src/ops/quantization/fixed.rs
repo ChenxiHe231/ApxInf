@@ -1,4 +1,4 @@
-//! Legacy `kernels::quantization` names over cuda-new quantization operators.
+//! Fixed and rowwise quantization operators.
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
@@ -155,7 +155,7 @@ pub fn concat_rows_quantize_bf16_e4m3(
 /// matrix. Ported from the legacy wrapper, which uses a strided 2D device
 /// copy rather than a kernel.
 pub fn slice_columns_f16(ctx: &CudaContext, input: &Tensor, output_cols: usize) -> Result<Tensor> {
-    use super::contracts::make_gpu_tensor;
+    use crate::ops::validation::make_gpu_tensor;
     if input.dtype() != DType::F16 {
         return Err(Error::DTypeMismatch {
             expected: DType::F16,

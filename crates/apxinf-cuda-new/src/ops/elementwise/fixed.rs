@@ -1,11 +1,11 @@
-//! Legacy `kernels::elementwise` names over cuda-new operators.
+//! Allocating and caller-owned elementwise operators.
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 
 use crate::ffi::abi::{elementwise as abi, status};
 use crate::{ops, CudaBuffer, CudaContext};
 
-use super::contracts::{bf16_output, matrix_shape, matrix_tensor};
+use crate::ops::validation::{bf16_output, matrix_shape, matrix_tensor};
 
 fn invalid(message: &str) -> Error {
     Error::Other(message.into())
@@ -16,7 +16,7 @@ fn invalid(message: &str) -> Error {
 /// ported smolvla launcher (the Xavier FP16 path).
 pub fn add(ctx: &CudaContext, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if a.dtype() == DType::F16 {
-        use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+        use crate::ops::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
         use crate::ffi::abi::transformer_f16 as abi;
         if b.dtype() != DType::F16 || b.shape() != a.shape() {
             return Err(invalid("FP16 add requires matching FP16 tensors"));
@@ -49,7 +49,7 @@ pub fn add(ctx: &CudaContext, a: &Tensor, b: &Tensor) -> Result<Tensor> {
 /// takes the ported smolvla launcher (the Xavier FP16 path).
 pub fn scale(ctx: &CudaContext, input: &Tensor, factor: f32) -> Result<Tensor> {
     if input.dtype() == DType::F16 {
-        use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+        use crate::ops::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
         use crate::ffi::abi::transformer_f16 as abi;
         if !factor.is_finite() {
             return Err(invalid("scale factor must be finite"));
@@ -524,12 +524,12 @@ pub fn bias_qkv_in_place_bf16(
 
 // ── smolvla FP16 surface ────────────────────────────────────────────────────
 //
-// Ported verbatim from the legacy `kernels::elementwise` FP16 wrappers over
+// Ported verbatim from the legacy FP16 elementwise wrappers over
 // the `apxinf_transformer_f16_*` launchers (native/adapters/elementwise/fixed_f16.cu).
 
 /// `bias_f16`: broadcast-add an optional `[cols]` FP16 bias over rows.
 pub fn bias_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
-    use super::contracts::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, optional_ptr};
+    use crate::ops::validation::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, optional_ptr};
     use crate::ffi::abi::transformer_f16 as abi;
     let (rows, cols) = matrix_shape(input, "bias")?;
     if input.dtype() != DType::F16
@@ -573,7 +573,7 @@ pub fn concat_rows_f16(ctx: &CudaContext, first: &Tensor, second: &Tensor) -> Re
 /// `concat_columns_f16`: concatenate equally tall FP16 matrices along their
 /// column dimension with a 2D strided device copy per input.
 pub fn concat_columns_f16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tensor> {
-    use super::contracts::output_tensor;
+    use crate::ops::validation::output_tensor;
     let first = tensors
         .first()
         .ok_or_else(|| invalid("column concatenation requires at least one tensor"))?;
@@ -641,7 +641,7 @@ pub fn euler_update_f16(
     velocity: &Tensor,
     dt: f32,
 ) -> Result<Tensor> {
-    use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+    use crate::ops::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
     use crate::ffi::abi::transformer_f16 as abi;
     if state.dtype() != DType::F16
         || velocity.dtype() != DType::F16
@@ -681,7 +681,7 @@ pub fn add_into(
     output: &CudaBuffer,
     count: usize,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_buffers};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
     use crate::ffi::abi::llm_decode as llmdec;
     let bytes = checked_bytes(dtype, &[count], "decode add")?;
     require_buffers(
@@ -720,7 +720,7 @@ pub fn mul_into(
     output: &CudaBuffer,
     count: usize,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_buffers};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
     use crate::ffi::abi::llm_decode as llmdec;
     let bytes = checked_bytes(dtype, &[count], "decode multiply")?;
     require_buffers(

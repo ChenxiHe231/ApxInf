@@ -20,7 +20,7 @@ use crate::vla::{
 };
 
 use super::backend::{
-    kernels, DeviceBuffer as CudaBuffer, ImageLayout as KernelImageLayout, RuntimeBackend,
+    ops, DeviceBuffer as CudaBuffer, ImageLayout as KernelImageLayout, RuntimeBackend,
 };
 use super::fp8_calibration::{checkpoint_identity, Pi0FastFp8Calibration};
 use super::{
@@ -148,7 +148,7 @@ impl Pi0FastVlaRuntime {
                 let images = CudaBuffer::alloc(bytes.len(), self.backend.device_id())
                     .map_err(Error::Cuda)?;
                 images.copy_from_host(bytes).map_err(Error::Cuda)?;
-                kernels::preprocess::rgb_u8_to_patches_f32(
+                ops::preprocess::rgb_u8_to_patches_f32(
                     self.backend.context(),
                     &images,
                     &patches,

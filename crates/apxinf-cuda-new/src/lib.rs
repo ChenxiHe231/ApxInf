@@ -5,7 +5,6 @@ pub mod cublas;
 pub mod device_caps;
 mod ffi;
 mod graph;
-pub mod kernels;
 mod kv_cache;
 pub mod nvtx;
 pub mod phase;

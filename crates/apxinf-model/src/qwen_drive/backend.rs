@@ -4,13 +4,10 @@
 //! kernel contract; adding another accelerator backend changes this seam,
 //! not the layer topology.
 //!
-//! Qwen-Drive now runs on the cuda-new runtime: `kernels` resolves to the
-//! legacy-named shim over cuda-new operators, and `RuntimeBackend` is the
-//! cuda-new backend. The executor and runner files are unchanged — the
-//! runtime swap happens entirely in these aliases.
+//! Qwen-Drive uses cuda-new's public `ops` surface and runtime backend.
 
 pub(crate) use apxinf_cuda_new::{
-    kernels, nvtx, ops, transfers, CublasTranspose, CudaBuffer as DeviceBuffer,
+    nvtx, ops, transfers, CublasTranspose, CudaBuffer as DeviceBuffer,
     CudaContext as Context, CudaNewBackend as RuntimeBackend,
 };
 

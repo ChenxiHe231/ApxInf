@@ -1,4 +1,4 @@
-//! Legacy `kernels::embedding` names over cuda-new kernels.
+//! Embedding lookup and position operators.
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
@@ -273,7 +273,7 @@ pub fn lookup_into(
     embed_dim: usize,
     seq_len: usize,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers};
+    use super::validation::{check_cuda, checked_bytes, require_address, require_buffers};
     use crate::ffi::abi::llm_decode as llmdec;
     require_buffers(
         ctx,

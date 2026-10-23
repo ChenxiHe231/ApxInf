@@ -4,7 +4,7 @@
 use std::ffi::c_void;
 
 use crate::ffi::raw::cuda_runtime::{cudaError_t, cudaStream_t};
-use crate::kernels::gdn_policy::GdnLaunchPolicy;
+use crate::ops::gdn_policy::GdnLaunchPolicy;
 
 unsafe extern "C" {
     #[cfg(apxinf_segmented_attention_sm110)]

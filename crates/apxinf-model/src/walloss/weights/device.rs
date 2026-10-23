@@ -3,7 +3,7 @@
 use apxinf_core::{Backend, Error, Result, Tensor};
 
 #[cfg(feature = "cuda")]
-use crate::walloss::backend::{kernels, RuntimeBackend};
+use crate::walloss::backend::{ops, RuntimeBackend};
 
 use crate::walloss::fp8::{encode_e4m3, E4M3_MAX};
 
@@ -29,8 +29,8 @@ impl DynamicFp8LinearWeights {
     }
 
     #[cfg(feature = "cuda")]
-    pub fn as_kernel_view(&self) -> kernels::gemm::DynamicFp8WeightView<'_> {
-        kernels::gemm::DynamicFp8WeightView {
+    pub fn as_kernel_view(&self) -> ops::gemm::DynamicFp8WeightView<'_> {
+        ops::gemm::DynamicFp8WeightView {
             values_e4m3: &self.weight,
             channel_scales: &self.channel_scales,
         }
@@ -63,7 +63,7 @@ impl DynamicFp8LinearWeights {
             let host_bf16 =
                 Tensor::from_bf16(vec![padded_output_features, padded_input_features], &values)?;
             let device_bf16 = backend.to_device(&host_bf16)?;
-            let quantized = kernels::quantization::quantize_rows_bf16_e4m3(
+            let quantized = ops::quantization::quantize_rows_bf16_e4m3(
                 cuda_backend.context(),
                 &device_bf16,
             )?;

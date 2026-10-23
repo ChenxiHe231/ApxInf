@@ -1,4 +1,4 @@
-//! Legacy `kernels::cache` names over cuda-new cache operators.
+//! Caller-owned cache buffer operators.
 
 use apxinf_core::{Result, Tensor};
 
@@ -29,7 +29,7 @@ pub fn append(
     seq_len: usize,
     append_len: usize,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_buffers};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
     use crate::ffi::abi::llm_decode as abi;
     use apxinf_core::{DType, Error};
 
@@ -93,7 +93,7 @@ pub fn append(
 
 /// Append one token to a caller-owned head-major
 /// `[kv_heads, max_seq_len, head_dim]` KV cache using a device-resident
-/// position. Ports the legacy `kernels::cache::append_at` contract over the
+/// position. Ports the legacy caller-owned `append_at` contract over the
 /// llm_decode adapter.
 #[allow(clippy::too_many_arguments)]
 pub fn append_at(
@@ -106,7 +106,7 @@ pub fn append_at(
     max_seq_len: usize,
     position: crate::CudaDeviceAddress,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_address, require_buffers};
     use crate::ffi::abi::llm_decode as abi;
     use apxinf_core::DType;
     require_buffers(

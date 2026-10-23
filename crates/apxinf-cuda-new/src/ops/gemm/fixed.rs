@@ -1,4 +1,4 @@
-//! Legacy `kernels::gemm` names over the cuda-new GEMM operator.
+//! Fixed and direct-launch GEMM operators.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -317,7 +317,7 @@ pub fn gemm_fp8_dynamic_bf16(
 // These predate the tuned GEMM operator and keep their legacy arithmetic:
 // FP32 accumulators held until the bias lands, one final BF16 rounding.
 
-use super::contracts::{checked_bytes, require_buffers, require_finite};
+use crate::ops::validation::{checked_bytes, require_buffers, require_finite};
 use crate::cublas::CublasTranspose;
 use crate::ffi::abi::hybrid as la_abi;
 use crate::ffi::raw::cuda_runtime as raw;
@@ -359,7 +359,7 @@ pub fn bf16_addmv(
         checked_bytes(DType::F32, &[w[0]], "BF16 addmv accumulator")?,
     )?
     .into_tensor(Shape::new(vec![w[0]]), DType::F32);
-    super::linear_attention::cast_bf16_to_f32(ctx, bias, &accumulator)?;
+    crate::ops::linear_attention::cast_bf16_to_f32(ctx, bias, &accumulator)?;
     let wp = CudaBuffer::from_tensor(weight).map_err(Error::Cuda)?;
     let xp = CudaBuffer::from_tensor(vector).map_err(Error::Cuda)?;
     let cp = CudaBuffer::from_tensor(&accumulator).map_err(Error::Cuda)?;
@@ -382,7 +382,7 @@ pub fn bf16_addmv(
         .map_err(Error::Cuda)?;
     let output = crate::workspace::output_buffer(ctx, bias.size_in_bytes())?
         .into_tensor(Shape::new(vec![w[0]]), DType::BF16);
-    super::linear_attention::cast_f32_to_bf16(ctx, &accumulator, &output)?;
+    crate::ops::linear_attention::cast_f32_to_bf16(ctx, &accumulator, &output)?;
     Ok(output)
 }
 
@@ -459,7 +459,7 @@ pub fn bf16_addmm_checkpoint(
         .map_err(Error::Cuda)?;
     let output = crate::workspace::output_buffer(ctx, output_bytes)?
         .into_tensor(Shape::new(shape.to_vec()), DType::BF16);
-    super::linear_attention::cast_f32_to_bf16(ctx, &accumulator, &output)?;
+    crate::ops::linear_attention::cast_f32_to_bf16(ctx, &accumulator, &output)?;
     Ok(output)
 }
 

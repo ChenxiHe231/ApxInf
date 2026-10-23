@@ -1,6 +1,6 @@
 //! Prepared execution: stable inputs, workspaces, capture and resource lifetime.
 use super::runner::{rgb_bf16_lut, validate, Validated, ValidatedVision};
-use crate::qwen_drive::backend::{kernels, nvtx, transfers, DeviceBuffer};
+use crate::qwen_drive::backend::{ops, nvtx, transfers, DeviceBuffer};
 use crate::qwen_drive::model::{
     DirectExecution, DirectInputs, PlanningState, QwenDriveModel, RawRgbInput, VisionState,
 };
@@ -13,7 +13,7 @@ use apxinf_core::{DType, Device, Error, Graph, NormalGenerator, Result, Sampling
 use std::sync::Arc;
 use std::{cell::RefCell, rc::Rc};
 struct WorkspaceExecution<'a> {
-    workspace: &'a kernels::GraphWorkspace,
+    workspace: &'a ops::ExecutionSession,
     usage: Vec<usize>,
 }
 fn validate_phase_usage(preflight: &[usize], captured: &[usize]) -> Result<()> {
@@ -54,8 +54,8 @@ pub(super) struct DirectPlan {
     graph: Option<Box<dyn Graph>>,
     output: Tensor,
     inputs: DirectInputs,
-    workspace: kernels::GraphWorkspace,
-    noise_workspace: kernels::GraphWorkspace,
+    workspace: ops::ExecutionSession,
+    noise_workspace: ops::ExecutionSession,
     mutable: RefCell<Mutable>,
     model: Rc<QwenDriveModel>,
     spec: InferenceSpec,
@@ -143,7 +143,7 @@ impl DirectPlan {
         )?;
         if let ValidatedVision::Rgb(bytes) = valid.vision {
             let resize = resize_frames
-                .map(|frames| kernels::pillow_bicubic::PillowBicubicRgbPlan::new(ctx, &frames))
+                .map(|frames| ops::pillow_bicubic::PillowBicubicRgbPlan::new(ctx, &frames))
                 .transpose()?;
             let rgb_bytes = if let Some(plan) = &resize {
                 plan.raw().clone()
@@ -161,9 +161,9 @@ impl DirectPlan {
         // One arena is reused sequentially for Vision, Language and Action inside
         // the same graph. Only persistent visual features and shared KV cross phases.
         let bytes = 32usize * (1 << 30);
-        let workspace = kernels::GraphWorkspace::new(bytes, ctx.device_id())?;
+        let workspace = ops::ExecutionSession::with_capacity(bytes, ctx.device_id())?;
         let noise_workspace =
-            kernels::GraphWorkspace::new(inputs.noise.numel() * 4 + 256, ctx.device_id())?;
+            ops::ExecutionSession::with_capacity(inputs.noise.numel() * 4 + 256, ctx.device_id())?;
         let spec = sample.observation.inference_spec();
         let image_positions = sample
             .observation
@@ -200,7 +200,7 @@ impl DirectPlan {
                 workspace: &plan.workspace,
                 usage: Vec::new(),
             };
-            let output = match kernels::prepare_with_workspace(&plan.workspace, || {
+            let output = match ops::prepare_with_session(&plan.workspace, || {
                 plan.model
                     .forward_direct(&plan.inputs, &mut mutable.state, &mut preflight)
             }) {
@@ -228,7 +228,7 @@ impl DirectPlan {
                     usage: Vec::new(),
                 };
                 match backend.capture_graph(|| {
-                    let output = kernels::with_workspace(&plan.workspace, || {
+                    let output = ops::with_session(&plan.workspace, || {
                         plan.model
                             .forward_direct(&plan.inputs, &mut mutable.state, &mut captured)
                     })?;
@@ -308,8 +308,8 @@ impl DirectPlan {
             InitialLatent::Generate { rng } => {
                 mutable.generator.generate(rng)?;
                 if self.model.config().noise_init_std != 1.0 {
-                    let scaled = kernels::with_workspace(&self.noise_workspace, || {
-                        kernels::elementwise::scale(
+                    let scaled = ops::with_session(&self.noise_workspace, || {
+                        ops::elementwise::scale(
                             ctx,
                             &self.inputs.noise,
                             self.model.config().noise_init_std,
@@ -354,7 +354,7 @@ impl PreparedInference for DirectPlan {
             graph.replay()?;
             Ok(Action::new(self.output.clone()))
         } else {
-            kernels::with_workspace_eager(&self.workspace, || {
+            ops::prepare_with_session(&self.workspace, || {
                 self.model.forward_direct(
                     &self.inputs,
                     &mut mutable.state,

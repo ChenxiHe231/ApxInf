@@ -4,13 +4,10 @@
 //! kernel contract. Adding another accelerator backend changes this seam,
 //! not the layer topology.
 //!
-//! π0-FAST now runs on the cuda-new runtime: `kernels` resolves to the
-//! legacy-named shim over cuda-new operators, and `RuntimeBackend` is the
-//! cuda-new backend. The executor and runtime files are unchanged — the
-//! runtime swap happens entirely in these aliases.
+//! π0-FAST uses cuda-new's public `ops` surface and runtime backend.
 
-pub(crate) use apxinf_cuda_new::kernels;
-pub(crate) use apxinf_cuda_new::kernels::preprocess::ImageLayout;
+pub(crate) use apxinf_cuda_new::ops;
+pub(crate) use apxinf_cuda_new::ops::preprocess::ImageLayout;
 pub(crate) use apxinf_cuda_new::{
     CudaBuffer as DeviceBuffer, CudaContext as Context, CudaNewBackend as RuntimeBackend,
 };

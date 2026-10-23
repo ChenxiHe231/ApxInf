@@ -3,7 +3,7 @@
 use apxinf_core::{Error, KvCache, Result, Tensor};
 use std::any::Any;
 
-use crate::{kernels, CudaBuffer, CudaContext};
+use crate::{ops, CudaBuffer, CudaContext};
 
 /// KV cache stored in CUDA buffers.
 ///
@@ -60,7 +60,7 @@ impl CudaKvCache {
         v_new: &Tensor,
         append_len: usize,
     ) -> Result<()> {
-        kernels::cache::append(
+        ops::cache::append(
             ctx,
             &self.k_buffers[layer_idx],
             k_new,
@@ -70,7 +70,7 @@ impl CudaKvCache {
             self.seq_len,
             append_len,
         )?;
-        kernels::cache::append(
+        ops::cache::append(
             ctx,
             &self.v_buffers[layer_idx],
             v_new,
@@ -198,7 +198,7 @@ mod tests {
         let decode_cache = CudaKvCache::new(0, 1, 2, 2, 3).unwrap();
         let position = crate::HostMappedBuffer::alloc(4, 0).unwrap();
         position.write_u32(1).unwrap();
-        kernels::cache::append_at(
+        ops::cache::append_at(
             &ctx,
             apxinf_core::DType::F32,
             decode_cache.k_buffer(0),

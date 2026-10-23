@@ -1,18 +1,27 @@
 //! Semantic CUDA APIs with selection and native state behind L1.
 
-mod attention;
+pub mod activation;
+pub mod attention;
 mod attn_ops;
-mod cache;
-mod elementwise;
+pub mod cache;
+pub mod elementwise;
+pub mod embedding;
+pub mod fused;
 mod gather;
 mod gdn;
-mod gemm;
+pub(crate) mod gdn_policy;
+pub mod gemm;
+pub mod linear_attention;
 pub mod mlp;
 mod model;
-mod norm;
+pub mod norm;
+pub mod pillow_bicubic;
 mod pointwise;
-mod quantization;
-mod rope;
+pub mod preprocess;
+pub mod quantization;
+pub mod rope;
+pub mod sampling;
+pub(crate) mod validation;
 
 // Keep these crate-private aliases while graph/workspace and unit tests still
 // refer to the GEMM implementation through `crate::ops`.
@@ -35,8 +44,8 @@ pub use attention::{
 pub use attn_ops::{
     apply_output_gate, head_rms_norm, partial_rope, rotary_dim, split_query_and_gate,
 };
-pub use cache::{append as cache_append, concat_rows, copy_tensor, reserve_prefix};
-pub use elementwise::{
+pub use cache::core::{append as cache_append, concat_rows, copy_tensor, reserve_prefix};
+pub use elementwise::core::{
     activation as elementwise_activation, add as elementwise_add, add_bias as elementwise_add_bias,
     mul as elementwise_mul, scale as elementwise_scale, ElementwiseActivation,
 };
@@ -67,13 +76,11 @@ pub use norm::{
 };
 pub use pointwise::{pointwise, PointwiseActivation, PointwiseArgs, PointwiseSemantic};
 pub use quantization::{quantization, QuantizationArgs, QuantizationSemantic};
+pub use rope::apply_vision_2d as rope_apply_vision_2d;
 pub use rope::{
-    apply_batched as rope_apply_batched, apply_mrope as rope_apply_mrope,
-    apply_vision_2d as rope_apply_vision_2d,
-};
-pub use rope::{
-    decode_rope, multimodal_rope, rope, split_qkv_axial_rope, AxialRopeArgs, DecodeRopeArgs,
-    MultimodalRopeArgs, RopeArgs, RopeSemantic,
+    decode_rope, execute_batched as rope_apply_batched, execute_mrope as rope_apply_mrope,
+    multimodal_rope, rope, split_qkv_axial_rope, AxialRopeArgs, DecodeRopeArgs, MultimodalRopeArgs,
+    RopeArgs, RopeSemantic,
 };
 
 /// Run a fixed-shape forward pass that may tune and create native executions.
@@ -91,6 +98,32 @@ pub fn with_session<T>(
     operation: impl FnOnce() -> apxinf_core::Result<T>,
 ) -> apxinf_core::Result<T> {
     crate::workspace::with_session(session, operation)
+}
+
+/// Session-aware scratch storage for direct-launch operators.
+pub fn scratch_buffer(
+    ctx: &crate::CudaContext,
+    bytes: usize,
+) -> apxinf_core::Result<crate::CudaBuffer> {
+    crate::workspace::output_buffer(ctx, bytes)
+}
+
+/// Session-aware scratch storage that is explicitly cleared before use.
+pub fn scratch_buffer_zeroed(
+    ctx: &crate::CudaContext,
+    bytes: usize,
+) -> apxinf_core::Result<crate::CudaBuffer> {
+    crate::workspace::output_buffer_zeroed(ctx, bytes)
+}
+
+/// Session-aware scratch storage with only each group's unused tail cleared.
+pub fn scratch_buffer_tail_zeroed(
+    ctx: &crate::CudaContext,
+    groups: usize,
+    group_bytes: usize,
+    used_bytes: usize,
+) -> apxinf_core::Result<crate::CudaBuffer> {
+    crate::workspace::output_buffer_tail_zeroed(ctx, groups, group_bytes, used_bytes)
 }
 #[cfg(test)]
 mod tests;

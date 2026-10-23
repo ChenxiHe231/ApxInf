@@ -1,8 +1,8 @@
-//! Legacy `kernels::rope` names over the cuda-new packed-QKV RoPE operator.
+//! Packed-QKV and caller-owned RoPE operators.
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-pub use super::attention::QkvTensors;
+pub use crate::ops::attention::QkvTensors;
 use crate::{ops, CudaContext};
 
 fn split_impl(
@@ -117,7 +117,7 @@ pub fn apply_q_write_kv_bf16(
 // They reuse cuda-new's `contracts` helpers where the legacy crate used its
 // own, so validation is equivalent.
 
-use super::contracts::{
+use crate::ops::validation::{
     checked_bytes, gpu_ptr, make_gpu_tensor, matrix_shape, require_address, require_buffers,
     require_finite,
 };
@@ -590,7 +590,7 @@ pub fn apply_half_split_f16(
     }
 
     unsafe {
-        super::contracts::check_cuda(abi::apxinf_transformer_f16_rope_half_split_f16(
+        crate::ops::validation::check_cuda(abi::apxinf_transformer_f16_rope_half_split_f16(
             gpu_ptr(input)?,
             out_buf.ptr(),
             head_dim as u32,
@@ -669,7 +669,7 @@ pub fn apply_into(
     theta: f32,
     position: crate::CudaDeviceAddress,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
     use crate::ffi::abi::llm_decode as abi;
     require_finite("RoPE", &[theta])?;
     if head_dim % 2 != 0 || theta <= 0.0 {
@@ -728,7 +728,7 @@ pub fn apply_mrope_bf16_into(
     section_h: usize,
     section_w: usize,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
     use crate::ffi::abi::llm_decode as abi;
     require_finite("MRoPE", &[theta])?;
     if head_dim % 2 != 0 || section_h + section_w > head_dim / 2 || theta <= 0.0 {
@@ -772,7 +772,7 @@ pub fn apply_k_write_cache_bf16(
     theta: f32,
     position: crate::CudaDeviceAddress,
 ) -> Result<()> {
-    use super::contracts::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_address, require_buffers, require_finite};
     use crate::ffi::abi::llm_decode as abi;
     require_finite("RoPE K write", &[theta])?;
     require_buffers(

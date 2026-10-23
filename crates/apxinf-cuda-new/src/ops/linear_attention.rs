@@ -9,14 +9,14 @@
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-use super::contracts::{
+use super::validation::{
     bf16_output, check_cuda, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr, require_buffers,
 };
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
 use crate::device_caps::CudaArchFamily;
 use crate::ffi::abi::hybrid as abi;
-use crate::kernels::gdn_policy::{wmma, GdnLaunchPolicy};
+use crate::ops::gdn_policy::{wmma, GdnLaunchPolicy};
 use crate::workspace::output_buffer;
 
 /// Fused first-prefill causal convolution and gated delta-rule scan.

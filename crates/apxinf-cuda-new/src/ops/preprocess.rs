@@ -1,4 +1,4 @@
-//! Legacy `kernels::preprocess` names over the cuda-new gather operator.
+//! Image preprocessing and patchification operators.
 
 use apxinf_core::{DType, Error, Result, Tensor};
 
@@ -382,7 +382,7 @@ pub fn rgb_u8_to_patches_f16(
 
 // ── smolvla pixel shuffle ───────────────────────────────────────────────────
 //
-// Ported verbatim from the legacy `kernels::preprocess` wrappers over the
+// Ported verbatim from the legacy FP16 preprocessing wrappers over the
 // `apxinf_transformer_f16_*` launchers (native/adapters/preprocess/fixed_f16.cu).
 
 /// `pixel_shuffle_4_bf16`: SmolVLA's 4x4 pixel shuffle over per-view token
@@ -392,7 +392,7 @@ pub fn pixel_shuffle_4_bf16(
     input: &Tensor,
     tokens_per_view: usize,
 ) -> Result<Tensor> {
-    use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+    use super::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
     use crate::ffi::abi::transformer_f16 as abi;
     let input_shape = input.shape().dims();
     if input.dtype() != DType::BF16
@@ -439,7 +439,7 @@ pub fn pixel_shuffle_4_f16(
     input: &Tensor,
     tokens_per_view: usize,
 ) -> Result<Tensor> {
-    use super::contracts::{check_cuda, gpu_ptr, make_gpu_tensor};
+    use super::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
     use crate::ffi::abi::transformer_f16 as abi;
     let input_shape = input.shape().dims();
     if input.dtype() != DType::F16

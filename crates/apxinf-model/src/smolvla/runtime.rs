@@ -7,7 +7,7 @@ use std::time::Instant;
 use apxinf_core::{Error, Graph, NormalGenerator, Result, SamplingBackend, Tensor};
 use half::{bf16, f16};
 
-use super::backend::{kernels, transfers, DeviceBuffer};
+use super::backend::{ops, transfers, DeviceBuffer};
 use crate::vla::{
     Action, ExecutionMode, ExecutionPolicy, ImageLayout, InferenceSpec, InitialLatent,
     Observation, PreparationStatus, PreparedInference, VisionObservation, VlaContract,
@@ -240,7 +240,7 @@ struct SmolVlaCapturedGraph {
     _time_embeddings: Vec<Tensor>,
     model: Arc<SmolVlaModel>,
     normal_generator: RefCell<Box<dyn NormalGenerator>>,
-    _workspace: kernels::GraphWorkspace,
+    _workspace: ops::ExecutionSession,
 }
 
 impl SmolVlaCapturedGraph {
@@ -293,8 +293,8 @@ impl SmolVlaCapturedGraph {
         let mut last_workspace_error = None;
         for capacity in GRAPH_WORKSPACE_CAPACITIES_BYTES {
             let workspace =
-                kernels::GraphWorkspace::new(capacity, device_id)?;
-            let preflight = kernels::prepare_with_workspace(&workspace, || {
+                ops::ExecutionSession::with_capacity(capacity, device_id)?;
+            let preflight = ops::prepare_with_session(&workspace, || {
                 model.infer_fixed(
                     raw_images.as_ref(),
                     &patches,
@@ -324,7 +324,7 @@ impl SmolVlaCapturedGraph {
             drop(expected_output);
 
             let (graph, output) = backend.capture_graph(|| {
-                kernels::with_workspace(&workspace, || {
+                ops::with_session(&workspace, || {
                     model.infer_fixed(
                         raw_images.as_ref(),
                         &patches,
