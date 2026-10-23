@@ -5,13 +5,12 @@
 //! images, and a video's `t > 1`, both need Attention segmented per frame and
 //! are rejected rather than fused into one span; see `prepare`.
 //!
-//! All per-request tower computation remains on CUDA. The learned 48x48
-//! position table is interpolated on the host once per distinct grid and
-//! retained in a small device cache, matching the maintained Qwen-Drive path.
-//! Vision and language computation share the same cuda-new context and stream.
+//! All per-request tower computation remains on CUDA. One fused kernel
+//! interpolates the learned 48x48 position table, applies spatial-merge order,
+//! and emits the matching axial IDs on every request. Vision and language
+//! computation share the same cuda-new context and stream.
 
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext};
@@ -19,15 +18,9 @@ use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext};
 use super::config::*;
 use super::vision_weights::VisionWeights;
 
-#[derive(Default)]
-pub(crate) struct VisionState {
-    pos_table_host: OnceLock<Vec<f32>>,
-    pos_embed_cache: Mutex<Vec<(Vec<[u32; 3]>, Tensor)>>,
-}
-
 struct PreparedVision {
-    pos_embeds: Tensor,
-    pos_ids_dev: Tensor,
+    height: usize,
+    width: usize,
     total_patches: usize,
 }
 
@@ -134,7 +127,6 @@ pub(crate) fn upload_pixels(ctx: &CudaContext, pixels: &Tensor) -> Result<Tensor
 /// not nest, so this must not be called inside the language prefill session.
 pub(crate) fn forward(
     weights: &VisionWeights,
-    state: &VisionState,
     ctx: &CudaContext,
     scratch: &VisionScratch,
     session: &ops::ExecutionSession,
@@ -142,10 +134,28 @@ pub(crate) fn forward(
     pixel_values: &Tensor,
     grid_thw: &[[u32; 3]],
 ) -> Result<Tensor> {
-    // Position embeddings and ids are per-grid persistent resources, built
-    // outside the session so the replayed traversal is pure compute.
-    let plan = prepare(weights, state, ctx, pixel_values, grid_thw)?;
-    let run = || forward_device(weights, ctx, scratch, pixel_values, &plan);
+    if weights.pos_embed.shape().dims() != [VISION_POSITIONS, VISION_HIDDEN] {
+        return Err(Error::Other(
+            "qwen38 image position table shape mismatch".into(),
+        ));
+    }
+    let plan = prepare(pixel_values, grid_thw)?;
+    let run = || {
+        let mut pos_embeds = scratch.pos_embeds.clone();
+        let mut pos_ids = scratch.pos_ids.clone();
+        ops::vision_position(
+            ctx,
+            ops::VisionPositionArgs {
+                table: &weights.pos_embed,
+                embeddings: &mut pos_embeds,
+                position_ids: &mut pos_ids,
+                height: plan.height,
+                width: plan.width,
+                merge_size: VISION_MERGE,
+            },
+        )?;
+        forward_device(weights, ctx, scratch, pixel_values, &plan)
+    };
     let output = if prepared {
         ops::with_session(session, run)?
     } else {
@@ -209,13 +219,7 @@ fn single_image_grid(grid_thw: &[[u32; 3]], total_patches: usize) -> Result<(usi
     Ok((h, w))
 }
 
-fn prepare(
-    weights: &VisionWeights,
-    state: &VisionState,
-    ctx: &CudaContext,
-    pixel_values: &Tensor,
-    grid_thw: &[[u32; 3]],
-) -> Result<PreparedVision> {
+fn prepare(pixel_values: &Tensor, grid_thw: &[[u32; 3]]) -> Result<PreparedVision> {
     let patch_width =
         VISION_CHANNELS * VISION_TEMPORAL_PATCH_SIZE * VISION_PATCH_SIZE * VISION_PATCH_SIZE;
     let dims = pixel_values.shape().dims();
@@ -226,22 +230,13 @@ fn prepare(
     }
 
     let total_patches = dims[0];
-    single_image_grid(grid_thw, total_patches)?;
-
-    let pos_embeds = compute_pos_embeds(weights, state, ctx, grid_thw)?;
-    let pos_ids = vision_position_ids(grid_thw);
-    let pos_ids: Vec<i32> = pos_ids.into_iter().map(|value| value as i32).collect();
-    let pos_ids_dev = upload_i32(ctx, vec![total_patches, 2], &pos_ids)?;
+    let (height, width) = single_image_grid(grid_thw, total_patches)?;
     Ok(PreparedVision {
-        pos_embeds,
-        pos_ids_dev,
+        height,
+        width,
         total_patches,
     })
 }
-
-
-
-
 
 /// Device scratch for one patch count, allocated once and reused by every
 /// block.
@@ -254,6 +249,8 @@ fn prepare(
 /// cache hit on a repeated grid -- `ExecutionKey` includes binding pointers.
 pub(crate) struct VisionScratch {
     patches: usize,
+    pos_embeds: Tensor,
+    pos_ids: Tensor,
     x: [Tensor; 2],
     normed: Tensor,
     qkv: Tensor,
@@ -287,6 +284,8 @@ impl VisionScratch {
         let bf16 = DType::BF16;
         Ok(Self {
             patches,
+            pos_embeds: device_tensor(ctx, &rows, bf16)?,
+            pos_ids: device_tensor(ctx, &[patches, 2], DType::I32)?,
             x: [
                 device_tensor(ctx, &rows, bf16)?,
                 device_tensor(ctx, &rows, bf16)?,
@@ -437,7 +436,7 @@ fn forward_device(
         &weights.patch_b,
         &mut current,
     )?;
-    ops::mlp::add_into(ctx, &prepared.pos_embeds, &current)?;
+    ops::mlp::add_into(ctx, &scratch.pos_embeds, &current)?;
     dump_vision_stage("00_patch_position", &current)?;
     layer_norm_into(
         ctx,
@@ -455,7 +454,7 @@ fn forward_device(
             ops::AxialRopeArgs {
                 qkv: &qkv,
                 bias: None,
-                positions: &prepared.pos_ids_dev,
+                positions: &scratch.pos_ids,
                 query: &mut query,
                 key: &mut key,
                 value: &mut value,
@@ -595,115 +594,6 @@ pub(crate) fn embed_and_replace(
     gather.row_map = Some(&row_map);
     ops::gather(ctx, gather)?;
     Ok(output)
-}
-
-fn compute_pos_embeds(
-    weights: &VisionWeights,
-    state: &VisionState,
-    ctx: &CudaContext,
-    grid_thw: &[[u32; 3]],
-) -> Result<Tensor> {
-    if let Ok(cache) = state.pos_embed_cache.lock() {
-        if let Some((_, tensor)) = cache.iter().find(|(key, _)| key.as_slice() == grid_thw) {
-            return Ok(tensor.clone());
-        }
-    }
-    if state.pos_table_host.get().is_none() {
-        let table = transfers::to_cpu(&weights.pos_embed)?.to_f32_vec()?;
-        let _ = state.pos_table_host.set(table);
-    }
-    let table = state
-        .pos_table_host
-        .get()
-        .ok_or_else(|| Error::Other("qwen38 image position table unavailable".into()))?;
-    let grid_side = (VISION_POSITIONS as f64).sqrt().round() as usize;
-    if table.len() != grid_side * grid_side * VISION_HIDDEN {
-        return Err(Error::Other(
-            "qwen38 image position table shape mismatch".into(),
-        ));
-    }
-
-    let total: usize = grid_thw
-        .iter()
-        .map(|grid| grid[0] as usize * grid[1] as usize * grid[2] as usize)
-        .sum();
-    let mut output = vec![0.0f32; total * VISION_HIDDEN];
-    let mut destination_token = 0usize;
-    for &[t, h, w] in grid_thw {
-        let (t, h, w) = (t as usize, h as usize, w as usize);
-        for _ in 0..t {
-            for merged_h in 0..h / VISION_MERGE {
-                for merged_w in 0..w / VISION_MERGE {
-                    for inner_h in 0..VISION_MERGE {
-                        for inner_w in 0..VISION_MERGE {
-                            let row = merged_h * VISION_MERGE + inner_h;
-                            let column = merged_w * VISION_MERGE + inner_w;
-                            let row_position =
-                                row as f32 * (grid_side - 1) as f32 / (h - 1).max(1) as f32;
-                            let column_position =
-                                column as f32 * (grid_side - 1) as f32 / (w - 1).max(1) as f32;
-                            let row0 = row_position.floor() as usize;
-                            let row1 = (row0 + 1).min(grid_side - 1);
-                            let column0 = column_position.floor() as usize;
-                            let column1 = (column0 + 1).min(grid_side - 1);
-                            let row_weight = row_position - row0 as f32;
-                            let column_weight = column_position - column0 as f32;
-                            let destination = destination_token * VISION_HIDDEN;
-                            for channel in 0..VISION_HIDDEN {
-                                let value00 =
-                                    table[(row0 * grid_side + column0) * VISION_HIDDEN + channel];
-                                let value01 =
-                                    table[(row0 * grid_side + column1) * VISION_HIDDEN + channel];
-                                let value10 =
-                                    table[(row1 * grid_side + column0) * VISION_HIDDEN + channel];
-                                let value11 =
-                                    table[(row1 * grid_side + column1) * VISION_HIDDEN + channel];
-                                output[destination + channel] =
-                                    (1.0 - row_weight) * (1.0 - column_weight) * value00
-                                        + (1.0 - row_weight) * column_weight * value01
-                                        + row_weight * (1.0 - column_weight) * value10
-                                        + row_weight * column_weight * value11;
-                            }
-                            destination_token += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let rounded: Vec<half::bf16> = output
-        .iter()
-        .map(|&value| half::bf16::from_f32(value))
-        .collect();
-    let host = Tensor::from_bf16(vec![total, VISION_HIDDEN], &rounded)?;
-    let uploaded = transfers::to_cuda(&host, ctx.device_id())?;
-    if let Ok(mut cache) = state.pos_embed_cache.lock() {
-        const MAX_GRIDS: usize = 4;
-        if cache.len() >= MAX_GRIDS {
-            cache.remove(0);
-        }
-        cache.push((grid_thw.to_vec(), uploaded.clone()));
-    }
-    Ok(uploaded)
-}
-
-fn vision_position_ids(grid_thw: &[[u32; 3]]) -> Vec<u32> {
-    let mut ids = Vec::new();
-    for &[t, h, w] in grid_thw {
-        for _ in 0..t {
-            for merged_h in 0..h as usize / VISION_MERGE {
-                for merged_w in 0..w as usize / VISION_MERGE {
-                    for inner_h in 0..VISION_MERGE {
-                        for inner_w in 0..VISION_MERGE {
-                            ids.push((merged_h * VISION_MERGE + inner_h) as u32);
-                            ids.push((merged_w * VISION_MERGE + inner_w) as u32);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    ids
 }
 
 /// Qwen3.5 three-axis language positions for an image-only multimodal prompt.

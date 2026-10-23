@@ -33,7 +33,6 @@ pub struct Qwen38 {
     model: weights::Model,
     /// Some text-only checkpoints intentionally omit the visual tower.
     vision: Option<VisionWeights>,
-    vision_state: vision::VisionState,
     /// Stable per-shape vision buffers and the session owning that traversal's
     /// prepared executions. `ExecutionKey` includes binding pointers, so the
     /// cache only hits while the scratch addresses stay put; a new patch count
@@ -100,7 +99,6 @@ impl Qwen38 {
             backend,
             model,
             vision,
-            vision_state: vision::VisionState::default(),
             vision_session: None,
             scratch,
             prefill: None,
@@ -299,7 +297,6 @@ impl Qwen38 {
                 .expect("vision session installed above");
             let visual = vision::forward(
                 vision_weights,
-                &self.vision_state,
                 &self.ctx,
                 scratch,
                 session,
