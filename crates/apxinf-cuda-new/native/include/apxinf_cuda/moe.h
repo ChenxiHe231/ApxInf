@@ -34,6 +34,13 @@ apxinf_status_t apxinf_moe_edge_nvfp4(
     apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t* spec,
     const apxinf_moe_edge_nvfp4_bindings_t* bindings);
 
+apxinf_status_t apxinf_moe_edge_bf16_decode_workspace_size(
+    const apxinf_moe_edge_bf16_decode_spec_t* spec, size_t* workspace_bytes);
+
+apxinf_status_t apxinf_moe_edge_bf16_decode(
+    apxinf_runtime_t runtime, const apxinf_moe_edge_bf16_decode_spec_t* spec,
+    const apxinf_moe_edge_bf16_decode_bindings_t* bindings);
+
 #ifdef __cplusplus
 }
 #endif

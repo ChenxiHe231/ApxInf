@@ -50,6 +50,24 @@ pub fn rms_norm(
 /// GEMM produces. This is SwiGLU; `gemm_geglu` computes the GELU variant and
 /// is not interchangeable.
 pub fn swiglu(ctx: &CudaContext, fused: &Tensor, output: &Tensor) -> Result<()> {
+    swiglu_impl(ctx, fused, output, false)
+}
+
+/// Qwen3.5 MTP SwiGLU order: `bf16(silu(bf16(gate)) * bf16(up))`.
+///
+/// Unlike [`swiglu`], the SiLU result is not materialized in BF16 before the
+/// multiply. This preserves the operation order of the original fused MTP
+/// kernel when its projections are moved to grouped/GEMM implementations.
+pub fn swiglu_round_product(ctx: &CudaContext, fused: &Tensor, output: &Tensor) -> Result<()> {
+    swiglu_impl(ctx, fused, output, true)
+}
+
+fn swiglu_impl(
+    ctx: &CudaContext,
+    fused: &Tensor,
+    output: &Tensor,
+    round_product_only: bool,
+) -> Result<()> {
     let fused_dims = fused.shape().dims().to_vec();
     let output_dims = output.shape().dims().to_vec();
     if fused_dims.len() != 2 || output_dims.len() != 2 {
@@ -62,8 +80,13 @@ pub fn swiglu(ctx: &CudaContext, fused: &Tensor, output: &Tensor) -> Result<()> 
     }
     let fused_buffer = tensor_storage(ctx, fused, DType::BF16, &fused_dims)?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
+    let launch = if round_product_only {
+        abi::apxinf_swiglu_bf16_round_product
+    } else {
+        abi::apxinf_swiglu_bf16
+    };
     unsafe {
-        status::check(abi::apxinf_swiglu_bf16(
+        status::check(launch(
             fused_buffer.ptr(),
             output_buffer.ptr(),
             output_dims[0] as i64,

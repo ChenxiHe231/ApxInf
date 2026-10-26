@@ -10,8 +10,8 @@ use std::path::Path;
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 use apxinf_cuda_new::{
-    edge_nvfp4_interleave_fc1, edge_nvfp4_moe_available, edge_nvfp4_rescale_e4m3,
-    edge_nvfp4_swizzle_scales, ops, transfers, CudaBuffer, CudaContext,
+    edge_bf16_decode_moe_available, edge_nvfp4_interleave_fc1, edge_nvfp4_moe_available,
+    edge_nvfp4_rescale_e4m3, edge_nvfp4_swizzle_scales, ops, transfers, CudaBuffer, CudaContext,
 };
 
 use super::architecture::{MixerKind, Qwen35MoeArchitecture};
@@ -120,11 +120,30 @@ pub struct DeviceDenseExpertProjection {
 }
 
 #[derive(Debug)]
+pub struct DeviceEdgeBf16Experts {
+    /// `[experts, 2 * intermediate, hidden]`, 64-row `[up, gate]` interleaved.
+    pub fc1_weight: Tensor,
+    /// `[experts, hidden, intermediate]`.
+    pub fc2_weight: Tensor,
+    pub experts: usize,
+    pub hidden: usize,
+    pub intermediate: usize,
+}
+
+#[derive(Debug)]
+pub enum DeviceDenseRoutedExperts {
+    Reference {
+        gate: DeviceDenseExpertProjection,
+        up: DeviceDenseExpertProjection,
+        down: DeviceDenseExpertProjection,
+    },
+    Edge(DeviceEdgeBf16Experts),
+}
+
+#[derive(Debug)]
 pub struct DeviceDenseMoe {
     pub router: DeviceDenseLinear,
-    pub expert_gate: DeviceDenseExpertProjection,
-    pub expert_up: DeviceDenseExpertProjection,
-    pub expert_down: DeviceDenseExpertProjection,
+    pub routed_experts: DeviceDenseRoutedExperts,
     pub shared_gate: DeviceDenseLinear,
     pub shared_up: DeviceDenseLinear,
     pub shared_down: DeviceDenseLinear,
@@ -486,15 +505,108 @@ fn upload_dense_moe(
         up.push(expert.up_proj);
         down.push(expert.down_proj);
     }
+    let routed_experts = if edge_bf16_decode_moe_available() {
+        DeviceDenseRoutedExperts::Edge(pack_and_upload_edge_bf16_experts(ctx, gate, up, down)?)
+    } else {
+        DeviceDenseRoutedExperts::Reference {
+            gate: upload_dense_expert_projection(ctx, gate, "MTP expert gate")?,
+            up: upload_dense_expert_projection(ctx, up, "MTP expert up")?,
+            down: upload_dense_expert_projection(ctx, down, "MTP expert down")?,
+        }
+    };
     Ok(DeviceDenseMoe {
         router: upload_dense(ctx, router, "MTP MoE router")?,
-        expert_gate: upload_dense_expert_projection(ctx, gate, "MTP expert gate")?,
-        expert_up: upload_dense_expert_projection(ctx, up, "MTP expert up")?,
-        expert_down: upload_dense_expert_projection(ctx, down, "MTP expert down")?,
+        routed_experts,
         shared_gate: upload_dense(ctx, shared_expert.gate_proj, "MTP shared gate")?,
         shared_up: upload_dense(ctx, shared_expert.up_proj, "MTP shared up")?,
         shared_down: upload_dense(ctx, shared_expert.down_proj, "MTP shared down")?,
         shared_expert_gate: upload_dense(ctx, shared_expert_gate, "MTP shared expert gate")?,
+    })
+}
+
+fn pack_and_upload_edge_bf16_experts(
+    ctx: &CudaContext,
+    gate: Vec<DenseLinearWeights<Tensor>>,
+    up: Vec<DenseLinearWeights<Tensor>>,
+    down: Vec<DenseLinearWeights<Tensor>>,
+) -> Result<DeviceEdgeBf16Experts> {
+    if gate.is_empty() || gate.len() != up.len() || gate.len() != down.len() {
+        return Err(invalid("Edge BF16 expert projection counts differ"));
+    }
+    let experts = gate.len();
+    let hidden = gate[0].input_features;
+    let intermediate = gate[0].output_features;
+    let mut fc1 = Vec::new();
+    let mut fc2 = Vec::new();
+    let fc1_bytes = experts
+        .checked_mul(2 * intermediate)
+        .and_then(|value| value.checked_mul(hidden))
+        .and_then(|value| value.checked_mul(DType::BF16.size_in_bytes()))
+        .ok_or_else(|| invalid("Edge BF16 FC1 byte size overflow"))?;
+    let fc2_bytes = experts
+        .checked_mul(hidden)
+        .and_then(|value| value.checked_mul(intermediate))
+        .and_then(|value| value.checked_mul(DType::BF16.size_in_bytes()))
+        .ok_or_else(|| invalid("Edge BF16 FC2 byte size overflow"))?;
+    fc1.try_reserve_exact(fc1_bytes)
+        .map_err(|error| invalid(format!("allocate Edge BF16 FC1 staging: {error}")))?;
+    fc2.try_reserve_exact(fc2_bytes)
+        .map_err(|error| invalid(format!("allocate Edge BF16 FC2 staging: {error}")))?;
+    for ((gate, up), down) in gate.into_iter().zip(up).zip(down) {
+        if gate.input_features != hidden
+            || gate.output_features != intermediate
+            || up.input_features != hidden
+            || up.output_features != intermediate
+            || down.input_features != intermediate
+            || down.output_features != hidden
+        {
+            return Err(invalid("Edge BF16 expert projection geometries differ"));
+        }
+        validate_cpu_tensor(
+            &gate.weight,
+            DType::BF16,
+            &[intermediate, hidden],
+            "Edge BF16 expert gate",
+        )?;
+        validate_cpu_tensor(
+            &up.weight,
+            DType::BF16,
+            &[intermediate, hidden],
+            "Edge BF16 expert up",
+        )?;
+        validate_cpu_tensor(
+            &down.weight,
+            DType::BF16,
+            &[hidden, intermediate],
+            "Edge BF16 expert down",
+        )?;
+        let packed = edge_nvfp4_interleave_fc1(
+            cpu_bytes(&gate.weight, "Edge BF16 expert gate")?,
+            cpu_bytes(&up.weight, "Edge BF16 expert up")?,
+            intermediate,
+            hidden * DType::BF16.size_in_bytes(),
+        )?;
+        fc1.extend_from_slice(&packed);
+        fc2.extend_from_slice(cpu_bytes(&down.weight, "Edge BF16 expert down")?);
+    }
+    let fc1 = Tensor::from_raw(
+        Shape::new(vec![experts, 2 * intermediate, hidden]),
+        DType::BF16,
+        Device::Cpu,
+        fc1,
+    )?;
+    let fc2 = Tensor::from_raw(
+        Shape::new(vec![experts, hidden, intermediate]),
+        DType::BF16,
+        Device::Cpu,
+        fc2,
+    )?;
+    Ok(DeviceEdgeBf16Experts {
+        fc1_weight: transfers::to_cuda(&fc1, ctx.device_id())?,
+        fc2_weight: transfers::to_cuda(&fc2, ctx.device_id())?,
+        experts,
+        hidden,
+        intermediate,
     })
 }
 

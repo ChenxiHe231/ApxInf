@@ -9,6 +9,7 @@
 #define APXINF_MOE_COMBINE_SPEC_VERSION 1u
 #define APXINF_MOE_NVFP4_EXPERTS_SPEC_VERSION 1u
 #define APXINF_MOE_EDGE_NVFP4_SPEC_VERSION 1u
+#define APXINF_MOE_EDGE_BF16_DECODE_SPEC_VERSION 1u
 
 typedef struct {
   uint32_t version;
@@ -138,4 +139,30 @@ typedef struct {
   void* output;
   apxinf_cuda_stream_t stream;
 } apxinf_moe_edge_nvfp4_bindings_t;
+
+// TensorRT-Edge-LLM CuTeDSL homogeneous grouped-GEMM contract specialized
+// for one-token BF16 decode. FC1 applies SwiGLU and FC2 applies the top-k
+// weights, producing one token-major routed contribution.
+typedef struct {
+  uint32_t version;
+  uint32_t dtype;
+  uint32_t experts;
+  uint32_t top_k;
+  uint32_t hidden;
+  uint32_t intermediate;
+} apxinf_moe_edge_bf16_decode_spec_t;
+
+typedef struct {
+  const void* input;
+  const int32_t* expert_ids;
+  const float* expert_weights;
+  // FC1 is [E, 2*I, H] with 64-row [up, gate] interleaving.
+  const void* fc1_weight;
+  // FC2 is [E, H, I].
+  const void* fc2_weight;
+  void* workspace;
+  size_t workspace_bytes;
+  void* output;
+  apxinf_cuda_stream_t stream;
+} apxinf_moe_edge_bf16_decode_bindings_t;
 

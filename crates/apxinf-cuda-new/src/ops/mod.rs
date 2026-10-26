@@ -69,12 +69,14 @@ pub use gemm::{
     GemmQuantization, GemmSwiGluArgs, GemmWeightLayout, GemvArgs, GemvBiasArgs, GemvBlockScales,
     RepackedWeight, WeightVersion,
 };
-pub use mlp::{fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu, rms_norm};
+pub use mlp::{fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu, swiglu_round_product, rms_norm};
 pub use moe::{
-    combine_reference as routed_moe_combine_reference, edge_nvfp4_interleave_fc1, edge_nvfp4_moe,
-    edge_nvfp4_moe_available, edge_nvfp4_moe_workspace_size, edge_nvfp4_rescale_e4m3,
-    edge_nvfp4_swizzle_scales, route_topk_reference, routed_moe_add_shared, routed_moe_combine,
-    routed_moe_nvfp4_experts, routed_moe_route, routed_moe_route_topk, EdgeNvfp4MoeArgs,
+    combine_reference as routed_moe_combine_reference, edge_bf16_decode_moe,
+    edge_bf16_decode_moe_available, edge_bf16_decode_moe_workspace_size, edge_nvfp4_interleave_fc1,
+    edge_nvfp4_moe, edge_nvfp4_moe_available, edge_nvfp4_moe_workspace_size,
+    edge_nvfp4_rescale_e4m3, edge_nvfp4_swizzle_scales, route_topk_reference,
+    routed_moe_add_shared, routed_moe_combine, routed_moe_nvfp4_experts, routed_moe_route,
+    routed_moe_route_topk, EdgeBf16DecodeMoeArgs, EdgeBf16DecodeMoeWeights, EdgeNvfp4MoeArgs,
     EdgeNvfp4MoeWeights, ExpertAssignment, Nvfp4ExpertProjection, RoutePlan,
     RoutedMoeAddSharedArgs, RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs,
     RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs, RoutedMoeSemantic, SharedExpertOutput,

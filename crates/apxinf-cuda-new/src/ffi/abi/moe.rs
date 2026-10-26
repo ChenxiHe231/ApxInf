@@ -7,6 +7,7 @@ pub(crate) const ROUTE_SPEC_VERSION: u32 = 1;
 pub(crate) const COMBINE_SPEC_VERSION: u32 = 1;
 pub(crate) const NVFP4_EXPERTS_SPEC_VERSION: u32 = 1;
 pub(crate) const EDGE_NVFP4_SPEC_VERSION: u32 = 1;
+pub(crate) const EDGE_BF16_DECODE_SPEC_VERSION: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -148,6 +149,31 @@ pub(crate) struct EdgeNvfp4Bindings {
     pub stream: CudaStream,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct EdgeBf16DecodeSpec {
+    pub version: u32,
+    pub dtype: u32,
+    pub experts: u32,
+    pub top_k: u32,
+    pub hidden: u32,
+    pub intermediate: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EdgeBf16DecodeBindings {
+    pub input: *const c_void,
+    pub expert_ids: *const i32,
+    pub expert_weights: *const f32,
+    pub fc1_weight: *const c_void,
+    pub fc2_weight: *const c_void,
+    pub workspace: *mut c_void,
+    pub workspace_bytes: usize,
+    pub output: *mut c_void,
+    pub stream: CudaStream,
+}
+
 unsafe extern "C" {
     pub(crate) fn apxinf_moe_route_topk(
         runtime: Runtime,
@@ -188,5 +214,16 @@ unsafe extern "C" {
         runtime: Runtime,
         spec: *const EdgeNvfp4Spec,
         bindings: *const EdgeNvfp4Bindings,
+    ) -> i32;
+
+    pub(crate) fn apxinf_moe_edge_bf16_decode_workspace_size(
+        spec: *const EdgeBf16DecodeSpec,
+        workspace_bytes: *mut usize,
+    ) -> i32;
+
+    pub(crate) fn apxinf_moe_edge_bf16_decode(
+        runtime: Runtime,
+        spec: *const EdgeBf16DecodeSpec,
+        bindings: *const EdgeBf16DecodeBindings,
     ) -> i32;
 }

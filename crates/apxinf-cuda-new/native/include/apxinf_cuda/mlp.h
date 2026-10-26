@@ -21,6 +21,11 @@ apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up, void* output,
                                    int64_t rows, int64_t width,
                                    apxinf_cuda_stream_t stream);
 
+/* SwiGLU with only the final product rounded to BF16 (Qwen3.5 MTP order). */
+apxinf_status_t apxinf_swiglu_bf16_round_product(
+    const void* fused_gate_up, void* output, int64_t rows, int64_t width,
+    apxinf_cuda_stream_t stream);
+
 apxinf_status_t apxinf_new_add_bf16(const void* addend, void* accumulator,
                                 int64_t count, apxinf_cuda_stream_t stream);
 

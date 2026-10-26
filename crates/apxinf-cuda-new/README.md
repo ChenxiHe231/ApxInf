@@ -1,6 +1,6 @@
 # `apxinf-cuda-new` Architecture Contract
 
-`apxinf-cuda-new` provides stable CUDA L3 semantic interfaces to the model layer and selects and prepares a provider kernel for the same semantic in the native layer. GEMM and Attention are the two operator families currently integrated, not the full set of types supported by the framework.
+`apxinf-cuda-new` provides stable CUDA L3 semantic interfaces to the model layer and selects and prepares a provider kernel for the same semantic in the native layer. GEMM, Attention, and fixed routed-MoE building blocks are integrated, not the full set of types supported by the framework.
 
 Preparation and graph capture have different owners. GEMM and Attention may own persistent native executions because they select providers and configurations. Fixed operators enqueue directly on the active stream. A model or execution phase owns the CUDA Graph; use `PreparedPhase` when a phase contains both direct fixed operators and persistent GEMM/Attention executions.
 

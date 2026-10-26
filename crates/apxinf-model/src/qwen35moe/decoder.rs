@@ -29,8 +29,8 @@ pub enum LogitsSelection {
     /// Only the final row, used by ordinary prefill and decode.
     Last,
     /// Every row, for callers that explicitly need a dense logits matrix.
-    /// Canonical MTP verification does not use this mode: it invokes four
-    /// separate one-row decode calls so every row follows scalar reductions.
+    /// The opt-in batched MTP verification candidate uses this mode; the
+    /// canonical path invokes four one-row decode calls instead.
     All,
 }
 
@@ -117,6 +117,32 @@ impl DecoderOutput {
             ));
         }
         row_view(&self.hidden_states, self.hidden_rows - 1, dims[1])
+    }
+
+    /// View the final row as a scalar-decode-shaped output without copying.
+    pub(super) fn last_row(&self) -> Result<Self> {
+        let logit_dims = self.logits.shape().dims();
+        let hidden_dims = self.hidden_states.shape().dims();
+        if logit_dims.len() != 2
+            || hidden_dims.len() != 2
+            || logit_dims[0] != self.rows
+            || hidden_dims[0] != self.hidden_rows
+            || self.rows == 0
+            || self.hidden_rows == 0
+            || self.end_position == 0
+        {
+            return Err(invalid(
+                "Qwen3.5 decoder output cannot expose an empty final row",
+            ));
+        }
+        Ok(Self {
+            logits: row_view(&self.logits, self.rows - 1, logit_dims[1])?,
+            rows: 1,
+            hidden_states: row_view(&self.hidden_states, self.hidden_rows - 1, hidden_dims[1])?,
+            hidden_rows: 1,
+            start_position: self.end_position - 1,
+            end_position: self.end_position,
+        })
     }
 
     /// Device argmax for each materialized logit row, followed by one compact
@@ -293,6 +319,22 @@ impl Qwen35Decoder {
         )
     }
 
+    /// Persistent four-row scratch for the speculative target candidate.
+    pub(super) fn allocate_verify_scratch(&self, ctx: &CudaContext) -> Result<DecoderScratch> {
+        let moe = self.architecture.layers[0].moe;
+        DecoderScratch::new(
+            ctx,
+            super::mtp_schedule::QWEN35_MTP_VERIFY_ROWS,
+            self.architecture.hidden_size,
+            self.architecture.vocab_size,
+            moe.experts,
+            moe.experts_per_token,
+            moe.expert_intermediate_size,
+            LogitsSelection::All,
+            HiddenSelection::All,
+        )
+    }
+
     /// Execute one scalar decode row into caller-owned persistent scratch.
     /// Returned tensors alias that scratch and remain valid until the next
     /// decode on the same session. Callers that need a value across another
@@ -383,6 +425,51 @@ impl Qwen35Decoder {
             DecoderPhase::Decode,
             LogitsSelection::Last,
             HiddenSelection::Last,
+            scratch,
+        )
+    }
+
+    /// Execute the fixed four-row speculative verification candidate through
+    /// the batched prefill kernels while appending to an existing prefix.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_verify_reusing_from_block<B: FullAttentionBackend>(
+        &self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        attention: &mut B,
+        attention_caches: &mut [B::Cache],
+        gdn_states: &[GdnState],
+        token_ids: &[u32],
+        token_block: &Tensor,
+        start_position: usize,
+        scratch: &mut DecoderScratch,
+    ) -> Result<DecoderOutput> {
+        self.validate_weights(weights)?;
+        self.validate_call(
+            attention_caches.len(),
+            gdn_states.len(),
+            token_ids,
+            start_position,
+            DecoderPhase::Prefill,
+        )?;
+        scratch.validate_contract(
+            token_ids.len(),
+            self.architecture.hidden_size,
+            self.architecture.vocab_size,
+            LogitsSelection::All,
+            HiddenSelection::All,
+        )?;
+        scratch.stage_device_tokens(ctx, token_block)?;
+        self.run_after_token_ids(
+            ctx,
+            weights,
+            attention,
+            attention_caches,
+            gdn_states,
+            start_position,
+            DecoderPhase::Prefill,
+            LogitsSelection::All,
+            HiddenSelection::All,
             scratch,
         )
     }
@@ -674,6 +761,19 @@ impl DecoderScratch {
         }
         let source = element_view(token_block, offset)?;
         transfers::copy_cuda_to_cuda(ctx, &source, &self.token_ids)
+    }
+
+    fn stage_device_tokens(&self, ctx: &CudaContext, token_block: &Tensor) -> Result<()> {
+        let dims = token_block.shape().dims();
+        if token_block.device() != Device::Cuda(ctx.device_id())
+            || token_block.dtype() != DType::I32
+            || dims != [self.tokens]
+        {
+            return Err(invalid(
+                "Qwen3.5 verification token block has the wrong CUDA I32 shape",
+            ));
+        }
+        transfers::copy_cuda_to_cuda(ctx, token_block, &self.token_ids)
     }
 
     fn embed(&self, ctx: &CudaContext, embedding: &Tensor) -> Result<()> {

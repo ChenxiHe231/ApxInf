@@ -180,10 +180,15 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     shadow_attention: Vec<B::Cache>,
     /// Prefix of the inactive cache bank known to equal the committed bank.
     shadow_attention_valid: usize,
-    /// Persistent one-row workspace shared by ordinary decode, four-row exact
-    /// target verification, and partial-commit replay. Variable-size prefill
-    /// deliberately keeps using call-sized temporary scratch.
+    /// Persistent one-row workspace shared by ordinary decode, scalar target
+    /// verification, and partial-commit replay. Variable-size prefill keeps
+    /// using call-sized temporary scratch.
     decode_scratch: DecoderScratch,
+    /// Persistent four-row candidate workspace. It is enabled only for parity
+    /// and performance validation until target-state equivalence is proven on
+    /// the real checkpoint.
+    verify_scratch: DecoderScratch,
+    batched_verify: bool,
     /// Four staged verification inputs and their device argmax outputs. These
     /// eliminate per-row H2D traffic, allocation and host synchronization.
     verify_token_ids: Tensor,
@@ -273,6 +278,9 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             shadow_attention,
             shadow_attention_valid: 0,
             decode_scratch: decoder.allocate_decode_scratch(ctx)?,
+            verify_scratch: decoder.allocate_verify_scratch(ctx)?,
+            batched_verify: std::env::var("APXINF_QWEN35_MTP_BATCH_VERIFY")
+                .is_ok_and(|value| value == "1"),
             verify_token_ids,
             verify_predictions,
             capacity,
@@ -631,18 +639,18 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         Ok(output)
     }
 
-    /// Evaluate a target-verification chunk one decode row at a time without
-    /// changing committed state or position.
+    /// Evaluate a target-verification chunk without changing committed state
+    /// or position.
     ///
     /// This is the exact base-model half required by `mtp_schedule`: an MTP
     /// executor can draft three tokens, call this method with
     /// `[pending,d0,d1,d2]`, and derive four target predictions. It is
-    /// intentionally *not* a batched prefill: the validated MTP contract
-    /// requires each verification row to use the exact scalar decode
-    /// attention provider, reductions, and recurrent-state transition. Pass
-    /// the resulting ticket to [`Self::prepare_target_commit`] with the
-    /// schedule's committed row count; partial acceptance replays that prefix
-    /// through the same scalar path.
+    /// The default is the validated scalar path. Setting
+    /// `APXINF_QWEN35_MTP_BATCH_VERIFY=1` at session construction selects the
+    /// persistent four-row prefill candidate for parity/profiling. Pass the
+    /// resulting ticket to [`Self::prepare_target_commit`] with the schedule's
+    /// committed row count; partial acceptance always replays the accepted
+    /// prefix through the scalar path.
     pub fn verify_target_chunk(
         &mut self,
         ctx: &CudaContext,
@@ -666,22 +674,39 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         self.bump_shadow_generation()?;
         self.prepare_shadow_from_committed(ctx)?;
         self.stage_verify_tokens(token_ids)?;
-        let mut final_output = None;
-        for (offset, (&token, (position, phase))) in token_ids
-            .iter()
-            .zip(exact_decode_plan(start_position, token_ids.len())?)
-            .enumerate()
-        {
-            debug_assert_eq!(phase, DecoderPhase::Decode);
-            let output = self.run_decode_shadow_from_block_enqueued(
-                ctx, decoder, weights, token, offset, position,
+        let final_output = if self.batched_verify {
+            let output = decoder.run_verify_reusing_from_block(
+                ctx,
+                weights,
+                &mut self.attention,
+                &mut self.shadow_attention,
+                &self.shadow_gdn,
+                token_ids,
+                &self.verify_token_ids,
+                start_position,
+                &mut self.verify_scratch,
             )?;
-            // Argmax is enqueued before the next scalar row overwrites the
-            // persistent logits buffer. All work shares ctx.stream, so one
-            // round-level synchronization preserves exact kernel ordering.
-            output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, offset)?;
-            final_output = Some(output);
-        }
+            output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, 0)?;
+            output.last_row()?
+        } else {
+            let mut final_output = None;
+            for (offset, (&token, (position, phase))) in token_ids
+                .iter()
+                .zip(exact_decode_plan(start_position, token_ids.len())?)
+                .enumerate()
+            {
+                debug_assert_eq!(phase, DecoderPhase::Decode);
+                let output = self.run_decode_shadow_from_block_enqueued(
+                    ctx, decoder, weights, token, offset, position,
+                )?;
+                // Argmax is enqueued before the next scalar row overwrites the
+                // persistent logits buffer. All work shares ctx.stream, so one
+                // round-level synchronization preserves exact kernel ordering.
+                output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, offset)?;
+                final_output = Some(output);
+            }
+            final_output.ok_or_else(|| invalid("Qwen3.5 target verification produced no rows"))?
+        };
         ctx.synchronize().map_err(Error::Cuda)?;
         let host_predictions = transfers::to_cpu(&self.verify_predictions)?;
         let predictions = host_predictions
@@ -702,8 +727,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             start_position,
             inputs: token_ids.to_vec(),
             predictions,
-            final_output: final_output
-                .ok_or_else(|| invalid("Qwen3.5 target verification produced no rows"))?,
+            final_output,
         })
     }
 

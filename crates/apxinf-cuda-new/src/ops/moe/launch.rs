@@ -1,8 +1,8 @@
 use apxinf_core::Result;
 
 use super::cuda_contracts::{
-    NormalizedAddShared, NormalizedCombine, NormalizedEdgeNvfp4, NormalizedNvfp4Experts,
-    NormalizedRoute, NormalizedRouteTopk,
+    NormalizedAddShared, NormalizedCombine, NormalizedEdgeBf16Decode, NormalizedEdgeNvfp4,
+    NormalizedNvfp4Experts, NormalizedRoute, NormalizedRouteTopk,
 };
 use crate::ffi::abi::{moe as abi, status};
 use crate::CudaContext;
@@ -15,6 +15,24 @@ pub(crate) fn route(ctx: &CudaContext, normalized: NormalizedRoute) -> Result<()
     )?;
     unsafe {
         status::check(abi::apxinf_moe_route_topk(
+            ctx.runtime(),
+            &normalized.spec,
+            &normalized.bindings,
+        ))
+    }
+}
+
+pub(crate) fn edge_bf16_decode(
+    ctx: &CudaContext,
+    normalized: NormalizedEdgeBf16Decode,
+) -> Result<()> {
+    let _storage = &normalized.storage;
+    crate::workspace::validate_capture_target(
+        ctx.device_id(),
+        normalized.bindings.stream as usize,
+    )?;
+    unsafe {
+        status::check(abi::apxinf_moe_edge_bf16_decode(
             ctx.runtime(),
             &normalized.spec,
             &normalized.bindings,

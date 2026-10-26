@@ -54,6 +54,7 @@ pub use ops::{
     RoutedMoeAddSharedArgs, RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs,
     RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs, RoutedMoeSemantic, SegmentedAttentionArgs,
     SharedExpertOutput, FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
+    5, BF16, EDGE_BF16_MOE, EdgeBf16DecodeMoeArgs, EdgeBf16DecodeMoeWeights, MTP, Qwen3, apxinf_edge_bf16_moe, by, edge_bf16_decode_moe, edge_bf16_decode_moe_available, edge_bf16_decode_moe_workspace_size, grouped, used,
     QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_Q_PROJECTION_WIDTH,
     QWEN35_ATTENTION_RMS_EPSILON, QWEN35_ATTENTION_ROTARY_DIM, QWEN35_MTP_DRAFT_STEPS,
     QWEN35_MTP_EXPERTS, QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_LAYERS,
@@ -74,6 +75,10 @@ pub const NVFP4_GEMM_SWIGLU: bool = cfg!(apxinf_nvfp4_gemm_swiglu);
 /// Whether this build includes the aarch64 SM110 TensorRT-Edge-LLM CuTeDSL
 /// routed NVFP4 MoE provider.
 pub const EDGE_NVFP4_MOE: bool = cfg!(apxinf_edge_nvfp4_moe);
+
+/// Whether this build includes the aarch64 SM110 TensorRT-Edge-LLM BF16
+/// grouped-MoE provider used by Qwen3.5 MTP decode.
+pub const EDGE_BF16_MOE: bool = cfg!(apxinf_edge_bf16_moe);
 
 /// Whether this build compiled the allocation-free FA2 decode kernel
 /// (`apxinf_decode_attention`). When `false` that ABI returns
