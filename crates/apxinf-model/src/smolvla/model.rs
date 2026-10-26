@@ -90,11 +90,7 @@ impl SmolVlaModel {
     }
 
     fn add_bias(&self, ctx: &Context, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
-        if self.fp16_gemm {
-            ops::elementwise::bias_f16(ctx, input, Some(bias))
-        } else {
-            ops::elementwise::bias_bf16(ctx, input, Some(bias))
-        }
+        ops::elementwise::bias(ctx, input, Some(bias))
     }
 
     fn gemm(&self, ctx: &Context, activation: &Tensor, weight: &Tensor) -> Result<Tensor> {
@@ -319,11 +315,7 @@ impl SmolVlaModel {
             token_count,
         )?;
         let state = self.embed_state(state)?;
-        let concat_rows = if self.fp16_gemm {
-            ops::elementwise::concat_rows_f16
-        } else {
-            ops::elementwise::concat_rows_bf16
-        };
+        let concat_rows = ops::elementwise::concat_rows;
         let prefix = concat_rows(ctx, &vision, &language)?;
         concat_rows(ctx, &prefix, &state)
     }
@@ -617,14 +609,7 @@ impl SmolVlaModel {
             &action,
             self.weights.action_in.bias.as_ref().unwrap(),
         )?;
-        let action_time = (if self.fp16_gemm {
-            ops::elementwise::concat_columns_f16
-        } else {
-            ops::elementwise::concat_columns_bf16
-        })(
-            ctx,
-            &[&action, embedding],
-        )?;
+        let action_time = ops::elementwise::concat_columns(ctx, &[&action, embedding])?;
         let fused = self.gemm(
             ctx,
             &action_time,
@@ -708,11 +693,7 @@ impl SmolVlaModel {
         )?;
         let input_tokens = input.shape().dims()[0];
         let kv_width = self.config.language_kv_heads * 64;
-        let concat_rows = if self.fp16_gemm {
-            ops::elementwise::concat_rows_f16
-        } else {
-            ops::elementwise::concat_rows_bf16
-        };
+        let concat_rows = ops::elementwise::concat_rows;
         let key = concat_rows(
             ctx,
             prefix_key,

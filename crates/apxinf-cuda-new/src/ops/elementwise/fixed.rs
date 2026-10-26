@@ -77,9 +77,19 @@ pub fn scale(ctx: &CudaContext, input: &Tensor, factor: f32) -> Result<Tensor> {
     Ok(output)
 }
 
-/// `bias_bf16`: broadcast-add an optional `[cols]` bias over rows. A missing
-/// bias returns the input unchanged, matching the legacy contract.
-pub fn bias_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
+/// Broadcast-add an optional `[cols]` bias over rows. A missing bias returns
+/// the input unchanged. The input dtype selects the unchanged implementation.
+pub fn bias(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
+    match input.dtype() {
+        DType::BF16 => bias_bf16(ctx, input, value),
+        DType::F16 => bias_f16(ctx, input, value),
+        dtype => Err(Error::Other(format!(
+            "bias requires F16 or BF16 input, got {dtype}"
+        ))),
+    }
+}
+
+fn bias_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
     let Some(bias) = value else {
         return Ok(input.clone());
     };
@@ -92,14 +102,14 @@ pub fn bias_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> R
     Ok(output)
 }
 
-/// `concat_rows_bf16`: stack two row-major matrices with equal columns.
-pub fn concat_rows_bf16(ctx: &CudaContext, first: &Tensor, second: &Tensor) -> Result<Tensor> {
+/// Stack two row-major matrices with equal columns.
+pub fn concat_rows(ctx: &CudaContext, first: &Tensor, second: &Tensor) -> Result<Tensor> {
     ops::concat_rows(ctx, first, second)
 }
 
 /// `gather_rows_bf16`: gather `rows` whole rows of `input` by u32 indices
 /// held in a device buffer.
-pub fn gather_rows_bf16(
+pub fn gather_rows(
     ctx: &CudaContext,
     input: &Tensor,
     indices: &CudaBuffer,
@@ -132,7 +142,7 @@ pub fn gather_rows_bf16(
 
 /// `replace_rows_bf16`: `output[r] = row_map[r] == u32::MAX ? base[r]
 /// : replacement[row_map[r]]`.
-pub fn replace_rows_bf16(
+pub fn replace_rows(
     ctx: &CudaContext,
     base: &Tensor,
     replacement: &Tensor,
@@ -286,7 +296,7 @@ pub fn prepare_row_indices(
 }
 
 /// `gather_rows_bf16_prepared`: gather rows using prepared index metadata.
-pub fn gather_rows_bf16_prepared(
+pub fn gather_rows_prepared(
     ctx: &CudaContext,
     input: &Tensor,
     indices: &PreparedRowIndices,
@@ -298,13 +308,13 @@ pub fn gather_rows_bf16_prepared(
         ));
     }
     indices.validate(ctx, input_rows, "CUDA prepared row gather")?;
-    gather_rows_bf16(ctx, input, &indices.buffer, indices.row_count)
+    gather_rows(ctx, input, &indices.buffer, indices.row_count)
 }
 
 /// `scatter_rows_bf16_prepared`: copy `destination` into a fresh output, then
 /// scatter `source` rows to the prepared destinations. `add` selects
 /// accumulate-vs-overwrite.
-pub fn scatter_rows_bf16_prepared(
+pub fn scatter_rows_prepared(
     ctx: &CudaContext,
     destination: &Tensor,
     indices: &PreparedRowIndices,
@@ -409,9 +419,23 @@ pub fn contiguous_rows(
     Ok(buffer.into_tensor(Shape::new(vec![row_count, columns]), input.dtype()))
 }
 
-/// `concat_columns_bf16`: concatenate equally tall BF16 matrices along their
-/// column dimension with a 2D strided device copy per input.
-pub fn concat_columns_bf16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tensor> {
+/// Concatenate equally tall matrices along their column dimension. The input
+/// dtype selects the unchanged strided-copy implementation.
+pub fn concat_columns(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tensor> {
+    let dtype = tensors
+        .first()
+        .ok_or_else(|| Error::Other("column concatenation requires at least one tensor".into()))?
+        .dtype();
+    match dtype {
+        DType::BF16 => concat_columns_bf16(ctx, tensors),
+        DType::F16 => concat_columns_f16(ctx, tensors),
+        dtype => Err(Error::Other(format!(
+            "column concatenation requires F16 or BF16 input, got {dtype}"
+        ))),
+    }
+}
+
+fn concat_columns_bf16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tensor> {
     let first = tensors
         .first()
         .ok_or_else(|| Error::Other("column concatenation requires at least one tensor".into()))?;
@@ -466,7 +490,7 @@ pub fn concat_columns_bf16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Ten
 /// `bias_qkv_in_place_bf16`: apply three independent BF16 biases to equally
 /// shaped fresh Q/K/V projections in a single launch, mutating them in place.
 /// Widths must be divisible by four.
-pub fn bias_qkv_in_place_bf16(
+pub fn bias_qkv_in_place(
     ctx: &CudaContext,
     query: Tensor,
     key: Tensor,
@@ -541,7 +565,7 @@ pub fn bias_qkv_in_place_bf16(
 // the `family-specific FP16` launchers (native/adapters/elementwise/fixed_f16.cu).
 
 /// `bias_f16`: broadcast-add an optional `[cols]` FP16 bias over rows.
-pub fn bias_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+fn bias_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
     use crate::ffi::abi::elementwise as abi;
     use crate::ops::validation::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, optional_ptr};
     let (rows, cols) = matrix_shape(input, "bias")?;
@@ -571,21 +595,9 @@ pub fn bias_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Res
     ))
 }
 
-/// `concat_rows_f16`: stack two row-major FP16 matrices with equal columns.
-/// Routes to the dtype-generic cuda-new `concat_rows` layout semantic (two
-/// device copies), which is byte-exact.
-pub fn concat_rows_f16(ctx: &CudaContext, first: &Tensor, second: &Tensor) -> Result<Tensor> {
-    if first.dtype() != DType::F16 || second.dtype() != DType::F16 {
-        return Err(invalid(
-            "static inference row concatenation expects FP16 matrices",
-        ));
-    }
-    ops::concat_rows(ctx, first, second)
-}
-
 /// `concat_columns_f16`: concatenate equally tall FP16 matrices along their
 /// column dimension with a 2D strided device copy per input.
-pub fn concat_columns_f16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tensor> {
+fn concat_columns_f16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tensor> {
     use crate::ops::validation::output_tensor;
     let first = tensors
         .first()

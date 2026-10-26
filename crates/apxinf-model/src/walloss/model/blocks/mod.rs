@@ -203,7 +203,7 @@ fn residual_mlp(
             )?;
             let gate_up = ops::gemm::bf16(context, &fused.normalized, gate_up)?;
             let gate_up = match gate_up_bias {
-                Some(bias) => ops::elementwise::bias_bf16(context, &gate_up, Some(bias))?,
+                Some(bias) => ops::elementwise::bias(context, &gate_up, Some(bias))?,
                 None => gate_up,
             };
             let activated = ops::pointwise::swiglu(
@@ -260,7 +260,7 @@ fn residual_mlp(
             )?;
             let gate_up = ops::gemm::bf16(context, &fused.normalized, gate_up)?;
             let gate_up = match gate_up_bias {
-                Some(bias) => ops::elementwise::bias_bf16(context, &gate_up, Some(bias))?,
+                Some(bias) => ops::elementwise::bias(context, &gate_up, Some(bias))?,
                 None => gate_up,
             };
             let activated = ops::pointwise::swiglu(
@@ -502,7 +502,7 @@ pub(super) fn language_prefix<W: TransformerWeights>(
 ) -> Result<PrefixCache> {
     let embedded = ops::embedding::lookup(context, token_embedding, token_ids, tokens)?;
     let mut hidden =
-        ops::elementwise::replace_rows_bf16(context, &embedded, vision_tokens, vision_row_map)?;
+        ops::elementwise::replace_rows(context, &embedded, vision_tokens, vision_row_map)?;
     let mut keys = Vec::with_capacity(weights.len());
     let mut values = Vec::with_capacity(weights.len());
     for layer in weights {
@@ -736,7 +736,7 @@ pub(super) fn vision_tower<W: VisionTowerWeights>(
     geometry: &DeviceVisionGeometry,
     patches: &Tensor,
 ) -> Result<Tensor> {
-    let ordered_patches = ops::elementwise::gather_rows_bf16(
+    let ordered_patches = ops::elementwise::gather_rows(
         context,
         patches,
         &geometry.patch_order,
@@ -802,8 +802,8 @@ fn vision_merger<W: VisionTowerWeights>(
     )?;
     let output = linear(context, &hidden, weights.merger_output())?;
     let output =
-        ops::elementwise::bias_bf16(context, &output, Some(weights.merger_output_bias()))?;
-    ops::elementwise::gather_rows_bf16(context, &output, reverse_indices, merged_tokens)
+        ops::elementwise::bias(context, &output, Some(weights.merger_output_bias()))?;
+    ops::elementwise::gather_rows(context, &output, reverse_indices, merged_tokens)
 }
 
 pub fn action_embedding(

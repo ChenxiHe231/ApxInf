@@ -618,13 +618,13 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             .backbone_row_index_cache
             .as_ref()
             .ok_or_else(|| Error::Other("GR00T row indices were not prepared".into()))?;
-        let non_image_backbone = ops::elementwise::gather_rows_bf16_prepared(
+        let non_image_backbone = ops::elementwise::gather_rows_prepared(
             self.backend.context(),
             &backbone,
             &row_indices.non_image_indices,
         )
         .map_err(|error| Error::Other(format!("GR00T non-image gather failed: {error}")))?;
-        let image_backbone = ops::elementwise::gather_rows_bf16_prepared(
+        let image_backbone = ops::elementwise::gather_rows_prepared(
             self.backend.context(),
             &backbone,
             &row_indices.image_indices,
@@ -1213,7 +1213,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             .ok_or_else(|| {
                 Error::Other(format!("missing GR00T action time embedding {step_index}"))
             })?;
-        action_features = ops::elementwise::concat_columns_bf16(
+        action_features = ops::elementwise::concat_columns(
             self.backend.context(),
             &[&action_features, time_features],
         )?;
@@ -1234,7 +1234,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             action_features = self.backend.add(&action_features, position)?;
         }
         let mut hidden =
-            ops::elementwise::concat_rows_bf16(self.backend.context(), state, &action_features)?;
+            ops::elementwise::concat_rows(self.backend.context(), state, &action_features)?;
 
         let use_static_conditioning = true;
         let dynamic_timestep = if use_static_conditioning {
@@ -2015,7 +2015,7 @@ fn linear<L: DeviceLinearWeights>(
     if let Some(output) = weights.packed8_bias(&output, backend)? {
         return Ok(output);
     }
-    ops::elementwise::bias_bf16(backend.context(), &output, weights.bias())
+    ops::elementwise::bias(backend.context(), &output, weights.bias())
 }
 
 fn rms_norm(backend: &RuntimeBackend, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
@@ -2041,7 +2041,7 @@ fn linear_quantized<L: DeviceLinearWeights>(
     if let Some(output) = weights.packed8_bias(&output, backend)? {
         return Ok(output);
     }
-    ops::elementwise::bias_bf16(backend.context(), &output, weights.bias())
+    ops::elementwise::bias(backend.context(), &output, weights.bias())
 }
 
 fn linear_relu<L: DeviceLinearWeights>(
@@ -2098,7 +2098,7 @@ fn forward_feed_forward<E: Gr00tPrecisionExecution>(
     if let Some(output) = weights.output.packed8_bias(&output, backend)? {
         return Ok(output);
     }
-    ops::elementwise::bias_bf16(backend.context(), &output, weights.output.bias())
+    ops::elementwise::bias(backend.context(), &output, weights.output.bias())
 }
 
 fn forward_feed_forward_projection<E: Gr00tPrecisionExecution>(
@@ -2301,7 +2301,7 @@ fn forward_attention<E: Gr00tPrecisionExecution>(
                         if let Some(output) = fused_qkv.packed8_bias(&projected, backend)? {
                             output
                         } else {
-                            ops::elementwise::bias_bf16(
+                            ops::elementwise::bias(
                                 backend.context(),
                                 &projected,
                                 fused_qkv.bias(),
@@ -2364,7 +2364,7 @@ fn forward_attention<E: Gr00tPrecisionExecution>(
         let key = weights.key.forward_reusable_quantized(input, backend)?;
         let value = weights.value.forward_reusable_quantized(input, backend)?;
         let (query, key, value) =
-            ops::elementwise::bias_qkv_in_place_bf16(
+            ops::elementwise::bias_qkv_in_place(
                 backend.context(),
                 query,
                 key,
@@ -2980,7 +2980,7 @@ fn scatter_rows(
     add: bool,
     indices: &ops::elementwise::PreparedRowIndices,
 ) -> Result<Tensor> {
-    ops::elementwise::scatter_rows_bf16_prepared(
+    ops::elementwise::scatter_rows_prepared(
         backend.context(),
         destination,
         indices,

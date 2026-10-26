@@ -967,7 +967,7 @@ fn prefix_gqa_bf16(
     let head_width = q_shape[1] * q_shape[2];
     let shared_rows = shared_output.reshape(vec![shared_tokens, head_width])?;
     let state_rows = state_output.reshape(vec![key_tokens - shared_tokens, head_width])?;
-    crate::ops::elementwise::concat_rows_bf16(ctx, &shared_rows, &state_rows)?
+    crate::ops::elementwise::concat_rows(ctx, &shared_rows, &state_rows)?
         .reshape(vec![key_tokens, q_shape[1], q_shape[2]])
 }
 
@@ -1153,7 +1153,7 @@ fn prefix_gqa_f16(
     let head_width = q_shape[1] * q_shape[2];
     let shared_rows = shared_output.reshape(vec![shared_tokens, head_width])?;
     let state_rows = state_output.reshape(vec![key_tokens - shared_tokens, head_width])?;
-    crate::ops::elementwise::concat_rows_f16(ctx, &shared_rows, &state_rows)?
+    crate::ops::elementwise::concat_rows(ctx, &shared_rows, &state_rows)?
         .reshape(vec![key_tokens, q_shape[1], q_shape[2]])
 }
 
@@ -1195,7 +1195,7 @@ fn vision_mha_f16(
         let view_output = full_gqa_f16(ctx, &view_q, &view_k, &view_v, tokens_per_view)?
             .reshape(vec![tokens_per_view, head_width])?;
         output = Some(match output {
-            Some(output) => crate::ops::elementwise::concat_rows_f16(ctx, &output, &view_output)?,
+            Some(output) => crate::ops::elementwise::concat_rows(ctx, &output, &view_output)?,
             None => view_output,
         });
     }

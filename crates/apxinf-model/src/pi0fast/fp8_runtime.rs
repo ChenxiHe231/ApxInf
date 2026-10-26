@@ -193,7 +193,7 @@ impl Pi0FastFp8Runtime {
             &weights.multimodal_projector,
             self.scales.multimodal_projector,
         )?;
-        elementwise::bias_bf16(
+        elementwise::bias(
             self.ctx(),
             &projected,
             weights.multimodal_projector.bias.as_ref(),
@@ -230,7 +230,7 @@ impl Pi0FastFp8Runtime {
 
         let image = self.embed_images(patches)?;
         let language = self.embed_tokens(token_ids, token_count)?;
-        let prefix = elementwise::concat_rows_bf16(self.ctx(), &image, &language)?;
+        let prefix = elementwise::concat_rows(self.ctx(), &image, &language)?;
 
         let (hidden, keys, values) = self.decode_prefix(prefix, max_sequence)?;
         let prefix_len = token_count + config.patch_tokens();
@@ -329,7 +329,7 @@ impl Pi0FastFp8Runtime {
         index
             .copy_from_host(&((rows - 1) as u32).to_ne_bytes())
             .map_err(Error::Cuda)?;
-        let last = elementwise::gather_rows_bf16(self.ctx(), &hidden, &index, 1)?;
+        let last = elementwise::gather_rows(self.ctx(), &hidden, &index, 1)?;
         Ok((last, keys, values))
     }
 

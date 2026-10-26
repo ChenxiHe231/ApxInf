@@ -58,7 +58,7 @@ fn fused_vision_mlp_residual_norm_shape_supported(
 fn add_bias(b: &dyn Backend, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return ops::elementwise::bias_bf16(cuda.context(), input, Some(bias));
+        return ops::elementwise::bias(cuda.context(), input, Some(bias));
     }
     b.add_bias(input, bias)
 }
@@ -1065,7 +1065,7 @@ fn segmented_vision_sdpa(
         }
         let mut output = segments.remove(0);
         for segment in segments {
-            output = ops::elementwise::concat_rows_bf16(cuda.context(), &output, &segment)?;
+            output = ops::elementwise::concat_rows(cuda.context(), &output, &segment)?;
         }
         return Ok(output);
     }

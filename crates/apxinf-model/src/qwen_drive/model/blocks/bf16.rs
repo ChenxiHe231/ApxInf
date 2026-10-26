@@ -939,7 +939,7 @@ impl BackboneBf16 {
             })
             .collect();
         let rows = upload_u32(self.ctx(), &rows)?;
-        let x = elementwise::replace_rows_bf16(self.ctx(), &x, &vis, &rows)?;
+        let x = elementwise::replace_rows(self.ctx(), &x, &vis, &rows)?;
         let positions = self.rope_index(token_ids, grids)?;
         let max_pos = positions
             .iter()
@@ -1080,7 +1080,7 @@ pub(super) mod vision {
         let _vision = nvtx::range("qwen_drive/vision/blocks");
         // Patch embedding: [N, patch_vec] @ [patch_vec, hidden] + bias.
         let mut x = gemm::bf16(ctx, pixel_values, &weights.patch_w)?;
-        x = elementwise::bias_bf16(ctx, &x, Some(&weights.patch_b))?;
+        x = elementwise::bias(ctx, &x, Some(&weights.patch_b))?;
         super::dump_attention_probe(ctx, 100, &[("patch_embed", &x)])?;
 
         // Bilinear-interpolated learned position embeddings (host canonicalization).
@@ -2295,7 +2295,7 @@ impl DirectInputs {
                 &self.tokens,
                 self.token_count,
             )?;
-            let embedded = ops::elementwise::replace_rows_bf16(
+            let embedded = ops::elementwise::replace_rows(
                 ctx,
                 &text_embed,
                 &self.visual_output,
