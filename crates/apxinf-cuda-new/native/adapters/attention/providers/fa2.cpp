@@ -202,6 +202,20 @@ void prepare_fa2_splitkv(Execution& execution) {
   check_cuda(cudaMalloc(&state->softmax_lse, lse_bytes));
   check_cuda(cudaMalloc(&state->softmax_lse_accum, lse_accum_bytes));
   check_cuda(cudaMalloc(&state->output_accum, output_accum_bytes));
+  // The combine kernel reduces over all `configuration` split slots. A split
+  // that covers no key tile never writes its accumulator, so an unzeroed
+  // allocation leaks whatever the allocator last held into the reduction, and
+  // a fresh cudaMalloc per prepare makes that garbage differ run to run.
+  // Stream-ordered so this cannot race the kernels already queued.
+  {
+    const auto stream =
+        static_cast<cudaStream_t>(execution.bindings.stream);
+    check_cuda(cudaMemsetAsync(state->softmax_lse, 0, lse_bytes, stream));
+    check_cuda(
+        cudaMemsetAsync(state->softmax_lse_accum, 0, lse_accum_bytes, stream));
+    check_cuda(
+        cudaMemsetAsync(state->output_accum, 0, output_accum_bytes, stream));
+  }
   execution.resource_bytes = required;
   execution.provider_state = state.release();
 }

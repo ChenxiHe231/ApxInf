@@ -884,6 +884,7 @@ impl Qwen35Decoder {
             .zip(&weights.layers)
             .enumerate()
         {
+            trace_hash("pre", layer.index, &scratch.hidden);
             match (&layer.mixer, &resident.mixer) {
                 (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) => {
                     let state = &gdn_states[gdn_index];
@@ -1081,7 +1082,7 @@ impl Qwen35Decoder {
                     )));
                 }
             }
-            trace_hash("layer", layer.index, &scratch.hidden);
+            trace_hash("post", layer.index, &scratch.hidden);
         }
 
         scratch.finish(
@@ -1264,6 +1265,7 @@ impl DecoderScratch {
             HiddenSelection::All => self.hidden.clone(),
             HiddenSelection::Last => row_view(&self.hidden, self.tokens - 1, self.hidden_size)?,
         };
+        trace_hash("hidden_in_finish", 0, &self.hidden);
         trace_hash("source", 0, &source);
         if std::env::var("APXINF_QWEN35_HASH_TRACE").is_ok() {
             eprintln!(

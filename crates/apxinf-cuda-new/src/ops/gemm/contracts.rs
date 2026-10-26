@@ -44,7 +44,14 @@ impl Default for GemmPolicy {
             online_tune: true,
             allow_fallback: true,
             graph_safe: true,
-            deterministic: false,
+            // cublasLt-native-fp8+custom-epilogue and cublasLt-native-nvfp4 are
+            // both registered deterministic=false (adapters/gemm/candidates.cpp),
+            // so with this at false the FP8 attention projections are free to
+            // return different bits on identical inputs. Setting
+            // APXINF_GEMM_DETERMINISTIC restricts the candidate set to the
+            // implementations that promise bit-reproducibility (cutlass-fp8,
+            // cutlass-nvfp4-blockscaled).
+            deterministic: std::env::var_os("APXINF_GEMM_DETERMINISTIC").is_some(),
             cache_dir: None,
         }
     }
