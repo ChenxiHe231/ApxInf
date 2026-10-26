@@ -151,14 +151,14 @@ pub fn sinusoidal_bf16(
 // for both dtypes, so these route through it. `add_position_*` are the
 // same-dtype bias-position gathers.
 
-fn lookup_scaled(
+pub fn lookup_scaled(
     ctx: &CudaContext,
     table: &Tensor,
     ids: &CudaBuffer,
     tokens: usize,
-    dtype: DType,
 ) -> Result<Tensor> {
     use crate::ops;
+    let dtype = table.dtype();
     let dims = table.shape().dims();
     if table.dtype() != dtype || dims.len() != 2 || ids.len() < tokens * 4 || tokens == 0 {
         return Err(Error::Other(format!(
@@ -171,26 +171,6 @@ fn lookup_scaled(
     args.vocab_size = dims[0];
     ops::gather(ctx, args)?;
     Ok(output)
-}
-
-/// `lookup_bf16`: sqrt(width)-scaled BF16 embedding lookup over device ids.
-pub fn lookup_bf16(
-    ctx: &CudaContext,
-    table: &Tensor,
-    ids: &CudaBuffer,
-    tokens: usize,
-) -> Result<Tensor> {
-    lookup_scaled(ctx, table, ids, tokens, DType::BF16)
-}
-
-/// `lookup_f16`: sqrt(width)-scaled FP16 embedding lookup over device ids.
-pub fn lookup_f16(
-    ctx: &CudaContext,
-    table: &Tensor,
-    ids: &CudaBuffer,
-    tokens: usize,
-) -> Result<Tensor> {
-    lookup_scaled(ctx, table, ids, tokens, DType::F16)
 }
 
 fn add_position_same_dtype(
@@ -241,7 +221,7 @@ fn add_position_same_dtype(
 
 /// `add_position_bf16`: BF16 projection + optional bias + learned per-view
 /// position embedding.
-pub fn add_position_bf16(
+pub fn add_position(
     ctx: &CudaContext,
     projection: &Tensor,
     bias: Option<&Tensor>,
@@ -254,20 +234,8 @@ pub fn add_position_bf16(
         bias,
         position,
         tokens_per_view,
-        DType::BF16,
+        projection.dtype(),
     )
-}
-
-/// `add_position_f16`: FP16 projection + optional bias + learned per-view
-/// position embedding.
-pub fn add_position_f16(
-    ctx: &CudaContext,
-    projection: &Tensor,
-    bias: Option<&Tensor>,
-    position: &Tensor,
-    tokens_per_view: usize,
-) -> Result<Tensor> {
-    add_position_same_dtype(ctx, projection, bias, position, tokens_per_view, DType::F16)
 }
 
 // ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───

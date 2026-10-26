@@ -2,17 +2,7 @@
 
 use apxinf_core::{Result, Tensor};
 
-use crate::{ops, CudaContext};
-
-/// `reserve_prefix_bf16`: allocate a `[total_rows, cols]` cache seeded with
-/// `prefix` and zero-padded to capacity.
-pub fn reserve_prefix_bf16(
-    ctx: &CudaContext,
-    prefix: &Tensor,
-    total_rows: usize,
-) -> Result<Tensor> {
-    ops::reserve_prefix(ctx, prefix, total_rows)
-}
+use crate::CudaContext;
 
 // ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
 

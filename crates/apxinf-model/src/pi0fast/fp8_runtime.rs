@@ -312,12 +312,12 @@ impl Pi0FastFp8Runtime {
                 config.rope_theta,
             )?;
             hidden = output.hidden;
-            keys.push(cache::reserve_prefix_bf16(
+            keys.push(cache::reserve_prefix(
                 self.ctx(),
                 &output.key,
                 max_sequence,
             )?);
-            values.push(cache::reserve_prefix_bf16(
+            values.push(cache::reserve_prefix(
                 self.ctx(),
                 &output.value,
                 max_sequence,

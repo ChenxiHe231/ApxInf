@@ -327,11 +327,7 @@ impl SmolVlaModel {
     ) -> Result<Tensor> {
         let ctx = self.backend.context();
         let vision = self.encode_vision(ctx, patches)?;
-        let language = (if self.fp16_gemm {
-            ops::embedding::lookup_f16
-        } else {
-            ops::embedding::lookup_bf16
-        })(
+        let language = ops::embedding::lookup_scaled(
             ctx,
             &self.weights.token_embedding,
             token_ids,
@@ -353,11 +349,7 @@ impl SmolVlaModel {
             patches,
             &self.weights.patch_embedding.weight,
         )?;
-        let mut hidden = (if self.fp16_gemm {
-            ops::embedding::add_position_f16
-        } else {
-            ops::embedding::add_position_bf16
-        })(
+        let mut hidden = ops::embedding::add_position(
             ctx,
             &projection,
             self.weights.patch_embedding.bias.as_ref(),
