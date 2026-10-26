@@ -159,6 +159,57 @@ enum Commands {
         tuning_dir: Option<PathBuf>,
     },
 
+    /// Serve a text model through an OpenAI-compatible HTTP API
+    #[cfg(feature = "server")]
+    Serve {
+        /// Path to a Hugging Face checkpoint directory
+        #[arg(short, long)]
+        model: PathBuf,
+
+        /// Explicit registry family; omitted to use config.json:model_type
+        #[arg(long)]
+        model_name: Option<String>,
+
+        /// Family-local implementation variant
+        #[arg(long)]
+        model_variant: Option<String>,
+
+        /// Auxiliary checkpoint asset as NAME=PATH
+        #[arg(long, value_parser = parse_asset)]
+        asset: Vec<(String, PathBuf)>,
+
+        /// Model name exposed by /v1/models and accepted in requests
+        #[arg(long)]
+        served_model_name: Option<String>,
+
+        /// Bind address. Use 0.0.0.0 only on a trusted network.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: std::net::IpAddr,
+
+        #[arg(long, default_value_t = 8000)]
+        port: u16,
+
+        /// Device to run inference on
+        #[arg(short, long, default_value = "cuda:0")]
+        device: String,
+
+        /// Text weight dtype: auto, fp32, or bf16
+        #[arg(long, default_value = "auto")]
+        dtype: String,
+
+        /// Maximum queued requests behind the active batch-one request
+        #[arg(long, default_value_t = 16)]
+        queue_capacity: usize,
+
+        /// Maximum prompt tokens accepted by the HTTP layer
+        #[arg(long, default_value_t = 4096)]
+        max_input_tokens: usize,
+
+        /// Maximum generated tokens accepted per request
+        #[arg(long, default_value_t = 1024)]
+        max_output_tokens: usize,
+    },
+
     /// Run a quick test of the engine
     Test,
 }
@@ -259,6 +310,83 @@ fn main() {
                 autotune,
                 tuning_dir.as_ref(),
             ) {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(feature = "server")]
+        Commands::Serve {
+            model,
+            model_name,
+            model_variant,
+            asset,
+            served_model_name,
+            host,
+            port,
+            device,
+            dtype,
+            queue_capacity,
+            max_input_tokens,
+            max_output_tokens,
+        } => {
+            if queue_capacity == 0 || max_input_tokens == 0 || max_output_tokens == 0 {
+                eprintln!("queue and token limits must be positive");
+                std::process::exit(1);
+            }
+            let device = match parse_device(&device) {
+                Ok(device) => device,
+                Err(error) => {
+                    eprintln!("{error}");
+                    std::process::exit(1);
+                }
+            };
+            let text_weight_dtype = match dtype.to_ascii_lowercase().as_str() {
+                "auto" => None,
+                "fp32" | "f32" => Some(DType::F32),
+                "bf16" => Some(DType::BF16),
+                other => {
+                    eprintln!("unsupported text weight dtype '{other}'; use auto, fp32, or bf16");
+                    std::process::exit(1);
+                }
+            };
+            let mut assets = std::collections::BTreeMap::new();
+            for (name, path) in asset {
+                if assets.insert(name.clone(), path).is_some() {
+                    eprintln!("duplicate auxiliary asset: {name}");
+                    std::process::exit(1);
+                }
+            }
+            let alias = served_model_name.unwrap_or_else(|| {
+                model
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("apxinf-model")
+                    .to_owned()
+            });
+            let load_options = LoadOptions {
+                model_name,
+                model_variant,
+                text_weight_dtype,
+                assets,
+                ..LoadOptions::default()
+            };
+            let config = apxinf_serving::ServeConfig {
+                host,
+                port,
+                queue_capacity,
+                api: apxinf_serving::ApiConfig {
+                    served_model_name: alias,
+                    max_output_tokens,
+                },
+                engine: apxinf_serving::ApxInfEngineConfig {
+                    model_path: model,
+                    device,
+                    load_options,
+                    default_max_tokens: max_output_tokens,
+                    max_input_tokens,
+                },
+            };
+            if let Err(error) = apxinf_serving::serve_blocking(config) {
                 eprintln!("{error}");
                 std::process::exit(1);
             }

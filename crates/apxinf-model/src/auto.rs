@@ -13,6 +13,7 @@ use crate::generation_config::{
 };
 use crate::llm_trait::{
     GeneratedToken, GenerationOutput, GenerationRequest, LlmCapabilities, LlmInput, LlmTrait,
+    SpeculativeGenerationStats,
 };
 use crate::pi05::Pi05Config;
 use crate::profiling::GenerationProfile;
@@ -51,6 +52,11 @@ pub struct LoadOptions {
     /// Optional text-model weight dtype. `None` preserves checkpoint dtype
     /// (except CPU backends, which currently require f32).
     pub text_weight_dtype: Option<DType>,
+    /// Optional batch-one text KV capacity. Serving derives this from its
+    /// admitted prompt/output limits plus any speculative lookahead; fixed-
+    /// cache model families use it to reject impossible requests before
+    /// allocating device state.
+    pub text_kv_capacity: Option<usize>,
     pub calibration_path: Option<PathBuf>,
     /// For cuda-new, override the recipe directory. None uses the shared
     /// hardware/toolkit tuning directory; legacy JSON records are not loaded.
@@ -157,6 +163,19 @@ impl LoadedModel {
             Self::Text { model, .. } => Ok(model.capabilities()),
             Self::Vla(_) => Err(Error::Other("loaded model is VLA, not text".into())),
             Self::Decision(model) => Ok(model.capabilities()),
+        }
+    }
+
+    /// Read-only speculative counters for the most recent text request.
+    /// `None` means the request used the scalar path or the model does not
+    /// expose speculative diagnostics.
+    pub fn speculative_generation_stats(&self) -> Result<Option<SpeculativeGenerationStats>> {
+        match self {
+            Self::Text { model, .. } => Ok(model.speculative_generation_stats()),
+            Self::Vla(_) => Err(Error::Other("loaded model is VLA, not text".into())),
+            Self::Decision(_) => Err(Error::Other(
+                "decision models do not expose speculative text statistics".into(),
+            )),
         }
     }
 
@@ -753,6 +772,22 @@ mod tests {
         std::fs::write(directory.join("config.json"), r#"{"model_type":"qwen3_5"}"#).unwrap();
 
         assert_eq!(AutoModel::detect_model_name(&directory).unwrap(), "qwen3_5");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn exact_qwen3_5_moe_identity_is_not_routed_to_legacy_qwen3_5() {
+        let directory = temporary_directory("qwen35-moe-detection");
+        std::fs::write(
+            directory.join("config.json"),
+            r#"{"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            AutoModel::detect_model_name(&directory).unwrap(),
+            "qwen3_5_moe"
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

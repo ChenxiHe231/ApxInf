@@ -68,6 +68,10 @@ name = "qwen38_bench"
 required-features = ["cuda"]
 
 [[example]]
+name = "qwen35_mtp_bench"
+required-features = ["cuda"]
+
+[[example]]
 name = "d3_smoke"
 required-features = ["cuda"]
 

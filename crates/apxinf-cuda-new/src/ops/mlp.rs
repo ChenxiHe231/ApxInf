@@ -10,9 +10,12 @@ use crate::ffi::abi::{mlp as abi, status};
 use crate::ops::gemm::contracts::{invalid, tensor_storage};
 use crate::CudaContext;
 
-/// `y[r,c] = x[r,c] / sqrt(mean(x[r,:]^2) + epsilon) * weight[c]`
+/// `y[r,c] = x[r,c] / sqrt(mean(x[r,:]^2) + epsilon) * (1 + weight[c])`
 ///
-/// The reduction runs in f32 regardless of the BF16 storage.
+/// The reduction and zero-centered affine run in f32 regardless of the BF16
+/// storage. This is the Qwen3.5/Qwen3.8 checkpoint convention; callers with a
+/// conventional RMSNorm checkpoint must convert its multiplicative weight to
+/// a delta before calling this operator.
 pub fn rms_norm(
     ctx: &CudaContext,
     input: &Tensor,

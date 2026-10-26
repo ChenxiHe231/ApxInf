@@ -16,6 +16,7 @@ pub mod metal_qwen3;
 pub mod pi05;
 pub mod pi0fast;
 pub mod profiling;
+pub mod qwen35moe;
 #[cfg(feature = "cuda")]
 pub mod qwen38;
 pub mod qwen3vl;
@@ -41,7 +42,7 @@ pub use llama::{GeneralLlama, KVCache, LlamaModel, LlamaWeights, TransformerLaye
 pub use llm_trait::{
     generate_streaming, generate_streaming_with_options, GeneratedToken, GenerationOutput,
     GenerationRequest, ImageInput, LlmCapabilities, LlmInput, LlmTrait, TextCompilationScope,
-    TextPreparationState, TextPreparationStatus,
+    SpeculativeGenerationStats, TextPreparationState, TextPreparationStatus,
 };
 pub use pi05::{Pi05Config, Pi05PerformanceProfile};
 pub use profiling::GenerationProfile;

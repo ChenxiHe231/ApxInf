@@ -221,6 +221,81 @@ impl ChatMessage {
     }
 }
 
+/// Function payload attached to an assistant message in a tool-use turn.
+///
+/// Hugging Face provider templates expect `arguments` as an object even though
+/// OpenAI carries the same value as a JSON string on the wire. The serving layer
+/// validates and parses that string before constructing this representation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatToolCallFunction {
+    pub name: String,
+    pub arguments: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A previous assistant tool call rendered back into a provider chat template.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatToolCall {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub function: ChatToolCallFunction,
+}
+
+/// Rich chat message used by network serving and multi-turn tool use.
+///
+/// The original [`ChatMessage`] remains the compact, source-compatible text
+/// API. This type adds the fields consumed by modern Hugging Face templates:
+/// nullable content, assistant `tool_calls`, tool response IDs, and optional
+/// reasoning content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatTemplateMessage {
+    pub role: String,
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ChatToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl ChatTemplateMessage {
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: Some(content.into()),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn assistant_tool_calls(
+        content: Option<String>,
+        reasoning_content: Option<String>,
+        tool_calls: Vec<ChatToolCall>,
+    ) -> Self {
+        Self {
+            role: "assistant".into(),
+            content,
+            reasoning_content,
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        }
+    }
+
+    pub fn tool(content: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
+        Self {
+            role: "tool".into(),
+            content: Some(content.into()),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+}
+
 /// Configuration loaded from tokenizer_config.json.
 #[derive(Debug, Deserialize, Default)]
 struct TokenizerConfig {
@@ -286,7 +361,11 @@ impl Tokenizer {
     }
 
     /// Encode text, optionally applying the tokenizer's post-processor.
-    pub fn encode_with_special_tokens(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>> {
+    pub fn encode_with_special_tokens(
+        &self,
+        text: &str,
+        add_special_tokens: bool,
+    ) -> Result<Vec<u32>> {
         let encoding = self
             .inner
             .encode(text, add_special_tokens)
@@ -421,9 +500,20 @@ impl Tokenizer {
         self.render_chat_template(messages, options, true)
     }
 
-    fn render_chat_template(
+    /// Render rich multi-turn messages exactly as the checkpoint template sees
+    /// them. This is the serving counterpart of
+    /// [`Self::apply_chat_template_with_options`].
+    pub fn apply_chat_template_messages_with_options(
         &self,
-        messages: &[ChatMessage],
+        messages: &[ChatTemplateMessage],
+        options: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<String> {
+        self.render_chat_template(messages, options, true)
+    }
+
+    fn render_chat_template<T: Serialize + ?Sized>(
+        &self,
+        messages: &T,
         options: &serde_json::Map<String, serde_json::Value>,
         hf_whitespace: bool,
     ) -> Result<String> {
@@ -690,6 +780,42 @@ mod tests {
         assert!(tokenizer
             .apply_chat_template_with_options(&messages, &options)
             .is_err());
+    }
+
+    #[test]
+    fn rich_messages_render_tool_calls_and_tool_responses() {
+        let tokenizer = Tokenizer {
+            inner: HfTokenizer::new(WordLevel::default()),
+            config: TokenizerConfig::default(),
+            chat_template: Some(
+                "{{ messages[0].role }}|{{ messages[0].tool_calls[0].function.name }}|{{ messages[0].tool_calls[0].function.arguments.city }}|{{ messages[1].role }}|{{ messages[1].tool_call_id }}|{{ messages[1].content }}"
+                    .into(),
+            ),
+        };
+        let messages = [
+            ChatTemplateMessage::assistant_tool_calls(
+                None,
+                Some("checking weather".into()),
+                vec![ChatToolCall {
+                    id: Some("call-1".into()),
+                    kind: Some("function".into()),
+                    function: ChatToolCallFunction {
+                        name: "weather.get".into(),
+                        arguments: serde_json::Map::from_iter([(
+                            "city".into(),
+                            serde_json::Value::String("上海".into()),
+                        )]),
+                    },
+                }],
+            ),
+            ChatTemplateMessage::tool(r#"{"temperature":21}"#, "call-1"),
+        ];
+        assert_eq!(
+            tokenizer
+                .apply_chat_template_messages_with_options(&messages, &serde_json::Map::new())
+                .unwrap(),
+            r#"assistant|weather.get|上海|tool|call-1|{"temperature":21}"#
+        );
     }
 
     #[test]

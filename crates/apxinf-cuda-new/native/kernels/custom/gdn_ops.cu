@@ -1715,6 +1715,17 @@ int smem_variant() {
 
 }  // namespace
 
+// Test oracle only -- do not call from production.
+//
+// This is the correctness reference the FlashInfer Cake prefill is checked
+// against, not a shippable kernel. It is one monolithic, largely serial launch
+// whose duration grows with the sequence (48 ms for a single layer at 2,048
+// tokens, against 0.427 ms for the Cake path), and the model runs 30 GDN
+// layers. Production prefill goes through apxinf_gdn_prefill.
+//
+// Note also that `chunk_size` and `num_chunks` are validated but do not steer
+// the kernel: smem_variant() (default 8, CHUNK=32) picks the templated
+// launcher, which recomputes the chunk count from seq_padded itself.
 int gdn_chunk_scan(const void* q, const void* k, const void* v, const void* g,
                    const void* beta, void* out, void* state, int seq_padded,
                    int v_heads, int k_heads, int chunk_size, int k_dim,

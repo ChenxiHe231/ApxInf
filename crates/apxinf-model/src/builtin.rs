@@ -33,6 +33,13 @@ pub fn register_builtin_models() {
     registry::register("qwen3_5", load_qwen38);
     #[cfg(feature = "cuda")]
     registry::register("qwen3_5_text", load_qwen38);
+    // Exact public Qwen3.5 MoE identity. Keep the legacy `qwen3_5` aliases
+    // above bound to Qwen38: the two checkpoint families have different
+    // layer, quantization and cache contracts.
+    #[cfg(feature = "cuda")]
+    registry::register("qwen3_5_moe", load_qwen35_moe);
+    #[cfg(feature = "cuda")]
+    registry::register("qwen3_5_moe_text", load_qwen35_moe);
 
     #[cfg(feature = "cuda")]
     crate::walloss::register_builtin();
@@ -116,7 +123,6 @@ fn upcast_bf16_weights(tensors: &mut HashMap<String, Tensor>) -> Result<()> {
     Ok(())
 }
 
-
 /// Qwen3.8-27B-NVFP4 on CUDA: safetensors shards in the checkpoint directory,
 /// validated default execution (FlashInfer-GDN prefill, CUDA-graph decode,
 /// split-KV attention).
@@ -132,5 +138,65 @@ fn load_qwen38(
         .map_err(|error| Error::Other(format!("load {}: {error}", path.display())))?;
     let config = apxinf_loader::safetensors::config_from_metadata(&metadata);
     let model = crate::qwen38::Qwen38::load(config, tensors, device)?;
+    Ok(LoadedModel::text(Box::new(model)))
+}
+
+/// Exact `txn545/Qwen3.5-35B-A3B-NVFP4` loader. Unlike the legacy Qwen38
+/// loader, this validates the nested Hugging Face config and complete
+/// text+MTP tensor manifest before allocating a session.
+#[cfg(feature = "cuda")]
+fn load_qwen35_moe(
+    path: &Path,
+    device: Device,
+    backend: Arc<dyn Backend>,
+    options: &LoadOptions,
+) -> Result<LoadedModel> {
+    if !matches!(device, Device::Cuda(_)) {
+        return Err(Error::Other(
+            "Qwen3.5-35B-A3B NVFP4 requires a CUDA device".into(),
+        ));
+    }
+    if options
+        .text_weight_dtype
+        .is_some_and(|dtype| dtype != DType::BF16)
+    {
+        let dtype = options.text_weight_dtype.expect("checked as present");
+        return Err(Error::Other(format!(
+            "Qwen3.5-35B-A3B has a fixed NVFP4/BF16 checkpoint contract; text weight dtype override {dtype} is unsupported (use bf16 or auto)"
+        )));
+    }
+    if !options.assets.is_empty() {
+        return Err(Error::Other(format!(
+            "Qwen3.5-35B-A3B does not accept auxiliary assets: {}",
+            options
+                .assets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let model_dir = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or_else(|| Path::new("."))
+    };
+    let config = crate::qwen35moe::Qwen35MoeConfig::from_json_file(&model_dir.join("config.json"))?;
+    let kv_capacity = options
+        .text_kv_capacity
+        .unwrap_or(crate::qwen35moe::DEFAULT_KV_CAPACITY);
+    if kv_capacity == 0 || kv_capacity > config.text_config.max_position_embeddings {
+        return Err(Error::Other(format!(
+            "Qwen3.5 KV capacity must be in 1..={}, got {kv_capacity}",
+            config.text_config.max_position_embeddings
+        )));
+    }
+    let model = crate::qwen35moe::Qwen35Moe::from_checkpoint_path(
+        config,
+        path,
+        device,
+        backend,
+        kv_capacity,
+    )?;
     Ok(LoadedModel::text(Box::new(model)))
 }

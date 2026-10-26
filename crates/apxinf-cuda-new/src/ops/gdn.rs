@@ -426,6 +426,20 @@ pub fn gdn_decay_and_beta(
 /// `state` is `[v_heads, v_dim, k_dim]` f32, updated in place. q/k are
 /// L2-normalized in fp32 and q scaled by `k_dim**-0.5` inside the kernel, to
 /// match the reference. `seq_padded` must be a multiple of `chunk_size`.
+///
+/// # Test oracle only -- do not call from production
+///
+/// This is the correctness reference the fast path is checked against, not a
+/// shippable kernel. It is one monolithic, largely serial launch whose duration
+/// grows with the sequence: 48 ms for a single layer at 2,048 tokens, against
+/// 0.427 ms for [`gdn_prefill`]. On a shared-SoC part a launch that long is its
+/// own hazard, and at 30 GDN layers it is two orders of magnitude of wasted
+/// time besides.
+///
+/// Production prefill belongs on [`gdn_prefill`] (vendored FlashInfer Cake);
+/// see `ops::qwen35_gdn_prefill` for how the Qwen3.5 path reaches it, and
+/// `tests/qwen35_cake_gdn_parity.rs` / `tests/qwen38_flashinfer_gdn.rs` for the
+/// comparisons that keep this function worth maintaining.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_chunk_scan(
     ctx: &CudaContext,
@@ -505,6 +519,19 @@ pub fn gdn_chunk_scan(
 ///
 /// `fused` is `[seq_padded, row_width]` BF16 with q first, then k, then v.
 /// `q_offset`, `k_offset` and `v_offset` are element offsets into a row.
+///
+/// # Test oracle only -- do not call from production
+///
+/// Inherits [`gdn_chunk_scan`]'s standing: reference, not shippable. The
+/// Qwen3.5 prefill used to reach the chunked scan through here and no longer
+/// does; `ops::qwen35_gdn_prefill` now routes chunk-aligned prompts to
+/// [`gdn_prefill`] and everything else to the exact per-token path.
+///
+/// One wart worth knowing if you do use it: `chunk_size` is effectively dead.
+/// The native dispatcher validates it, then runs whichever templated variant
+/// `smem_variant()` selects (default 8, i.e. CHUNK=32) and recomputes the chunk
+/// count itself, so the `chunk_size` and `num_chunks` passed from here do not
+/// steer the kernel.
 #[allow(clippy::too_many_arguments)]
 pub fn gdn_chunk_scan_interleaved(
     ctx: &CudaContext,

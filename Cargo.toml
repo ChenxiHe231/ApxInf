@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 members = [
     "crates/apxinf-core",
     "crates/apxinf-cuda",
@@ -7,6 +8,7 @@ members = [
     "crates/apxinf-mlx",
     "crates/apxinf-loader",
     "crates/apxinf-model",
+    "crates/apxinf-serving",
     "crates/apxinf-tokenizer",
     "crates/apxinf-py",
 ]
@@ -20,12 +22,12 @@ license = "Apache-2.0"
 [features]
 default = []
 # Native Apple Metal execution through an explicitly configured MLX C++ SDK.
-mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "apxinf-model/mlx"]
+mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "apxinf-model/mlx", "apxinf-serving?/mlx"]
 # CUDA GPU inference. NVTX profiling markers auto-detect the lib name at
 # build time: desktop CUDA 12.x uses libnvtx3interop; Drive OS / embedded
 # CUDA uses libnvToolsExt. Both are handled transparently — see
 # crates/apxinf-cuda/build.rs.
-cuda = ["dep:apxinf-cuda", "apxinf-cuda/nvtx", "apxinf-model/cuda"]
+cuda = ["dep:apxinf-cuda", "apxinf-cuda/nvtx", "apxinf-model/cuda", "apxinf-serving?/cuda"]
 # Same as `cuda` but with NVTX compiled out entirely (no-op stubs). Use
 # when the target has no NVTX library installed at all.
 cuda-no-nvtx = ["dep:apxinf-cuda", "apxinf-model/cuda"]
@@ -35,11 +37,14 @@ cuda-no-nvtx = ["dep:apxinf-cuda", "apxinf-model/cuda"]
 cuda-new = ["cuda", "apxinf-model/cuda-new"]
 # AMD ROCm/HIP inference. Independent of `cuda`: both may be enabled, and
 # a process can then hold a CUDA and a HIP backend at once.
-hip = ["dep:apxinf-hip", "apxinf-model/hip"]
+hip = ["dep:apxinf-hip", "apxinf-model/hip", "apxinf-serving?/hip"]
 # CPU-only BLAS backend for the non-GPU matmul fallback. Combine with `cuda`
 # if you want the CPU path to use OpenBLAS. Drive OS aarch64 doesn't ship
 # libopenblas — leave this off on Thor.
 openblas = ["apxinf-core/openblas"]
+# OpenAI-compatible HTTP serving. Kept optional so the core CLI and libraries do
+# not pull in an async HTTP runtime unless deployment serving is requested.
+server = ["dep:apxinf-serving"]
 
 [dependencies]
 apxinf-core = { path = "crates/apxinf-core" }
@@ -48,6 +53,7 @@ apxinf-cuda = { path = "crates/apxinf-cuda", optional = true, default-features =
 apxinf-hip = { path = "crates/apxinf-hip", optional = true }
 apxinf-loader = { path = "crates/apxinf-loader" }
 apxinf-model = { path = "crates/apxinf-model" }
+apxinf-serving = { path = "crates/apxinf-serving", optional = true }
 apxinf-tokenizer = { path = "crates/apxinf-tokenizer" }
 clap = { version = "=4.5.23", features = ["derive"] }
 serde_json = "1"

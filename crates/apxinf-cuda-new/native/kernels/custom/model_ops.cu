@@ -4,6 +4,8 @@
 
 #include <cuda_bf16.h>
 
+#include <climits>
+
 namespace apxinf::cuda_new::model_ops {
 namespace {
 
@@ -23,16 +25,28 @@ __global__ void embedding_gather_kernel(const __nv_bfloat16* __restrict__ table,
   output[index] = table[(long long)id * hidden + element];
 }
 
+// Ties must resolve to the lowest index, matching `apxinf_better_pair` in
+// sampling.cuh. Without the index comparison the winner depends on which lane
+// happened to hold the value, so this kernel and the sampler could disagree on
+// equal BF16 logits -- and over a 248k vocabulary exact ties are common. MTP
+// verification argmaxes here while scalar decode argmaxes in the sampler, and
+// speculative decoding is only exact when the two agree.
+__device__ __forceinline__ bool argmax_better(float value, int index,
+                                              float best_value,
+                                              int best_index) {
+  return value > best_value || (value == best_value && index < best_index);
+}
+
 __global__ void argmax_kernel(const __nv_bfloat16* __restrict__ logits,
                               int32_t* __restrict__ index, int count) {
   __shared__ float best_value[32];
   __shared__ int best_index[32];
 
   float local_value = -INFINITY;
-  int local_index = 0;
+  int local_index = INT_MAX;
   for (int i = threadIdx.x; i < count; i += blockDim.x) {
     const float value = __bfloat162float(logits[i]);
-    if (value > local_value) {
+    if (argmax_better(value, i, local_value, local_index)) {
       local_value = value;
       local_index = i;
     }
@@ -41,7 +55,7 @@ __global__ void argmax_kernel(const __nv_bfloat16* __restrict__ logits,
     const float other_value =
         __shfl_down_sync(0xFFFFFFFFu, local_value, offset);
     const int other_index = __shfl_down_sync(0xFFFFFFFFu, local_index, offset);
-    if (other_value > local_value) {
+    if (argmax_better(other_value, other_index, local_value, local_index)) {
       local_value = other_value;
       local_index = other_index;
     }
@@ -57,12 +71,14 @@ __global__ void argmax_kernel(const __nv_bfloat16* __restrict__ logits,
     float value = best_value[0];
     int chosen = best_index[0];
     for (int i = 1; i < warps; ++i) {
-      if (best_value[i] > value) {
+      if (argmax_better(best_value[i], best_index[i], value, chosen)) {
         value = best_value[i];
         chosen = best_index[i];
       }
     }
-    *index = chosen;
+    // A row of all -inf leaves the sentinel; report index 0 rather than a
+    // negative token the caller would reject.
+    *index = chosen == INT_MAX ? 0 : chosen;
   }
 }
 
