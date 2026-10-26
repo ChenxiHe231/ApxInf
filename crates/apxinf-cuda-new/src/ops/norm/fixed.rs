@@ -42,7 +42,7 @@ pub fn rms_quantize_rows_bf16_e4m3(
     eps: f32,
     output_cols: usize,
 ) -> Result<crate::ops::quantization::DynamicFp8Tensor> {
-    use crate::ffi::abi::{quant_fused as abi, status};
+    use crate::ffi::abi::{norm as abi, status};
     use crate::CudaBuffer;
     let dims = input.shape().dims();
     if dims.len() != 2 || input.dtype() != DType::BF16 {
@@ -66,7 +66,7 @@ pub fn rms_quantize_rows_bf16_e4m3(
     let values_buffer = CudaBuffer::from_tensor(&values).map_err(apxinf_core::Error::Cuda)?;
     let scales_buffer = CudaBuffer::from_tensor(&scales).map_err(apxinf_core::Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_quant_rms_norm_rows_bf16_e4m3(
+        status::check(abi::apxinf_norm_rms_norm_rows_bf16_e4m3(
             input_buffer.ptr(),
             weight_buffer.ptr(),
             values_buffer.ptr(),

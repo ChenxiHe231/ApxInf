@@ -13,7 +13,7 @@
 
 use super::backend::{ops, Context};
 use apxinf_core::{Result, Tensor};
-use ops::{activation, attention, fused, gemm, norm, quantization, rope};
+use ops::{activation, attention, gemm, norm, quantization, rope};
 
 use super::{
     Fp8DeviceLanguageLayer, Fp8DeviceVisionBlock, Pi0FastLanguageConfig,
@@ -169,7 +169,7 @@ pub fn language_layer_fp8(
     let attention = attention::mqa_bf16(ctx, &qkv.q, &qkv.k, &qkv.v, tokens)?
         .reshape(vec![tokens, config.num_heads * config.head_dim])?;
     let projected = fp8_projection(ctx, &attention, &weights.output, scales.attention_output)?;
-    let fused = fused::bias_residual_rms_bf16(
+    let fused = norm::bias_residual_rms_bf16(
         ctx,
         &projected,
         weights.output.bias.as_ref(),
@@ -181,7 +181,7 @@ pub fn language_layer_fp8(
     let activated = activation::geglu_bf16(ctx, &gate_up)?;
     let projected = fp8_projection(ctx, &activated, &weights.down, scales.down_input)?;
     let hidden =
-        fused::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)?;
+        norm::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)?;
     Ok(Fp8LanguageLayerOutput {
         hidden,
         key: qkv.k.reshape(vec![tokens, config.head_dim])?,
@@ -213,7 +213,7 @@ pub fn vision_layer_fp8(
     let attention = attention::mha_bf16(ctx, &qkv.q, &qkv.k, &qkv.v, patches_per_view)?
         .reshape(vec![input.shape().dims()[0], heads * head_dim])?;
     let projected = fp8_projection(ctx, &attention, &weights.output, scales.attention_output)?;
-    let fused = fused::bias_residual_layer_bf16(
+    let fused = norm::bias_residual_layer_bf16(
         ctx,
         &projected,
         weights.output.bias.as_ref(),
@@ -225,7 +225,7 @@ pub fn vision_layer_fp8(
     let activation = fp8_projection(ctx, &fused.normalized, &weights.fc1, scales.fc1_input)?;
     let activation = activation::bias_gelu_bf16(ctx, &activation, weights.fc1.bias.as_ref())?;
     let projection = fp8_projection(ctx, &activation, &weights.fc2, scales.fc2_input)?;
-    fused::bias_residual_bf16(ctx, &projection, weights.fc2.bias.as_ref(), &fused.hidden)
+    norm::bias_residual_bf16(ctx, &projection, weights.fc2.bias.as_ref(), &fused.hidden)
 }
 
 /// One cached (single-token) language layer for the autoregressive loop.
@@ -261,7 +261,7 @@ pub fn language_layer_cached_decode_fp8(
     let attention = attention::mqa_bf16(ctx, &q, key_cache, value_cache, position_offset + tokens)?
         .reshape(vec![tokens, config.num_heads * config.head_dim])?;
     let projected = fp8_projection(ctx, &attention, &weights.output, scales.attention_output)?;
-    let fused = fused::bias_residual_rms_bf16(
+    let fused = norm::bias_residual_rms_bf16(
         ctx,
         &projected,
         weights.output.bias.as_ref(),
@@ -272,7 +272,7 @@ pub fn language_layer_cached_decode_fp8(
     let gate_up = fp8_projection(ctx, &fused.normalized, &weights.gate_up, scales.gate_up_input)?;
     let activated = activation::geglu_bf16(ctx, &gate_up)?;
     let projected = fp8_projection(ctx, &activated, &weights.down, scales.down_input)?;
-    fused::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)
+    norm::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)
 }
 
 /// Quantize `input` to E4M3, then run the FP8 GEMM with a BF16 output.

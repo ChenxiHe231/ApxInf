@@ -5,7 +5,6 @@ pub mod attention;
 pub mod cache;
 pub mod elementwise;
 pub mod embedding;
-pub mod fused;
 pub mod gather;
 pub mod gdn;
 pub mod gemm;

@@ -68,7 +68,7 @@ impl DeviceLinearWeights for Gr00tBf16LinearWeights {
         {
             return Ok(None);
         }
-        let fused = ops::fused::bias_then_residual_adaptive_layer_bf16_cached_1536(
+        let fused = ops::norm::bias_then_residual_adaptive_layer_bf16_cached_1536(
             backend.context(),
             projection,
             &self.weights.bias,
@@ -97,7 +97,7 @@ impl DeviceLinearWeights for Gr00tBf16LinearWeights {
         {
             return Ok(None);
         }
-        let fused = ops::fused::bias_then_residual_layer_bf16_cached_1536(
+        let fused = ops::norm::bias_then_residual_layer_bf16_cached_1536(
             backend.context(),
             projection,
             &self.weights.bias,

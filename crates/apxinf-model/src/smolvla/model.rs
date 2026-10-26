@@ -460,7 +460,7 @@ impl SmolVlaModel {
             )?;
             self.backend.add(&projected, input)?
         } else {
-            ops::fused::bias_then_residual_bf16_packed4(
+            ops::norm::bias_then_residual_bf16_packed4(
                 ctx,
                 &projected,
                 Some(weights.attention_output.bias.as_ref().unwrap()),
@@ -494,7 +494,7 @@ impl SmolVlaModel {
                 self.add_bias(ctx, &projected, weights.fc2.bias.as_ref().unwrap())?;
             self.backend.add(&projected, &hidden)
         } else {
-            ops::fused::bias_then_residual_bf16_packed4(
+            ops::norm::bias_then_residual_bf16_packed4(
                 ctx,
                 &projected,
                 Some(weights.fc2.bias.as_ref().unwrap()),

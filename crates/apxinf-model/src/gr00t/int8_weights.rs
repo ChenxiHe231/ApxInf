@@ -218,7 +218,7 @@ impl DeviceLinearWeights for Gr00tInt8LinearWeights {
         {
             return Ok(None);
         }
-        Ok(Some(ops::fused::bias_then_residual_bf16_packed4(
+        Ok(Some(ops::norm::bias_then_residual_bf16_packed4(
             backend.context(),
             projection,
             bias,

@@ -4,6 +4,7 @@ mod head;
 pub(crate) mod launch;
 mod norm;
 mod planning;
+mod residual;
 mod weight_offset;
 
 pub use fixed::*;
@@ -18,4 +19,5 @@ pub use norm::{
 pub use planning::{
     adaln_gate_residual, adaln_rms_norm, add_rms_norm_plus1, gated_rms_silu, rms_norm_plus1,
 };
+pub use residual::*;
 pub use weight_offset::rms_norm_weight_offset;

@@ -295,7 +295,7 @@ pub fn swiglu_quantize_rows_bf16_e4m3(
     logical_inner: usize,
     output_cols: usize,
 ) -> Result<super::quantization::DynamicFp8Tensor> {
-    use crate::ffi::abi::{quant_fused as abi, status};
+    use crate::ffi::abi::{pointwise as abi, status};
     use crate::CudaBuffer;
     let dims = gate_up.shape().dims();
     if dims.len() != 2 || gate_up.dtype() != DType::BF16 {
@@ -322,7 +322,7 @@ pub fn swiglu_quantize_rows_bf16_e4m3(
     let values_buffer = CudaBuffer::from_tensor(&values).map_err(Error::Cuda)?;
     let scales_buffer = CudaBuffer::from_tensor(&scales).map_err(Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_quant_swiglu_rows_bf16_e4m3(
+        status::check(abi::apxinf_pointwise_swiglu_rows_bf16_e4m3(
             gate_up_buffer.ptr(),
             bias_buffer
                 .as_ref()

@@ -713,7 +713,7 @@ fn apply_bias_residual(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return ops::fused::bias_residual_bf16(
+        return ops::norm::bias_residual_bf16(
             cuda.context(),
             projection,
             Some(bias),
@@ -753,7 +753,7 @@ fn apply_bias_residual_layer_norm(
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
         let fused = if use_cached_1024 {
-            ops::fused::bias_residual_layer_bf16_cached_1024(
+            ops::norm::bias_residual_layer_bf16_cached_1024(
                 cuda.context(),
                 projection,
                 Some(projection_bias),
@@ -763,7 +763,7 @@ fn apply_bias_residual_layer_norm(
                 eps,
             )?
         } else {
-            ops::fused::bias_residual_layer_bf16(
+            ops::norm::bias_residual_layer_bf16(
                 cuda.context(),
                 projection,
                 Some(projection_bias),

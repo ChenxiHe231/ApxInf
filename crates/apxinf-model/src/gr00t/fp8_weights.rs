@@ -392,36 +392,6 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         )?))
     }
 
-    fn forward_reusable_quantized_bias_gelu(
-        &self,
-        input: &Self::ReusableInput,
-        output_scale: f32,
-        backend: &RuntimeBackend,
-    ) -> Result<Option<Self::ReusableInput>> {
-        if std::env::var_os("APXINF_GR00T_FP8_LEGACY_M41_FC1_EPILOGUE").is_some()
-            || backend.context().caps().sm != 110
-            || input.shape().dims() != [41, 1536]
-            || self.weight.shape().dims() != [1536, 6144]
-        {
-            return Ok(None);
-        }
-        let Some(bias) = self.bias.as_ref() else {
-            return Ok(None);
-        };
-        if bias.shape().dims() != [6144] {
-            return Ok(None);
-        }
-        ops::fused::try_fp8_bias_gelu_quant_e4m3_m41(
-            backend.context(),
-            input,
-            &self.weight,
-            bias,
-            self.activation_scale,
-            self.weight_scale,
-            output_scale,
-        )
-    }
-
     fn residual_layer_norm_quantized(
         &self,
         projection: &Tensor,
@@ -431,7 +401,7 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         eps: f32,
         backend: &RuntimeBackend,
     ) -> Result<Option<(Tensor, Self::ReusableInput)>> {
-        let fused = ops::fused::bias_residual_layer_quant_bf16_e4m3(
+        let fused = ops::norm::bias_residual_layer_quant_bf16_e4m3(
             backend.context(),
             projection,
             None,

@@ -10,7 +10,6 @@ pub(crate) mod multimodal_attention;
 pub(crate) mod norm;
 pub(crate) mod pointwise;
 pub(crate) mod preprocess;
-pub(crate) mod quant_fused;
 pub(crate) mod quantization;
 pub(crate) mod rope;
 pub(crate) mod runtime;

@@ -973,7 +973,7 @@ pub(super) mod vision {
     use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
     use crate::qwen_drive::backend::{nvtx, ops, transfers, Context, DeviceBuffer};
-    use ops::{activation, elementwise, fused, gemm, norm};
+    use ops::{activation, elementwise, gemm, norm};
 
     use crate::qwen_drive::config::QwenDriveConfig;
     use crate::qwen_drive::weights::bf16::VisionDeviceWeights;
@@ -1154,7 +1154,7 @@ pub(super) mod vision {
                 super::dump_attention_probe(ctx, 106, &[("block0_proj", &proj)])?;
             }
 
-            let residual_norm = fused::bias_residual_layer_bf16(
+            let residual_norm = norm::bias_residual_layer_bf16(
                 ctx,
                 &proj,
                 None,
@@ -1199,7 +1199,7 @@ pub(super) mod vision {
                 .map(|next| (&next.norm1_w, &next.norm1_b))
                 .unwrap_or((&weights.merger_norm_w, &weights.merger_norm_b));
             let residual_norm =
-                fused::bias_residual_layer_bf16(ctx, &h2, None, &x, next_w, next_b, eps)?;
+                norm::bias_residual_layer_bf16(ctx, &h2, None, &x, next_w, next_b, eps)?;
             if block_idx == 0 {
                 super::dump_attention_probe(
                     ctx,
@@ -1379,7 +1379,7 @@ pub(crate) mod expert {
 
     use crate::qwen_drive::backend::{nvtx, ops, transfers, Context, DeviceBuffer};
     use ops::{
-        activation, attention, elementwise, embedding, fused, gemm, norm, preprocess, quantization,
+        activation, attention, elementwise, embedding, gemm, norm, preprocess, quantization,
     };
 
     use crate::qwen_drive::config::{PlanningExpertConfig, QwenDriveConfig};
@@ -2057,7 +2057,7 @@ pub(crate) mod expert {
             let attn = attn.reshape(vec![length, heads * head_dim])?;
             let proj = gemm::bf16(ctx, &attn, &layer.o_w)?;
 
-            let residual_norm = fused::adaln_gate_residual_rms_bf16(
+            let residual_norm = norm::adaln_gate_residual_rms_bf16(
                 ctx,
                 &proj,
                 &hidden,
@@ -2077,7 +2077,7 @@ pub(crate) mod expert {
                 let next_shift = row_col_slice(&modulations[layer_index + 1], 0, hidden_size)?;
                 let next_scale =
                     row_col_slice(&modulations[layer_index + 1], hidden_size, hidden_size)?;
-                let residual_norm = fused::adaln_gate_residual_rms_bf16(
+                let residual_norm = norm::adaln_gate_residual_rms_bf16(
                     ctx,
                     &down,
                     &hidden,

@@ -50,6 +50,18 @@ unsafe extern "C" {
         count: i64,
         stream: CudaStream,
     ) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn apxinf_pointwise_swiglu_rows_bf16_e4m3(
+        gate_up: *const c_void,
+        bias: *const c_void,
+        output: *mut c_void,
+        scales: *mut c_void,
+        rows: i32,
+        input_cols: i32,
+        inner: i32,
+        output_cols: i32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_pointwise_launch(
         runtime: Runtime,
         spec: *const Spec,

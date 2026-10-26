@@ -148,7 +148,7 @@ fn dynamic_residual_norm(
     eps: f32,
     output_cols: usize,
 ) -> Result<(Tensor, ops::quantization::DynamicFp8Tensor)> {
-    let fused = ops::fused::bias_residual_rms_quantize_rows_bf16_e4m3(
+    let fused = ops::norm::bias_residual_rms_quantize_rows_bf16_e4m3(
         context,
         projected,
         output_bias,
@@ -193,7 +193,7 @@ fn residual_mlp(
     match (output, gate_up, down) {
         (MatrixRef::Bf16(output), MatrixRef::Bf16(gate_up), MatrixRef::Bf16(down)) => {
             let projected = ops::gemm::bf16(context, attention, output)?;
-            let fused = ops::fused::bias_residual_rms_bf16(
+            let fused = ops::norm::bias_residual_rms_bf16(
                 context,
                 &projected,
                 output_bias,
@@ -208,7 +208,7 @@ fn residual_mlp(
             };
             let activated = ops::activation::swiglu_bf16(context, &gate_up)?;
             let down = ops::gemm::bf16(context, &activated, down)?;
-            ops::fused::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
+            ops::norm::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
         }
         (
             MatrixRef::DynamicFp8(output),
@@ -242,11 +242,11 @@ fn residual_mlp(
                 down.padded_input_features(),
             )?;
             let down = dynamic_linear_prequantized(context, &activated, down, false)?;
-            ops::fused::bias_residual_bf16(context, &down, down_bias, &hidden)
+            ops::norm::bias_residual_bf16(context, &down, down_bias, &hidden)
         }
         (MatrixRef::DynamicFp8(output), MatrixRef::Bf16(gate_up), MatrixRef::Bf16(down)) => {
             let projected = dynamic_linear(context, attention, output)?;
-            let fused = ops::fused::bias_residual_rms_bf16(
+            let fused = ops::norm::bias_residual_rms_bf16(
                 context,
                 &projected,
                 output_bias,
@@ -261,7 +261,7 @@ fn residual_mlp(
             };
             let activated = ops::activation::swiglu_bf16(context, &gate_up)?;
             let down = ops::gemm::bf16(context, &activated, down)?;
-            ops::fused::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
+            ops::norm::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
         }
         (MatrixRef::Bf16(output), MatrixRef::DynamicFp8(gate_up), MatrixRef::DynamicFp8(down)) => {
             let projected = ops::gemm::bf16(context, attention, output)?;
@@ -291,7 +291,7 @@ fn residual_mlp(
                 down.padded_input_features(),
             )?;
             let down = dynamic_linear_prequantized(context, &activated, down, false)?;
-            ops::fused::bias_residual_bf16(context, &down, down_bias, &hidden)
+            ops::norm::bias_residual_bf16(context, &down, down_bias, &hidden)
         }
         _ => Err(Error::Other(
             "walloss transformer matrix precisions must be uniform within one layer".into(),

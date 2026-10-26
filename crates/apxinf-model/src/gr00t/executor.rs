@@ -1033,7 +1033,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                 if use_fused_vision_residual_norm_quant {
                     if let Some(linear) = self.backbone_linears.get(name) {
                         if let Some(scale) = linear.activation_scale() {
-                            let fused = ops::fused::bias_residual_layer_quant_bf16_e4m3(
+                            let fused = ops::norm::bias_residual_layer_quant_bf16_e4m3(
                                 self.backend.context(),
                                 projection,
                                 Some(projection_bias),
@@ -1049,7 +1049,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                         }
                     }
                 }
-                let fused = ops::fused::bias_residual_layer_bf16(
+                let fused = ops::norm::bias_residual_layer_bf16(
                     self.backend.context(),
                     projection,
                     Some(projection_bias),
@@ -1074,14 +1074,14 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                     && projection.shape().dims() == [512, 1024]
                     && std::env::var_os("APXINF_GR00T_LEGACY_VISION_FC2_RESIDUAL").is_none()
                 {
-                    ops::fused::bias_residual_bf16_packed4(
+                    ops::norm::bias_residual_bf16_packed4(
                         self.backend.context(),
                         projection,
                         bias,
                         residual,
                     )
                 } else {
-                    ops::fused::bias_residual_bf16(
+                    ops::norm::bias_residual_bf16(
                         self.backend.context(),
                         projection,
                         Some(bias),
@@ -1509,7 +1509,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                     normalized_quantized = None;
                 } else {
                     residual = if fuse_attention_bias_residual {
-                        ops::fused::bias_then_residual_bf16_packed4(
+                        ops::norm::bias_then_residual_bf16_packed4(
                             self.backend.context(),
                             &attention,
                             block.attention.output.bias(),
@@ -2222,7 +2222,7 @@ fn forward_feed_forward_residual_quantized<E: Gr00tPrecisionExecution>(
     let output = weights
         .output
         .forward_reusable_quantized(&hidden, backend)?;
-    ops::fused::bias_then_residual_bf16(backend.context(), &output, weights.output.bias(), residual)
+    ops::norm::bias_then_residual_bf16(backend.context(), &output, weights.output.bias(), residual)
 }
 
 fn forward_feed_forward_residual<E: Gr00tPrecisionExecution>(
@@ -2255,7 +2255,7 @@ fn forward_feed_forward_residual_with_quantized_input<E: Gr00tPrecisionExecution
     )? {
         return Ok(output);
     }
-    ops::fused::bias_then_residual_bf16(backend.context(), &output, weights.output.bias(), residual)
+    ops::norm::bias_then_residual_bf16(backend.context(), &output, weights.output.bias(), residual)
 }
 
 fn noncausal_attention<E: Gr00tPrecisionExecution>(

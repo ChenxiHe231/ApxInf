@@ -1,4 +1,5 @@
-//! Fused residual, normalization, and quantization operators.
+//! Residual, normalization, and quantization operators owned by the
+//! normalization family.
 
 use apxinf_core::{DType, Result, Shape, Tensor};
 
@@ -88,7 +89,7 @@ pub fn bias_residual_layer_bf16(
 /// legacy struct of the same name.
 pub struct DynamicResidualNormTensors {
     pub hidden: Tensor,
-    pub normalized: super::quantization::DynamicFp8Tensor,
+    pub normalized: crate::ops::quantization::DynamicFp8Tensor,
 }
 
 /// `bias_residual_rms_quantize_rows_bf16_e4m3`: residual update, RMS norm,
@@ -103,7 +104,7 @@ pub fn bias_residual_rms_quantize_rows_bf16_e4m3(
     eps: f32,
     output_cols: usize,
 ) -> Result<DynamicResidualNormTensors> {
-    use crate::ffi::abi::{quant_fused as abi, status};
+    use crate::ffi::abi::{norm as abi, status};
     use crate::CudaBuffer;
     let dims = projection.shape().dims();
     if dims.len() != 2 || projection.dtype() != DType::BF16 {
@@ -135,7 +136,7 @@ pub fn bias_residual_rms_quantize_rows_bf16_e4m3(
     let values_buffer = CudaBuffer::from_tensor(&values).map_err(apxinf_core::Error::Cuda)?;
     let scales_buffer = CudaBuffer::from_tensor(&scales).map_err(apxinf_core::Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_quant_bias_residual_rms_norm_rows_bf16_e4m3(
+        status::check(abi::apxinf_norm_bias_residual_rms_norm_rows_bf16_e4m3(
             projection_buffer.ptr(),
             bias_buffer
                 .as_ref()
@@ -154,7 +155,7 @@ pub fn bias_residual_rms_quantize_rows_bf16_e4m3(
     }
     Ok(DynamicResidualNormTensors {
         hidden,
-        normalized: super::quantization::DynamicFp8Tensor { values, scales },
+        normalized: crate::ops::quantization::DynamicFp8Tensor { values, scales },
     })
 }
 
@@ -647,17 +648,3 @@ fn residual_layer_cached(
     Ok(ResidualNormTensors { hidden, normalized })
 }
 
-/// `try_fp8_bias_gelu_quant_e4m3_m41`: fixed-shape sm110 FP8 fusion. Not
-/// vendored into cuda-new; callers fall back to the generic route.
-#[allow(clippy::too_many_arguments)]
-pub fn try_fp8_bias_gelu_quant_e4m3_m41(
-    _ctx: &CudaContext,
-    _activation: &Tensor,
-    _weight: &Tensor,
-    _bias: &Tensor,
-    _activation_scale: f32,
-    _weight_scale: f32,
-    _output_scale: f32,
-) -> Result<Option<Tensor>> {
-    Ok(None)
-}
