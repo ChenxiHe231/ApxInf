@@ -1029,8 +1029,11 @@ impl Qwen35Decoder {
                                 .decode(ctx, gdn, state, &scratch.normalized)
                                 .map_err(|error| layer_error(layer.index, "GDN decode", error))?,
                         }
+                        trace_hash("gdn_norm", layer.index, &scratch.normalized);
+                        trace_hash("gdn_mix", layer.index, scratch.gdn.output());
                         ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
                             .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
+                        trace_hash("gdn_res", layer.index, &scratch.hidden);
                         run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
                             .map_err(|error| layer_error(layer.index, "MoE tail", error))?;
                     }
