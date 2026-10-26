@@ -396,7 +396,7 @@ fn decode_forward_capturable(
                 cfg.rms_norm_eps,
             )?;
         } else {
-            ops::elementwise::add_into(ctx, dtype, &ws.x, &ws.attn_proj, &ws.x, hidden)?;
+            ops::elementwise::decode_add_into(ctx, dtype, &ws.x, &ws.attn_proj, &ws.x, hidden)?;
             ops::norm::rms_into(
                 ctx,
                 dtype,
@@ -470,7 +470,7 @@ fn decode_forward_capturable(
             )?;
         } else {
             let next_norm_weight = weight_view(next_norm_w, device_id)?;
-            ops::elementwise::add_into(ctx, dtype, &ws.x, &ws.mlp_out, &ws.x, hidden)?;
+            ops::elementwise::decode_add_into(ctx, dtype, &ws.x, &ws.mlp_out, &ws.x, hidden)?;
             ops::norm::rms_into(
                 ctx,
                 dtype,

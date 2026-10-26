@@ -698,7 +698,7 @@ fn euler_update_f16(
 // ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
 
 /// Allocation-free elementwise add into caller-owned decode storage.
-pub fn add_into(
+pub fn decode_add_into(
     ctx: &CudaContext,
     dtype: DType,
     a: &CudaBuffer,

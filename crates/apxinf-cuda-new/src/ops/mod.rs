@@ -40,6 +40,7 @@ pub use elementwise::core::{
     activation as elementwise_activation, add as elementwise_add, add_bias as elementwise_add_bias,
     mul as elementwise_mul, scale as elementwise_scale, ElementwiseActivation,
 };
+pub use elementwise::add_into;
 pub use gather::{
     embedding_gather, gather, EmbeddingScale, GatherArgs, GatherSemantic,
     PatchGeometry as GatherPatchGeometry,
@@ -67,9 +68,7 @@ pub use norm::{
     BiasResidualArgs, BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, LayerNormArgs,
     RmsNormArgs,
 };
-pub use pointwise::{
-    add_into, pointwise, swiglu_into, PointwiseActivation, PointwiseArgs, PointwiseSemantic,
-};
+pub use pointwise::{pointwise, swiglu_into, PointwiseActivation, PointwiseArgs, PointwiseSemantic};
 pub use preprocess::{vision_position, VisionPositionArgs};
 pub use quantization::{quantization, quantize_per_tensor, QuantizationArgs, QuantizationSemantic};
 pub use rope::apply_vision_2d as rope_apply_vision_2d;
