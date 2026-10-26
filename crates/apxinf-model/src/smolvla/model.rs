@@ -524,11 +524,7 @@ impl SmolVlaModel {
                 self.config.rms_norm_eps,
             )?;
             let qkv = self.gemm(ctx, &normalized, &layer.qkv.weight)?;
-            let qkv = (if self.fp16_gemm {
-                ops::rope::split_qkv_apply_f16
-            } else {
-                ops::rope::split_qkv_apply_bf16
-            })(
+            let qkv = ops::rope::split_qkv_apply(
                 ctx,
                 &qkv,
                 layer.qkv.bias.as_ref(),
@@ -725,11 +721,7 @@ impl SmolVlaModel {
         )?;
         let qkv = self.gemm(ctx, &normalized, &weights.qkv.weight)?;
         let prefix_tokens = prefix_key.shape().dims()[0];
-        let qkv = (if self.fp16_gemm {
-            ops::rope::split_qkv_apply_f16
-        } else {
-            ops::rope::split_qkv_apply_bf16
-        })(
+        let qkv = ops::rope::split_qkv_apply(
             ctx,
             &qkv,
             weights.qkv.bias.as_ref(),

@@ -148,7 +148,7 @@ pub fn language_layer_fp8(
 ) -> Result<Fp8LanguageLayerOutput> {
     let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = fp8_projection(ctx, &normalized, &weights.qkv, scales.qkv_input)?;
-    let qkv = rope::split_qkv_apply_bf16(
+    let qkv = rope::split_qkv_apply(
         ctx,
         &qkv,
         weights.qkv.bias.as_ref(),

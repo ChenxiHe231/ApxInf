@@ -28,7 +28,7 @@ pub fn language_layer_bf16(
 ) -> Result<Bf16LanguageLayerOutput> {
     let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = gemm::bf16(ctx, &normalized, &weights.qkv.weight)?;
-    let qkv = rope::split_qkv_apply_bf16(
+    let qkv = rope::split_qkv_apply(
         ctx,
         &qkv,
         weights.qkv.bias.as_ref(),

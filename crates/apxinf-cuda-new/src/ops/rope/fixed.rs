@@ -22,15 +22,19 @@ fn split_impl(
     }
     let tokens = dims[0];
     let q_shape = Shape::new(vec![tokens, q_heads, head_dim]);
-    let mut q = ctx.allocate_output(q_shape, DType::BF16)?;
+    let dtype = qkv.dtype();
+    if !matches!(dtype, DType::BF16 | DType::F16) {
+        return Err(Error::Other("packed QKV must be BF16 or F16".into()));
+    }
+    let mut q = ctx.allocate_output(q_shape, dtype)?;
     let (mut k, mut v, kv_output_offset) = match cache {
         // Rotate K and copy V directly into caller-owned cache rows.
         Some((k_cache, v_cache, offset)) => (k_cache.clone(), v_cache.clone(), offset),
         None => {
             let kv_shape = Shape::new(vec![tokens, kv_heads, head_dim]);
             (
-                ctx.allocate_output(kv_shape.clone(), DType::BF16)?,
-                ctx.allocate_output(kv_shape, DType::BF16)?,
+                ctx.allocate_output(kv_shape.clone(), dtype)?,
+                ctx.allocate_output(kv_shape, dtype)?,
                 0,
             )
         }
@@ -55,10 +59,10 @@ fn split_impl(
     Ok(QkvTensors { q, k, v })
 }
 
-/// `split_qkv_apply_bf16`: split a packed GQA projection and rotate Q/K into
-/// fresh per-call buffers.
+/// Split a packed GQA projection and rotate Q/K into fresh per-call buffers.
+/// Output dtype is inferred from `qkv`.
 #[allow(clippy::too_many_arguments)]
-pub fn split_qkv_apply_bf16(
+pub fn split_qkv_apply(
     ctx: &CudaContext,
     qkv: &Tensor,
     bias: Option<&Tensor>,
@@ -657,51 +661,6 @@ pub fn apply_half_split_f16(
         ctx.device_id(),
         out_buf,
     ))
-}
-
-/// `split_qkv_apply_f16`: split a packed FP16 GQA projection and rotate Q/K
-/// into fresh per-call buffers. The cuda-new RoPE operator carries the same
-/// dtype-templated split kernel, so this routes through it with F16 outputs.
-#[allow(clippy::too_many_arguments)]
-pub fn split_qkv_apply_f16(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: Option<&Tensor>,
-    q_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
-    theta: f32,
-    position_offset: usize,
-) -> Result<QkvTensors> {
-    let dims = qkv.shape().dims();
-    if dims.len() != 2 || qkv.dtype() != DType::F16 {
-        return Err(Error::Other(
-            "packed FP16 QKV must be a rank-2 FP16 tensor".into(),
-        ));
-    }
-    let tokens = dims[0];
-    let mut q = ctx.allocate_output(Shape::new(vec![tokens, q_heads, head_dim]), DType::F16)?;
-    let kv_shape = Shape::new(vec![tokens, kv_heads, head_dim]);
-    let mut k = ctx.allocate_output(kv_shape.clone(), DType::F16)?;
-    let mut v = ctx.allocate_output(kv_shape, DType::F16)?;
-    ops::rope(
-        ctx,
-        ops::RopeArgs {
-            semantic: ops::RopeSemantic::SplitQkvRope,
-            qkv,
-            bias,
-            q: &mut q,
-            k: &mut k,
-            v: &mut v,
-            q_heads,
-            kv_heads,
-            head_dim,
-            theta,
-            position_offset,
-            kv_output_offset: 0,
-        },
-    )?;
-    Ok(QkvTensors { q, k, v })
 }
 
 // ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
