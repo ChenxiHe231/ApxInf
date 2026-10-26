@@ -15,7 +15,7 @@ use crate::workspace::output_buffer;
 /// Returns no implementation for unsupported geometry or device, before any
 /// allocation. Stateful continuation uses the recurrent operators instead.
 #[allow(clippy::too_many_arguments)]
-pub fn try_causal_conv_gdn_prefill_bf16(
+pub(super) fn try_causal_conv_gdn_prefill_bf16(
     ctx: &CudaContext,
     zba: &Tensor,
     conv_weight: &Tensor,
@@ -154,7 +154,7 @@ fn ffi_i32(value: usize) -> Result<i32> {
 }
 
 /// Cast an F32 tensor to BF16 (round-to-nearest-even).
-pub fn causal_conv1d_silu_bf16(
+pub(super) fn causal_conv1d_silu_bf16(
     ctx: &CudaContext,
     x: &Tensor,
     weight: &Tensor,
@@ -201,7 +201,7 @@ pub fn causal_conv1d_silu_bf16(
 
 /// Whether a GDN prefill pipeline can use physically BF16 Q/K throughout.
 /// The caller chooses once before allocation; typed launches reject violations.
-pub fn gdn_qk_bf16_prefill_supported(
+pub(super) fn gdn_qk_bf16_prefill_supported(
     ctx: &CudaContext,
     recurrent: bool,
     head_k_dim: usize,
@@ -224,7 +224,7 @@ pub fn gdn_qk_bf16_prefill_supported(
 /// BF16-normalized values; decode retains FP32 and applies the query scale.
 /// Outputs are caller-owned fp32 buffers
 /// `[num_v_heads, seq_pad, head_k_dim]` (zero-filled tail by the caller).
-pub fn gdn_qk_prep(
+pub(super) fn gdn_qk_prep(
     ctx: &CudaContext,
     conv_out: &Tensor,
     q: &CudaBuffer,
@@ -281,7 +281,7 @@ pub fn gdn_qk_prep(
 }
 
 /// Physical BF16 Q/K producer for a selected prefill route.
-pub fn gdn_qk_prep_qk_bf16(
+pub(super) fn gdn_qk_prep_qk_bf16(
     ctx: &CudaContext,
     conv_out: &Tensor,
     q: &CudaBuffer,
@@ -345,7 +345,7 @@ pub fn gdn_qk_prep_qk_bf16(
 /// the value channel offset inside `conv_out`. Outputs: head-major
 /// `v [num_v_heads, seq_pad, head_v_dim]` at BF16 width, and fp32
 /// `beta/g [num_v_heads, seq_pad]`.
-pub fn gdn_vb_prep(
+pub(super) fn gdn_vb_prep(
     ctx: &CudaContext,
     conv_out: &Tensor,
     zba: &Tensor,
@@ -421,7 +421,7 @@ pub fn gdn_vb_prep(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn gdn_gate_prep(
+pub(super) fn gdn_gate_prep(
     ctx: &CudaContext,
     zba: &Tensor,
     b_col: usize,
@@ -496,7 +496,7 @@ pub fn gdn_gate_prep(
 }
 
 /// Chunk-local inclusive cumsum of the decay `g`.
-pub fn gdn_cumsum(
+pub(super) fn gdn_cumsum(
     ctx: &CudaContext,
     g: &CudaBuffer,
     g_cum: &CudaBuffer,
@@ -530,7 +530,7 @@ pub fn gdn_cumsum(
 /// Raw masked intra-chunk matrices: A = -(k_beta @ k^T) * decay (strictly
 /// lower), T = (q @ k^T) * decay (lower). Caller-owned fp32 buffers
 /// `[num_v_heads, chunks, chunk_size, chunk_size]`.
-pub fn gdn_attn_raw(
+pub(super) fn gdn_attn_raw(
     ctx: &CudaContext,
     q: &CudaBuffer,
     k: &CudaBuffer,
@@ -578,7 +578,7 @@ pub fn gdn_attn_raw(
 }
 
 /// Fixed-shape F1 for physically BF16 Q/K; never falls back to FP32.
-pub fn gdn_attn_raw_solve_f1_qk_bf16(
+pub(super) fn gdn_attn_raw_solve_f1_qk_bf16(
     ctx: &CudaContext,
     q: &CudaBuffer,
     k: &CudaBuffer,
@@ -638,7 +638,7 @@ pub fn gdn_attn_raw_solve_f1_qk_bf16(
 
 /// In-place forward substitution + identity on each chunk matrix, producing
 /// (I - A)^-1. `matrices` is the total chunk-matrix count (heads * chunks).
-pub fn gdn_tri_solve(
+pub(super) fn gdn_tri_solve(
     ctx: &CudaContext,
     a: &CudaBuffer,
     matrices: usize,
@@ -663,7 +663,7 @@ pub fn gdn_tri_solve(
 }
 
 /// VT = A @ (v * beta), KCD = A @ (k * beta * exp(g_cum)) per chunk.
-pub fn gdn_chunk_gemm(
+pub(super) fn gdn_chunk_gemm(
     ctx: &CudaContext,
     a: &CudaBuffer,
     v: &CudaBuffer,
@@ -730,7 +730,7 @@ pub fn gdn_chunk_gemm(
 /// Typed direct-V W/U: reads V straight from the convolution output instead of
 /// a head-major copy.
 #[allow(clippy::too_many_arguments)]
-pub fn gdn_chunk_gemm_tri_k_bf16_direct_v(
+pub(super) fn gdn_chunk_gemm_tri_k_bf16_direct_v(
     ctx: &CudaContext,
     a: &CudaBuffer,
     conv_out: &Tensor,
@@ -825,7 +825,7 @@ pub fn gdn_chunk_gemm_tri_k_bf16_direct_v(
 
 /// Sequential chunk recurrence with state read-in/write-back; emits the
 /// token-major BF16 layer output `[seq, num_v_heads * head_v_dim]`.
-pub fn gdn_chunk_state(
+pub(super) fn gdn_chunk_state(
     ctx: &CudaContext,
     q: &CudaBuffer,
     k: &CudaBuffer,
@@ -908,7 +908,7 @@ pub fn gdn_chunk_state(
 }
 
 /// LOSSY WMMA scan consuming physical BF16 Q/K.
-pub fn gdn_chunk_state_qk_bf16(
+pub(super) fn gdn_chunk_state_qk_bf16(
     ctx: &CudaContext,
     q: &CudaBuffer,
     k: &CudaBuffer,
@@ -995,7 +995,7 @@ pub fn gdn_chunk_state_qk_bf16(
 /// Single-token recurrent update. q/k/v are head-major fp32
 /// `[num_v_heads, head_dim]` (seq_pad == 1 layout); state read-in/write-back;
 /// out is `[1, num_v_heads * head_v_dim]` BF16.
-pub fn gdn_recurrent(
+pub(super) fn gdn_recurrent(
     ctx: &CudaContext,
     q: &CudaBuffer,
     k: &CudaBuffer,
