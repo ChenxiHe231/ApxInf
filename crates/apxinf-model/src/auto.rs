@@ -179,6 +179,11 @@ impl LoadedModel {
         }
     }
 
+    /// Configure process-local prompt-prefix reuse for the loaded text model.
+    pub fn set_context_reuse(&mut self, enabled: bool) -> Result<()> {
+        self.text_mut()?.set_context_reuse(enabled)
+    }
+
     /// Model plus deployment generation settings before request overrides.
     pub fn generation_defaults(&self) -> Result<&GenerationOptions> {
         match self {

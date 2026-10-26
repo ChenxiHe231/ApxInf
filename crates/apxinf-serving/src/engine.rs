@@ -31,6 +31,7 @@ pub struct EngineRequest {
 pub struct EngineOutput {
     pub text: String,
     pub prompt_tokens: usize,
+    pub reused_prompt_tokens: usize,
     pub completion_tokens: usize,
     pub hit_length: bool,
     pub ttft_ms: Option<f64>,
@@ -69,6 +70,7 @@ pub struct ApxInfEngineConfig {
     pub load_options: LoadOptions,
     pub default_max_tokens: usize,
     pub max_input_tokens: usize,
+    pub enable_context_reuse: bool,
 }
 
 pub struct ApxInfChatEngine {
@@ -76,6 +78,7 @@ pub struct ApxInfChatEngine {
     model: LoadedModel,
     default_max_tokens: usize,
     max_input_tokens: usize,
+    enable_context_reuse: bool,
 }
 
 impl ApxInfChatEngine {
@@ -112,16 +115,23 @@ impl ApxInfChatEngine {
                 "the checkpoint does not provide a chat template",
             ));
         }
-        let model = AutoModel::load_model(config.device, &config.model_path, &config.load_options)
-            .map_err(|error| ApiError::unavailable(format!("failed to load model: {error}")))?;
+        let mut model =
+            AutoModel::load_model(config.device, &config.model_path, &config.load_options)
+                .map_err(|error| ApiError::unavailable(format!("failed to load model: {error}")))?;
         model.text_capabilities().map_err(|error| {
             ApiError::unavailable(format!("model is not a text model: {error}"))
         })?;
+        model
+            .set_context_reuse(config.enable_context_reuse)
+            .map_err(|error| {
+                ApiError::unavailable(format!("failed to configure context reuse: {error}"))
+            })?;
         Ok(Self {
             tokenizer,
             model,
             default_max_tokens: config.default_max_tokens,
             max_input_tokens: config.max_input_tokens,
+            enable_context_reuse: config.enable_context_reuse,
         })
     }
 }
@@ -194,6 +204,17 @@ impl ChatEngine for ApxInfChatEngine {
                 Some("messages".to_owned()),
             ));
         }
+        let reusable_prefix_tokens = if self.enable_context_reuse {
+            system_prefix_tokens(&self.tokenizer, &messages, &options, &prompt_tokens)?
+        } else {
+            0
+        };
+        if reusable_prefix_tokens > 0 {
+            eprintln!(
+                "system prefix candidate: {reusable_prefix_tokens} of {} prompt tokens",
+                prompt_tokens.len()
+            );
+        }
 
         let default_eos = self
             .model
@@ -232,21 +253,25 @@ impl ChatEngine for ApxInfChatEngine {
         let mut consumer_connected = true;
         let output = self
             .model
-            .generate_streaming_with_options(LlmInput::text(&prompt_tokens), &generation, |token| {
-                if !consumer_connected
-                    || decode_error.is_some()
-                    || eos_token_ids
-                        .as_ref()
-                        .is_some_and(|eos| eos.contains(&token.token_id))
-                {
-                    return;
-                }
-                match decoder.push(token.token_id) {
-                    Ok(Some(delta)) => consumer_connected = on_text(&delta),
-                    Ok(None) => {}
-                    Err(error) => decode_error = Some(error),
-                }
-            })
+            .generate_streaming_with_options(
+                LlmInput::text_with_reusable_prefix(&prompt_tokens, reusable_prefix_tokens),
+                &generation,
+                |token| {
+                    if !consumer_connected
+                        || decode_error.is_some()
+                        || eos_token_ids
+                            .as_ref()
+                            .is_some_and(|eos| eos.contains(&token.token_id))
+                    {
+                        return;
+                    }
+                    match decoder.push(token.token_id) {
+                        Ok(Some(delta)) => consumer_connected = on_text(&delta),
+                        Ok(None) => {}
+                        Err(error) => decode_error = Some(error),
+                    }
+                },
+            )
             .map_err(|error| ApiError::internal(format!("generation failed: {error}")))?;
         if let Some(error) = decode_error {
             return Err(ApiError::internal(format!(
@@ -275,6 +300,7 @@ impl ChatEngine for ApxInfChatEngine {
         Ok(EngineOutput {
             text,
             prompt_tokens: output.profile.input_tokens(),
+            reused_prompt_tokens: output.profile.reused_input_tokens(),
             completion_tokens,
             hit_length: !stopped_on_eos && completion_tokens >= max_tokens,
             ttft_ms: output.profile.ttft_ms(),
@@ -283,6 +309,52 @@ impl ChatEngine for ApxInfChatEngine {
             total_latency_ms: output.profile.total_latency_ms(),
         })
     }
+}
+
+/// Find the token span emitted before conversation content. Rendering a
+/// system/tool-only probe with a dummy user message keeps this independent of
+/// checkpoint-specific chat-template delimiters. Two distinct dummy contents
+/// prevent their content tokens from being mistaken for the reusable prefix.
+fn system_prefix_tokens(
+    tokenizer: &Tokenizer,
+    messages: &[ChatTemplateMessage],
+    options: &Map<String, Value>,
+    prompt_tokens: &[u32],
+) -> Result<usize, ApiError> {
+    let system_messages = messages
+        .iter()
+        .take_while(|message| message.role == "system")
+        .cloned()
+        .collect::<Vec<_>>();
+    let has_tools = options
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty());
+    if system_messages.is_empty() && !has_tools {
+        return Ok(0);
+    }
+
+    let render_probe = |content: &str| -> Result<Vec<u32>, ApiError> {
+        let mut probe = system_messages.clone();
+        probe.push(ChatTemplateMessage::text("user", content));
+        let rendered = tokenizer
+            .apply_chat_template_messages_with_options(&probe, options)
+            .map_err(|error| ApiError::invalid(error.to_string(), Some("messages".to_owned())))?;
+        tokenizer
+            .encode(&rendered)
+            .map_err(|error| ApiError::invalid(error.to_string(), Some("messages".to_owned())))
+    };
+    let first = render_probe("APXINF_SYSTEM_PREFIX_BOUNDARY_A")?;
+    let second = render_probe("\u{2603}APXINF_SYSTEM_PREFIX_BOUNDARY_B")?;
+    let probe_prefix = common_token_prefix(&first, &second);
+    Ok(probe_prefix.min(common_token_prefix(&first, prompt_tokens)))
+}
+
+fn common_token_prefix(left: &[u32], right: &[u32]) -> usize {
+    left.iter()
+        .zip(right)
+        .take_while(|(left, right)| left == right)
+        .count()
 }
 
 /// Cumulative decoding is required because byte-fallback tokens may not be

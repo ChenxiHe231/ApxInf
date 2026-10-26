@@ -24,6 +24,7 @@ impl ChatEngine for CaptureEngine {
                 "你好，我是 Anthropic 兼容接口。".into()
             },
             prompt_tokens: 12,
+            reused_prompt_tokens: 5,
             completion_tokens: 8,
             hit_length: false,
             ttft_ms: None,
@@ -94,6 +95,7 @@ async fn serves_anthropic_text_messages_without_removing_openai_routes() {
     assert_eq!(body["content"][0]["type"], "text");
     assert_eq!(body["stop_reason"], "end_turn");
     assert_eq!(body["usage"]["input_tokens"], 12);
+    assert_eq!(body["usage"]["cache_read_input_tokens"], 5);
 
     let request = requests.recv_timeout(Duration::from_secs(1)).unwrap();
     assert_eq!(request.messages[0].role, "system");

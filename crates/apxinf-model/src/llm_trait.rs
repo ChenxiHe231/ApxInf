@@ -41,6 +41,10 @@ impl<'a> ImageInput<'a> {
 pub struct LlmInput<'a> {
     pub token_ids: &'a [u32],
     pub image: Option<ImageInput<'a>>,
+    /// Exact leading tokens that the caller permits a model runtime to reuse
+    /// across requests. Serving uses this only for the rendered system/tool
+    /// prefix; ordinary callers leave it at zero.
+    pub reusable_prefix_tokens: usize,
 }
 
 impl<'a> LlmInput<'a> {
@@ -48,6 +52,18 @@ impl<'a> LlmInput<'a> {
         Self {
             token_ids,
             image: None,
+            reusable_prefix_tokens: 0,
+        }
+    }
+
+    pub const fn text_with_reusable_prefix(
+        token_ids: &'a [u32],
+        reusable_prefix_tokens: usize,
+    ) -> Self {
+        Self {
+            token_ids,
+            image: None,
+            reusable_prefix_tokens,
         }
     }
 
@@ -55,6 +71,7 @@ impl<'a> LlmInput<'a> {
         Self {
             token_ids,
             image: Some(image),
+            reusable_prefix_tokens: 0,
         }
     }
 }
@@ -219,6 +236,20 @@ pub trait LlmTrait {
     /// callers must not infer acceptance from throughput or token count.
     fn speculative_generation_stats(&self) -> Option<SpeculativeGenerationStats> {
         None
+    }
+
+    /// Enable or disable caller-scoped prefix reuse. The caller marks the
+    /// reusable leading span on each [`LlmInput`]; implementations must reject
+    /// enablement when they cannot preserve every piece of model state needed
+    /// to continue that prefix correctly.
+    fn set_context_reuse(&mut self, enabled: bool) -> Result<()> {
+        if enabled {
+            Err(Error::Other(
+                "context reuse is not supported by this model runtime".into(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     /// Process a complete prompt and return its logits.

@@ -435,6 +435,7 @@ pub struct MessagesResponse {
 pub struct MessagesUsage {
     pub input_tokens: usize,
     pub output_tokens: usize,
+    pub cache_read_input_tokens: usize,
 }
 
 pub fn response_content(
@@ -471,6 +472,9 @@ impl From<Usage> for MessagesUsage {
         Self {
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
+            cache_read_input_tokens: usage
+                .prompt_tokens_details
+                .map_or(0, |details| details.cached_tokens),
         }
     }
 }

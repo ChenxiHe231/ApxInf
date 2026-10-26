@@ -208,6 +208,11 @@ enum Commands {
         /// Maximum generated tokens accepted per request
         #[arg(long, default_value_t = 1024)]
         max_output_tokens: usize,
+
+        /// Reuse device-resident state for the rendered system/tool prefix
+        /// across requests. Conversation history and user content are not cached.
+        #[arg(long, default_value_t = false)]
+        enable_context_reuse: bool,
     },
 
     /// Run a quick test of the engine
@@ -328,6 +333,7 @@ fn main() {
             queue_capacity,
             max_input_tokens,
             max_output_tokens,
+            enable_context_reuse,
         } => {
             if queue_capacity == 0 || max_input_tokens == 0 || max_output_tokens == 0 {
                 eprintln!("queue and token limits must be positive");
@@ -384,6 +390,7 @@ fn main() {
                     load_options,
                     default_max_tokens: max_output_tokens,
                     max_input_tokens,
+                    enable_context_reuse,
                 },
             };
             if let Err(error) = apxinf_serving::serve_blocking(config) {
@@ -485,6 +492,27 @@ mod device_tests {
         };
         assert_eq!(model_name.as_deref(), Some("minicpm5"));
         assert_eq!(model_variant.as_deref(), Some("bf16-compiled"));
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn parses_context_reuse_server_flag() {
+        let cli = Cli::try_parse_from([
+            "apxinf",
+            "serve",
+            "--model",
+            "/checkpoint",
+            "--enable-context-reuse",
+        ])
+        .unwrap();
+        let Commands::Serve {
+            enable_context_reuse,
+            ..
+        } = cli.command
+        else {
+            panic!("expected serve command");
+        };
+        assert!(enable_context_reuse);
     }
 }
 
