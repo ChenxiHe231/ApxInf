@@ -300,7 +300,7 @@ impl Pi0FastBf16Runtime {
             let slot = tokens
                 .view(step * step_bytes, step_bytes)
                 .map_err(Error::Cuda)?;
-            sampling::argmax_bf16_remapped_into(self.ctx(), &logits, &self.lm_head_remap, &slot)?;
+            sampling::argmax_remapped_into(self.ctx(), &logits, &self.lm_head_remap, &slot)?;
             if let Some(stop) = stop_token {
                 // cuda-new launches argmax on its non-default context stream,
                 // while CudaBuffer::copy_to_host uses a synchronous default-

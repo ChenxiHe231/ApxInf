@@ -10,10 +10,10 @@ mod suppress;
 
 pub use suppress::suppress_logits;
 
-/// `argmax_bf16_remapped_into`: device argmax over BF16 logits, mapping the
+/// Device argmax over BF16 logits, mapping the
 /// winning index through a u32 remap table into `out`. Ported bit-identically
 /// from the legacy selection kernel, including its tie-break.
-pub fn argmax_bf16_remapped_into(
+pub fn argmax_remapped_into(
     ctx: &CudaContext,
     logits: &Tensor,
     remap: &CudaBuffer,

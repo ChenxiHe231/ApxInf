@@ -248,7 +248,7 @@ impl Pi0FastFp8Runtime {
             let slot = tokens
                 .view(step * step_bytes, step_bytes)
                 .map_err(Error::Cuda)?;
-            sampling::argmax_bf16_remapped_into(self.ctx(), &logits, &self.lm_head_remap, &slot)?;
+            sampling::argmax_remapped_into(self.ctx(), &logits, &self.lm_head_remap, &slot)?;
             if let Some(stop) = stop_token {
                 // See the BF16 path: the host stop-token read must wait for
                 // argmax on cuda-new's non-default context stream.

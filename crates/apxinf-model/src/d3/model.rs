@@ -716,7 +716,7 @@ fn gdn(
             1,
             1.0 / (text.linear_key_head_dim as f32).sqrt(),
         )?;
-        ops::gdn_gated_norm_seq_f16(
+        ops::gdn_gated_norm_seq(
             ctx,
             &out_rows,
             &z_heads,
