@@ -400,6 +400,25 @@ impl BaseMoeScratch {
                 .edge_workspace
                 .as_ref()
                 .ok_or_else(|| invalid("SM110 Edge NVFP4 workspace is unavailable"))?;
+            // Diagnostic only, default off. The decode layout kernel
+            // (`small_batch_setup_kernel`, tokens <= 4) writes only the live
+            // `tokens * top_k` permutation slots and leaves the padded
+            // remainder of `permuted_m` untouched, unlike the prefill
+            // `build_layout_kernel` which fills padding with -1 behind a
+            // barrier. `permuted_m` is 32,640 for a single decode token, so
+            // 32,632 slots carry whatever the previous call left behind.
+            // Setting APXINF_QWEN35_MOE_WS_POISON=<byte> fills the whole
+            // workspace before every MoE call; if two runs with different
+            // poison bytes produce different tokens, the generated FC1/FC2
+            // kernels are reading past `tile_limit`.
+            if let Some(byte) = std::env::var("APXINF_QWEN35_MOE_WS_POISON")
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+            {
+                workspace
+                    .memset_async(byte, ctx.stream())
+                    .map_err(Error::Cuda)?;
+            }
             let mut routed_output = CudaBuffer::from_tensor(&self.assignment_output)
                 .map_err(Error::Cuda)?
                 .view(0, self.tokens * self.hidden * DType::BF16.size_in_bytes())

@@ -1081,6 +1081,7 @@ impl Qwen35Decoder {
                     )));
                 }
             }
+            trace_hash("layer", layer.index, &scratch.hidden);
         }
 
         scratch.finish(
@@ -1263,6 +1264,16 @@ impl DecoderScratch {
             HiddenSelection::All => self.hidden.clone(),
             HiddenSelection::Last => row_view(&self.hidden, self.tokens - 1, self.hidden_size)?,
         };
+        trace_hash("source", 0, &source);
+        if std::env::var("APXINF_QWEN35_HASH_TRACE").is_ok() {
+            eprintln!(
+                "[qwen35-hash] counters tokens={} hidden_rows={} hidden={:?} final_norm_buf={:?}",
+                self.tokens,
+                self.hidden_rows,
+                self.hidden.shape().dims(),
+                self.final_normalized.shape().dims(),
+            );
+        }
         qwen35_rms_norm(
             ctx,
             &source,
@@ -1270,6 +1281,7 @@ impl DecoderScratch {
             &mut self.final_normalized,
             eps,
         )?;
+        trace_hash("final_normalized", 0, &self.final_normalized);
         let head_input = match logits_selection {
             LogitsSelection::All => self.final_normalized.clone(),
             LogitsSelection::Last => row_view(
@@ -1278,8 +1290,61 @@ impl DecoderScratch {
                 self.hidden_size,
             )?,
         };
-        project_lm_head(ctx, weights, &head_input, &mut self.logits)
+        trace_hash("head_input", 0, &head_input);
+        project_lm_head(ctx, weights, &head_input, &mut self.logits)?;
+        trace_hash("logits", 0, &self.logits);
+        Ok(())
     }
+}
+
+/// Hash a device tensor and print it, for localizing run-to-run divergence.
+///
+/// Default off. `APXINF_QWEN35_HASH_TRACE=1` prints one FNV-1a-64 per layer so
+/// two generations in the same process can be diffed to find the first op
+/// whose output moves. Synchronizes and copies to host, so it is far too slow
+/// for anything but debugging.
+pub(super) fn trace_hash(label: &str, index: usize, tensor: &Tensor) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("APXINF_QWEN35_HASH_TRACE").is_ok()) {
+        return;
+    }
+    let host = match apxinf_cuda_new::transfers::to_cpu(tensor) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("[qwen35-hash] {label}[{index}] to_cpu failed: {error}");
+            return;
+        }
+    };
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: [u8; 4]| {
+        for byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+    };
+    match host.dtype() {
+        DType::BF16 => match host.as_bf16() {
+            Ok(values) => values
+                .iter()
+                .for_each(|value| feed((value.to_bits() as u32).to_le_bytes())),
+            Err(error) => {
+                eprintln!("[qwen35-hash] {label}[{index}] as_bf16 failed: {error}");
+                return;
+            }
+        },
+        DType::F32 => match host.as_f32() {
+            Ok(values) => values.iter().for_each(|value| feed(value.to_bits().to_le_bytes())),
+            Err(error) => {
+                eprintln!("[qwen35-hash] {label}[{index}] as_f32 failed: {error}");
+                return;
+            }
+        },
+        other => {
+            eprintln!("[qwen35-hash] {label}[{index}] unsupported dtype {other:?}");
+            return;
+        }
+    }
+    eprintln!("[qwen35-hash] {label}[{index}] shape={:?} = {hash:016x}", tensor.shape().dims());
 }
 
 fn run_decode_moe_tail(
