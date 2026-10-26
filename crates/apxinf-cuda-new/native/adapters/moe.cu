@@ -126,6 +126,7 @@ __global__ void build_assignments_kernel(
     int32_t* __restrict__ assignment_expert_ids,
     int32_t* __restrict__ assignment_token_ids,
     int32_t* __restrict__ assignment_slots,
+    int32_t* __restrict__ token_assignment_indices,
     float* __restrict__ assignment_weights,
     int32_t* __restrict__ expert_offsets, int tokens, int experts, int top_k) {
   if (blockIdx.x != 0 || threadIdx.x != 0) return;
@@ -140,6 +141,7 @@ __global__ void build_assignments_kernel(
         assignment_expert_ids[cursor] = expert;
         assignment_token_ids[cursor] = token;
         assignment_slots[cursor] = slot;
+        token_assignment_indices[token_offset + slot] = cursor;
         assignment_weights[cursor] = expert_weights[route];
         ++cursor;
       }
@@ -362,32 +364,55 @@ __global__ void nvfp4_down_warp_kernel(
 template <class T>
 __global__ void combine_kernel(
     const T* __restrict__ assignment_output,
-    const int32_t* __restrict__ assignment_token_ids,
     const float* __restrict__ assignment_weights,
+    const int32_t* __restrict__ token_assignment_indices,
     const T* __restrict__ shared_output,
     const T* __restrict__ shared_gate_logits, T* __restrict__ output,
-    int tokens, int routes, int hidden) {
-  const int64_t count = static_cast<int64_t>(tokens) * hidden;
-  for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x +
-                       threadIdx.x;
-       index < count;
-       index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
-    const int token = static_cast<int>(index / hidden);
-    const int dimension = static_cast<int>(index % hidden);
-    float result = 0.0f;
-    for (int route = 0; route < routes; ++route) {
-      if (assignment_token_ids[route] == token) {
-        result += assignment_weights[route] *
-                  as_float(assignment_output[static_cast<int64_t>(route) *
-                                             hidden + dimension]);
+    int tokens, int top_k, int hidden) {
+  const int token = static_cast<int>(blockIdx.x);
+  if (token >= tokens) return;
+
+  // The inverse map points from the token-major route slots back into the
+  // expert-major output. Sorting those row indices reproduces the legacy
+  // expert-major accumulation order exactly while reducing each output from
+  // a scan over every route in the batch to just this token's top-k routes.
+  __shared__ int route_rows[kMaxTopK];
+  if (threadIdx.x < top_k) {
+    route_rows[threadIdx.x] =
+        token_assignment_indices[token * top_k + threadIdx.x];
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    for (int index = 1; index < top_k; ++index) {
+      const int value = route_rows[index];
+      int cursor = index;
+      while (cursor > 0 && route_rows[cursor - 1] > value) {
+        route_rows[cursor] = route_rows[cursor - 1];
+        --cursor;
       }
+      route_rows[cursor] = value;
+    }
+  }
+  __syncthreads();
+
+  for (int dimension = threadIdx.x; dimension < hidden;
+       dimension += blockDim.x) {
+    float result = 0.0f;
+    for (int slot = 0; slot < top_k; ++slot) {
+      const int route = route_rows[slot];
+      result += assignment_weights[route] *
+                as_float(assignment_output[static_cast<int64_t>(route) *
+                                           hidden + dimension]);
     }
     const float gate_logit = as_float(shared_gate_logits[token]);
     const float gate = gate_logit >= 0.0f
                            ? 1.0f / (1.0f + expf(-gate_logit))
                            : expf(gate_logit) / (1.0f + expf(gate_logit));
-    result += gate * as_float(shared_output[index]);
-    output[index] = from_float<T>(result);
+    result += gate * as_float(
+                         shared_output[static_cast<int64_t>(token) * hidden +
+                                       dimension]);
+    output[static_cast<int64_t>(token) * hidden + dimension] =
+        from_float<T>(result);
   }
 }
 
@@ -410,7 +435,9 @@ void validate_combine_spec(const apxinf_moe_combine_spec_t& spec) {
       (spec.dtype != APXINF_DTYPE_F32 && spec.dtype != APXINF_DTYPE_F16 &&
        spec.dtype != APXINF_DTYPE_BF16) ||
       spec.tokens == 0 || spec.tokens > INT32_MAX || spec.routes == 0 ||
-      spec.routes > INT32_MAX || spec.hidden == 0 || spec.hidden > INT32_MAX) {
+      spec.routes > INT32_MAX || spec.top_k == 0 || spec.top_k > kMaxTopK ||
+      static_cast<uint64_t>(spec.tokens) * spec.top_k != spec.routes ||
+      spec.hidden == 0 || spec.hidden > INT32_MAX) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "invalid routed-MoE combine Spec");
   }
@@ -460,7 +487,8 @@ cudaError_t launch_route(const apxinf_moe_route_spec_t& spec,
   build_assignments_kernel<<<1, 1, 0, stream>>>(
       bindings.expert_ids, bindings.expert_weights,
       bindings.assignment_expert_ids, bindings.assignment_token_ids,
-      bindings.assignment_slots, bindings.assignment_weights,
+      bindings.assignment_slots, bindings.token_assignment_indices,
+      bindings.assignment_weights,
       bindings.expert_offsets, static_cast<int>(spec.tokens),
       static_cast<int>(spec.experts), static_cast<int>(spec.top_k));
   return cudaGetLastError();
@@ -469,15 +497,14 @@ cudaError_t launch_route(const apxinf_moe_route_spec_t& spec,
 template <class T>
 cudaError_t launch_combine(const apxinf_moe_combine_spec_t& spec,
                            const apxinf_moe_combine_bindings_t& bindings) {
-  const int64_t count = static_cast<int64_t>(spec.tokens) * spec.hidden;
-  combine_kernel<T><<<blocks_for(count), kThreads, 0,
+  combine_kernel<T><<<static_cast<int>(spec.tokens), kThreads, 0,
                       static_cast<cudaStream_t>(bindings.stream)>>>(
       static_cast<const T*>(bindings.assignment_output),
-      bindings.assignment_token_ids, bindings.assignment_weights,
+      bindings.assignment_weights, bindings.token_assignment_indices,
       static_cast<const T*>(bindings.shared_output),
       static_cast<const T*>(bindings.shared_gate_logits),
       static_cast<T*>(bindings.output), static_cast<int>(spec.tokens),
-      static_cast<int>(spec.routes), static_cast<int>(spec.hidden));
+      static_cast<int>(spec.top_k), static_cast<int>(spec.hidden));
   return cudaGetLastError();
 }
 
@@ -571,6 +598,7 @@ extern "C" apxinf_status_t apxinf_moe_route_topk(
         bindings->assignment_expert_ids == nullptr ||
         bindings->assignment_token_ids == nullptr ||
         bindings->assignment_slots == nullptr ||
+        bindings->token_assignment_indices == nullptr ||
         bindings->assignment_weights == nullptr ||
         bindings->expert_offsets == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
@@ -601,6 +629,7 @@ extern "C" apxinf_status_t apxinf_moe_combine(
     if (bindings->assignment_output == nullptr ||
         bindings->assignment_token_ids == nullptr ||
         bindings->assignment_weights == nullptr ||
+        bindings->token_assignment_indices == nullptr ||
         bindings->shared_output == nullptr ||
         bindings->shared_gate_logits == nullptr || bindings->output == nullptr) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,

@@ -93,6 +93,7 @@ fn qwen35_top8_assign_and_shared_combine_match_cpu_reference() {
     let mut assignment_expert_ids = zeros(&ctx, vec![routes], DType::I32);
     let mut assignment_token_ids = zeros(&ctx, vec![routes], DType::I32);
     let mut assignment_slots = zeros(&ctx, vec![routes], DType::I32);
+    let mut token_assignment_indices = zeros(&ctx, vec![routes], DType::I32);
     let mut assignment_weights = zeros(&ctx, vec![routes], DType::F32);
     let mut expert_offsets = zeros(&ctx, vec![config.experts + 1], DType::I32);
 
@@ -106,6 +107,7 @@ fn qwen35_top8_assign_and_shared_combine_match_cpu_reference() {
             assignment_expert_ids: &mut assignment_expert_ids,
             assignment_token_ids: &mut assignment_token_ids,
             assignment_slots: &mut assignment_slots,
+            token_assignment_indices: &mut token_assignment_indices,
             assignment_weights: &mut assignment_weights,
             expert_offsets: &mut expert_offsets,
         },
@@ -183,6 +185,7 @@ fn qwen35_top8_assign_and_shared_combine_match_cpu_reference() {
             assignment_output: &assignment_output,
             assignment_token_ids: &assignment_token_ids,
             assignment_weights: &assignment_weights,
+            token_assignment_indices: &token_assignment_indices,
             shared_output: &shared_output,
             shared_gate_logits: &shared_gate_logits,
             output: &mut output,

@@ -24,6 +24,7 @@ typedef struct {
   int32_t* assignment_expert_ids;
   int32_t* assignment_token_ids;
   int32_t* assignment_slots;
+  int32_t* token_assignment_indices;
   float* assignment_weights;
   int32_t* expert_offsets;
   apxinf_cuda_stream_t stream;
@@ -34,6 +35,7 @@ typedef struct {
   uint32_t dtype;
   uint32_t tokens;
   uint32_t routes;
+  uint32_t top_k;
   uint32_t hidden;
 } apxinf_moe_combine_spec_t;
 
@@ -41,6 +43,7 @@ typedef struct {
   const void* assignment_output;
   const int32_t* assignment_token_ids;
   const float* assignment_weights;
+  const int32_t* token_assignment_indices;
   const void* shared_output;
   const void* shared_gate_logits;
   void* output;
