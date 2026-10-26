@@ -72,7 +72,7 @@ fn layer_norm(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return ops::norm::layer_bf16(cuda.context(), input, weight, bias, eps);
+        return ops::norm::layer(cuda.context(), input, weight, bias, eps);
     }
     b.layer_norm(input, weight, bias, eps)
 }

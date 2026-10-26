@@ -13,13 +13,8 @@ fn fixed_scale_e4m3(ctx: &CudaContext, input: &Tensor, scale: f32) -> Result<Ten
     Ok(out)
 }
 
-/// `quantize_bf16_e4m3`: BF16 to E4M3 against one pre-calibrated scale.
-pub fn quantize_bf16_e4m3(ctx: &CudaContext, input: &Tensor, scale: f32) -> Result<Tensor> {
-    fixed_scale_e4m3(ctx, input, scale)
-}
-
-/// `quantize_f16_e4m3`: F16 to E4M3 against one pre-calibrated scale.
-pub fn quantize_f16_e4m3(ctx: &CudaContext, input: &Tensor, scale: f32) -> Result<Tensor> {
+/// Quantize F16 or BF16 input to E4M3 with one pre-calibrated scale.
+pub fn quantize_fixed_scale(ctx: &CudaContext, input: &Tensor, scale: f32) -> Result<Tensor> {
     fixed_scale_e4m3(ctx, input, scale)
 }
 
@@ -30,18 +25,12 @@ pub struct DynamicFp8Tensor {
     pub scales: Tensor,
 }
 
-/// `quantize_rows_bf16_e4m3`: quantize each BF16 row independently.
-pub fn quantize_rows_bf16_e4m3(ctx: &CudaContext, input: &Tensor) -> Result<DynamicFp8Tensor> {
-    let cols = input.shape().dims().get(1).copied().unwrap_or(0);
-    quantize_rows_bf16_e4m3_padded(ctx, input, cols)
-}
-
-/// `quantize_rows_bf16_e4m3_padded`: rowwise quantization with zero-valued
-/// FP8 padding columns appended up to `output_cols`.
-pub fn quantize_rows_bf16_e4m3_padded(
+/// Quantize each row independently, optionally appending zero-valued FP8
+/// columns up to `output_cols`. Passing `None` preserves the input width.
+pub fn quantize_rows(
     ctx: &CudaContext,
     input: &Tensor,
-    output_cols: usize,
+    output_cols: Option<usize>,
 ) -> Result<DynamicFp8Tensor> {
     let dims = input.shape().dims();
     if dims.len() != 2 {
@@ -50,6 +39,7 @@ pub fn quantize_rows_bf16_e4m3_padded(
         ));
     }
     let rows = dims[0];
+    let output_cols = output_cols.unwrap_or(dims[1]);
     let mut values = ctx.allocate_output(Shape::new(vec![rows, output_cols]), DType::F8E4M3)?;
     let mut scales = ctx.allocate_output(Shape::new(vec![rows]), DType::F32)?;
     let mut args =

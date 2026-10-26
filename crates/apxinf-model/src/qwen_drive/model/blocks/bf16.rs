@@ -752,7 +752,7 @@ impl BackboneBf16 {
             DType::F32 => {
                 let dims = on_device.shape().dims().to_vec();
                 let out = device_tensor(ctx, &dims, DType::BF16)?;
-                quantization::cast_f32_to_bf16(ctx, &on_device, &out)?;
+                quantization::cast(ctx, &on_device, &out)?;
                 Ok(out)
             }
             dtype => Err(Error::Other(format!(
@@ -1094,7 +1094,7 @@ pub(super) mod vision {
 
             let normed = match normalized.take() {
                 Some(value) => value,
-                None => norm::layer_bf16(ctx, &x, &block.norm1_w, &block.norm1_b, eps)?,
+                None => norm::layer(ctx, &x, &block.norm1_w, &block.norm1_b, eps)?,
             };
             if block_idx == 0 {
                 super::dump_attention_probe(ctx, 102, &[("block0_norm1", &normed)])?;
@@ -1217,7 +1217,7 @@ pub(super) mod vision {
         // Merger: LayerNorm(1024) -> merge 4 rows -> fc1 -> exact erf GELU -> fc2.
         let normed = match normalized {
             Some(value) => value,
-            None => norm::layer_bf16(ctx, &x, &weights.merger_norm_w, &weights.merger_norm_b, eps)?,
+            None => norm::layer(ctx, &x, &weights.merger_norm_w, &weights.merger_norm_b, eps)?,
         };
         super::dump_attention_probe(ctx, 111, &[("merger_normed", &normed)])?;
         // Merging rows is a reshape and nothing else: the merger takes `merge*merge`
@@ -1958,7 +1958,7 @@ pub(crate) mod expert {
             })?;
 
         let wp_bf16 = device_tensor(ctx, &[length, point_dim], DType::BF16)?;
-        quantization::cast_f32_to_bf16(ctx, &waypoints, &wp_bf16)?;
+        quantization::cast(ctx, &waypoints, &wp_bf16)?;
         let traj = gemm::bf16_bias(
             ctx,
             &wp_bf16,
@@ -2094,13 +2094,13 @@ pub(crate) mod expert {
             }
         }
 
-        let final_normed = norm::rms_bf16(ctx, &hidden, &weights.final_norm, eps)?;
+        let final_normed = norm::rms(ctx, &hidden, &weights.final_norm, eps)?;
 
         let endpoint =
             gemm::bf16_bias(ctx, &final_normed, &weights.out_proj_w, &weights.out_proj_b)?;
         let endpoint_f32 = device_tensor(ctx, &[length, point_dim], DType::F32)?;
 
-        quantization::cast_bf16_to_f32(ctx, &endpoint, &endpoint_f32)?;
+        quantization::cast(ctx, &endpoint, &endpoint_f32)?;
         let remaining = (1.0f64 - t_f64).max(config.min_one_minus_t as f64) as f32;
         preprocess::flow_update(ctx, &waypoints, &endpoint_f32, remaining, step_f64 as f32)?;
 

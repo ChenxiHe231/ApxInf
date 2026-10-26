@@ -286,7 +286,7 @@ impl Gr00tFp8LinearWeights {
             backend.context().caps().sm,
             std::env::var_os("APXINF_GR00T_FP8_LEGACY_STATIC_QUANT").is_some(),
         ) {
-            ops::quantization::quantize_bf16_e4m3(backend.context(), input, self.activation_scale)
+            ops::quantization::quantize_fixed_scale(backend.context(), input, self.activation_scale)
         } else {
             ops::quantization::quantize_bf16_e4m3_packed8(
                 backend.context(),
@@ -314,7 +314,7 @@ impl Gr00tFp8LinearWeights {
         let weight_scale = e4m3_weight_scale(maximum);
         let weight = backend.to_device(&weights.weight)?;
         let weight =
-            ops::quantization::quantize_bf16_e4m3(backend.context(), &weight, weight_scale)?;
+            ops::quantization::quantize_fixed_scale(backend.context(), &weight, weight_scale)?;
         Ok(Self {
             weight,
             weight_scale,
@@ -340,7 +340,7 @@ impl Gr00tFp8LinearWeights {
         let weight_scale = e4m3_weight_scale(maximum);
         let weight = backend.to_device(weight)?;
         let weight =
-            ops::quantization::quantize_bf16_e4m3(backend.context(), &weight, weight_scale)?;
+            ops::quantization::quantize_fixed_scale(backend.context(), &weight, weight_scale)?;
         Ok(Self {
             weight,
             weight_scale,

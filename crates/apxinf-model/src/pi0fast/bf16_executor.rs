@@ -26,7 +26,7 @@ pub fn language_layer_bf16(
     rms_eps: f32,
     rope_theta: f32,
 ) -> Result<Bf16LanguageLayerOutput> {
-    let normalized = norm::rms_bf16(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = gemm::bf16(ctx, &normalized, &weights.qkv.weight)?;
     let qkv = rope::split_qkv_apply_bf16(
         ctx,
@@ -101,7 +101,7 @@ pub fn vision_layer_bf16(
     head_dim: usize,
     layer_norm_eps: f32,
 ) -> Result<Tensor> {
-    let normalized = norm::layer_bf16(
+    let normalized = norm::layer(
         ctx,
         input,
         &weights.norm1.weight,
@@ -197,7 +197,7 @@ pub fn language_layer_cached_decode_bf16(
     rope_theta: f32,
 ) -> Result<Tensor> {
     let tokens = input.shape().dims()[0];
-    let normalized = norm::rms_bf16(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = projection(ctx, &normalized, &weights.qkv.weight)?;
     let q = rope::apply_q_write_kv_bf16(
         ctx,
@@ -248,7 +248,7 @@ pub fn language_layer_cached_bf16(
     rope_theta: f32,
 ) -> Result<Tensor> {
     let tokens = input.shape().dims()[0];
-    let normalized = norm::rms_bf16(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = gemm::bf16(ctx, &normalized, &weights.qkv.weight)?;
     let q = rope::apply_q_write_kv_bf16(
         ctx,

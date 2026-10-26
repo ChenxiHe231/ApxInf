@@ -63,10 +63,8 @@ impl DynamicFp8LinearWeights {
             let host_bf16 =
                 Tensor::from_bf16(vec![padded_output_features, padded_input_features], &values)?;
             let device_bf16 = backend.to_device(&host_bf16)?;
-            let quantized = ops::quantization::quantize_rows_bf16_e4m3(
-                cuda_backend.context(),
-                &device_bf16,
-            )?;
+            let quantized =
+                ops::quantization::quantize_rows(cuda_backend.context(), &device_bf16, None)?;
             (quantized.values, quantized.scales)
         } else {
             quantize_rows_host(&padded_weight, backend)?

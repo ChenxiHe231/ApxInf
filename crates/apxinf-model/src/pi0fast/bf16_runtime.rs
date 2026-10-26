@@ -204,7 +204,7 @@ impl Pi0FastBf16Runtime {
                 config.layer_norm_eps,
             )?;
         }
-        let hidden = norm::layer_bf16(
+        let hidden = norm::layer(
             self.ctx(),
             &hidden,
             &weights.vision_post_norm.weight,
@@ -386,7 +386,7 @@ impl Pi0FastBf16Runtime {
     }
 
     fn lm_head(&self, hidden: &Tensor) -> Result<Tensor> {
-        let normalized = norm::rms_bf16(
+        let normalized = norm::rms(
             self.ctx(),
             hidden,
             &self.weights.language_final_norm_scale,

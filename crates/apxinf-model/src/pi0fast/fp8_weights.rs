@@ -111,7 +111,7 @@ pub fn quantize_e4m3_absmax_to_device(
                 .collect::<Vec<_>>(),
         )?;
         let f16 = backend.to_device(&f16_host)?;
-        let weight = ops::quantization::quantize_f16_e4m3(cuda.context(), &f16, scale)?;
+        let weight = ops::quantization::quantize_fixed_scale(cuda.context(), &f16, scale)?;
         Ok((weight, scale))
     }
     #[cfg(not(feature = "cuda"))]

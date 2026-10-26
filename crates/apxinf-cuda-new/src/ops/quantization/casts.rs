@@ -4,7 +4,17 @@ use crate::context::CudaContext;
 use crate::ffi::abi::quantization as quantization_abi;
 use crate::ops::validation::{check_cuda, gpu_ptr};
 
-pub fn cast_f32_to_bf16(ctx: &CudaContext, input: &Tensor, output: &Tensor) -> Result<()> {
+pub fn cast(ctx: &CudaContext, input: &Tensor, output: &Tensor) -> Result<()> {
+    match (input.dtype(), output.dtype()) {
+        (DType::F32, DType::BF16) => cast_f32_to_bf16(ctx, input, output),
+        (DType::BF16, DType::F32) => cast_bf16_to_f32(ctx, input, output),
+        _ => Err(Error::Other(
+            "cast supports F32->BF16 and BF16->F32".into(),
+        )),
+    }
+}
+
+fn cast_f32_to_bf16(ctx: &CudaContext, input: &Tensor, output: &Tensor) -> Result<()> {
     if input.dtype() != DType::F32
         || output.dtype() != DType::BF16
         || input.numel() != output.numel()
@@ -22,7 +32,7 @@ pub fn cast_f32_to_bf16(ctx: &CudaContext, input: &Tensor, output: &Tensor) -> R
 }
 
 /// Cast a BF16 tensor to F32 (exact widening).
-pub fn cast_bf16_to_f32(ctx: &CudaContext, input: &Tensor, output: &Tensor) -> Result<()> {
+fn cast_bf16_to_f32(ctx: &CudaContext, input: &Tensor, output: &Tensor) -> Result<()> {
     if input.dtype() != DType::BF16
         || output.dtype() != DType::F32
         || input.numel() != output.numel()

@@ -110,7 +110,7 @@ impl CudaNewBackend {
 
 impl Backend for CudaNewBackend {
     fn rms_norm(&self, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        ops::norm::rms_bf16(&self.ctx, input, weight, eps)
+        ops::norm::rms(&self.ctx, input, weight, eps)
     }
 
     fn silu(&self, input: &Tensor) -> Result<Tensor> {

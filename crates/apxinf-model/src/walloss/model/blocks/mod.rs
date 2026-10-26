@@ -71,10 +71,10 @@ fn dynamic_linear(
         )));
     }
     let padded_input_features = weight.padded_input_features();
-    let activation = ops::quantization::quantize_rows_bf16_e4m3_padded(
+    let activation = ops::quantization::quantize_rows(
         context,
         input,
-        padded_input_features,
+        Some(padded_input_features),
     )?;
     dynamic_linear_prequantized(context, &activation, weight, false)
 }
@@ -122,7 +122,7 @@ fn qkv_after_rms(
 ) -> Result<Tensor> {
     match weights {
         MatrixRef::Bf16(weight) => {
-            let normalized = ops::norm::rms_bf16(context, input, norm_weight, eps)?;
+            let normalized = ops::norm::rms(context, input, norm_weight, eps)?;
             ops::gemm::bf16(context, &normalized, weight)
         }
         MatrixRef::DynamicFp8(weight) => {
@@ -668,7 +668,7 @@ pub(super) fn action_stack<W: TransformerWeights>(
         .map_err(|e| Error::Other(format!("action_layer {index}: {e}")))?
         .hidden;
     }
-    let hidden = ops::norm::rms_bf16(context, &hidden, final_norm, config.rms_norm_eps)
+    let hidden = ops::norm::rms(context, &hidden, final_norm, config.rms_norm_eps)
         .map_err(|e| Error::Other(format!("action final rms: {e}")))?;
     velocity(context, action_weights, &hidden).map_err(|e| Error::Other(format!("velocity: {e}")))
 }
@@ -791,7 +791,7 @@ fn vision_merger<W: VisionTowerWeights>(
     }
     let merged_tokens = tokens / merge_unit;
     let normalized =
-        ops::norm::rms_bf16(context, input, weights.merger_norm(), config.rms_norm_eps)?
+        ops::norm::rms(context, input, weights.merger_norm(), config.rms_norm_eps)?
             .reshape(vec![merged_tokens, merge_unit * config.hidden_size])?;
     let hidden = linear(context, &normalized, weights.merger_hidden())?;
     let hidden = ops::pointwise::bias_activation(

@@ -2044,7 +2044,7 @@ fn linear<L: DeviceLinearWeights>(
 }
 
 fn rms_norm(backend: &RuntimeBackend, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    ops::norm::rms_bf16(backend.context(), input, weight, eps)
+    ops::norm::rms(backend.context(), input, weight, eps)
 }
 
 fn layer_norm(
@@ -2054,7 +2054,7 @@ fn layer_norm(
     bias: &Tensor,
     eps: f32,
 ) -> Result<Tensor> {
-    ops::norm::layer_bf16(backend.context(), input, weight, bias, eps)
+    ops::norm::layer(backend.context(), input, weight, bias, eps)
 }
 
 fn linear_quantized<L: DeviceLinearWeights>(

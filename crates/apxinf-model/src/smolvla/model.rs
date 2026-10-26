@@ -367,11 +367,7 @@ impl SmolVlaModel {
         for layer in &self.weights.vision_layers {
             hidden = self.vision_layer(ctx, layer, &hidden)?;
         }
-        let hidden = (if self.fp16_gemm {
-            ops::norm::layer_f16
-        } else {
-            ops::norm::layer_bf16
-        })(
+        let hidden = ops::norm::layer(
             ctx,
             &hidden,
             &self.weights.vision_post_norm.weight,
@@ -401,11 +397,7 @@ impl SmolVlaModel {
         weights: &super::weights::VisionLayer,
         input: &Tensor,
     ) -> Result<Tensor> {
-        let normalized = (if self.fp16_gemm {
-            ops::norm::layer_f16
-        } else {
-            ops::norm::layer_bf16
-        })(
+        let normalized = ops::norm::layer(
             ctx,
             input,
             &weights.norm1.weight,
@@ -459,11 +451,7 @@ impl SmolVlaModel {
                 input,
             )?
         };
-        let normalized = (if self.fp16_gemm {
-            ops::norm::layer_f16
-        } else {
-            ops::norm::layer_bf16
-        })(
+        let normalized = ops::norm::layer(
             ctx,
             &hidden,
             &weights.norm2.weight,
@@ -549,11 +537,7 @@ impl SmolVlaModel {
         let mut keys = Vec::with_capacity(self.config.language_depth);
         let mut values = Vec::with_capacity(self.config.language_depth);
         for layer in &self.weights.text_layers {
-            let normalized = (if self.fp16_gemm {
-                ops::norm::rms_f16
-            } else {
-                ops::norm::rms_bf16
-            })(
+            let normalized = ops::norm::rms(
                 ctx,
                 &hidden,
                 &layer.input_norm,
@@ -602,11 +586,7 @@ impl SmolVlaModel {
             }
             hidden = mlp_output;
         }
-        let hidden = (if self.fp16_gemm {
-            ops::norm::rms_f16
-        } else {
-            ops::norm::rms_bf16
-        })(
+        let hidden = ops::norm::rms(
             ctx,
             &hidden,
             &self.weights.text_norm,
@@ -651,11 +631,7 @@ impl SmolVlaModel {
         gate_up: &super::weights::Linear,
         down: &super::weights::Linear,
     ) -> Result<Tensor> {
-        let normalized = (if self.fp16_gemm {
-            ops::norm::rms_f16
-        } else {
-            ops::norm::rms_bf16
-        })(ctx, input, norm, self.config.rms_norm_eps)?;
+        let normalized = ops::norm::rms(ctx, input, norm, self.config.rms_norm_eps)?;
         let activated =
             self.gemm(ctx, &normalized, &gate_up.weight)?;
         let activated = ops::pointwise::swiglu(
@@ -742,11 +718,7 @@ impl SmolVlaModel {
                 }
             };
         }
-        let hidden = (if self.fp16_gemm {
-            ops::norm::rms_f16
-        } else {
-            ops::norm::rms_bf16
-        })(
+        let hidden = ops::norm::rms(
             ctx,
             &hidden,
             &self.weights.expert_norm,
@@ -765,11 +737,7 @@ impl SmolVlaModel {
         prefix_key: &Tensor,
         prefix_value: &Tensor,
     ) -> Result<Tensor> {
-        let normalized = (if self.fp16_gemm {
-            ops::norm::rms_f16
-        } else {
-            ops::norm::rms_bf16
-        })(
+        let normalized = ops::norm::rms(
             ctx,
             input,
             &weights.input_norm,
@@ -852,11 +820,7 @@ impl SmolVlaModel {
         key: &Tensor,
         value: &Tensor,
     ) -> Result<Tensor> {
-        let normalized = (if self.fp16_gemm {
-            ops::norm::rms_f16
-        } else {
-            ops::norm::rms_bf16
-        })(
+        let normalized = ops::norm::rms(
             ctx,
             input,
             &weights.input_norm,

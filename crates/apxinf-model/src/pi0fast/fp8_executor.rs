@@ -146,7 +146,7 @@ pub fn language_layer_fp8(
     rms_eps: f32,
     rope_theta: f32,
 ) -> Result<Fp8LanguageLayerOutput> {
-    let normalized = norm::rms_bf16(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = fp8_projection(ctx, &normalized, &weights.qkv, scales.qkv_input)?;
     let qkv = rope::split_qkv_apply_bf16(
         ctx,
@@ -200,7 +200,7 @@ pub fn vision_layer_fp8(
     head_dim: usize,
     layer_norm_eps: f32,
 ) -> Result<Tensor> {
-    let normalized = norm::layer_bf16(
+    let normalized = norm::layer(
         ctx,
         input,
         &weights.norm1.weight,
@@ -248,7 +248,7 @@ pub fn language_layer_cached_decode_fp8(
     rope_theta: f32,
 ) -> Result<Tensor> {
     let tokens = input.shape().dims()[0];
-    let normalized = norm::rms_bf16(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = fp8_projection(ctx, &normalized, &weights.qkv, scales.qkv_input)?;
     let q = rope::apply_q_write_kv_bf16(
         ctx,
@@ -289,6 +289,6 @@ pub(super) fn fp8_projection(
     weight: &super::Fp8LinearWeights,
     activation_scale: f32,
 ) -> Result<Tensor> {
-    let quantized = quantization::quantize_bf16_e4m3(ctx, input, activation_scale)?;
+    let quantized = quantization::quantize_fixed_scale(ctx, input, activation_scale)?;
     gemm::fp8_bf16(ctx, &quantized, activation_scale, weight.as_kernel_view())
 }

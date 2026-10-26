@@ -330,7 +330,7 @@ pub fn bf16_addmv(
         checked_bytes(DType::F32, &[w[0]], "BF16 addmv accumulator")?,
     )?
     .into_tensor(Shape::new(vec![w[0]]), DType::F32);
-    crate::ops::quantization::cast_bf16_to_f32(ctx, bias, &accumulator)?;
+    crate::ops::quantization::cast(ctx, bias, &accumulator)?;
     let wp = CudaBuffer::from_tensor(weight).map_err(Error::Cuda)?;
     let xp = CudaBuffer::from_tensor(vector).map_err(Error::Cuda)?;
     let cp = CudaBuffer::from_tensor(&accumulator).map_err(Error::Cuda)?;
@@ -353,7 +353,7 @@ pub fn bf16_addmv(
         .map_err(Error::Cuda)?;
     let output = crate::workspace::output_buffer(ctx, bias.size_in_bytes())?
         .into_tensor(Shape::new(vec![w[0]]), DType::BF16);
-    crate::ops::quantization::cast_f32_to_bf16(ctx, &accumulator, &output)?;
+    crate::ops::quantization::cast(ctx, &accumulator, &output)?;
     Ok(output)
 }
 
@@ -430,7 +430,7 @@ pub fn bf16_addmm_checkpoint(
         .map_err(Error::Cuda)?;
     let output = crate::workspace::output_buffer(ctx, output_bytes)?
         .into_tensor(Shape::new(shape.to_vec()), DType::BF16);
-    crate::ops::quantization::cast_f32_to_bf16(ctx, &accumulator, &output)?;
+    crate::ops::quantization::cast(ctx, &accumulator, &output)?;
     Ok(output)
 }
 

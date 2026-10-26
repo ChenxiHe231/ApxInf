@@ -1,6 +1,6 @@
 //! Allocating and caller-owned normalization operators.
 
-use apxinf_core::{DType, Result, Shape, Tensor};
+use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
 use crate::{ops, CudaContext};
 
@@ -11,14 +11,36 @@ use crate::{ops, CudaContext};
 /// legacy plain RMS wrapper implements). The `ops::norm::rms_norm_weight_offset`
 /// operator is a different, Gemma/Qwen3.5-convention norm that applies
 /// `(1 + weight)` and must not be used here.
-pub fn rms_bf16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+pub fn rms(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    match input.dtype() {
+        DType::BF16 => rms_bf16(ctx, input, weight, eps),
+        DType::F16 => rms_f16(ctx, input, weight, eps),
+        _ => Err(Error::Other("RMSNorm requires BF16 or F16 input".into())),
+    }
+}
+
+fn rms_bf16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
     let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
     ops::rms_norm(ctx, ops::RmsNormArgs::new(input, weight, &mut output, eps))?;
     Ok(output)
 }
 
 /// `layer_bf16`: LayerNorm with weight and bias.
-pub fn layer_bf16(
+pub fn layer(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    match input.dtype() {
+        DType::BF16 => layer_bf16(ctx, input, weight, bias, eps),
+        DType::F16 => layer_f16(ctx, input, weight, bias, eps),
+        _ => Err(Error::Other("LayerNorm requires BF16 or F16 input".into())),
+    }
+}
+
+fn layer_bf16(
     ctx: &CudaContext,
     input: &Tensor,
     weight: &Tensor,
@@ -290,10 +312,9 @@ pub fn layer_quant_bf16_e4m3(
 
 /// `rms_f16`: RMS-normalize a `[rows, cols]` FP16 activation with a plain
 /// `[cols]` scale (the Xavier FP16 path).
-pub fn rms_f16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+fn rms_f16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
     use crate::ffi::abi::norm as abi;
     use crate::ops::validation::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
-    use apxinf_core::Error;
     let (rows, cols) = matrix_shape(input, "RMSNorm")?;
     if input.dtype() != DType::F16
         || weight.dtype() != DType::F16
@@ -324,7 +345,7 @@ pub fn rms_f16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> 
 }
 
 /// `layer_f16`: LayerNorm with FP16 weight and bias.
-pub fn layer_f16(
+fn layer_f16(
     ctx: &CudaContext,
     input: &Tensor,
     weight: &Tensor,
@@ -333,7 +354,6 @@ pub fn layer_f16(
 ) -> Result<Tensor> {
     use crate::ffi::abi::norm as abi;
     use crate::ops::validation::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
-    use apxinf_core::Error;
     let (rows, cols) = matrix_shape(input, "LayerNorm")?;
     if [input, weight, bias]
         .into_iter()
