@@ -18,14 +18,46 @@ use serde_json::{json, Value};
 const VOCAB_SIZE: usize = 248_320;
 const PROMPT_TOKENS: usize = 4_096;
 const DEFAULT_OUTPUT_TOKENS: usize = 256;
-const WARMUPS: usize = 2;
-const REPEATS: usize = 5;
+const DEFAULT_WARMUPS: usize = 2;
+const DEFAULT_REPEATS: usize = 5;
 const MTP_LOOKAHEAD: usize = 3;
 
 #[derive(Clone, Copy)]
 enum Mode {
     Scalar,
     Mtp,
+}
+
+#[derive(Clone, Copy)]
+enum BenchmarkMode {
+    Scalar,
+    Mtp,
+    Both,
+}
+
+impl BenchmarkMode {
+    fn parse(args: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
+        let value = args
+            .iter()
+            .position(|arg| arg == "--mode")
+            .and_then(|index| args.get(index + 1))
+            .map(String::as_str)
+            .unwrap_or("both");
+        match value {
+            "scalar" => Ok(Self::Scalar),
+            "mtp" => Ok(Self::Mtp),
+            "both" => Ok(Self::Both),
+            _ => Err(format!("--mode must be scalar, mtp, or both; got {value}").into()),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar",
+            Self::Mtp => "mtp",
+            Self::Both => "both",
+        }
+    }
 }
 
 impl Mode {
@@ -142,16 +174,18 @@ fn run_mode(
     prompt: &[u32],
     max_new_tokens: usize,
     mode: Mode,
+    warmups: usize,
+    repeats: usize,
 ) -> Result<ModeResult, Box<dyn std::error::Error>> {
     let options = mode.options(max_new_tokens);
-    let mut measured_ttft_ms = Vec::with_capacity(REPEATS);
-    let mut measured_prefill_tps = Vec::with_capacity(REPEATS);
-    let mut measured_generation_tps = Vec::with_capacity(REPEATS);
+    let mut measured_ttft_ms = Vec::with_capacity(repeats);
+    let mut measured_prefill_tps = Vec::with_capacity(repeats);
+    let mut measured_generation_tps = Vec::with_capacity(repeats);
     let mut aggregate = AggregateSpeculation::default();
     let mut canonical_tokens: Option<Vec<u32>> = None;
 
-    for iteration in 0..WARMUPS + REPEATS {
-        let warmup = iteration < WARMUPS;
+    for iteration in 0..warmups + repeats {
+        let warmup = iteration < warmups;
         let output =
             model.generate_streaming_with_options(LlmInput::text(prompt), &options, |_token| {})?;
         let token_ids = output.token_ids();
@@ -224,8 +258,8 @@ fn run_mode(
         "mode": mode.name(),
         "prompt_tokens": prompt.len(),
         "output_tokens": max_new_tokens,
-        "warmups": WARMUPS,
-        "repeats": REPEATS,
+        "warmups": warmups,
+        "repeats": repeats,
         "ttft_ms": {
             "median": quantile(&measured_ttft_ms, 0.5),
             "p95": quantile(&measured_ttft_ms, 0.95),
@@ -259,14 +293,20 @@ fn arg_value(args: &[String], name: &str, default: usize) -> usize {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let checkpoint = args
-        .get(1)
-        .filter(|arg| !arg.starts_with("--"))
-        .ok_or("usage: qwen35_mtp_bench <checkpoint-dir> [--device N] [--max-new N]")?;
+    let checkpoint = args.get(1).filter(|arg| !arg.starts_with("--")).ok_or(
+        "usage: qwen35_mtp_bench <checkpoint-dir> [--device N] [--max-new N] \
+             [--warmups N] [--repeats N] [--mode scalar|mtp|both]",
+    )?;
     let device = arg_value(&args, "--device", 0);
     let max_new_tokens = arg_value(&args, "--max-new", DEFAULT_OUTPUT_TOKENS);
+    let warmups = arg_value(&args, "--warmups", DEFAULT_WARMUPS);
+    let repeats = arg_value(&args, "--repeats", DEFAULT_REPEATS);
+    let benchmark_mode = BenchmarkMode::parse(&args)?;
     if max_new_tokens < DEFAULT_OUTPUT_TOKENS {
         return Err(format!("--max-new must be at least {DEFAULT_OUTPUT_TOKENS}").into());
+    }
+    if repeats == 0 {
+        return Err("--repeats must be at least 1".into());
     }
 
     let prompt = exact_prompt();
@@ -285,26 +325,67 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "device": device,
             "prompt_tokens": PROMPT_TOKENS,
             "output_tokens": max_new_tokens,
-            "warmups": WARMUPS,
-            "repeats": REPEATS,
+            "warmups": warmups,
+            "repeats": repeats,
+            "mode": benchmark_mode.name(),
             "load_seconds": load_start.elapsed().as_secs_f64(),
         })
     );
 
-    let scalar = run_mode(&mut model, &prompt, max_new_tokens, Mode::Scalar)?;
-    let mtp = run_mode(&mut model, &prompt, max_new_tokens, Mode::Mtp)?;
-    if scalar.canonical_tokens != mtp.canonical_tokens {
-        return Err("MTP token IDs differ from forced-scalar greedy token IDs".into());
+    match benchmark_mode {
+        BenchmarkMode::Scalar => {
+            let scalar = run_mode(
+                &mut model,
+                &prompt,
+                max_new_tokens,
+                Mode::Scalar,
+                warmups,
+                repeats,
+            )?;
+            println!("{}", scalar.summary);
+        }
+        BenchmarkMode::Mtp => {
+            let mtp = run_mode(
+                &mut model,
+                &prompt,
+                max_new_tokens,
+                Mode::Mtp,
+                warmups,
+                repeats,
+            )?;
+            println!("{}", mtp.summary);
+        }
+        BenchmarkMode::Both => {
+            let scalar = run_mode(
+                &mut model,
+                &prompt,
+                max_new_tokens,
+                Mode::Scalar,
+                warmups,
+                repeats,
+            )?;
+            let mtp = run_mode(
+                &mut model,
+                &prompt,
+                max_new_tokens,
+                Mode::Mtp,
+                warmups,
+                repeats,
+            )?;
+            if scalar.canonical_tokens != mtp.canonical_tokens {
+                return Err("MTP token IDs differ from forced-scalar greedy token IDs".into());
+            }
+            println!("{}", scalar.summary);
+            println!("{}", mtp.summary);
+            println!(
+                "{}",
+                json!({
+                    "schema": "apxinf.qwen35.benchmark.parity.v1",
+                    "token_ids_equal": true,
+                    "compared_tokens": max_new_tokens,
+                })
+            );
+        }
     }
-    println!("{}", scalar.summary);
-    println!("{}", mtp.summary);
-    println!(
-        "{}",
-        json!({
-            "schema": "apxinf.qwen35.benchmark.parity.v1",
-            "token_ids_equal": true,
-            "compared_tokens": max_new_tokens,
-        })
-    );
     Ok(())
 }
