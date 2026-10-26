@@ -26,7 +26,7 @@ use crate::engine::{ApxInfChatEngine, ApxInfEngineConfig, EngineRequest};
 use crate::error::ApiError;
 use crate::protocol::{
     AssistantMessage, ChatCompletionChoice, ChatCompletionRequest, ChatCompletionResponse,
-    ModelCard, ModelList, Usage,
+    ModelCard, ModelList, PromptTokensDetails, Usage,
 };
 use crate::tool_calling::{parse_qwen3_xml, validate_tool_choice, ToolRegistry};
 use crate::worker::{EngineStreamEvent, WorkerClient};
@@ -343,6 +343,9 @@ fn prepare_completion(
         prompt_tokens: output.prompt_tokens,
         completion_tokens: output.completion_tokens,
         total_tokens: output.prompt_tokens + output.completion_tokens,
+        prompt_tokens_details: Some(PromptTokensDetails {
+            cached_tokens: output.reused_prompt_tokens,
+        }),
     };
     Ok(PreparedCompletion {
         content: parsed.content,

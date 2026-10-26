@@ -56,6 +56,22 @@ pub trait MtpBackend {
         target_hidden: &apxinf_core::Tensor,
     ) -> Result<Self::PreparedPrefill>;
 
+    /// Extend an already committed MTP prompt state with a new target-prefill
+    /// chunk. `previous_target_hidden` is the final target row before the
+    /// chunk; `target_hidden` contains every target row produced by the new
+    /// chunk. Together they preserve the shifted teacher-forcing alignment:
+    /// chunk token `i` consumes the target hidden row immediately before it.
+    fn prepare_append_prefill(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        committed: &Self::State,
+        shadow: &mut Self::State,
+        chunk_tokens: &[TokenId],
+        previous_target_hidden: &apxinf_core::Tensor,
+        target_hidden: &apxinf_core::Tensor,
+    ) -> Result<Self::PreparedPrefill>;
+
     /// Allocation-free publication after both target prefill and MTP prefill
     /// have succeeded. The resulting logical MTP position equals the base
     /// prompt length `P`; physical MTP KV rows are `P-1` because teacher
@@ -143,6 +159,7 @@ impl PreparedTargetCommit {
 pub struct PreparedTargetPrefill {
     epoch: u64,
     shadow_generation: u64,
+    start_position: usize,
     end_position: usize,
     output: DecoderOutput,
 }
@@ -175,6 +192,19 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     position: usize,
     epoch: u64,
     shadow_generation: u64,
+}
+
+/// Device-resident checkpoint for one committed target prefix.
+///
+/// The checkpoint owns independent storage: later decode transactions may
+/// freely swap and overwrite the session's committed/shadow banks without
+/// invalidating a reusable prefix. Only rows before `position` are defined in
+/// the attention caches.
+pub struct Qwen35SessionSnapshot<C> {
+    gdn: Vec<GdnState>,
+    attention: Vec<C>,
+    capacity: usize,
+    position: usize,
 }
 
 impl<B: FullAttentionBackend> Qwen35Session<B> {
@@ -271,6 +301,121 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         &self.attention
     }
 
+    /// Allocate one independent prefix checkpoint with the same geometry as
+    /// this session. Allocation happens once when context reuse is enabled.
+    pub fn allocate_snapshot(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+        capacity: usize,
+    ) -> Result<Qwen35SessionSnapshot<B::Cache>> {
+        if capacity == 0 || capacity > self.capacity {
+            return Err(invalid("Qwen3.5 target snapshot capacity is invalid"));
+        }
+        let architecture = decoder.architecture();
+        let mut gdn = Vec::with_capacity(architecture.gdn_layers().count());
+        let mut attention = Vec::with_capacity(architecture.full_attention_layers().count());
+        for (layer, resident) in architecture.layers.iter().zip(&weights.layers) {
+            match (&layer.mixer, &resident.mixer) {
+                (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(_)) => {
+                    gdn.push(GdnState::new(ctx)?);
+                }
+                (
+                    MixerKind::FullAttention(geometry),
+                    DeviceMixerWeights::FullAttention(full_attention),
+                ) => {
+                    let scales = full_attention.kv_cache_scales.ok_or_else(|| {
+                        invalid(format!(
+                            "Qwen3.5 base attention layer {} is missing FP8 KV scales",
+                            layer.index
+                        ))
+                    })?;
+                    attention.push(self.attention.allocate_cache(
+                        ctx,
+                        layer.index,
+                        *geometry,
+                        capacity,
+                        scales,
+                    )?);
+                }
+                _ => {
+                    return Err(invalid(format!(
+                        "Qwen3.5 layer {} mixer changed after validation",
+                        layer.index
+                    )));
+                }
+            }
+        }
+        Ok(Qwen35SessionSnapshot {
+            gdn,
+            attention,
+            capacity,
+            position: 0,
+        })
+    }
+
+    /// Copy the currently committed target prefix into an independent
+    /// checkpoint. The copy is ordered on `ctx`; callers synchronize before
+    /// publishing the checkpoint's token identity.
+    pub fn capture_snapshot(
+        &mut self,
+        ctx: &CudaContext,
+        snapshot: &mut Qwen35SessionSnapshot<B::Cache>,
+    ) -> Result<()> {
+        if self.position > snapshot.capacity
+            || snapshot.gdn.len() != self.committed_gdn.len()
+            || snapshot.attention.len() != self.committed_attention.len()
+        {
+            return Err(invalid("Qwen3.5 target snapshot geometry mismatch"));
+        }
+        for (destination, source) in snapshot.gdn.iter().zip(&self.committed_gdn) {
+            destination.copy_from(ctx, source)?;
+        }
+        for (source, destination) in self.committed_attention.iter().zip(&mut snapshot.attention) {
+            self.attention
+                .copy_cache_range(ctx, source, destination, 0..self.position)?;
+        }
+        ctx.synchronize().map_err(Error::Cuda)?;
+        snapshot.position = self.position;
+        Ok(())
+    }
+
+    /// Restore a committed target prefix from an independent checkpoint.
+    /// Stale rows beyond the checkpoint position remain unreachable and are
+    /// overwritten if the sequence later grows into them.
+    pub fn restore_snapshot(
+        &mut self,
+        ctx: &CudaContext,
+        snapshot: &Qwen35SessionSnapshot<B::Cache>,
+    ) -> Result<()> {
+        if snapshot.position == 0
+            || snapshot.position > self.capacity
+            || snapshot.position > snapshot.capacity
+            || snapshot.gdn.len() != self.committed_gdn.len()
+            || snapshot.attention.len() != self.committed_attention.len()
+        {
+            return Err(invalid("Qwen3.5 target snapshot is empty or incompatible"));
+        }
+        for (destination, source) in self.committed_gdn.iter().zip(&snapshot.gdn) {
+            destination.copy_from(ctx, source)?;
+        }
+        for (source, destination) in snapshot.attention.iter().zip(&mut self.committed_attention) {
+            self.attention
+                .copy_cache_range(ctx, source, destination, 0..snapshot.position)?;
+        }
+        ctx.synchronize().map_err(Error::Cuda)?;
+        self.position = snapshot.position;
+        self.epoch = self
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| invalid("Qwen3.5 session epoch overflow"))?;
+        // The inactive bank contains unrelated history. The next append will
+        // copy the complete restored prefix before executing new rows.
+        self.shadow_attention_valid = 0;
+        Ok(())
+    }
+
     /// Replace the current sequence with `token_ids`. Existing committed state
     /// remains visible if any allocation, kernel, backend call or synchronize
     /// fails.
@@ -295,6 +440,39 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             HiddenSelection::Last,
         )?;
         self.publish_shadow(output.end_position, 0)?;
+        Ok(output)
+    }
+
+    /// Append a multi-token prefill chunk to the committed sequence. Unlike
+    /// `forward(start>0)`, this retains the batched prefill kernels instead of
+    /// degrading the chunk into a scalar decode loop.
+    pub fn append_prefill(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+        token_ids: &[u32],
+    ) -> Result<DecoderOutput> {
+        if self.position == 0 {
+            return Err(invalid(
+                "Qwen3.5 append prefill requires a committed prefix",
+            ));
+        }
+        let start_position = self.position;
+        self.validate_capacity(start_position, token_ids.len())?;
+        self.bump_shadow_generation()?;
+        self.prepare_shadow_from_committed(ctx)?;
+        let output = self.run_shadow(
+            ctx,
+            decoder,
+            weights,
+            token_ids,
+            start_position,
+            DecoderPhase::Prefill,
+            LogitsSelection::Last,
+            HiddenSelection::Last,
+        )?;
+        self.publish_shadow(output.end_position, start_position)?;
         Ok(output)
     }
 
@@ -358,6 +536,47 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         Ok(PreparedTargetPrefill {
             epoch: self.epoch,
             shadow_generation: self.shadow_generation,
+            start_position: 0,
+            end_position: output.end_position,
+            output,
+        })
+    }
+
+    /// Prepare a target chunk on top of the committed prefix while retaining
+    /// all new hidden rows needed to extend the MTP teacher-forcing cache.
+    pub fn prepare_target_append_prefill(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+        token_ids: &[u32],
+    ) -> Result<PreparedTargetPrefill> {
+        if self.position == 0 {
+            return Err(invalid(
+                "Qwen3.5 target append prefill requires a committed prefix",
+            ));
+        }
+        let start_position = self.position;
+        self.validate_capacity(start_position, token_ids.len())?;
+        self.bump_shadow_generation()?;
+        self.prepare_shadow_from_committed(ctx)?;
+        let output = self.run_shadow(
+            ctx,
+            decoder,
+            weights,
+            token_ids,
+            start_position,
+            DecoderPhase::Prefill,
+            LogitsSelection::Last,
+            HiddenSelection::All,
+        )?;
+        self.epoch
+            .checked_add(1)
+            .ok_or_else(|| invalid("Qwen3.5 session epoch overflow"))?;
+        Ok(PreparedTargetPrefill {
+            epoch: self.epoch,
+            shadow_generation: self.shadow_generation,
+            start_position,
             end_position: output.end_position,
             output,
         })
@@ -372,14 +591,14 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
     ) -> Result<DecoderOutput> {
         if prepared.epoch != self.epoch
             || prepared.shadow_generation != self.shadow_generation
-            || prepared.end_position == 0
-            || prepared.output.start_position != 0
+            || prepared.end_position <= prepared.start_position
+            || prepared.output.start_position != prepared.start_position
             || prepared.output.end_position != prepared.end_position
-            || prepared.output.hidden_rows != prepared.end_position
+            || prepared.output.hidden_rows != prepared.end_position - prepared.start_position
         {
             return Err(invalid("stale Qwen3.5 prepared target prefill"));
         }
-        self.publish_shadow(prepared.end_position, 0)?;
+        self.publish_shadow(prepared.end_position, prepared.start_position)?;
         Ok(prepared.output)
     }
 
@@ -455,12 +674,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         {
             debug_assert_eq!(phase, DecoderPhase::Decode);
             let output = self.run_decode_shadow_from_block_enqueued(
-                ctx,
-                decoder,
-                weights,
-                token,
-                offset,
-                position,
+                ctx, decoder, weights, token, offset, position,
             )?;
             // Argmax is enqueued before the next scalar row overwrites the
             // persistent logits buffer. All work shares ctx.stream, so one
@@ -476,7 +690,9 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             .take(token_ids.len())
             .map(|&token| {
                 u32::try_from(token).map_err(|_| {
-                    invalid(format!("Qwen3.5 target argmax returned negative ID {token}"))
+                    invalid(format!(
+                        "Qwen3.5 target argmax returned negative ID {token}"
+                    ))
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -686,12 +902,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         {
             debug_assert_eq!(phase, DecoderPhase::Decode);
             output = Some(self.run_decode_shadow_from_block_enqueued(
-                ctx,
-                decoder,
-                weights,
-                token,
-                offset,
-                position,
+                ctx, decoder, weights, token, offset, position,
             )?);
         }
         ctx.synchronize().map_err(Error::Cuda)?;

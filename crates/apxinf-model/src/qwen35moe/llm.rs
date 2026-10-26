@@ -19,14 +19,16 @@ use crate::llm_trait::{
 use crate::profiling::GenerationProfile;
 use crate::GenerationOptions;
 
-use super::attention_backend::Qwen35Fp8AttentionBackend;
+use super::attention_backend::{Qwen35AttentionCache, Qwen35Fp8AttentionBackend};
 use super::config::Qwen35MoeConfig;
 use super::decoder::Qwen35Decoder;
 use super::device_weights::{
     load_qwen35_device_weights_from_path, upload_qwen35_device_weights, Qwen35DeviceWeights,
 };
 use super::loader::load_qwen35_runtime_weights;
-use super::mtp_runtime::{MtpGreedyPolicy, Qwen35MtpCoordinator, Qwen35MtpRuntime};
+use super::mtp_runtime::{
+    MtpGreedyPolicy, Qwen35ContextSnapshot, Qwen35MtpCoordinator, Qwen35MtpRuntime, Qwen35MtpState,
+};
 use super::mtp_schedule::QWEN35_MTP_DRAFT_STEPS;
 use super::session::Qwen35Session;
 
@@ -34,6 +36,14 @@ use super::session::Qwen35Session;
 /// supplies its prompt/output admission plus MTP lookahead through
 /// `LoadOptions::text_kv_capacity` instead of relying on this default.
 pub const DEFAULT_KV_CAPACITY: usize = 8_192;
+
+type ContextSnapshot = Qwen35ContextSnapshot<Qwen35AttentionCache, Qwen35MtpState>;
+
+struct SystemPrefixCache {
+    tokens: Vec<u32>,
+    snapshot: ContextSnapshot,
+    capacity: usize,
+}
 
 /// Exact text runtime for `txn545/Qwen3.5-35B-A3B-NVFP4`.
 ///
@@ -48,6 +58,9 @@ pub struct Qwen35Moe {
     runtime: Qwen35MtpCoordinator<Qwen35Fp8AttentionBackend, Qwen35MtpRuntime>,
     vocab_size: usize,
     reset_error: Option<String>,
+    context_reuse_enabled: bool,
+    system_prefix_cache: Option<SystemPrefixCache>,
+    last_reused_tokens: usize,
 }
 
 impl Qwen35Moe {
@@ -129,11 +142,264 @@ impl Qwen35Moe {
             runtime,
             vocab_size: config.text_config.vocab_size,
             reset_error: None,
+            context_reuse_enabled: false,
+            system_prefix_cache: None,
+            last_reused_tokens: 0,
         })
     }
 
     pub fn kv_capacity(&self) -> usize {
         self.runtime.target().capacity()
+    }
+
+    fn configure_context_reuse(&mut self, enabled: bool) -> Result<()> {
+        self.last_reused_tokens = 0;
+        self.context_reuse_enabled = enabled;
+        if !enabled {
+            self.system_prefix_cache = None;
+        }
+        Ok(())
+    }
+
+    /// Prepare an MTP request while retaining only the caller-designated
+    /// system/tool prefix. Conversation history and user content are always
+    /// evaluated again for each request.
+    fn prefill_mtp_with_system_reuse(
+        &mut self,
+        prompt: &[u32],
+        reusable_prefix_tokens: usize,
+        options: &GenerationOptions,
+    ) -> Result<super::mtp_runtime::MtpPrefillOutcome> {
+        self.last_reused_tokens = 0;
+        if reusable_prefix_tokens > prompt.len() {
+            return Err(Error::Other(format!(
+                "reusable system prefix has {reusable_prefix_tokens} tokens, but prompt has {}",
+                prompt.len()
+            )));
+        }
+        if !self.context_reuse_enabled
+            || reusable_prefix_tokens == 0
+            || reusable_prefix_tokens == prompt.len()
+        {
+            self.runtime.reset(&self.ctx)?;
+            return self.runtime.prefill_greedy(
+                &self.ctx,
+                &self.decoder,
+                &self.weights,
+                prompt,
+                options,
+            );
+        }
+
+        let mut cache = match self
+            .system_prefix_cache
+            .take()
+            .filter(|cache| cache.capacity >= reusable_prefix_tokens)
+        {
+            Some(cache) => cache,
+            None => SystemPrefixCache {
+                tokens: Vec::new(),
+                snapshot: self.runtime.allocate_context_snapshot(
+                    &self.ctx,
+                    &self.decoder,
+                    &self.weights,
+                    reusable_prefix_tokens,
+                )?,
+                capacity: reusable_prefix_tokens,
+            },
+        };
+        let result = (|| {
+            let hit = cache.tokens.len() == reusable_prefix_tokens
+                && prompt.get(..reusable_prefix_tokens) == Some(cache.tokens.as_slice());
+            if hit {
+                self.runtime.restore_context(&self.ctx, &cache.snapshot)?;
+                self.last_reused_tokens = reusable_prefix_tokens;
+            } else {
+                self.runtime.reset(&self.ctx)?;
+                self.runtime.prefill_greedy(
+                    &self.ctx,
+                    &self.decoder,
+                    &self.weights,
+                    &prompt[..reusable_prefix_tokens],
+                    options,
+                )?;
+                // Do not publish a token identity until every device copy is
+                // complete. A failed capture can never become a false hit.
+                cache.tokens.clear();
+                self.runtime
+                    .capture_context(&self.ctx, &mut cache.snapshot)?;
+                cache
+                    .tokens
+                    .extend_from_slice(&prompt[..reusable_prefix_tokens]);
+                eprintln!(
+                    "system prefix cache miss: prepared {reusable_prefix_tokens} prompt tokens"
+                );
+            }
+
+            let outcome = self.runtime.append_prefill_greedy(
+                &self.ctx,
+                &self.decoder,
+                &self.weights,
+                &prompt[reusable_prefix_tokens..],
+                options,
+            )?;
+            if self.last_reused_tokens > 0 {
+                eprintln!(
+                    "system prefix cache hit: reused {} of {} prompt tokens; evaluated {}",
+                    self.last_reused_tokens,
+                    prompt.len(),
+                    prompt.len() - self.last_reused_tokens
+                );
+            }
+            Ok(outcome)
+        })();
+        self.system_prefix_cache = Some(cache);
+        result
+    }
+
+    /// Benchmark-only setup for a scalar chunk-prefill case. The prefix is
+    /// committed outside the measured region; an empty prefix leaves the
+    /// target session reset for a normal prefill.
+    #[doc(hidden)]
+    pub fn benchmark_prepare_scalar_prefix(&mut self, prefix: &[u32]) -> Result<()> {
+        self.runtime.reset(&self.ctx)?;
+        if !prefix.is_empty() {
+            self.runtime
+                .target_mut()
+                .prefill(&self.ctx, &self.decoder, &self.weights, prefix)?;
+        }
+        Ok(())
+    }
+
+    /// Run the measured scalar prefill chunk and return its greedy first token.
+    #[doc(hidden)]
+    pub fn benchmark_scalar_prefill_chunk(&mut self, chunk: &[u32]) -> Result<u32> {
+        let output = if self.runtime.target().position() == 0 {
+            self.runtime
+                .target_mut()
+                .prefill(&self.ctx, &self.decoder, &self.weights, chunk)?
+        } else {
+            self.runtime.target_mut().append_prefill(
+                &self.ctx,
+                &self.decoder,
+                &self.weights,
+                chunk,
+            )?
+        };
+        output
+            .greedy_token_ids(&self.ctx)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Other("Qwen3.5 scalar prefill returned no token".into()))
+    }
+
+    /// Continue exact scalar greedy decode from a measured prefill result.
+    #[doc(hidden)]
+    pub fn benchmark_scalar_decode(
+        &mut self,
+        first_token: u32,
+        max_new_tokens: usize,
+    ) -> Result<Vec<u32>> {
+        if max_new_tokens == 0 {
+            return Err(Error::Other(
+                "Qwen3.5 scalar benchmark requires output tokens".into(),
+            ));
+        }
+        let mut tokens = Vec::with_capacity(max_new_tokens);
+        tokens.push(first_token);
+        while tokens.len() < max_new_tokens {
+            let input = *tokens.last().expect("one scalar token is present");
+            let output =
+                self.runtime
+                    .target_mut()
+                    .decode(&self.ctx, &self.decoder, &self.weights, input)?;
+            let next = output
+                .greedy_token_ids(&self.ctx)?
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::Other("Qwen3.5 scalar decode returned no token".into()))?;
+            tokens.push(next);
+        }
+        Ok(tokens)
+    }
+
+    /// Benchmark-only setup for an MTP chunk-prefill case. A non-empty prefix
+    /// prepares both target and proposer state outside the measured region.
+    #[doc(hidden)]
+    pub fn benchmark_prepare_mtp_prefix(
+        &mut self,
+        prefix: &[u32],
+        options: &GenerationOptions,
+    ) -> Result<()> {
+        self.runtime.reset(&self.ctx)?;
+        if !prefix.is_empty() {
+            self.runtime.prefill_greedy(
+                &self.ctx,
+                &self.decoder,
+                &self.weights,
+                prefix,
+                options,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Run a measured MTP-aware prefill chunk. This extends both target KV/GDN
+    /// state and shifted MTP teacher-forcing state when a prefix is present.
+    #[doc(hidden)]
+    pub fn benchmark_mtp_prefill_chunk(
+        &mut self,
+        chunk: &[u32],
+        options: &GenerationOptions,
+    ) -> Result<u32> {
+        let outcome = if self.runtime.target().position() == 0 {
+            self.runtime
+                .prefill_greedy(&self.ctx, &self.decoder, &self.weights, chunk, options)?
+        } else {
+            self.runtime.append_prefill_greedy(
+                &self.ctx,
+                &self.decoder,
+                &self.weights,
+                chunk,
+                options,
+            )?
+        };
+        Ok(outcome.first_token)
+    }
+
+    /// Continue the already prepared speculative schedule without repeating
+    /// prompt work. Returned token IDs include `first_token`.
+    #[doc(hidden)]
+    pub fn benchmark_mtp_decode(
+        &mut self,
+        first_token: u32,
+        max_new_tokens: usize,
+    ) -> Result<Vec<u32>> {
+        if max_new_tokens == 0 {
+            return Err(Error::Other(
+                "Qwen3.5 MTP benchmark requires output tokens".into(),
+            ));
+        }
+        let mut tokens = Vec::with_capacity(max_new_tokens);
+        tokens.push(first_token);
+        while tokens.len() < max_new_tokens && !self.runtime.is_finished() {
+            let round = self
+                .runtime
+                .run_greedy_round(&self.ctx, &self.decoder, &self.weights)?;
+            for token in round.outcome.emitted {
+                if tokens.len() == max_new_tokens {
+                    break;
+                }
+                tokens.push(token);
+            }
+        }
+        if tokens.len() != max_new_tokens {
+            return Err(Error::Other(format!(
+                "Qwen3.5 MTP benchmark produced {} tokens, expected {max_new_tokens}",
+                tokens.len()
+            )));
+        }
+        Ok(tokens)
     }
 
     fn mtp_capacity_admits(&self, prompt_tokens: usize, max_new_tokens: usize) -> bool {
@@ -165,14 +431,9 @@ impl Qwen35Moe {
         }
 
         let mut profile = GenerationProfile::new();
-        // Match the shared scalar driver: every request starts from empty
-        // target and draft state while retaining the resident allocations.
-        self.runtime.reset(&self.ctx)?;
-        let prefill = self.runtime.prefill_greedy(
-            &self.ctx,
-            &self.decoder,
-            &self.weights,
+        let prefill = self.prefill_mtp_with_system_reuse(
             prompt,
+            request.input.reusable_prefix_tokens,
             request.options,
         )?;
         let first = GeneratedToken {
@@ -202,7 +463,7 @@ impl Qwen35Moe {
                 profile.run_unprofiled(|| on_token(token));
             }
         }
-        profile.finalize(prompt.len(), tokens.len());
+        profile.finalize_with_reuse(prompt.len(), tokens.len(), self.last_reused_tokens);
         Ok(GenerationOutput { tokens, profile })
     }
 
@@ -365,6 +626,10 @@ impl LlmTrait for Qwen35Moe {
             matched_by_depth: stats.matched_by_depth.to_vec(),
             accepted_prefix_by_depth: stats.accepted_prefix_by_depth.to_vec(),
         })
+    }
+
+    fn set_context_reuse(&mut self, enabled: bool) -> Result<()> {
+        self.configure_context_reuse(enabled)
     }
 
     fn prefill(&mut self, input: LlmInput<'_>) -> Result<Tensor> {

@@ -53,6 +53,7 @@ impl ChatEngine for FakeEngine {
         Ok(EngineOutput {
             text,
             prompt_tokens: 11,
+            reused_prompt_tokens: 3,
             completion_tokens: 7,
             hit_length: false,
             ttft_ms: Some(10.0),
@@ -161,6 +162,10 @@ async fn serves_health_models_and_plain_chat() {
     assert_eq!(response["choices"][0]["message"]["role"], "assistant");
     assert_eq!(response["choices"][0]["finish_reason"], "stop");
     assert_eq!(response["usage"]["total_tokens"], 18);
+    assert_eq!(
+        response["usage"]["prompt_tokens_details"]["cached_tokens"],
+        3
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 1);
 }
 
@@ -279,6 +284,7 @@ impl ChatEngine for IncrementalEngine {
         Ok(EngineOutput {
             text: "first second".into(),
             prompt_tokens: 1,
+            reused_prompt_tokens: 0,
             completion_tokens: 2,
             hit_length: false,
             ttft_ms: Some(1.0),
@@ -418,6 +424,7 @@ impl ChatEngine for SplitToolEngine {
         Ok(EngineOutput {
             text: format!("{}{}", fragments.concat(), closing),
             prompt_tokens: 9,
+            reused_prompt_tokens: 0,
             completion_tokens: 10,
             hit_length: false,
             ttft_ms: None,
@@ -545,6 +552,7 @@ impl ChatEngine for BlockingEngine {
         Ok(EngineOutput {
             text: "done".into(),
             prompt_tokens: 1,
+            reused_prompt_tokens: 0,
             completion_tokens: 1,
             hit_length: false,
             ttft_ms: None,
@@ -651,6 +659,7 @@ impl ChatEngine for CancellationAwareEngine {
         Ok(EngineOutput {
             text: "x".into(),
             prompt_tokens: 1,
+            reused_prompt_tokens: 0,
             completion_tokens: 1,
             hit_length: false,
             ttft_ms: None,

@@ -671,14 +671,16 @@ fn validate_cache_pair(
     validate_cache_device(ctx, destination)?;
     if source.layer_index != destination.layer_index
         || source.geometry != destination.geometry
-        || source.capacity != destination.capacity
         || source.scales != destination.scales
     {
         return Err(invalid(
-            "Qwen3.5 BF16 cache copy requires matching layer, geometry, capacity and metadata",
+            "Qwen3.5 BF16 cache copy requires matching layer, geometry and metadata",
         ));
     }
-    if positions.start > positions.end || positions.end > source.capacity {
+    if positions.start > positions.end
+        || positions.end > source.capacity
+        || positions.end > destination.capacity
+    {
         return Err(invalid("Qwen3.5 BF16 cache copy range is out of bounds"));
     }
     Ok(())

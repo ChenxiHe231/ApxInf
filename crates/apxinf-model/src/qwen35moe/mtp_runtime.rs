@@ -15,7 +15,7 @@ use super::device_weights::{DeviceMtpWeights, Qwen35DeviceWeights};
 use super::mtp_schedule::{
     MtpCommit, Qwen35MtpSchedule, RoundOutcome, TokenId, QWEN35_MTP_DRAFT_STEPS,
 };
-use super::session::{MtpBackend, Qwen35Session};
+use super::session::{MtpBackend, Qwen35Session, Qwen35SessionSnapshot};
 use crate::{GenerationOptions, SamplingMode};
 
 const HIDDEN: usize = ops::QWEN35_MTP_HIDDEN;
@@ -251,11 +251,42 @@ impl MtpBackend for Qwen35MtpRuntime {
     ) -> Result<()> {
         validate_state_storage(ctx, source, self.geometry)?;
         validate_state_storage(ctx, destination, self.geometry)?;
-        if source.capacity != destination.capacity {
-            return Err(invalid("Qwen3.5 MTP cache banks have different capacities"));
+        if let Some(position) = source.position {
+            position.validate(source.capacity)?;
+            if position.cache_rows > destination.capacity {
+                return Err(invalid(
+                    "Qwen3.5 MTP destination cache cannot hold the source prefix",
+                ));
+            }
+            if position.cache_rows > 0 {
+                let source_key = cache_prefix_view(
+                    &source.key,
+                    position.cache_rows,
+                    self.geometry.kv_heads,
+                    self.geometry.head_dim,
+                )?;
+                let destination_key = cache_prefix_view(
+                    &destination.key,
+                    position.cache_rows,
+                    self.geometry.kv_heads,
+                    self.geometry.head_dim,
+                )?;
+                let source_value = cache_prefix_view(
+                    &source.value,
+                    position.cache_rows,
+                    self.geometry.kv_heads,
+                    self.geometry.head_dim,
+                )?;
+                let destination_value = cache_prefix_view(
+                    &destination.value,
+                    position.cache_rows,
+                    self.geometry.kv_heads,
+                    self.geometry.head_dim,
+                )?;
+                transfers::copy_cuda_to_cuda(ctx, &source_key, &destination_key)?;
+                transfers::copy_cuda_to_cuda(ctx, &source_value, &destination_value)?;
+            }
         }
-        transfers::copy_cuda_to_cuda(ctx, &source.key, &destination.key)?;
-        transfers::copy_cuda_to_cuda(ctx, &source.value, &destination.value)?;
         destination.position = source.position;
         destination.generation = source
             .generation
@@ -332,6 +363,104 @@ impl MtpBackend for Qwen35MtpRuntime {
                     false,
                 )?;
             }
+        }
+        ctx.synchronize().map_err(Error::Cuda)?;
+        shadow.position = Some(position);
+        self.pending_draft = None;
+        Ok(PreparedMtpPrefill {
+            generation: shadow.generation,
+            position,
+        })
+    }
+
+    fn prepare_append_prefill(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        committed: &Self::State,
+        shadow: &mut Self::State,
+        chunk_tokens: &[TokenId],
+        previous_target_hidden: &Tensor,
+        target_hidden: &Tensor,
+    ) -> Result<Self::PreparedPrefill> {
+        self.validate_weights(ctx, weights)?;
+        validate_state_storage(ctx, committed, self.geometry)?;
+        validate_state_storage(ctx, shadow, self.geometry)?;
+        if chunk_tokens.is_empty() {
+            return Err(invalid("Qwen3.5 MTP append prefill requires tokens"));
+        }
+        validate_tensor(
+            previous_target_hidden,
+            ctx,
+            DType::BF16,
+            &[1, HIDDEN],
+            "previous target hidden",
+        )?;
+        validate_tensor(
+            target_hidden,
+            ctx,
+            DType::BF16,
+            &[chunk_tokens.len(), HIDDEN],
+            "target append hidden",
+        )?;
+
+        let start = committed
+            .position
+            .ok_or_else(|| invalid("Qwen3.5 MTP append prefill requires committed state"))?;
+        start.validate(committed.capacity)?;
+        let position = start.after_commit(chunk_tokens.len())?;
+        position.validate(committed.capacity)?;
+        self.copy_state(ctx, committed, shadow)?;
+
+        let token_values = chunk_tokens
+            .iter()
+            .map(|&token| {
+                i32::try_from(token)
+                    .map_err(|_| invalid(format!("Qwen3.5 MTP token {token} exceeds i32")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let position_values = (start.logical_position..position.logical_position)
+            .map(|position| {
+                i32::try_from(position)
+                    .map_err(|_| invalid("Qwen3.5 MTP append position exceeds i32"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let tokens = transfers::to_cuda(
+            &Tensor::from_i32(vec![chunk_tokens.len()], &token_values)?,
+            ctx.device_id(),
+        )?;
+        let positions = transfers::to_cuda(
+            &Tensor::from_i32(vec![chunk_tokens.len()], &position_values)?,
+            ctx.device_id(),
+        )?;
+
+        for row in 0..chunk_tokens.len() {
+            let base_hidden = if row == 0 {
+                previous_target_hidden.clone()
+            } else {
+                row_view(target_hidden, row - 1, HIDDEN)?
+            };
+            let token = element_view(&tokens, row)?;
+            let rope_position = element_view(&positions, row)?;
+            let geometry = self.geometry;
+            let eps = self.rms_norm_eps;
+            let theta = self.rope_theta;
+            let scratch = self.ensure_scratch(ctx)?;
+            forward_one(
+                ctx,
+                weights,
+                shadow,
+                scratch,
+                geometry,
+                eps,
+                theta,
+                &base_hidden,
+                &token,
+                &rope_position,
+                start.cache_rows + row,
+                0,
+                false,
+            )?;
         }
         ctx.synchronize().map_err(Error::Cuda)?;
         shadow.position = Some(position);
@@ -564,8 +693,9 @@ impl MtpBackend for Qwen35MtpRuntime {
 }
 
 /// Resolved serving policy admitted by the exact argmax MTP protocol.
-/// Sampling, filters, penalties and log-probability requests must use the base
-/// scalar generation path instead.
+/// Sampling, penalties and log-probability requests must use the base scalar
+/// generation path instead. Temperature/top-k/top-p do not alter an explicit
+/// greedy selection and therefore do not exclude the exact MTP path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MtpGreedyPolicy {
     pub max_new_tokens: usize,
@@ -577,24 +707,13 @@ impl MtpGreedyPolicy {
         let complete = GenerationOptions::apxinf_defaults().overlay(options);
         let greedy = complete.sampling_mode == Some(SamplingMode::Greedy)
             || complete.temperature == Some(0.0);
-        let neutral_temperature = complete
-            .temperature
-            .is_some_and(|value| value.is_finite() && (value == 0.0 || value == 1.0));
-        let neutral_top_k = complete.top_k.is_some_and(|value| value <= 0);
-        let neutral_top_p = complete.top_p == Some(1.0);
         let neutral_penalties = complete.repetition_penalty == Some(1.0)
             && complete.frequency_penalty == Some(0.0)
             && complete.presence_penalty == Some(0.0);
         let no_logprob = complete.return_logprob == Some(false);
-        if !greedy
-            || !neutral_temperature
-            || !neutral_top_k
-            || !neutral_top_p
-            || !neutral_penalties
-            || !no_logprob
-        {
+        if !greedy || !neutral_penalties || !no_logprob {
             return Err(invalid(
-                "Qwen3.5 MTP accepts only greedy generation without filters, penalties, or logprobs; use base scalar generation",
+                "Qwen3.5 MTP accepts only greedy generation without penalties or logprobs; use base scalar generation",
             ));
         }
         let max_new_tokens = complete
@@ -639,6 +758,17 @@ pub struct Qwen35MtpCoordinator<B: FullAttentionBackend, M: MtpBackend> {
     target_hidden: Option<Tensor>,
 }
 
+/// Device-resident checkpoint for an MTP-ready text prefix.
+///
+/// Target attention/GDN state and the draft layer's BF16 KV state are kept
+/// together so restoring a prefix cannot create target/draft position drift.
+pub struct Qwen35ContextSnapshot<C, S> {
+    target: Qwen35SessionSnapshot<C>,
+    mtp: S,
+    target_hidden: Option<Tensor>,
+    position: usize,
+}
+
 impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
     pub fn new(ctx: &CudaContext, target: Qwen35Session<B>, mut mtp: M) -> Result<Self> {
         let capacity = target.capacity();
@@ -669,6 +799,77 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
     /// again before drafting.
     pub fn target_mut(&mut self) -> &mut Qwen35Session<B> {
         &mut self.target
+    }
+
+    /// Allocate one reusable context checkpoint. No prefix is visible until a
+    /// successful [`Self::capture_context`] call publishes its position.
+    pub fn allocate_context_snapshot(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+        capacity: usize,
+    ) -> Result<Qwen35ContextSnapshot<B::Cache, M::State>> {
+        if capacity == 0 || capacity > self.target.capacity() {
+            return Err(invalid("Qwen3.5 context snapshot capacity is invalid"));
+        }
+        let target = self
+            .target
+            .allocate_snapshot(ctx, decoder, weights, capacity)?;
+        let mtp = self.mtp.allocate_state(ctx, capacity)?;
+        Ok(Qwen35ContextSnapshot {
+            target,
+            mtp,
+            target_hidden: None,
+            position: 0,
+        })
+    }
+
+    /// Save the currently committed prompt endpoint. Generation may continue
+    /// afterwards without mutating the checkpoint.
+    pub fn capture_context(
+        &mut self,
+        ctx: &CudaContext,
+        snapshot: &mut Qwen35ContextSnapshot<B::Cache, M::State>,
+    ) -> Result<()> {
+        let position = self.target.position();
+        let target_hidden = self
+            .target_hidden
+            .as_ref()
+            .ok_or_else(|| invalid("Qwen3.5 context capture requires MTP prefill state"))?
+            .clone();
+        self.target.capture_snapshot(ctx, &mut snapshot.target)?;
+        self.mtp
+            .copy_state(ctx, &self.committed_mtp, &mut snapshot.mtp)?;
+        ctx.synchronize().map_err(Error::Cuda)?;
+        snapshot.target_hidden = Some(target_hidden);
+        snapshot.position = position;
+        Ok(())
+    }
+
+    /// Restore a prior prompt endpoint and discard generation bookkeeping.
+    /// The caller must append at least one suffix token before starting a new
+    /// speculative schedule.
+    pub fn restore_context(
+        &mut self,
+        ctx: &CudaContext,
+        snapshot: &Qwen35ContextSnapshot<B::Cache, M::State>,
+    ) -> Result<()> {
+        if snapshot.position == 0 || snapshot.target_hidden.is_none() {
+            return Err(invalid("Qwen3.5 context snapshot is empty"));
+        }
+        self.target.restore_snapshot(ctx, &snapshot.target)?;
+        if self.target.position() != snapshot.position {
+            return Err(invalid("Qwen3.5 context snapshot position mismatch"));
+        }
+        self.mtp
+            .copy_state(ctx, &snapshot.mtp, &mut self.committed_mtp)?;
+        ctx.synchronize().map_err(Error::Cuda)?;
+        self.schedule = None;
+        self.policy = None;
+        self.pending = None;
+        self.target_hidden = snapshot.target_hidden.clone();
+        Ok(())
     }
 
     /// Clear target and both BF16 MTP cache banks and discard all generation
@@ -741,6 +942,64 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
 
         // Target publication validates before it swaps. MTP publication is an
         // infallible state swap, so neither tree can be left half-published.
+        let target = self.target.publish_target_prefill(prepared_target)?;
+        self.mtp
+            .publish_prefill(&mut self.committed_mtp, &mut self.shadow_mtp, prepared_mtp);
+        self.schedule = Some(schedule);
+        self.policy = Some(policy);
+        self.pending = Some(first_token);
+        self.target_hidden = Some(target_hidden);
+        Ok(MtpPrefillOutcome {
+            target,
+            first_token,
+        })
+    }
+
+    /// Extend an already prepared prompt with a true batched prefill chunk,
+    /// then restart speculative generation bookkeeping at the new end.
+    pub fn append_prefill_greedy(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+        chunk_tokens: &[TokenId],
+        options: &GenerationOptions,
+    ) -> Result<MtpPrefillOutcome> {
+        let policy = MtpGreedyPolicy::from_generation_options(options)?;
+        let previous_target_hidden = self
+            .target_hidden
+            .as_ref()
+            .ok_or_else(|| invalid("Qwen3.5 MTP append prefill requires prepared target state"))?
+            .clone();
+        let prepared_target =
+            self.target
+                .prepare_target_append_prefill(ctx, decoder, weights, chunk_tokens)?;
+        let target_hidden_rows = &prepared_target.output().hidden_states;
+        let prepared_mtp = self.mtp.prepare_append_prefill(
+            ctx,
+            weights,
+            &self.committed_mtp,
+            &mut self.shadow_mtp,
+            chunk_tokens,
+            &previous_target_hidden,
+            target_hidden_rows,
+        )?;
+        let target_hidden = prepared_target.output().last_hidden_state()?;
+        let first = prepared_target.output().greedy_token_ids(ctx)?;
+        let first_token = *first
+            .first()
+            .ok_or_else(|| invalid("Qwen3.5 target append prefill produced no token"))?;
+        let prompt_len = prepared_target.output().end_position;
+        let schedule = Qwen35MtpSchedule::new(
+            prompt_len,
+            prompt_len,
+            policy.max_new_tokens,
+            1,
+            policy.eos_token_ids.clone(),
+        )
+        .map_err(schedule_error)?;
+        ctx.synchronize().map_err(Error::Cuda)?;
+
         let target = self.target.publish_target_prefill(prepared_target)?;
         self.mtp
             .publish_prefill(&mut self.committed_mtp, &mut self.shadow_mtp, prepared_mtp);
@@ -1522,7 +1781,7 @@ mod tests {
     }
 
     #[test]
-    fn speculative_policy_admits_only_unmodified_greedy_argmax() {
+    fn speculative_policy_admits_greedy_argmax_with_ignored_sampling_filters() {
         let greedy = GenerationOptions::greedy(32, Some(7));
         assert_eq!(
             MtpGreedyPolicy::from_generation_options(&greedy).unwrap(),
@@ -1539,11 +1798,12 @@ mod tests {
 
         let mut non_neutral_temperature = greedy.clone();
         non_neutral_temperature.temperature = Some(0.7);
-        assert!(MtpGreedyPolicy::from_generation_options(&non_neutral_temperature).is_err());
+        assert!(MtpGreedyPolicy::from_generation_options(&non_neutral_temperature).is_ok());
 
         let mut filtered = greedy.clone();
         filtered.top_p = Some(0.9);
-        assert!(MtpGreedyPolicy::from_generation_options(&filtered).is_err());
+        filtered.top_k = Some(20);
+        assert!(MtpGreedyPolicy::from_generation_options(&filtered).is_ok());
 
         let mut penalized = greedy.clone();
         penalized.repetition_penalty = Some(1.1);

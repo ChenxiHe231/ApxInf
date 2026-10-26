@@ -21,6 +21,7 @@ pub struct GenerationProfile {
     excluded_time: Duration,
     input_tokens: usize,
     output_tokens: usize,
+    reused_input_tokens: usize,
 }
 
 impl GenerationProfile {
@@ -33,6 +34,7 @@ impl GenerationProfile {
             excluded_time: Duration::ZERO,
             input_tokens: 0,
             output_tokens: 0,
+            reused_input_tokens: 0,
         }
     }
 
@@ -45,9 +47,21 @@ impl GenerationProfile {
 
     /// Finalize the profile with token counts and record end time.
     pub fn finalize(&mut self, input_tokens: usize, output_tokens: usize) {
+        self.finalize_with_reuse(input_tokens, output_tokens, 0);
+    }
+
+    /// Finalize a generation and record how much of its logical input was
+    /// restored from a prior device-resident context checkpoint.
+    pub fn finalize_with_reuse(
+        &mut self,
+        input_tokens: usize,
+        output_tokens: usize,
+        reused_input_tokens: usize,
+    ) {
         self.end_time = Some(Instant::now());
         self.input_tokens = input_tokens;
         self.output_tokens = output_tokens;
+        self.reused_input_tokens = reused_input_tokens.min(input_tokens);
     }
 
     /// Run application-side work without charging it to engine latency.
@@ -118,6 +132,11 @@ impl GenerationProfile {
         self.output_tokens
     }
 
+    /// Number of logical prompt tokens restored rather than evaluated.
+    pub fn reused_input_tokens(&self) -> usize {
+        self.reused_input_tokens
+    }
+
     /// Format a human-readable summary of all metrics.
     pub fn summary(&self) -> String {
         let ttft = self.ttft_ms()
@@ -145,6 +164,7 @@ impl GenerationProfile {
         format!(
             "=== Generation Profile ===\n\
              Input tokens:     {}\n\
+             Reused input:     {}\n\
              Output tokens:    {}\n\
              TTFT:             {}\n\
              TPOT:             {}\n\
@@ -153,6 +173,7 @@ impl GenerationProfile {
              ========================="
             ,
             self.input_tokens,
+            self.reused_input_tokens,
             self.output_tokens,
             ttft,
             tpot,
@@ -182,6 +203,7 @@ mod tests {
             excluded_time: Duration::from_millis(20),
             input_tokens: 8,
             output_tokens: 3,
+            reused_input_tokens: 0,
         };
 
         assert_eq!(profile.ttft_ms(), Some(10.0));
