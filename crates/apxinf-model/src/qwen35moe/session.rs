@@ -957,20 +957,73 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             || verification.shadow_generation != self.shadow_generation
             || verification.start_position != self.position
             || verification.predictions.len() != verification.inputs.len()
-            || verification.final_output.rows != 1
-            || verification.final_output.hidden_rows != 1
-            || verification.final_output.start_position
-                != self
-                    .position
-                    .checked_add(verification.inputs.len().saturating_sub(1))
-                    .unwrap_or(usize::MAX)
+            // The verification forward runs every row with
+            // LogitsSelection::All / HiddenSelection::All, so it carries one
+            // logit and hidden row per verified token. It is
+            // `prepare_target_commit` that narrows it to the accepted row via
+            // `into_row`, and `publish_target_commit` that then requires
+            // rows == 1. Demanding a single row here described the old
+            // pre-`into_row` shape and rejected every well-formed four-row
+            // verification, which made --mode mtp unusable.
+            || verification.final_output.rows != verification.inputs.len()
+            || verification.final_output.hidden_rows != verification.inputs.len()
+            || verification.final_output.start_position != self.position
             || verification.final_output.end_position
                 != self
                     .position
                     .checked_add(verification.inputs.len())
                     .unwrap_or(usize::MAX)
         {
-            return Err(invalid("stale or malformed Qwen3.5 target verification"));
+            // One opaque message for eight different invariants made this
+            // impossible to act on, so name the one that actually tripped.
+            let expected_end = self
+                .position
+                .checked_add(verification.inputs.len())
+                .unwrap_or(usize::MAX);
+            let which = if verification.epoch != self.epoch {
+                format!("epoch {} != session {}", verification.epoch, self.epoch)
+            } else if verification.shadow_generation != self.shadow_generation {
+                format!(
+                    "shadow_generation {} != session {}",
+                    verification.shadow_generation, self.shadow_generation
+                )
+            } else if verification.start_position != self.position {
+                format!(
+                    "start_position {} != session position {}",
+                    verification.start_position, self.position
+                )
+            } else if verification.predictions.len() != verification.inputs.len() {
+                format!(
+                    "predictions {} != inputs {}",
+                    verification.predictions.len(),
+                    verification.inputs.len()
+                )
+            } else if verification.final_output.rows != verification.inputs.len() {
+                format!(
+                    "final_output.rows {} != inputs {}",
+                    verification.final_output.rows,
+                    verification.inputs.len()
+                )
+            } else if verification.final_output.hidden_rows != verification.inputs.len() {
+                format!(
+                    "final_output.hidden_rows {} != inputs {}",
+                    verification.final_output.hidden_rows,
+                    verification.inputs.len()
+                )
+            } else if verification.final_output.start_position != self.position {
+                format!(
+                    "final_output.start_position {} != session position {}",
+                    verification.final_output.start_position, self.position
+                )
+            } else {
+                format!(
+                    "final_output.end_position {} != expected {expected_end}",
+                    verification.final_output.end_position
+                )
+            };
+            return Err(invalid(format!(
+                "stale or malformed Qwen3.5 target verification: {which}"
+            )));
         }
         Ok(())
     }
