@@ -436,7 +436,7 @@ fn forward_device(
         &weights.patch_b,
         &mut current,
     )?;
-    ops::mlp::add_into(ctx, &scratch.pos_embeds, &current)?;
+    ops::add_into(ctx, &scratch.pos_embeds, &current)?;
     dump_vision_stage("00_patch_position", &current)?;
     layer_norm_into(
         ctx,
