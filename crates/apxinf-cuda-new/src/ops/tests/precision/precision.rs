@@ -270,21 +270,36 @@ fn attention_f16_language_mqa_uses_fa2() {
 #[test]
 fn attention_f16_action_cache_uses_fa2() {
     let ctx = CudaContext::new(0).unwrap();
-    let (batch, query_tokens, key_tokens, query_heads, kv_heads, head_dim) =
-        (1, 10, 532, 8, 1, 256);
+    let (batch, query_tokens, key_tokens, key_capacity, query_heads, kv_heads, head_dim) =
+        (1, 10, 532, 640, 8, 1, 256);
     let query_shape = vec![batch, query_tokens, query_heads, head_dim];
-    let cache_shape = vec![batch, key_tokens, kv_heads, head_dim];
+    let cache_shape = vec![batch, key_capacity, kv_heads, head_dim];
     let query = zeros_tensor(0, query_shape.clone(), DType::F16);
     let key = zeros_tensor(0, cache_shape.clone(), DType::F16);
-    let value = zeros_tensor(0, cache_shape, DType::F16);
-    let mut out = zeros_tensor(0, query_shape, DType::F16);
+    let value = f16_tensor(
+        0,
+        cache_shape.clone(),
+        &vec![1.0; batch * key_capacity * kv_heads * head_dim],
+    );
+    let mut out = zeros_tensor(0, query_shape.clone(), DType::F16);
     let mut args = KvCacheAttentionArgs::new(&query, &key, &value, &mut out).non_causal();
+    args.valid_key_tokens = key_tokens;
     args.policy.allow_fallback = false;
     let normalized = super::normalize_kv_cache_attention(&ctx, args).unwrap();
+    super::attention_execution::validate_candidates(
+        &ctx,
+        &normalized,
+        &vec![1.0; batch * query_tokens * query_heads * head_dim],
+    )
+    .unwrap();
     let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
     assert!(
-        execution.summary().starts_with("flash-attention-2-split-kv ")
-            || execution.summary().starts_with("flash-attention-2-kv-cache "),
+        execution
+            .summary()
+            .starts_with("flash-attention-2-split-kv ")
+            || execution
+                .summary()
+                .starts_with("flash-attention-2-kv-cache "),
         "unexpected F16 action KV-cache provider: {}",
         execution.summary()
     );

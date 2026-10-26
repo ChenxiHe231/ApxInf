@@ -33,7 +33,8 @@ CublasState& provider(Execution& state) {
 }
 
 bool needs_safe_dequantization(const Spec& spec) {
-  return spec.quantization == APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL;
+  return spec.quantization == APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL &&
+         spec.b_layout == APXINF_GEMM_LAYOUT_KN;
 }
 
 cudaDataType_t input_cuda_dtype(uint32_t dtype) {
@@ -163,17 +164,22 @@ cudaError_t launch_cublas(Execution& state) {
   check_cublas(cublasSetStream(resources.handle, stream));
   check_cublas(cublasSetWorkspace(resources.handle, resources.workspace,
                                   resources.workspace_bytes));
+  const bool output_major_w8a8 =
+      compute_spec.quantization == APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL &&
+      compute_spec.b_layout == APXINF_GEMM_LAYOUT_NK;
   check_cublas(cublasGemmEx(
-      resources.handle, CUBLAS_OP_N, CUBLAS_OP_N, compute_spec.n,
-      compute_spec.m, compute_spec.k,
+      resources.handle,
+      output_major_w8a8 ? CUBLAS_OP_T : CUBLAS_OP_N,
+      CUBLAS_OP_N, compute_spec.n, compute_spec.m, compute_spec.k,
       alpha_pointer, weight,
       compute_spec.a_dtype == APXINF_DTYPE_I8 ? CUDA_R_8I : input_type,
-      compute_spec.n, activation,
+      output_major_w8a8 ? compute_spec.k : compute_spec.n, activation,
       compute_spec.a_dtype == APXINF_DTYPE_I8 ? CUDA_R_8I : input_type,
       compute_spec.k, beta_pointer, projection, data_type, compute_spec.n,
       compute_spec.a_dtype == APXINF_DTYPE_I8 ? CUBLAS_COMPUTE_32I
                                               : CUBLAS_COMPUTE_32F,
-      CUBLAS_GEMM_DEFAULT));
+      output_major_w8a8 ? CUBLAS_GEMM_DEFAULT_TENSOR_OP
+                        : CUBLAS_GEMM_DEFAULT));
   return vendor::launch_postprocess(compute_spec, resources.common, bindings,
                                     projection);
 }

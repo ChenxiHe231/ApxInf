@@ -26,7 +26,7 @@ fn write_arch_header(out: &Path, selection: &ArchSelection) -> PathBuf {
          constexpr uint64_t kDeviceFeatureFa2 = UINT64_C(1) << 2;\n\
          constexpr uint64_t kDeviceFeatureCutlassSm89Bf16Geglu = UINT64_C(1) << 3;\n\
          constexpr uint64_t kDeviceFeatureCutlassSm87W8A8 = UINT64_C(1) << 4;\n\
-         constexpr uint64_t kDeviceFeatureQwenDriveSm110 = UINT64_C(1) << 5;\n\
+         constexpr uint64_t kDeviceFeatureFixedSm110 = UINT64_C(1) << 5;\n\
          struct CompiledTarget { int sm; uint64_t features; };\n\
          constexpr CompiledTarget kCompiledTargets[] = {\n",
     );
@@ -341,47 +341,63 @@ fn main() {
         "attention/tuning_key.cpp",
         "attention/autotune.cpp",
         "attention/execution.cpp",
+        "attention/gates.cpp",
         "attention/providers/custom.cu",
-        "elementwise/execution.cpp",
         "elementwise/ops.cpp",
         "cache/ops.cpp",
         "quant_fused/ops.cpp",
         "attention/multimodal.cpp",
         "activation/fixed_bf16.cu",
+        "activation/fixed_decode.cu",
         "activation/fixed_f16.cu",
-        "activation/fixed_hybrid_bf16.cu",
+        "activation/fixed_swiglu_bf16.cu",
         "attention/fixed_bf16.cu",
+        "attention/fixed_decode.cu",
         "attention/fixed_f16.cu",
+        "cache/fixed_decode.cu",
         "elementwise/fixed_bf16.cu",
+        "elementwise/fixed_decode.cu",
         "elementwise/fixed_f16.cu",
-        "elementwise/fixed_hybrid.cu",
+        "attention/planning_bf16.cu",
         "embedding/fixed_bf16.cu",
-        "gemm/fixed_w8a8.cu",
-        "linear_attention/fixed_gdn.cu",
+        "embedding/fixed_decode.cu",
+        "gemm/fixed_w8a8_bias_gelu.cu",
+        "gemm/gemv.cpp",
+        "gdn/fixed.cu",
         "norm/fixed_bf16.cu",
+        "norm/fixed_decode.cu",
         "norm/fixed_f16.cu",
-        "norm/fixed_hybrid_bf16.cu",
+        "norm/fixed_gated_bf16.cu",
         "norm/fused_bf16.cu",
+        "norm/direct.cpp",
         "preprocess/fixed_bf16.cu",
         "preprocess/fixed_f16.cu",
+        "preprocess/planning_bf16.cu",
         "quantization/fixed_bf16.cu",
+        "quantization/per_tensor.cpp",
         "rope/fixed_bf16.cu",
+        "rope/fixed_decode.cu",
         "rope/fixed_f16.cu",
-        "llm_decode/ops.cu",
+        "rope/partial.cpp",
         "preprocess/ops.cpp",
-        "linear_attention/execution.cpp",
-        "attn_helpers/execution.cpp",
-        "reduction/execution.cpp",
-        "sampling.cu",
-        "norm.cu",
-        "pointwise.cu",
-        "rope.cu",
-        "gather.cu",
-        "quantization.cu",
+        "gdn/execution.cpp",
+        "pointwise/elementwise.cpp",
+        "gather/embedding.cpp",
+        "sampling/argmax.cpp",
+        "sampling/suppress_bf16.cu",
+        "sampling/launch.cu",
+        "norm/launch.cu",
+        "pointwise/launch.cu",
+        "rope/launch.cu",
+        "gather/launch.cu",
+        "quantization/launch.cu",
     ]
     .map(|source| adapters.join(source))
     .to_vec();
-    generic_sources.push(native.join("kernels/custom/mlp_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/norm_weight_offset.cu"));
+    generic_sources.push(native.join("kernels/custom/pointwise_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/quantization_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/gemv.cu"));
     generic_sources.push(native.join("kernels/custom/elementwise_ops.cu"));
     generic_sources.push(native.join("kernels/custom/cache_ops.cu"));
     generic_sources.push(native.join("kernels/custom/quant_ops.cu"));
@@ -389,8 +405,11 @@ fn main() {
     generic_sources.push(native.join("kernels/custom/preprocess_ops.cu"));
     generic_sources.push(native.join("kernels/custom/gdn_ops.cu"));
     generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_tma.cpp"));
-    generic_sources.push(native.join("kernels/custom/attn_ops.cu"));
-    generic_sources.push(native.join("kernels/custom/model_ops.cu"));
+    generic_sources.push(native.join("kernels/custom/rope_partial.cu"));
+    generic_sources.push(native.join("kernels/custom/norm_head.cu"));
+    generic_sources.push(native.join("kernels/custom/attention_gates.cu"));
+    generic_sources.push(native.join("kernels/custom/gather_embedding.cu"));
+    generic_sources.push(native.join("kernels/custom/sampling_argmax.cu"));
     generic_sources.push(native.join("tests/framework_backend.cu"));
     let cutlass_root = native.join("kernels/cutlass");
     let fa2_root = native.join("kernels/fa2");
@@ -448,7 +467,7 @@ fn main() {
             sm110_sources.extend([
                 native.join("adapters/attention/providers/segmented_sm110.cu"),
                 native.join("kernels/custom/gdn_bf16_prefill_prologue.cu"),
-                native.join("adapters/linear_attention/providers/gdn_bf16_prefill_sm110.cu"),
+                native.join("adapters/gdn/providers/bf16_prefill_sm110.cu"),
                 native.join("kernels/flashinfer_gdn/gdn_bf16_prefill_sm110_launch.cu"),
             ]);
         }

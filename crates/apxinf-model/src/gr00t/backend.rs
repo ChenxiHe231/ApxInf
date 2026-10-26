@@ -48,56 +48,12 @@ pub(super) fn try_packed8_bias_activation(
     ) {
         return Ok(None);
     }
-    ops::activation::try_bias_activation_bf16_packed8(
-        backend.context(),
-        input,
-        bias,
-        activation,
-    )
-}
-
-pub(super) const fn qk_rms_mrope_block_threads(
-    sm: u32,
-    seq_len: usize,
-    head_dim: usize,
-    query_heads: usize,
-    key_heads: usize,
-    legacy_threads: bool,
-) -> u32 {
-    let measured_arch_shape =
-        (sm == 110 && (seq_len == 90 || seq_len == 156)) || (sm == 87 && seq_len == 156);
-    if !legacy_threads
-        && measured_arch_shape
-        && head_dim == 128
-        && query_heads == 16
-        && key_heads == 8
-    {
-        128
-    } else {
-        256
-    }
+    ops::activation::try_bias_activation_bf16_packed8(backend.context(), input, bias, activation)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{qk_rms_mrope_block_threads as threads, use_packed8_bias_activation};
-
-    #[test]
-    fn qk_rms_mrope_threads_preserve_per_architecture_shapes() {
-        for (sm, seq_len, expected) in [
-            (110, 90, 128),
-            (110, 156, 128),
-            (87, 90, 256),
-            (87, 156, 128),
-            (89, 156, 256),
-        ] {
-            assert_eq!(threads(sm, seq_len, 128, 16, 8, false), expected);
-            assert_eq!(threads(sm, seq_len, 128, 16, 8, true), 256);
-        }
-        assert_eq!(threads(110, 41, 128, 16, 8, false), 256);
-        assert_eq!(threads(110, 90, 64, 16, 8, false), 256);
-        assert_eq!(threads(87, 156, 128, 8, 8, false), 256);
-    }
+    use super::use_packed8_bias_activation;
 
     #[test]
     fn packed8_policy_keeps_measured_shapes_and_legacy_opt_out() {

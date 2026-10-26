@@ -16,14 +16,14 @@ fn invalid(message: &str) -> Error {
 /// ported smolvla launcher (the Xavier FP16 path).
 pub fn add(ctx: &CudaContext, a: &Tensor, b: &Tensor) -> Result<Tensor> {
     if a.dtype() == DType::F16 {
+        use crate::ffi::abi::elementwise as abi;
         use crate::ops::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
-        use crate::ffi::abi::transformer_f16 as abi;
         if b.dtype() != DType::F16 || b.shape() != a.shape() {
             return Err(invalid("FP16 add requires matching FP16 tensors"));
         }
         let output = crate::workspace::output_buffer(ctx, a.size_in_bytes())?;
         unsafe {
-            check_cuda(abi::apxinf_transformer_f16_add_f16(
+            check_cuda(abi::apxinf_elementwise_add_f16(
                 gpu_ptr(a)?,
                 gpu_ptr(b)?,
                 output.ptr(),
@@ -49,14 +49,14 @@ pub fn add(ctx: &CudaContext, a: &Tensor, b: &Tensor) -> Result<Tensor> {
 /// takes the ported smolvla launcher (the Xavier FP16 path).
 pub fn scale(ctx: &CudaContext, input: &Tensor, factor: f32) -> Result<Tensor> {
     if input.dtype() == DType::F16 {
+        use crate::ffi::abi::elementwise as abi;
         use crate::ops::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
-        use crate::ffi::abi::transformer_f16 as abi;
         if !factor.is_finite() {
             return Err(invalid("scale factor must be finite"));
         }
         let output = crate::workspace::output_buffer(ctx, input.size_in_bytes())?;
         unsafe {
-            check_cuda(abi::apxinf_transformer_f16_scale_f16(
+            check_cuda(abi::apxinf_elementwise_scale_f16(
                 gpu_ptr(input)?,
                 output.ptr(),
                 u32::try_from(input.numel())
@@ -298,7 +298,7 @@ pub fn scatter_rows_bf16_prepared(
     source: &Tensor,
     add: bool,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::transformer_bf16;
+    use crate::ffi::abi::elementwise;
     use crate::ffi::raw::cuda_runtime as raw;
     let (destination_rows, columns) =
         matrix_shape(destination, "prepared row scatter destination")?;
@@ -342,7 +342,7 @@ pub fn scatter_rows_bf16_prepared(
             ctx.stream().handle(),
         ))
         .map_err(Error::Cuda)?;
-        raw::check_cuda(transformer_bf16::apxinf_transformer_bf16_scatter_rows_bf16(
+        raw::check_cuda(elementwise::apxinf_elementwise_scatter_rows_bf16(
             source_buffer.ptr(),
             indices.buffer.ptr(),
             output.ptr(),
@@ -462,7 +462,7 @@ pub fn bias_qkv_in_place_bf16(
     key_bias: &Tensor,
     value_bias: &Tensor,
 ) -> Result<(Tensor, Tensor, Tensor)> {
-    use crate::ffi::abi::transformer_bf16;
+    use crate::ffi::abi::elementwise;
     use crate::ffi::raw::cuda_runtime as raw;
     let (rows, cols) = matrix_shape(&query, "fused QKV bias")?;
     let expected_device = Device::Cuda(ctx.device_id());
@@ -506,7 +506,7 @@ pub fn bias_qkv_in_place_bf16(
     let key_bias_buffer = CudaBuffer::from_tensor(key_bias).map_err(Error::Cuda)?;
     let value_bias_buffer = CudaBuffer::from_tensor(value_bias).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(transformer_bf16::apxinf_transformer_bf16_bias_qkv_in_place_bf16(
+        raw::check_cuda(elementwise::apxinf_elementwise_bias_qkv_in_place_bf16(
             query_buffer.ptr(),
             key_buffer.ptr(),
             value_buffer.ptr(),
@@ -525,12 +525,12 @@ pub fn bias_qkv_in_place_bf16(
 // ── smolvla FP16 surface ────────────────────────────────────────────────────
 //
 // Ported verbatim from the legacy FP16 elementwise wrappers over
-// the `apxinf_transformer_f16_*` launchers (native/adapters/elementwise/fixed_f16.cu).
+// the `family-specific FP16` launchers (native/adapters/elementwise/fixed_f16.cu).
 
 /// `bias_f16`: broadcast-add an optional `[cols]` FP16 bias over rows.
 pub fn bias_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+    use crate::ffi::abi::elementwise as abi;
     use crate::ops::validation::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, optional_ptr};
-    use crate::ffi::abi::transformer_f16 as abi;
     let (rows, cols) = matrix_shape(input, "bias")?;
     if input.dtype() != DType::F16
         || bias.is_some_and(|x| x.dtype() != DType::F16 || x.shape().dims() != [cols])
@@ -541,7 +541,7 @@ pub fn bias_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Res
     }
     let output = f16_output(ctx, rows, cols)?;
     unsafe {
-        check_cuda(abi::apxinf_transformer_f16_bias_f16(
+        check_cuda(abi::apxinf_elementwise_bias_f16(
             gpu_ptr(input)?,
             optional_ptr(bias)?,
             output.ptr(),
@@ -641,8 +641,8 @@ pub fn euler_update_f16(
     velocity: &Tensor,
     dt: f32,
 ) -> Result<Tensor> {
+    use crate::ffi::abi::elementwise as abi;
     use crate::ops::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
-    use crate::ffi::abi::transformer_f16 as abi;
     if state.dtype() != DType::F16
         || velocity.dtype() != DType::F16
         || state.shape() != velocity.shape()
@@ -653,7 +653,7 @@ pub fn euler_update_f16(
     }
     let output = crate::workspace::output_buffer(ctx, state.size_in_bytes())?;
     unsafe {
-        check_cuda(abi::apxinf_transformer_f16_euler_update_f16(
+        check_cuda(abi::apxinf_elementwise_euler_update_f16(
             gpu_ptr(state)?,
             gpu_ptr(velocity)?,
             output.ptr(),
@@ -681,8 +681,8 @@ pub fn add_into(
     output: &CudaBuffer,
     count: usize,
 ) -> Result<()> {
+    use crate::ffi::abi::elementwise as llmdec;
     use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
-    use crate::ffi::abi::llm_decode as llmdec;
     let bytes = checked_bytes(dtype, &[count], "decode add")?;
     require_buffers(
         ctx,
@@ -691,14 +691,14 @@ pub fn add_into(
     )?;
     let status = unsafe {
         match dtype {
-            DType::F32 => llmdec::apxinf_llmdec_add_f32(
+            DType::F32 => llmdec::apxinf_elementwise_fixed_decode_add_f32(
                 a.ptr(),
                 b.ptr(),
                 output.ptr(),
                 count as u32,
                 ctx.stream().handle(),
             ),
-            DType::BF16 => llmdec::apxinf_llmdec_add_bf16(
+            DType::BF16 => llmdec::apxinf_elementwise_fixed_decode_add_bf16(
                 a.ptr(),
                 b.ptr(),
                 output.ptr(),
@@ -720,8 +720,8 @@ pub fn mul_into(
     output: &CudaBuffer,
     count: usize,
 ) -> Result<()> {
+    use crate::ffi::abi::elementwise as llmdec;
     use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
-    use crate::ffi::abi::llm_decode as llmdec;
     let bytes = checked_bytes(dtype, &[count], "decode multiply")?;
     require_buffers(
         ctx,
@@ -730,14 +730,14 @@ pub fn mul_into(
     )?;
     let status = unsafe {
         match dtype {
-            DType::F32 => llmdec::apxinf_llmdec_mul_f32(
+            DType::F32 => llmdec::apxinf_elementwise_fixed_decode_mul_f32(
                 a.ptr(),
                 b.ptr(),
                 output.ptr(),
                 count as u32,
                 ctx.stream().handle(),
             ),
-            DType::BF16 => llmdec::apxinf_llmdec_mul_bf16(
+            DType::BF16 => llmdec::apxinf_elementwise_fixed_decode_mul_bf16(
                 a.ptr(),
                 b.ptr(),
                 output.ptr(),

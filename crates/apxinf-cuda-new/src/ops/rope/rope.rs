@@ -15,7 +15,9 @@ fn bf16_rank3_storage(ctx: &CudaContext, tensor: &Tensor, what: &str) -> Result<
         return Err(Error::Other(format!("{what} requires a BF16 CUDA tensor")));
     }
     if tensor.shape().dims().len() != 3 {
-        return Err(Error::Other(format!("{what} requires a [seq, heads, dim] tensor")));
+        return Err(Error::Other(format!(
+            "{what} requires a [seq, heads, dim] tensor"
+        )));
     }
     CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)
 }
@@ -23,9 +25,9 @@ fn bf16_rank3_storage(ctx: &CudaContext, tensor: &Tensor, what: &str) -> Result<
 fn upload_u32(ctx: &CudaContext, values: &[u32], what: &str) -> Result<CudaBuffer> {
     let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
     let buffer = CudaBuffer::alloc(bytes.len(), ctx.device_id()).map_err(Error::Cuda)?;
-    buffer.copy_from_host(&bytes).map_err(|error| {
-        Error::Other(format!("{what}: upload position ids failed: {error}"))
-    })?;
+    buffer
+        .copy_from_host(&bytes)
+        .map_err(|error| Error::Other(format!("{what}: upload position ids failed: {error}")))?;
     Ok(buffer)
 }
 
@@ -49,14 +51,19 @@ pub fn apply_batched(
     }
     let seq_len = dims[0];
     if head_dim == 0 || head_dim % 2 != 0 || n_heads == 0 || seq_len == 0 {
-        return Err(Error::Other("batched RoPE requires even non-zero dims".into()));
+        return Err(Error::Other(
+            "batched RoPE requires even non-zero dims".into(),
+        ));
     }
     let output = ctx.allocate_output(input.shape().clone(), DType::BF16)?;
     let input_buffer = bf16_rank3_storage(ctx, input, "batched RoPE")?;
     let output_buffer = bf16_rank3_storage(ctx, &output, "batched RoPE")?;
-    let n_heads = i32::try_from(n_heads).map_err(|_| Error::Other("RoPE heads exceed i32".into()))?;
-    let head_dim = i32::try_from(head_dim).map_err(|_| Error::Other("RoPE dim exceeds i32".into()))?;
-    let seq_len = i32::try_from(seq_len).map_err(|_| Error::Other("RoPE seq exceeds i32".into()))?;
+    let n_heads =
+        i32::try_from(n_heads).map_err(|_| Error::Other("RoPE heads exceed i32".into()))?;
+    let head_dim =
+        i32::try_from(head_dim).map_err(|_| Error::Other("RoPE dim exceeds i32".into()))?;
+    let seq_len =
+        i32::try_from(seq_len).map_err(|_| Error::Other("RoPE seq exceeds i32".into()))?;
     let pos_offset =
         i32::try_from(pos_offset).map_err(|_| Error::Other("RoPE offset exceeds i32".into()))?;
     unsafe {
@@ -87,7 +94,9 @@ pub fn apply_mrope(
 ) -> Result<Tensor> {
     let dims = input.shape().dims();
     if dims.len() != 3 || dims[1] != n_heads || dims[2] != head_dim {
-        return Err(Error::Other("mRoPE requires a [seq, heads, dim] tensor".into()));
+        return Err(Error::Other(
+            "mRoPE requires a [seq, heads, dim] tensor".into(),
+        ));
     }
     let seq_len = dims[0];
     if pos_ids.len() != seq_len * 3 {
@@ -101,11 +110,16 @@ pub fn apply_mrope(
     let input_buffer = bf16_rank3_storage(ctx, input, "mRoPE")?;
     let output_buffer = bf16_rank3_storage(ctx, &output, "mRoPE")?;
     let ids = upload_u32(ctx, pos_ids, "mRoPE")?;
-    let n_heads = i32::try_from(n_heads).map_err(|_| Error::Other("mRoPE heads exceed i32".into()))?;
-    let head_dim = i32::try_from(head_dim).map_err(|_| Error::Other("mRoPE dim exceeds i32".into()))?;
-    let seq_len = i32::try_from(seq_len).map_err(|_| Error::Other("mRoPE seq exceeds i32".into()))?;
-    let sec_h = i32::try_from(sections[1]).map_err(|_| Error::Other("mRoPE section exceeds i32".into()))?;
-    let sec_w = i32::try_from(sections[2]).map_err(|_| Error::Other("mRoPE section exceeds i32".into()))?;
+    let n_heads =
+        i32::try_from(n_heads).map_err(|_| Error::Other("mRoPE heads exceed i32".into()))?;
+    let head_dim =
+        i32::try_from(head_dim).map_err(|_| Error::Other("mRoPE dim exceeds i32".into()))?;
+    let seq_len =
+        i32::try_from(seq_len).map_err(|_| Error::Other("mRoPE seq exceeds i32".into()))?;
+    let sec_h =
+        i32::try_from(sections[1]).map_err(|_| Error::Other("mRoPE section exceeds i32".into()))?;
+    let sec_w =
+        i32::try_from(sections[2]).map_err(|_| Error::Other("mRoPE section exceeds i32".into()))?;
     unsafe {
         status::check(abi::apxinf_rope_apply_mrope_bf16(
             input_buffer.ptr(),
@@ -171,4 +185,3 @@ pub fn apply_vision_2d(
     }
     Ok(output)
 }
-

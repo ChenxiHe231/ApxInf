@@ -31,13 +31,14 @@ void validate_recorded_alignment(const void* pointer, uint32_t alignment,
 }
 
 void validate_spec(const apxinf::gemm::Spec& spec) {
-  if (spec.version != 6 ||
+  if (spec.version != 7 ||
       spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256 ||
       spec.a_dtype > APXINF_DTYPE_E2M1_PAIR ||
       spec.b_dtype > APXINF_DTYPE_E2M1_PAIR ||
       spec.accumulation_dtype > APXINF_DTYPE_I32 ||
       spec.output_dtype > APXINF_DTYPE_E4M3 ||
-      spec.quantization > APXINF_GEMM_QUANT_NVFP4_BLOCK || spec.m <= 0 ||
+      spec.quantization > APXINF_GEMM_QUANT_NVFP4_BLOCK ||
+      spec.b_layout > APXINF_GEMM_LAYOUT_NK || spec.m <= 0 ||
       spec.n <= 0 || spec.k <= 0 || spec.m > INT32_MAX ||
       spec.n > INT32_MAX || spec.k > INT32_MAX ||
       spec.alpha_is_unit > 1 || spec.output_scale_is_unit > 1 ||
@@ -72,6 +73,12 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
         spec.semantic != APXINF_GEMM_SEMANTIC_GEMM_BIAS))) {
     throw Failure(APXINF_STATUS_UNSUPPORTED, "invalid INT8 GEMM contract");
   }
+  if (spec.b_layout == APXINF_GEMM_LAYOUT_NK &&
+      spec.quantization != APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL &&
+      spec.quantization != APXINF_GEMM_QUANT_NVFP4_BLOCK) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "output-major B is supported only by W8A8 and NVFP4");
+  }
   if (spec.a_dtype != APXINF_DTYPE_I8 &&
       spec.accumulation_dtype != APXINF_DTYPE_F32) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
@@ -95,7 +102,8 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
   if (spec.quantization == APXINF_GEMM_QUANT_NVFP4_BLOCK) {
     if (spec.a_dtype != APXINF_DTYPE_E2M1_PAIR ||
         spec.b_dtype != APXINF_DTYPE_E2M1_PAIR ||
-        spec.semantic != APXINF_GEMM_SEMANTIC_GEMM) {
+        spec.semantic != APXINF_GEMM_SEMANTIC_GEMM ||
+        spec.b_layout != APXINF_GEMM_LAYOUT_NK) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "NVFP4 quantization requires two packed E2M1 inputs");
     }

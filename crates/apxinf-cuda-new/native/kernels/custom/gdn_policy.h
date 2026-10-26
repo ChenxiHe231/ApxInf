@@ -1,11 +1,10 @@
 // Copyright 2026 apxinf contributors.
-// Launch constants for the gated-delta-net kernels, chosen on the Rust side.
+// Native launch policy for the gated-delta-net fixed candidates.
 //
 // Every field here was swept on a board and came out different on the next
-// one, so none of them is a portable constant and none of them belongs in the
-// adapter. `crates/apxinf-cuda/src/kernels/gdn_policy.rs` holds the table and
-// the environment overrides; this is the same struct seen from the other side
-// of the ABI. Keep the field order identical.
+// one, so none of them is a portable semantic parameter. The native adapter
+// selects this policy during explicit per-device preparation; Rust L3 and the
+// public ABI do not expose these fields.
 #pragma once
 
 #include <cstdint>

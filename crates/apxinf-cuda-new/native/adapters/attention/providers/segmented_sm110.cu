@@ -41,71 +41,7 @@ constexpr int kKvBatchRows = 1718;
 constexpr int kQueryWords = kQueryTokens * kQueryHeads * kDim;
 constexpr int kMergeRows = kQueryTokens * kQueryHeads;
 
-__global__ void duplicate_q_vec8(const uint4* source, uint4* destination) {
-  constexpr int vectors = kQueryWords / 8;
-  int index = int(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index < vectors) {
-    uint4 value = source[index];
-    destination[index] = value;
-    destination[index + vectors] = value;
-  }
-}
-
-__global__ void repack_lse(const float* native_lse, float* dense_lse) {
-  int index = int(blockIdx.x) * blockDim.x + threadIdx.x;
-  if (index >= kBatch * kMergeRows) return;
-  int batch = index / kMergeRows;
-  int row = index % kMergeRows;
-  int query_head = row / kQueryTokens;
-  int token = row % kQueryTokens;
-  constexpr int rounded_query = 256;
-  int kv_head = query_head / 4;
-  int lane = query_head % 4;
-  dense_lse[index] = native_lse[
-      batch * kKvHeads * rounded_query + kv_head * rounded_query +
-      token * 4 + lane];
-}
-
-union Bf16x8 {
-  uint4 vector;
-  uint16_t words[8];
-};
-
-__global__ void merge_partial_vec8(const uint4* partial, const float* lse,
-                                   uint4* output) {
-  constexpr int vectors_per_row = kDim / 8;
-  constexpr int vectors_per_batch = kQueryWords / 8;
-  int warp = (int(blockIdx.x) * blockDim.x + threadIdx.x) / 32;
-  if (warp >= kMergeRows) return;
-  int lane = threadIdx.x & 31;
-  int token = warp / kQueryHeads;
-  int head = warp % kQueryHeads;
-  int lse_index = head * kQueryTokens + token;
-  float weight0 = 0.0f, weight1 = 0.0f, sum = 0.0f;
-  if (lane == 0) {
-    float first = lse[lse_index];
-    float second = lse[kMergeRows + lse_index];
-    float maximum = fmaxf(first, second);
-    weight0 = expf(first - maximum);
-    weight1 = expf(second - maximum);
-    sum = weight0 + weight1;
-  }
-  weight0 = __shfl_sync(0xffffffff, weight0, 0);
-  weight1 = __shfl_sync(0xffffffff, weight1, 0);
-  sum = __shfl_sync(0xffffffff, sum, 0);
-  int vector = warp * vectors_per_row + lane;
-  Bf16x8 first{}, second{}, result{};
-  first.vector = partial[vector];
-  second.vector = partial[vectors_per_batch + vector];
-#pragma unroll
-  for (int i = 0; i < 8; ++i) {
-    float a = __bfloat162float(__ushort_as_bfloat16(first.words[i]));
-    float b = __bfloat162float(__ushort_as_bfloat16(second.words[i]));
-    result.words[i] = __bfloat16_as_ushort(
-        __float2bfloat16_rn((weight0 * a + weight1 * b) / sum));
-  }
-  output[vector] = result.vector;
-}
+#include "../../../kernels/attention/segmented_sm110_glue.cuh"
 
 struct CandidateCausalState {
   void* kernel = nullptr;
@@ -168,17 +104,17 @@ int launch_vision_group_with_state(int group, const void* q, const void* k,
 
 namespace apxinf::attention {
 
-size_t qwen_d256_causal_resource_requirements(const Spec&, int) {
+size_t d256_causal_sm110_resource_requirements(const Spec&, int) {
   return apxinf_attention_d256_causal_state_size();
 }
 
-void prepare_qwen_d256_causal(Execution& execution) {
+void prepare_d256_causal_sm110(Execution& execution) {
   auto state = std::make_unique<CandidateCausalState>();
   state->kernel =
       std::calloc(1, apxinf_attention_d256_causal_state_size());
   if (state->kernel == nullptr) {
     throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                  "Qwen D256 causal state allocation failed");
+                  "D256 causal state allocation failed");
   }
   const int status = apxinf_attention_d256_causal_forward(
       execution.bindings.query, execution.bindings.key,
@@ -190,14 +126,14 @@ void prepare_qwen_d256_causal(Execution& execution) {
   if (status != 0) {
     std::free(state->kernel);
     throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                  "Qwen D256 causal preparation failed with status " +
+                  "D256 causal preparation failed with status " +
                       std::to_string(status));
   }
   execution.resource_bytes = apxinf_attention_d256_causal_state_size();
   execution.provider_state = state.release();
 }
 
-cudaError_t launch_qwen_d256_causal(Execution& execution) {
+cudaError_t launch_d256_causal_sm110(Execution& execution) {
   auto* state = static_cast<CandidateCausalState*>(execution.provider_state);
   const int status = apxinf_attention_d256_causal_forward(
       execution.bindings.query, execution.bindings.key,
@@ -209,7 +145,7 @@ cudaError_t launch_qwen_d256_causal(Execution& execution) {
   return status == 0 ? cudaGetLastError() : cudaErrorUnknown;
 }
 
-void destroy_qwen_d256_causal(Execution& execution) noexcept {
+void destroy_d256_causal_sm110(Execution& execution) noexcept {
   auto* state = static_cast<CandidateCausalState*>(execution.provider_state);
   if (state == nullptr) return;
   std::free(state->kernel);
@@ -217,7 +153,7 @@ void destroy_qwen_d256_causal(Execution& execution) noexcept {
   execution.provider_state = nullptr;
 }
 
-size_t qwen_d256_split_resource_requirements(const Spec&, int) {
+size_t d256_kv_split_sm110_resource_requirements(const Spec&, int) {
   const size_t query_bytes = size_t(kQueryWords) * sizeof(uint16_t);
   const size_t native_lse = apxinf_attention_d256_split_batch_lse_elements(
                                 kQueryTokens, kKvHeads, kBatch) *
@@ -227,14 +163,14 @@ size_t qwen_d256_split_resource_requirements(const Spec&, int) {
          3 * sizeof(int32_t);
 }
 
-void prepare_qwen_d256_split(Execution& execution) {
+void prepare_d256_kv_split_sm110(Execution& execution) {
   auto* state = new CandidateSplitState();
   try {
     state->kernel =
         std::calloc(1, apxinf_attention_d256_split_batch_state_size());
     if (state->kernel == nullptr) {
       throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                    "Qwen D256 split state allocation failed");
+                    "D256 KV split state allocation failed");
     }
     const size_t query_bytes = size_t(kQueryWords) * sizeof(uint16_t);
     const size_t native_lse_bytes =
@@ -266,7 +202,7 @@ void prepare_qwen_d256_split(Execution& execution) {
         1);
     if (status != 0) {
       throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                    "Qwen D256 split preparation failed with status " +
+                    "D256 KV split preparation failed with status " +
                         std::to_string(status));
     }
   } catch (...) {
@@ -274,11 +210,11 @@ void prepare_qwen_d256_split(Execution& execution) {
     throw;
   }
   execution.resource_bytes =
-      qwen_d256_split_resource_requirements(execution.spec, 0);
+      d256_kv_split_sm110_resource_requirements(execution.spec, 0);
   execution.provider_state = state;
 }
 
-cudaError_t launch_qwen_d256_split(Execution& execution) {
+cudaError_t launch_d256_kv_split_sm110(Execution& execution) {
   auto* state = static_cast<CandidateSplitState*>(execution.provider_state);
   const auto stream = static_cast<cudaStream_t>(execution.bindings.stream);
   duplicate_q_vec8<<<100, 256, 0, stream>>>(
@@ -303,17 +239,17 @@ cudaError_t launch_qwen_d256_split(Execution& execution) {
   return cudaGetLastError();
 }
 
-void destroy_qwen_d256_split(Execution& execution) noexcept {
+void destroy_d256_kv_split_sm110(Execution& execution) noexcept {
   destroy_candidate_split(
       static_cast<CandidateSplitState*>(execution.provider_state));
   execution.provider_state = nullptr;
 }
 
-size_t qwen_vision_segmented_resource_requirements(const Spec&, int) {
+size_t segmented_vision_sm110_resource_requirements(const Spec&, int) {
   return 2 * apxinf_attention_strided_groups_state_size();
 }
 
-void prepare_qwen_vision_segmented(Execution& execution) {
+void prepare_segmented_vision_sm110(Execution& execution) {
   auto state = std::make_unique<CandidateVisionState>();
   const size_t bytes = apxinf_attention_strided_groups_state_size();
   state->length_624 = std::calloc(1, bytes);
@@ -322,7 +258,7 @@ void prepare_qwen_vision_segmented(Execution& execution) {
     destroy_vision_group_state(state->length_624);
     destroy_vision_group_state(state->length_2200);
     throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                  "Qwen vision attention state allocation failed");
+                  "segmented vision attention state allocation failed");
   }
   for (int group : {0, 3}) {
     const int status = launch_vision_group_with_state(
@@ -334,7 +270,7 @@ void prepare_qwen_vision_segmented(Execution& execution) {
       destroy_vision_group_state(state->length_624);
       destroy_vision_group_state(state->length_2200);
       throw Failure(APXINF_STATUS_PROVIDER_ERROR,
-                    "Qwen vision attention preparation failed with status " +
+                    "segmented vision attention preparation failed with status " +
                         std::to_string(status));
     }
   }
@@ -342,7 +278,7 @@ void prepare_qwen_vision_segmented(Execution& execution) {
   execution.provider_state = state.release();
 }
 
-cudaError_t launch_qwen_vision_segmented(Execution& execution) {
+cudaError_t launch_segmented_vision_sm110(Execution& execution) {
   auto* state = static_cast<CandidateVisionState*>(execution.provider_state);
   for (int group = 0; group < 4; ++group) {
     const int status = launch_vision_group_with_state(
@@ -355,7 +291,7 @@ cudaError_t launch_qwen_vision_segmented(Execution& execution) {
   return cudaGetLastError();
 }
 
-void destroy_qwen_vision_segmented(Execution& execution) noexcept {
+void destroy_segmented_vision_sm110(Execution& execution) noexcept {
   auto* state = static_cast<CandidateVisionState*>(execution.provider_state);
   if (state == nullptr) return;
   destroy_vision_group_state(state->length_624);

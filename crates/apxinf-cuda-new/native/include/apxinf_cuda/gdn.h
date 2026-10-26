@@ -7,6 +7,16 @@
 extern "C" {
 #endif
 
+apxinf_status_t apxinf_gdn_prepare_fixed(
+    int32_t device, int32_t head_k_dim, int32_t head_v_dim,
+    int32_t chunk_size);
+
+int32_t apxinf_gdn_qk_bf16_supported(
+    int32_t device, int32_t recurrent, int32_t head_k_dim,
+    int32_t head_v_dim, int32_t chunk_size);
+
+apxinf_status_t apxinf_gdn_chunk_scan_prepare(int32_t device);
+
 /* Gated DeltaNet primitives. See kernels/custom/gdn_ops.h for the recurrence.
 
    The update rule is implemented from the architecture's documented form and

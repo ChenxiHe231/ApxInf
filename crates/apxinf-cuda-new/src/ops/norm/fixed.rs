@@ -8,12 +8,11 @@ use crate::{ops, CudaContext};
 /// `[cols]` scale.
 ///
 /// Routes to `ops::norm::rms_norm` (the plain `x/rms * weight` contract the
-/// legacy plain RMS wrapper implements). The `ops::mlp::rms_norm`
+/// legacy plain RMS wrapper implements). The `ops::norm::rms_norm_weight_offset`
 /// operator is a different, Gemma/Qwen3.5-convention norm that applies
 /// `(1 + weight)` and must not be used here.
 pub fn rms_bf16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    let mut output =
-        ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
+    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
     ops::rms_norm(ctx, ops::RmsNormArgs::new(input, weight, &mut output, eps))?;
     Ok(output)
 }
@@ -27,7 +26,10 @@ pub fn layer_bf16(
     eps: f32,
 ) -> Result<Tensor> {
     let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    ops::layer_norm(ctx, ops::LayerNormArgs::new(input, weight, bias, &mut output, eps))?;
+    ops::layer_norm(
+        ctx,
+        ops::LayerNormArgs::new(input, weight, bias, &mut output, eps),
+    )?;
     Ok(output)
 }
 
@@ -87,7 +89,7 @@ pub fn adaptive_layer(
     modulation: &Tensor,
     eps: f32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::{transformer_bf16 as abi, status};
+    use crate::ffi::abi::{norm as abi, status};
     use crate::CudaBuffer;
     let dims = input.shape().dims();
     let modulation_dims = modulation.shape().dims();
@@ -110,10 +112,11 @@ pub fn adaptive_layer(
         u32::try_from(value).map_err(|_| apxinf_core::Error::Other(format!("{what} exceeds u32")))
     };
     let input_buffer = CudaBuffer::from_tensor(input).map_err(apxinf_core::Error::Cuda)?;
-    let modulation_buffer = CudaBuffer::from_tensor(modulation).map_err(apxinf_core::Error::Cuda)?;
+    let modulation_buffer =
+        CudaBuffer::from_tensor(modulation).map_err(apxinf_core::Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(apxinf_core::Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_transformer_bf16_adaptive_layer_norm_bf16(
+        status::check(abi::apxinf_norm_adaptive_layer_norm_bf16(
             input_buffer.ptr(),
             modulation_buffer.ptr(),
             output_buffer.ptr(),
@@ -135,7 +138,7 @@ pub fn adaptive_layer_quant_bf16_e4m3(
     eps: f32,
     scale: f32,
 ) -> Result<(Tensor, Tensor)> {
-    use crate::ffi::abi::{transformer_bf16 as abi, status};
+    use crate::ffi::abi::{norm as abi, status};
     use crate::CudaBuffer;
     let dims = input.shape().dims();
     let modulation_dims = modulation.shape().dims();
@@ -161,11 +164,12 @@ pub fn adaptive_layer_quant_bf16_e4m3(
         u32::try_from(value).map_err(|_| apxinf_core::Error::Other(format!("{what} exceeds u32")))
     };
     let input_buffer = CudaBuffer::from_tensor(input).map_err(apxinf_core::Error::Cuda)?;
-    let modulation_buffer = CudaBuffer::from_tensor(modulation).map_err(apxinf_core::Error::Cuda)?;
+    let modulation_buffer =
+        CudaBuffer::from_tensor(modulation).map_err(apxinf_core::Error::Cuda)?;
     let bf16_buffer = CudaBuffer::from_tensor(&bf16).map_err(apxinf_core::Error::Cuda)?;
     let fp8_buffer = CudaBuffer::from_tensor(&fp8).map_err(apxinf_core::Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_transformer_bf16_adaptive_layer_norm_quant_bf16_e4m3(
+        status::check(abi::apxinf_norm_adaptive_layer_norm_quant_bf16_e4m3(
             input_buffer.ptr(),
             modulation_buffer.ptr(),
             bf16_buffer.ptr(),
@@ -188,7 +192,7 @@ pub fn rms_quant_bf16_e4m3(
     eps: f32,
     scale: f32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::{transformer_bf16 as abi, status};
+    use crate::ffi::abi::{norm as abi, status};
     use crate::CudaBuffer;
     let dims = input.shape().dims();
     if dims.len() != 2
@@ -212,7 +216,7 @@ pub fn rms_quant_bf16_e4m3(
     let weight_buffer = CudaBuffer::from_tensor(weight).map_err(apxinf_core::Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(apxinf_core::Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_transformer_bf16_rms_norm_quant_bf16_e4m3(
+        status::check(abi::apxinf_norm_rms_norm_quant_bf16_e4m3(
             input_buffer.ptr(),
             weight_buffer.ptr(),
             output_buffer.ptr(),
@@ -235,7 +239,7 @@ pub fn layer_quant_bf16_e4m3(
     eps: f32,
     scale: f32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::{transformer_bf16 as abi, status};
+    use crate::ffi::abi::{norm as abi, status};
     use crate::CudaBuffer;
     let dims = input.shape().dims();
     if dims.len() != 2
@@ -264,7 +268,7 @@ pub fn layer_quant_bf16_e4m3(
     let bias_buffer = CudaBuffer::from_tensor(bias).map_err(apxinf_core::Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(apxinf_core::Error::Cuda)?;
     unsafe {
-        status::check(abi::apxinf_transformer_bf16_layer_norm_quant_bf16_e4m3(
+        status::check(abi::apxinf_norm_layer_norm_quant_bf16_e4m3(
             input_buffer.ptr(),
             weight_buffer.ptr(),
             bias_buffer.ptr(),
@@ -282,13 +286,13 @@ pub fn layer_quant_bf16_e4m3(
 // ── smolvla FP16 surface ────────────────────────────────────────────────────
 //
 // Ported verbatim from the legacy FP16 normalization wrappers over the
-// `apxinf_transformer_f16_*` launchers (native/adapters/norm/fixed_f16.cu).
+// `family-specific FP16` launchers (native/adapters/norm/fixed_f16.cu).
 
 /// `rms_f16`: RMS-normalize a `[rows, cols]` FP16 activation with a plain
 /// `[cols]` scale (the Xavier FP16 path).
 pub fn rms_f16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    use crate::ffi::abi::norm as abi;
     use crate::ops::validation::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
-    use crate::ffi::abi::transformer_f16 as abi;
     use apxinf_core::Error;
     let (rows, cols) = matrix_shape(input, "RMSNorm")?;
     if input.dtype() != DType::F16
@@ -301,7 +305,7 @@ pub fn rms_f16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> 
     }
     let output = f16_output(ctx, rows, cols)?;
     unsafe {
-        crate::ops::validation::check_cuda(abi::apxinf_transformer_f16_rms_norm_f16(
+        crate::ops::validation::check_cuda(abi::apxinf_norm_rms_norm_f16(
             gpu_ptr(input)?,
             gpu_ptr(weight)?,
             output.ptr(),
@@ -327,8 +331,8 @@ pub fn layer_f16(
     bias: &Tensor,
     eps: f32,
 ) -> Result<Tensor> {
+    use crate::ffi::abi::norm as abi;
     use crate::ops::validation::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
-    use crate::ffi::abi::transformer_f16 as abi;
     use apxinf_core::Error;
     let (rows, cols) = matrix_shape(input, "LayerNorm")?;
     if [input, weight, bias]
@@ -343,7 +347,7 @@ pub fn layer_f16(
     }
     let output = f16_output(ctx, rows, cols)?;
     unsafe {
-        crate::ops::validation::check_cuda(abi::apxinf_transformer_f16_layer_norm_f16(
+        crate::ops::validation::check_cuda(abi::apxinf_norm_layer_norm_f16(
             gpu_ptr(input)?,
             gpu_ptr(weight)?,
             gpu_ptr(bias)?,
@@ -376,8 +380,8 @@ pub fn rms_into(
     rows: usize,
     eps: f32,
 ) -> Result<()> {
+    use crate::ffi::abi::norm as abi;
     use crate::ops::validation::{check_cuda, checked_bytes, require_buffers, require_finite};
-    use crate::ffi::abi::llm_decode as abi;
     use apxinf_core::Error;
     require_finite("RMSNorm", &[eps])?;
     if eps <= 0.0 {
@@ -396,7 +400,7 @@ pub fn rms_into(
     )?;
     let status = unsafe {
         match dtype {
-            DType::F32 => abi::apxinf_llmdec_rms_norm_f32(
+            DType::F32 => abi::apxinf_norm_fixed_decode_rms_norm_f32(
                 input.ptr(),
                 weight.ptr(),
                 output.ptr(),
@@ -405,7 +409,7 @@ pub fn rms_into(
                 eps,
                 ctx.stream().handle(),
             ),
-            DType::BF16 => abi::apxinf_llmdec_rms_norm_bf16(
+            DType::BF16 => abi::apxinf_norm_fixed_decode_rms_norm_bf16(
                 input.ptr(),
                 weight.ptr(),
                 output.ptr(),
@@ -438,8 +442,8 @@ pub fn residual_add_rms_bf16_into(
     rows: usize,
     eps: f32,
 ) -> Result<()> {
+    use crate::ffi::abi::norm as abi;
     use crate::ops::validation::{check_cuda, checked_bytes, require_buffers, require_finite};
-    use crate::ffi::abi::llm_decode as abi;
     require_finite("residual RMSNorm", &[eps])?;
     let matrix = checked_bytes(DType::BF16, &[rows, cols], "residual RMSNorm")?;
     let weight_size = checked_bytes(DType::BF16, &[cols], "residual RMSNorm")?;
@@ -454,7 +458,7 @@ pub fn residual_add_rms_bf16_into(
         ],
     )?;
     check_cuda(unsafe {
-        abi::apxinf_llmdec_rms_norm_add_bf16(
+        abi::apxinf_norm_fixed_decode_rms_norm_add_bf16(
             residual.ptr(),
             delta.ptr(),
             weight.ptr(),

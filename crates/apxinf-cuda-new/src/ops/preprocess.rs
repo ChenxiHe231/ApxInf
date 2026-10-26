@@ -4,6 +4,12 @@ use apxinf_core::{DType, Error, Result, Tensor};
 
 use crate::{ops, CudaBuffer, CudaContext};
 
+mod planning;
+
+pub use planning::{
+    concat7_cols, flow_update, fourier_features, vision_position, VisionPositionArgs,
+};
+
 /// Memory layout of a resized RGB `u8` image batch. Mirrors the legacy enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageLayout {
@@ -271,7 +277,7 @@ pub fn rgb_u8_to_temporal2_merge2_rect_bf16(
     lut: &CudaBuffer,
     frames: &[RgbRectFrame],
 ) -> Result<()> {
-    use crate::ffi::abi::hybrid as abi;
+    use crate::ffi::abi::preprocess as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     if frames.is_empty()
         || rgb.device() != ctx.device_id()
@@ -333,7 +339,7 @@ pub fn rgb_u8_to_temporal2_merge2_rect_bf16(
     for frame in frames {
         let frame_rows = frame.grid_h * frame.grid_w;
         unsafe {
-            raw::check_cuda(abi::apxinf_hybrid_rgb_u8_to_temporal2_merge2_rect_bf16(
+            raw::check_cuda(abi::apxinf_preprocess_rgb_u8_to_temporal2_merge2_rect_bf16(
                 (rgb.ptr() as *const u8).add(byte_offset).cast(),
                 output_ptr.add(word_offset).cast(),
                 lut.ptr().cast(),
@@ -383,7 +389,7 @@ pub fn rgb_u8_to_patches_f16(
 // ── smolvla pixel shuffle ───────────────────────────────────────────────────
 //
 // Ported verbatim from the legacy FP16 preprocessing wrappers over the
-// `apxinf_transformer_f16_*` launchers (native/adapters/preprocess/fixed_f16.cu).
+// `family-specific FP16` launchers (native/adapters/preprocess/fixed_f16.cu).
 
 /// `pixel_shuffle_4_bf16`: SmolVLA's 4x4 pixel shuffle over per-view token
 /// grids, `[views*T, W] -> [views*T/16, W*16]`.
@@ -393,7 +399,7 @@ pub fn pixel_shuffle_4_bf16(
     tokens_per_view: usize,
 ) -> Result<Tensor> {
     use super::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
-    use crate::ffi::abi::transformer_f16 as abi;
+    use crate::ffi::abi::preprocess as abi;
     let input_shape = input.shape().dims();
     if input.dtype() != DType::BF16
         || input_shape.len() != 2
@@ -416,7 +422,7 @@ pub fn pixel_shuffle_4_bf16(
     let output =
         crate::workspace::output_buffer(ctx, output_elements * DType::BF16.size_in_bytes())?;
     unsafe {
-        check_cuda(abi::apxinf_transformer_f16_pixel_shuffle_4_bf16(
+        check_cuda(abi::apxinf_preprocess_pixel_shuffle_4_bf16(
             gpu_ptr(input)?,
             output.ptr(),
             views as i32,
@@ -440,7 +446,7 @@ pub fn pixel_shuffle_4_f16(
     tokens_per_view: usize,
 ) -> Result<Tensor> {
     use super::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
-    use crate::ffi::abi::transformer_f16 as abi;
+    use crate::ffi::abi::preprocess as abi;
     let input_shape = input.shape().dims();
     if input.dtype() != DType::F16
         || input_shape.len() != 2
@@ -463,7 +469,7 @@ pub fn pixel_shuffle_4_f16(
     let output =
         crate::workspace::output_buffer(ctx, output_elements * DType::F16.size_in_bytes())?;
     unsafe {
-        check_cuda(abi::apxinf_transformer_f16_pixel_shuffle_4_f16(
+        check_cuda(abi::apxinf_preprocess_pixel_shuffle_4_f16(
             gpu_ptr(input)?,
             output.ptr(),
             views as i32,

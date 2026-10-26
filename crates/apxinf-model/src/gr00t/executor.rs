@@ -823,16 +823,16 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
 
         let capture_start = Instant::now();
         self.backend.begin_capture()?;
-        let output =
-            match ops::with_session(&workspace, || self.infer_device(&device_observation)) {
-                Ok(output) => output,
-                Err(error) => {
-                    let _ = self.backend.end_capture();
-                    return Err(Error::Other(format!(
-                        "whole-graph capture body failed: {error}"
-                    )));
-                }
-            };
+        let output = match ops::with_session(&workspace, || self.infer_device(&device_observation))
+        {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = self.backend.end_capture();
+                return Err(Error::Other(format!(
+                    "whole-graph capture body failed: {error}"
+                )));
+            }
+        };
         let graph = self
             .backend
             .end_capture()
@@ -1270,11 +1270,8 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             // positional embedding.
             action_features = self.backend.add(&action_features, position)?;
         }
-        let mut hidden = ops::elementwise::concat_rows_bf16(
-            self.backend.context(),
-            state,
-            &action_features,
-        )?;
+        let mut hidden =
+            ops::elementwise::concat_rows_bf16(self.backend.context(), state, &action_features)?;
 
         let use_static_conditioning = true;
         let dynamic_timestep = if use_static_conditioning {
@@ -1624,12 +1621,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             1,
             self.config.action_horizon,
         )?;
-        ops::elementwise::euler_update_bf16(
-            self.backend.context(),
-            actions,
-            &velocity,
-            step.delta,
-        )
+        ops::elementwise::euler_update_bf16(self.backend.context(), actions, &velocity, step.delta)
     }
 }
 
@@ -2230,12 +2222,7 @@ fn forward_feed_forward_residual_quantized<E: Gr00tPrecisionExecution>(
     let output = weights
         .output
         .forward_reusable_quantized(&hidden, backend)?;
-    ops::fused::bias_then_residual_bf16(
-        backend.context(),
-        &output,
-        weights.output.bias(),
-        residual,
-    )
+    ops::fused::bias_then_residual_bf16(backend.context(), &output, weights.output.bias(), residual)
 }
 
 fn forward_feed_forward_residual<E: Gr00tPrecisionExecution>(
@@ -2268,12 +2255,7 @@ fn forward_feed_forward_residual_with_quantized_input<E: Gr00tPrecisionExecution
     )? {
         return Ok(output);
     }
-    ops::fused::bias_then_residual_bf16(
-        backend.context(),
-        &output,
-        weights.output.bias(),
-        residual,
-    )
+    ops::fused::bias_then_residual_bf16(backend.context(), &output, weights.output.bias(), residual)
 }
 
 fn noncausal_attention<E: Gr00tPrecisionExecution>(
@@ -2780,20 +2762,7 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
         && text.n_kv_heads == 8
         && text.head_dim == 128;
     let (query, key) = if use_fused_qk_rms_mrope {
-        let legacy_threads = match backend.context().caps().sm {
-            110 => std::env::var_os("APXINF_GR00T_LEGACY_QK_MROPE_THREADS").is_some(),
-            87 => std::env::var_os("APXINF_GR00T_BF16_LEGACY_QK_MROPE_THREADS").is_some(),
-            _ => false,
-        };
-        let block_threads = super::backend::qk_rms_mrope_block_threads(
-            backend.context().caps().sm,
-            sequence_len,
-            text.head_dim,
-            text.n_heads,
-            text.n_kv_heads,
-            legacy_threads,
-        );
-        ops::rope::rms_norm_apply_mrope_qk_with_block_threads(
+        ops::rope::rms_norm_apply_mrope_qk(
             backend.context(),
             &query,
             &layer.q_norm_weight,
@@ -2807,7 +2776,6 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
             text.rope_theta,
             text.mrope_section,
             position_ids,
-            block_threads,
         )?
     } else {
         let query = rms_norm(backend, &query, &layer.q_norm_weight, text.rms_norm_eps)?

@@ -56,6 +56,9 @@ typedef struct {
   uint32_t accumulation_dtype;
   uint32_t output_dtype;
   uint32_t quantization;
+  /* Physical B storage. KN is canonical; NK is accepted by contracts such as
+     W8A8 and packed NVFP4 whose checkpoints are already output-major. */
+  uint32_t b_layout;
   /* Changes whether candidate preparation may hoist weight preprocessing. */
   uint32_t b_is_immutable;
   /* Largest guaranteed power-of-two byte alignment, capped at 256. */

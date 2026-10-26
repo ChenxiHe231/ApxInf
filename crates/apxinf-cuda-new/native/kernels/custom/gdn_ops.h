@@ -5,6 +5,8 @@
 
 namespace apxinf::cuda_new::gdn_ops {
 
+int gdn_chunk_scan_prepare(int device);
+
 // Gated DeltaNet single-token recurrent step.
 //
 // `state` is [v_heads, v_dim, k_dim] f32 and is updated in place. `q` and `k`

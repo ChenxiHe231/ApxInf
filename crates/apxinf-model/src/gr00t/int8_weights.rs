@@ -94,15 +94,6 @@ impl DeviceLinearWeights for Gr00tInt8LinearWeights {
     type ReusableInput = ops::gemm::W8A8Activation;
 
     fn forward(&self, input: &Tensor, backend: &RuntimeBackend) -> Result<Tensor> {
-        if backend.context().caps().sm == 87 && self.input_dim == 1536 && self.output_dim == 6144 {
-            if let Some(output) = ops::gemm::try_gemm_w8a8_m41_n6144_k1536(
-                backend.context(),
-                input,
-                self.as_kernel_view(),
-            )? {
-                return Ok(output);
-            }
-        }
         ops::gemm::w8a8(backend.context(), input, self.as_kernel_view())
     }
 
@@ -147,18 +138,6 @@ impl DeviceLinearWeights for Gr00tInt8LinearWeights {
         input: &Self::ReusableInput,
         backend: &RuntimeBackend,
     ) -> Result<Tensor> {
-        // Production M41 FC1 normally uses the fused bias-GELU producer.
-        // Its decomposed/legacy path keeps the measured plain INT8 schedule
-        // through an explicit model choice, without changing generic tactics.
-        if backend.context().caps().sm == 87 && self.input_dim == 1536 && self.output_dim == 6144 {
-            if let Some(output) = ops::gemm::try_gemm_quantized_w8a8_m41_n6144_k1536(
-                backend.context(),
-                input,
-                self.as_kernel_view(),
-            )? {
-                return Ok(output);
-            }
-        }
         ops::gemm::gemm_quantized_w8a8(backend.context(), input, self.as_kernel_view())
     }
 
@@ -189,24 +168,18 @@ impl DeviceLinearWeights for Gr00tInt8LinearWeights {
         input: &Self::ReusableInput,
         backend: &RuntimeBackend,
     ) -> Result<Option<Tensor>> {
-        if backend.context().caps().sm != 87 {
-            return Ok(None);
-        }
         let Some(bias) = self.bias.as_ref() else {
             return Ok(None);
         };
-        if std::env::var_os("APXINF_GR00T_W8A8_LEGACY_QKV_GEMM_BIAS").is_some()
-            || self.input_dim != 1536
-            || self.output_dim != 4608
-        {
+        if std::env::var_os("APXINF_GR00T_W8A8_LEGACY_QKV_GEMM_BIAS").is_some() {
             return Ok(None);
         }
-        ops::gemm::try_gemm_quantized_w8a8_bias(
+        Ok(Some(ops::gemm::gemm_quantized_w8a8_bias(
             backend.context(),
             input,
             self.as_kernel_view(),
             bias,
-        )
+        )?))
     }
 
     fn fused_silu_mul(

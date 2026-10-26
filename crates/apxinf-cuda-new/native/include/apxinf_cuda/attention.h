@@ -6,6 +6,13 @@
 extern "C" {
 #endif
 
+apxinf_status_t apxinf_attention_split_query_and_gate(
+    const void* fused, void* query, void* gate, int64_t tokens, int64_t heads,
+    int64_t head_dim, apxinf_cuda_stream_t stream);
+apxinf_status_t apxinf_attention_apply_output_gate(
+    void* data, const void* gate, int64_t count,
+    apxinf_cuda_stream_t stream);
+
 typedef struct apxinf_attention_execution* apxinf_attention_execution_t;
 
 apxinf_status_t apxinf_attention_prepare(

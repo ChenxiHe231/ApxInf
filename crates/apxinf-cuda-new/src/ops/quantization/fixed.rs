@@ -2,11 +2,10 @@
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-use crate::{ops, CudaBuffer, CudaContext};
+use crate::{ops, CudaContext};
 
 fn fixed_scale_e4m3(ctx: &CudaContext, input: &Tensor, scale: f32) -> Result<Tensor> {
-    let mut out =
-        ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::F8E4M3)?;
+    let mut out = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::F8E4M3)?;
     let mut args =
         ops::QuantizationArgs::new(ops::QuantizationSemantic::FixedScaleE4m3, input, &mut out);
     args.scale = scale;
@@ -73,7 +72,7 @@ pub fn slice_columns_bf16(ctx: &CudaContext, input: &Tensor, cols: usize) -> Res
 /// `quantize_bf16_e4m3_packed8`: elementwise BF16->E4M3 with a static scale,
 /// using the wide 8-element path when alignment allows.
 pub fn quantize_bf16_e4m3_packed8(ctx: &CudaContext, input: &Tensor, scale: f32) -> Result<Tensor> {
-    use crate::ffi::abi::{transformer_bf16 as abi, status};
+    use crate::ffi::abi::quantization as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     if input.dtype() != DType::BF16 {
         return Err(Error::DTypeMismatch {
@@ -88,7 +87,7 @@ pub fn quantize_bf16_e4m3_packed8(ctx: &CudaContext, input: &Tensor, scale: f32)
     let input_buffer = crate::CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
     let output_buffer = crate::CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_transformer_bf16_quantize_bf16_e4m3_packed8(
+        raw::check_cuda(abi::apxinf_quantization_quantize_bf16_e4m3_packed8(
             input_buffer.ptr(),
             output_buffer.ptr(),
             i64::try_from(input.numel()).map_err(|_| Error::Other("count exceeds i64".into()))?,
@@ -108,7 +107,7 @@ pub fn concat_rows_quantize_bf16_e4m3(
     second: &Tensor,
     scale: f32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::{transformer_bf16 as abi, status};
+    use crate::ffi::abi::quantization as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     let first_dims = first.shape().dims();
     let second_dims = second.shape().dims();
@@ -136,7 +135,7 @@ pub fn concat_rows_quantize_bf16_e4m3(
     let second_buffer = crate::CudaBuffer::from_tensor(second).map_err(Error::Cuda)?;
     let output_buffer = crate::CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_transformer_bf16_concat_rows_quantize_bf16_e4m3(
+        raw::check_cuda(abi::apxinf_quantization_concat_rows_quantize_bf16_e4m3(
             first_buffer.ptr(),
             second_buffer.ptr(),
             output_buffer.ptr(),

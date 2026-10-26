@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 
-use super::types::Runtime;
 pub(crate) use super::types::CudaStream;
+use super::types::Runtime;
 
 pub(crate) const SPEC_VERSION: u32 = 1;
 
@@ -37,6 +37,19 @@ pub(crate) struct Bindings {
 }
 
 unsafe extern "C" {
+    pub(crate) fn apxinf_pointwise_swiglu(
+        fused_gate_up: *const c_void,
+        output: *mut c_void,
+        rows: i64,
+        width: i64,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_pointwise_add_into(
+        addend: *const c_void,
+        accumulator: *mut c_void,
+        count: i64,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_pointwise_launch(
         runtime: Runtime,
         spec: *const Spec,

@@ -286,11 +286,7 @@ impl Gr00tFp8LinearWeights {
             backend.context().caps().sm,
             std::env::var_os("APXINF_GR00T_FP8_LEGACY_STATIC_QUANT").is_some(),
         ) {
-            ops::quantization::quantize_bf16_e4m3(
-                backend.context(),
-                input,
-                self.activation_scale,
-            )
+            ops::quantization::quantize_bf16_e4m3(backend.context(), input, self.activation_scale)
         } else {
             ops::quantization::quantize_bf16_e4m3_packed8(
                 backend.context(),
@@ -509,28 +505,7 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
             dual_geglu_interleaved: false,
             dual_geglu_auto_interleaved: None,
         };
-        let versions = backend.context().library_versions();
-        let use_thor_m41_ffn_down = backend.context().caps().sm == 110
-            && thor_m41_custom_tactic_versions_supported(&versions.cuda, &versions.cublas)
-            && input.shape().dims() == [41, 6144]
-            && self.weight.shape().dims() == [6144, 1536]
-            && std::env::var_os("APXINF_GR00T_FP8_LEGACY_M41_FFN_DOWN").is_none();
-        if use_thor_m41_ffn_down {
-            ops::gemm::fp8_bf16_custom(
-                backend.context(),
-                input,
-                self.activation_scale,
-                weight,
-                ops::gemm::Fp8Bf16CustomConfig {
-                    tile_id: 409,
-                    custom_option: 3,
-                    stages_id: 36,
-                    cluster_shape_id: 3,
-                },
-            )
-        } else {
-            ops::gemm::fp8_bf16(backend.context(), input, self.activation_scale, weight)
-        }
+        ops::gemm::fp8_bf16(backend.context(), input, self.activation_scale, weight)
     }
 
     fn adaptive_layer_norm_quantized(
@@ -571,13 +546,6 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
     }
 }
 
-/// The explicit cuBLASLt attributes were accepted with runtime 13000 and
-/// cuBLAS 130000, which CudaContext formats as "13.0". Even patch-version
-/// changes use the normal planner until this private tactic is revalidated.
-fn thor_m41_custom_tactic_versions_supported(cuda: &str, cublas: &str) -> bool {
-    cuda == "13.0" && cublas == "13.0"
-}
-
 fn thor_fp8_packed_static_quantization(sm: u32, legacy_requested: bool) -> bool {
     sm == 110 && !legacy_requested
 }
@@ -586,8 +554,7 @@ fn thor_fp8_packed_static_quantization(sm: u32, legacy_requested: bool) -> bool 
 mod tests {
     use super::{
         checkpoint_identity, e4m3_weight_scale, thor_fp8_packed_static_quantization,
-        thor_m41_custom_tactic_versions_supported, Gr00tFp8Calibration, LocalSha256,
-        CALIBRATION_SCHEMA, E4M3_MAX,
+        Gr00tFp8Calibration, LocalSha256, CALIBRATION_SCHEMA, E4M3_MAX,
     };
     use std::path::Path;
 
@@ -598,22 +565,6 @@ mod tests {
         for sm in [0, 80, 87, 89, 90, 100, 103, 120] {
             assert!(!thor_fp8_packed_static_quantization(sm, false));
             assert!(!thor_fp8_packed_static_quantization(sm, true));
-        }
-    }
-
-    #[test]
-    fn explicit_m41_tactic_requires_the_accepted_library_versions() {
-        assert!(thor_m41_custom_tactic_versions_supported("13.0", "13.0"));
-        for (cuda, cublas) in [
-            ("13.2", "13.0"),
-            ("13.0", "13.4"),
-            ("13.0.1", "13.0"),
-            ("13.0", "13.0.1"),
-            ("13.0.0", "13.0"),
-            ("", "13.0"),
-            ("13.0", ""),
-        ] {
-            assert!(!thor_m41_custom_tactic_versions_supported(cuda, cublas));
         }
     }
 

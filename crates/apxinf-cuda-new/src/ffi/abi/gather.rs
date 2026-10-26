@@ -40,6 +40,15 @@ pub(crate) struct Bindings {
 }
 
 unsafe extern "C" {
+    pub(crate) fn apxinf_gather_embedding(
+        table: *const c_void,
+        ids: *const c_void,
+        output: *mut c_void,
+        tokens: i64,
+        hidden: i64,
+        vocab: i64,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_gather_launch(
         runtime: Runtime,
         spec: *const Spec,

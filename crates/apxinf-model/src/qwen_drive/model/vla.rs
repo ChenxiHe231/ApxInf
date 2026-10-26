@@ -2,7 +2,7 @@
 //! The caller owns backbone state and chooses how GDN blocks execute.
 use super::blocks::bf16::{expert, upload_u32, BackboneBf16, BackboneState, PlannerBf16};
 use super::{PlanningState, VisionState};
-use crate::qwen_drive::backend::ops::linear_attention;
+use crate::qwen_drive::backend::ops::sampling;
 use crate::qwen_drive::inputs::ExpertConditioning;
 use apxinf_core::{
     NextTokenLogits, Result, RngKey, SamplingBackend, Tensor, TokenSamplingInit,
@@ -122,7 +122,7 @@ impl QwenDriveModel {
             let eos = upload_u32(b.ctx(), reasoning.terminator_ids)?;
             for step in 0..reasoning.max_new_tokens {
                 if step < reasoning.min_new_tokens {
-                    linear_attention::suppress_logits(
+                    sampling::suppress_logits(
                         b.ctx(),
                         &logits,
                         logits.shape().dims()[0] - 1,

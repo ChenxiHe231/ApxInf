@@ -29,8 +29,8 @@ pub fn append(
     seq_len: usize,
     append_len: usize,
 ) -> Result<()> {
+    use crate::ffi::abi::cache as abi;
     use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
-    use crate::ffi::abi::llm_decode as abi;
     use apxinf_core::{DType, Error};
 
     if append_len == 0
@@ -65,7 +65,7 @@ pub fn append(
     )?;
     let status = unsafe {
         match dtype {
-            DType::F32 => abi::apxinf_llmdec_kv_cache_append_f32(
+            DType::F32 => abi::apxinf_cache_fixed_decode_append_f32(
                 cache.ptr(),
                 input.ptr(),
                 kv_heads as u32,
@@ -75,7 +75,7 @@ pub fn append(
                 append_len as u32,
                 ctx.stream().handle(),
             ),
-            DType::BF16 => abi::apxinf_llmdec_kv_cache_append_bf16(
+            DType::BF16 => abi::apxinf_cache_fixed_decode_append_bf16(
                 cache.ptr(),
                 input.ptr(),
                 kv_heads as u32,
@@ -94,7 +94,7 @@ pub fn append(
 /// Append one token to a caller-owned head-major
 /// `[kv_heads, max_seq_len, head_dim]` KV cache using a device-resident
 /// position. Ports the legacy caller-owned `append_at` contract over the
-/// llm_decode adapter.
+/// fixed decode adapter.
 #[allow(clippy::too_many_arguments)]
 pub fn append_at(
     ctx: &CudaContext,
@@ -106,8 +106,8 @@ pub fn append_at(
     max_seq_len: usize,
     position: crate::CudaDeviceAddress,
 ) -> Result<()> {
+    use crate::ffi::abi::cache as abi;
     use crate::ops::validation::{check_cuda, checked_bytes, require_address, require_buffers};
-    use crate::ffi::abi::llm_decode as abi;
     use apxinf_core::DType;
     require_buffers(
         ctx,
@@ -128,7 +128,7 @@ pub fn append_at(
     require_address(ctx, "KV append", "position", position, 4)?;
     let status = unsafe {
         match dtype {
-            DType::F32 => abi::apxinf_llmdec_kv_cache_append_decode_f32(
+            DType::F32 => abi::apxinf_cache_fixed_decode_append_decode_f32(
                 cache.ptr(),
                 input.ptr(),
                 kv_heads as u32,
@@ -137,7 +137,7 @@ pub fn append_at(
                 position.ptr(),
                 ctx.stream().handle(),
             ),
-            DType::BF16 => abi::apxinf_llmdec_kv_cache_append_decode_bf16(
+            DType::BF16 => abi::apxinf_cache_fixed_decode_append_decode_bf16(
                 cache.ptr(),
                 input.ptr(),
                 kv_heads as u32,

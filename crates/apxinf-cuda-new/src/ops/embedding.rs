@@ -17,7 +17,9 @@ pub fn lookup(
 ) -> Result<Tensor> {
     let dims = table.shape().dims();
     if dims.len() != 2 {
-        return Err(Error::Other("embedding lookup expects a rank-2 table".into()));
+        return Err(Error::Other(
+            "embedding lookup expects a rank-2 table".into(),
+        ));
     }
     if table.dtype() != DType::BF16 {
         return Err(Error::Other(
@@ -29,7 +31,8 @@ pub fn lookup(
     let table_buffer = CudaBuffer::from_tensor(table).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     let rows = i64::try_from(seq_len).map_err(|_| Error::Other("lookup rows exceed i64".into()))?;
-    let cols_i64 = i64::try_from(cols).map_err(|_| Error::Other("lookup cols exceed i64".into()))?;
+    let cols_i64 =
+        i64::try_from(cols).map_err(|_| Error::Other("lookup cols exceed i64".into()))?;
     unsafe {
         status::check(abi::apxinf_elementwise_gather_rows_bf16(
             table_buffer.ptr(),
@@ -75,8 +78,8 @@ pub fn add_position_f32_bf16(
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     let count = i64::try_from(rows * cols)
         .map_err(|_| Error::Other("position embedding size exceeds i64".into()))?;
-    let cols_i32 =
-        i32::try_from(cols).map_err(|_| Error::Other("position embedding cols exceed i32".into()))?;
+    let cols_i32 = i32::try_from(cols)
+        .map_err(|_| Error::Other("position embedding cols exceed i32".into()))?;
     let tokens_i32 = i32::try_from(tokens_per_view)
         .map_err(|_| Error::Other("tokens_per_view exceeds i32".into()))?;
     unsafe {
@@ -104,7 +107,7 @@ pub fn sinusoidal_bf16(
     scale: f32,
     frequency_step: f32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::hybrid as abi;
+    use crate::ffi::abi::embedding as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     let shape = positions.shape().dims();
     if shape.len() != 1
@@ -127,7 +130,7 @@ pub fn sinusoidal_bf16(
     let positions_buffer = CudaBuffer::from_tensor(positions).map_err(Error::Cuda)?;
     let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
     unsafe {
-        raw::check_cuda(abi::apxinf_hybrid_sinusoidal_embedding_bf16(
+        raw::check_cuda(abi::apxinf_embedding_sinusoidal_embedding_bf16(
             positions_buffer.ptr(),
             output_buffer.ptr(),
             rows,
@@ -245,7 +248,14 @@ pub fn add_position_bf16(
     position: &Tensor,
     tokens_per_view: usize,
 ) -> Result<Tensor> {
-    add_position_same_dtype(ctx, projection, bias, position, tokens_per_view, DType::BF16)
+    add_position_same_dtype(
+        ctx,
+        projection,
+        bias,
+        position,
+        tokens_per_view,
+        DType::BF16,
+    )
 }
 
 /// `add_position_f16`: FP16 projection + optional bias + learned per-view
@@ -274,7 +284,7 @@ pub fn lookup_into(
     seq_len: usize,
 ) -> Result<()> {
     use super::validation::{check_cuda, checked_bytes, require_address, require_buffers};
-    use crate::ffi::abi::llm_decode as llmdec;
+    use crate::ffi::abi::embedding as llmdec;
     require_buffers(
         ctx,
         "decode embedding",
@@ -294,7 +304,7 @@ pub fn lookup_into(
     require_address(ctx, "decode embedding", "ids", ids, seq_len * 4)?;
     let status = unsafe {
         match dtype {
-            DType::F32 => llmdec::apxinf_llmdec_embedding_f32(
+            DType::F32 => llmdec::apxinf_embedding_fixed_decode_lookup_f32(
                 table.ptr(),
                 ids.ptr(),
                 output.ptr(),
@@ -302,7 +312,7 @@ pub fn lookup_into(
                 seq_len as u32,
                 ctx.stream().handle(),
             ),
-            DType::BF16 => llmdec::apxinf_llmdec_embedding_bf16(
+            DType::BF16 => llmdec::apxinf_embedding_fixed_decode_lookup_bf16(
                 table.ptr(),
                 ids.ptr(),
                 output.ptr(),

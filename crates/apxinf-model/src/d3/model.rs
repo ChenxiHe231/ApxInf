@@ -329,7 +329,7 @@ fn forward_language_device(
         vec![1, text.hidden_size],
         DType::BF16,
     )?;
-    ops::mlp::rms_norm(
+    ops::norm::rms_norm_weight_offset(
         ctx,
         &last,
         &weights.final_norm,
@@ -395,7 +395,7 @@ fn full_attention(
         vec![tokens, text.hidden_size],
         DType::BF16,
     )?;
-    ops::mlp::rms_norm(
+    ops::norm::rms_norm_weight_offset(
         ctx,
         &hidden,
         &layer.input_norm,
@@ -566,7 +566,7 @@ fn gdn(
         vec![tokens, text.hidden_size],
         DType::BF16,
     )?;
-    ops::mlp::rms_norm(
+    ops::norm::rms_norm_weight_offset(
         ctx,
         &hidden,
         &layer.input_norm,
@@ -832,7 +832,7 @@ fn mlp(
         vec![tokens, text.hidden_size],
         DType::BF16,
     )?;
-    ops::mlp::rms_norm(ctx, &hidden, norm, &normalized, text.rms_norm_eps)?;
+    ops::norm::rms_norm_weight_offset(ctx, &hidden, norm, &normalized, text.rms_norm_eps)?;
     let mut fused = prefix(
         &scratch.mlp_fused,
         vec![tokens, 2 * text.intermediate_size],
@@ -844,7 +844,7 @@ fn mlp(
         vec![tokens, text.intermediate_size],
         DType::BF16,
     )?;
-    ops::mlp::swiglu(ctx, &fused, &activation)?;
+    ops::pointwise::swiglu(ctx, &fused, &activation)?;
     let mut projected = prefix(
         &scratch.projected,
         vec![tokens, text.hidden_size],

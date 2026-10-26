@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cuda_fp8.h>
 
-extern "C" cudaError_t apxinf_hybrid_swiglu_bf16_rounded_pair_interleaved(
+extern "C" cudaError_t apxinf_activation_swiglu_bf16_rounded_pair_interleaved(
     const void* gate_up, void* output, int rows, int inner, int pair,
     cudaStream_t stream);
 
@@ -240,7 +240,7 @@ cudaError_t launch_postprocess(const Spec& spec,
       resources.projection_dtype == APXINF_DTYPE_BF16 &&
       spec.output_dtype == APXINF_DTYPE_BF16 && spec.alpha_is_unit != 0 &&
       spec.output_scale_is_unit != 0 && bindings.bias == nullptr) {
-    return apxinf_hybrid_swiglu_bf16_rounded_pair_interleaved(
+    return apxinf_activation_swiglu_bf16_rounded_pair_interleaved(
         projection, bindings.output, static_cast<int>(spec.m),
         static_cast<int>(spec.n / 2), 256,
         static_cast<cudaStream_t>(bindings.stream));

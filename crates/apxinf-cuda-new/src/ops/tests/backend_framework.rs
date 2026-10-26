@@ -100,7 +100,7 @@ fn graph_safe_autotune_captures_the_winner() {
 }
 
 #[test]
-fn merged_gemm_contract_rejects_pre_merge_spec_version() {
+fn gemm_contract_rejects_previous_spec_version() {
     let ctx = CudaContext::new(0).unwrap();
     let activation = zeros_tensor(0, vec![1, 16], DType::BF16);
     let weight = zeros_tensor(0, vec![16, 16], DType::BF16);
@@ -108,10 +108,10 @@ fn merged_gemm_contract_rejects_pre_merge_spec_version() {
     let args = GemmArgs::new(&activation, &weight, &mut output);
     let mut normalized =
         super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
-    assert_eq!(normalized.spec.version, 6);
-    normalized.spec.version = 5;
+    assert_eq!(normalized.spec.version, 7);
+    normalized.spec.version = 6;
     let error = match super::execution::prepare(&ctx, normalized) {
-        Ok(_) => panic!("pre-merge GEMM spec must be rejected"),
+        Ok(_) => panic!("previous GEMM spec must be rejected"),
         Err(error) => error,
     };
     assert!(error.to_string().contains("invalid GEMM Spec"), "{error}");
@@ -1137,15 +1137,15 @@ fn scaled_fp8_and_w8a8_use_the_canonical_kn_weight_contract() {
 }
 
 #[test]
-fn w8a8_orin_shape_uses_direct_cutlass_candidate() {
+fn w8a8_output_major_orin_shape_uses_family_cutlass_candidate() {
     let ctx = CudaContext::new(0).unwrap();
     let (m, k, n) = (41, 1536, 6144);
     let mut a_data = vec![0; m * k];
     for row in 0..m {
         a_data[row * k + (row * 37) % k] = 1;
     }
-    let b_data = (0..k * n)
-        .map(|index| ((3 * (index / n) + 5 * (index % n)) % 7 + 1) as u8)
+    let b_data = (0..n * k)
+        .map(|index| ((3 * (index % k) + 5 * (index / k)) % 7 + 1) as u8)
         .collect::<Vec<_>>();
     let row_scale_values = (0..m)
         .map(|row| if row % 2 == 0 { 0.5 } else { 1.0 })
@@ -1154,11 +1154,12 @@ fn w8a8_orin_shape_uses_direct_cutlass_candidate() {
         .map(|column| if column % 2 == 0 { 2.0 } else { 1.0 })
         .collect::<Vec<_>>();
     let a = bytes_tensor(0, vec![m, k], DType::I8, &a_data);
-    let b = bytes_tensor(0, vec![k, n], DType::I8, &b_data);
+    let b = bytes_tensor(0, vec![n, k], DType::I8, &b_data);
     let row_scales = scales(0, &row_scale_values);
     let channel_scales = scales(0, &channel_scale_values);
     let mut out = zeros_tensor(0, vec![m, n], DType::BF16);
     let mut args = GemmArgs::w8a8(&a, &row_scales, &b, &channel_scales, &mut out)
+        .with_output_major_weight()
         .with_immutable_weight(WeightVersion::new(1));
     args.policy.online_tune = false;
     args.policy.allow_fallback = ctx.caps().sm != 87;
@@ -1167,14 +1168,15 @@ fn w8a8_orin_shape_uses_direct_cutlass_candidate() {
 
     let normalized =
         super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+    assert_eq!(normalized.spec.b_layout, 1);
     if ctx.caps().sm == 87 {
-        super::execution::seed_recipe(&ctx, &normalized, 3, 6, 1, 0).unwrap();
+        super::execution::seed_recipe(&ctx, &normalized, 3, 8, 1, 0).unwrap();
     }
     let execution = super::execution::prepare(&ctx, normalized).unwrap();
     if ctx.caps().sm == 87 {
         assert!(execution
             .summary()
-            .starts_with("cutlass-w8a8-sm87 config=0 "));
+            .starts_with("cutlass-w8a8-m41-n6144-k1536-sm87 config=0 "));
         assert!(execution.summary().contains("source=recipe"));
     } else {
         assert!(execution
@@ -1192,9 +1194,72 @@ fn w8a8_orin_shape_uses_direct_cutlass_candidate() {
     for row in 0..m {
         let input = (row * 37) % k;
         for column in 0..n {
-            let expected = b_data[input * n + column] as f32
+            let expected = b_data[column * k + input] as f32
                 * row_scale_values[row]
                 * channel_scale_values[column];
+            assert_eq!(actual[row * n + column], expected);
+        }
+    }
+    std::fs::remove_dir_all(cache_dir).unwrap();
+}
+
+#[test]
+fn w8a8_output_major_bias_shape_uses_family_cutlass_candidate() {
+    let ctx = CudaContext::new(0).unwrap();
+    let (m, k, n) = (41, 1536, 4608);
+    let mut a_data = vec![0; m * k];
+    for row in 0..m {
+        a_data[row * k + (row * 29) % k] = 1;
+    }
+    let b_data = (0..n * k)
+        .map(|index| ((2 * (index % k) + 3 * (index / k)) % 5 + 1) as u8)
+        .collect::<Vec<_>>();
+    let a = bytes_tensor(0, vec![m, k], DType::I8, &a_data);
+    let b = bytes_tensor(0, vec![n, k], DType::I8, &b_data);
+    let row_scales = scales(0, &vec![1.0; m]);
+    let channel_scales = scales(0, &vec![1.0; n]);
+    let bias = tensor(0, vec![n], &vec![1.0; n]);
+    let mut out = zeros_tensor(0, vec![m, n], DType::BF16);
+    let mut args = GemmArgs::w8a8(&a, &row_scales, &b, &channel_scales, &mut out)
+        .with_output_major_weight()
+        .with_immutable_weight(WeightVersion::new(1));
+    args.policy.online_tune = false;
+    args.policy.allow_fallback = ctx.caps().sm != 87;
+    let cache_dir = scratch_cache_dir("w8a8-bias-sm87-cutlass");
+    args.policy.cache_dir = Some(cache_dir.to_string_lossy().into_owned());
+
+    let normalized = super::contracts::normalize(
+        &ctx,
+        args,
+        super::contracts::Semantic::GemmBias,
+        Some(&bias),
+    )
+    .unwrap();
+    if ctx.caps().sm == 87 {
+        super::execution::seed_recipe(&ctx, &normalized, 3, 9, 1, 0).unwrap();
+    }
+    let execution = super::execution::prepare(&ctx, normalized).unwrap();
+    if ctx.caps().sm == 87 {
+        assert!(execution
+            .summary()
+            .starts_with("cutlass-w8a8-bias-m41-n4608-k1536-sm87 config=0 "));
+        assert!(execution.summary().contains("source=recipe"));
+    } else {
+        assert!(execution
+            .summary()
+            .starts_with("cublas+custom-epilogue config=0 "));
+        assert!(execution.summary().contains("source=fallback"));
+    }
+
+    execution.enqueue().unwrap();
+    let graph = crate::capture(&ctx, || execution.enqueue()).unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    let actual = values(&out);
+    for row in 0..m {
+        let input = (row * 29) % k;
+        for column in 0..n {
+            let expected = b_data[column * k + input] as f32 + 1.0;
             assert_eq!(actual[row * n + column], expected);
         }
     }

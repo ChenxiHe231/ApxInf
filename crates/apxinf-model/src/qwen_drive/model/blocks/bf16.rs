@@ -1,7 +1,6 @@
 //! One BF16 Blocks implementation: vision, hybrid backbone and planning expert.
 //! Layer mathematics and physical state descriptions; no graph capture policy.
 use super::DirectExecution;
-use crate::qwen_drive::FIXED_SCENE_TOKENS;
 use crate::qwen_drive::backend::{
     nvtx, ops, transfers, Context, CublasTranspose, DeviceBuffer, RuntimeBackend,
 };
@@ -10,10 +9,10 @@ use crate::qwen_drive::inputs::ExpertConditioning;
 use crate::qwen_drive::weights::bf16::{
     BackboneDeviceWeights, ExpertDeviceWeights, GdnInputSplitWeights, MixerWeights,
 };
+use crate::qwen_drive::FIXED_SCENE_TOKENS;
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
-use ops::{elementwise, embedding, gemm, linear_attention as la};
+use ops::{attention, elementwise, embedding, gdn, gemm, norm, quantization};
 use std::sync::Arc;
-const GDN_CHUNK: usize = 64;
 
 pub(crate) struct BackboneBf16 {
     pub config: QwenDriveConfig,
@@ -94,11 +93,7 @@ fn device_tensor(ctx: &Context, shape: &[usize], dtype: DType) -> Result<Tensor>
         .map_err(Error::Cuda)
 }
 
-fn dump_attention_probe(
-    ctx: &Context,
-    layer: usize,
-    tensors: &[(&str, &Tensor)],
-) -> Result<()> {
+fn dump_attention_probe(ctx: &Context, layer: usize, tensors: &[(&str, &Tensor)]) -> Result<()> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static DUMP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -125,7 +120,9 @@ fn dump_attention_probe(
 
     let directory = std::path::PathBuf::from(directory);
     std::fs::create_dir_all(&directory).map_err(|error| {
-        Error::Other(format!("qwen_drive: create attention probe directory: {error}"))
+        Error::Other(format!(
+            "qwen_drive: create attention probe directory: {error}"
+        ))
     })?;
     let mut manifest = String::from("{\n  \"dtype\": \"bf16\",\n  \"tensors\": {\n");
     for (index, (name, tensor)) in tensors.iter().enumerate() {
@@ -152,7 +149,11 @@ fn dump_attention_probe(
         directory.join(format!("layer{layer}_call{call_index}_manifest.json")),
         manifest,
     )
-        .map_err(|error| Error::Other(format!("qwen_drive: write attention probe manifest: {error}")))?;
+    .map_err(|error| {
+        Error::Other(format!(
+            "qwen_drive: write attention probe manifest: {error}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -197,29 +198,6 @@ fn noncausal_kv_gqa_l3(
     args.valid_key_tokens = valid_key_tokens;
     ops::kv_cache_attention(ctx, args)?;
     output.reshape(q.to_vec())
-}
-
-fn alloc_zeros(ctx: &Context, bytes: usize) -> Result<DeviceBuffer> {
-    ops::scratch_buffer_zeroed(ctx, bytes.max(1))
-}
-
-/// Scan scratch shaped `[heads, seq_pad, width]`.
-///
-/// The prep ops write one row per token and leave the rows that round the
-/// sequence up to a chunk multiple, so those rows are the only ones the arena
-/// has to clear. At the shipped prefill that is 7 rows of 3392, and clearing
-/// all of them instead was 25.6 ms a request.
-fn alloc_scan_scratch(
-    ctx: &Context,
-    heads: usize,
-    seq_pad: usize,
-    seq: usize,
-    width_bytes: usize,
-) -> Result<DeviceBuffer> {
-    if seq_pad == seq {
-        return ops::scratch_buffer(ctx, (heads * seq_pad * width_bytes).max(1));
-    }
-    ops::scratch_buffer_tail_zeroed(ctx, heads, seq_pad * width_bytes, seq * width_bytes)
 }
 
 /// Fixed tuned GDN input projection into the original packed row stride.
@@ -524,7 +502,7 @@ impl BackboneBf16 {
     ) -> Result<(Tensor, Option<Tensor>)> {
         let ctx = self.ctx();
         let eps = self.config.text.rms_norm_eps;
-        let (x, normed) = la::add_rms_norm_plus1(ctx, x, delta, post_norm, eps)?;
+        let (x, normed) = norm::add_rms_norm_plus1(ctx, x, delta, post_norm, eps)?;
 
         let rows = normed.shape().dims()[0];
         let inner = gate_up_w.shape().dims()[1] / 2;
@@ -538,7 +516,7 @@ impl BackboneBf16 {
         let down = gemm::bf16(ctx, &act, down_w)?;
 
         if let Some(weight) = next_norm {
-            let (hidden, normalized) = la::add_rms_norm_plus1(ctx, &x, &down, weight, eps)?;
+            let (hidden, normalized) = norm::add_rms_norm_plus1(ctx, &x, &down, weight, eps)?;
             Ok((hidden, Some(normalized)))
         } else {
             elementwise::add(ctx, &x, &down).map(|hidden| (hidden, None))
@@ -569,7 +547,7 @@ impl BackboneBf16 {
         let rotary = text.rotary_dim();
         let normed = match normalized {
             Some(value) => value.clone(),
-            None => la::rms_norm_plus1(ctx, &x, &w.input_norm, eps)?,
+            None => norm::rms_norm_plus1(ctx, &x, &w.input_norm, eps)?,
         };
         let fused = gemm::bf16(ctx, &normed, &w.qkv_w)?;
 
@@ -578,7 +556,7 @@ impl BackboneBf16 {
             LayerCache::FullAttention { k, v } => (k.clone(), v.clone()),
             _ => return Err(Error::Other("qwen_drive: cache kind mismatch".into())),
         };
-        la::full_attn_prepare(
+        attention::full_attn_prepare(
             ctx,
             &fused,
             &w.q_norm,
@@ -614,7 +592,7 @@ impl BackboneBf16 {
         let attn = causal_gqa_l3(ctx, &q_out, &k_view, &v_view)?;
 
         let attn = attn.reshape(vec![seq, heads * head_dim])?;
-        la::sigmoid_gate_mul(ctx, &attn, &fused, heads, head_dim)?;
+        attention::sigmoid_gate_mul(ctx, &attn, &fused, heads, head_dim)?;
         let proj = gemm::bf16(ctx, &attn, &w.o_w)?;
 
         self.forward_mlp(&x, &proj, &w.post_norm, &w.gate_up_w, &w.down_w, next_norm)
@@ -644,14 +622,12 @@ impl BackboneBf16 {
         let value_dim = num_v_heads * head_v;
         let conv_dim = 2 * key_dim + value_dim;
         let z_col = conv_dim;
-        let b_col = conv_dim + value_dim;
-        let a_col = b_col + num_v_heads;
         let kernel = text.linear_conv_kernel_dim;
         let has_state = state.cache_len > 0;
 
         let normed = match normalized {
             Some(value) => value.clone(),
-            None => la::rms_norm_plus1(ctx, &x, &w.input_norm, eps)?,
+            None => norm::rms_norm_plus1(ctx, &x, &w.input_norm, eps)?,
         };
 
         // One GEMM over the packed projection. Four separate ones read the same
@@ -705,269 +681,25 @@ impl BackboneBf16 {
             )?;
             output
         } else {
-            let conv_out = device_tensor(ctx, &[seq, conv_dim], DType::BF16)?;
-            la::causal_conv1d_silu_bf16(
+            let output = device_tensor(ctx, &[seq, value_dim], DType::BF16)?;
+            ops::gdn_continue(
                 ctx,
-                &zba,
-                &w.conv_w,
-                if has_state {
-                    Some(&state_current)
-                } else {
-                    None
+                ops::GdnContinuationArgs {
+                    zba: &zba,
+                    conv_weight: &w.conv_w,
+                    current_conv_state: &state_current,
+                    new_conv_state: &state_next,
+                    a_log: &w.a_log,
+                    dt_bias: &w.dt_bias,
+                    recurrent_state: &recurrent,
+                    output: &output,
+                    kernel_width: kernel,
+                    geometry: [num_k_heads, num_v_heads, head_k, head_v],
                 },
-                &conv_out,
-                &state_next,
-                kernel,
             )?;
-
-            let recurrent_decode = has_state && seq == 1;
-            let seq_pad = if recurrent_decode {
-                1
-            } else {
-                seq.div_ceil(GDN_CHUNK) * GDN_CHUNK
-            };
-            let f32_bytes = DType::F32.size_in_bytes();
-            // Choose physical Q/K representation once before allocating scratch.
-            // Decode and every diagnostic/fallback policy stay on the FP32 route.
-            let qk_bf16 =
-                la::gdn_qk_bf16_prefill_supported(ctx, recurrent_decode, head_k, head_v, GDN_CHUNK);
-            let qk_bytes = if qk_bf16 {
-                DType::BF16.size_in_bytes()
-            } else {
-                f32_bytes
-            };
-            let scan = |width: usize| alloc_scan_scratch(ctx, num_v_heads, seq_pad, seq, width);
-            let q_buf = scan(head_k * qk_bytes)?;
-            let k_buf = scan(head_k * qk_bytes)?;
-            // Typed prefill reads V directly from the convolution output. Decode
-            // and fallback prefill still use the head-major scratch buffer.
-            let v_buf = if qk_bf16 {
-                None
-            } else {
-                Some(scan(head_v * DType::BF16.size_in_bytes())?)
-            };
-            let beta_buf = scan(f32_bytes)?;
-            let g_buf = scan(f32_bytes)?;
-
-            if qk_bf16 {
-                la::gdn_qk_prep_qk_bf16(
-                    ctx,
-                    &conv_out,
-                    &q_buf,
-                    &k_buf,
-                    seq_pad,
-                    num_k_heads,
-                    num_v_heads,
-                    head_k,
-                    key_dim,
-                    false,
-                    1e-6,
-                )?;
-            } else {
-                la::gdn_qk_prep(
-                    ctx,
-                    &conv_out,
-                    &q_buf,
-                    &k_buf,
-                    seq_pad,
-                    num_k_heads,
-                    num_v_heads,
-                    head_k,
-                    key_dim,
-                    recurrent_decode,
-                    1e-6,
-                )?;
-            }
-            if qk_bf16 {
-                la::gdn_gate_prep(
-                    ctx,
-                    &zba,
-                    b_col,
-                    a_col,
-                    &w.dt_bias,
-                    &w.a_log,
-                    &beta_buf,
-                    &g_buf,
-                    seq_pad,
-                    num_v_heads,
-                )?;
-            } else {
-                la::gdn_vb_prep(
-                    ctx,
-                    &conv_out,
-                    &zba,
-                    b_col,
-                    a_col,
-                    &w.dt_bias,
-                    &w.a_log,
-                    v_buf
-                        .as_ref()
-                        .ok_or_else(|| Error::Other("GDN V scratch missing".into()))?,
-                    &beta_buf,
-                    &g_buf,
-                    seq_pad,
-                    num_v_heads,
-                    head_v,
-                    2 * key_dim,
-                )?;
-            }
-            let gdn_out = device_tensor(ctx, &[seq, value_dim], DType::BF16)?;
-            let rec_state = match &state.caches[layer_idx] {
-                LayerCache::Gdn { recurrent, .. } => recurrent.clone(),
-                _ => return Err(Error::Other("qwen_drive: cache kind mismatch".into())),
-            };
-            let rec_buf = DeviceBuffer::from_tensor(&rec_state).map_err(Error::Cuda)?;
-            if recurrent_decode {
-                la::gdn_recurrent(
-                    ctx,
-                    &q_buf,
-                    &k_buf,
-                    v_buf
-                        .as_ref()
-                        .ok_or_else(|| Error::Other("GDN V scratch missing".into()))?,
-                    &beta_buf,
-                    &g_buf,
-                    &rec_buf,
-                    &gdn_out,
-                    num_v_heads,
-                    head_k,
-                    head_v,
-                )?;
-            } else {
-                let chunks = seq_pad / GDN_CHUNK;
-                let g_cum = alloc_zeros(ctx, num_v_heads * seq_pad * DType::F32.size_in_bytes())?;
-                let a_buf = alloc_zeros(
-                    ctx,
-                    num_v_heads * chunks * GDN_CHUNK * GDN_CHUNK * DType::F32.size_in_bytes(),
-                )?;
-                // t, vt and kcd are written through __float2bfloat16 by the ops
-                // that produce them and read by the scan alone, so they are held at
-                // the width they carry. a stays fp32: the triangular inverse works
-                // on it in place.
-                let t_buf = alloc_zeros(
-                    ctx,
-                    num_v_heads * chunks * GDN_CHUNK * GDN_CHUNK * DType::BF16.size_in_bytes(),
-                )?;
-                // a/t are chunk-square, so their padding is not a row suffix and
-                // they keep the whole-buffer clear. vt/kcd are token rows like the
-                // prep outputs: chunks * GDN_CHUNK is seq_pad.
-                let bf16_bytes = DType::BF16.size_in_bytes();
-                let vt_buf = scan(head_v * bf16_bytes)?;
-                let kcd_buf = scan(head_k * bf16_bytes)?;
-                // Covers the q/k/v/beta/g preparation ops and the scan's own
-                // zeroed allocations, which sit between conv_silu and cumsum.
-
-                la::gdn_cumsum(ctx, &g_buf, &g_cum, seq_pad, num_v_heads, GDN_CHUNK)?;
-
-                if qk_bf16 {
-                    la::gdn_attn_raw_solve_f1_qk_bf16(
-                        ctx,
-                        &q_buf,
-                        &k_buf,
-                        &beta_buf,
-                        &g_cum,
-                        &a_buf,
-                        &t_buf,
-                        seq_pad,
-                        num_v_heads,
-                        head_k,
-                        GDN_CHUNK,
-                    )?;
-                } else {
-                    la::gdn_attn_raw(
-                        ctx,
-                        &q_buf,
-                        &k_buf,
-                        &beta_buf,
-                        &g_cum,
-                        &a_buf,
-                        &t_buf,
-                        seq_pad,
-                        num_v_heads,
-                        head_k,
-                        GDN_CHUNK,
-                    )?;
-
-                    la::gdn_tri_solve(ctx, &a_buf, num_v_heads * chunks, GDN_CHUNK)?;
-                }
-                if qk_bf16 {
-                    la::gdn_chunk_gemm_tri_k_bf16_direct_v(
-                        ctx,
-                        &a_buf,
-                        &conv_out,
-                        &k_buf,
-                        &beta_buf,
-                        &g_cum,
-                        &vt_buf,
-                        &kcd_buf,
-                        seq_pad,
-                        num_v_heads,
-                        head_k,
-                        head_v,
-                        GDN_CHUNK,
-                        2 * key_dim,
-                    )?;
-                } else {
-                    la::gdn_chunk_gemm(
-                        ctx,
-                        &a_buf,
-                        v_buf
-                            .as_ref()
-                            .ok_or_else(|| Error::Other("GDN V scratch missing".into()))?,
-                        &k_buf,
-                        &beta_buf,
-                        &g_cum,
-                        &vt_buf,
-                        &kcd_buf,
-                        seq_pad,
-                        num_v_heads,
-                        head_k,
-                        head_v,
-                        GDN_CHUNK,
-                    )?;
-                }
-
-                if qk_bf16 {
-                    la::gdn_chunk_state_qk_bf16(
-                        ctx,
-                        &q_buf,
-                        &k_buf,
-                        &g_cum,
-                        &t_buf,
-                        &vt_buf,
-                        &kcd_buf,
-                        &rec_buf,
-                        &gdn_out,
-                        seq_pad,
-                        num_v_heads,
-                        head_k,
-                        head_v,
-                        GDN_CHUNK,
-                    )?;
-                } else {
-                    la::gdn_chunk_state(
-                        ctx,
-                        &q_buf,
-                        &k_buf,
-                        &g_cum,
-                        &t_buf,
-                        &vt_buf,
-                        &kcd_buf,
-                        &rec_buf,
-                        &gdn_out,
-                        seq_pad,
-                        num_v_heads,
-                        head_k,
-                        head_v,
-                        GDN_CHUNK,
-                    )?;
-                }
-            }
-
-            // Opt-in fingerprints of the first two recurrent outputs and convolution row.
-
-            gdn_out
+            output
         };
+
         dump_attention_probe(
             ctx,
             layer_idx,
@@ -982,7 +714,7 @@ impl BackboneBf16 {
         if let LayerCache::Gdn { flip, .. } = &mut state.caches[layer_idx] {
             *flip = !*flip;
         }
-        let gated = la::gated_rms_silu(
+        let gated = gdn::gated_rms_silu(
             ctx,
             &gdn_out.reshape(vec![seq * num_v_heads, head_v])?,
             &zba,
@@ -1020,7 +752,7 @@ impl BackboneBf16 {
             DType::F32 => {
                 let dims = on_device.shape().dims().to_vec();
                 let out = device_tensor(ctx, &dims, DType::BF16)?;
-                la::cast_f32_to_bf16(ctx, &on_device, &out)?;
+                quantization::cast_f32_to_bf16(ctx, &on_device, &out)?;
                 Ok(out)
             }
             dtype => Err(Error::Other(format!(
@@ -1146,7 +878,7 @@ impl BackboneBf16 {
         Ok(hidden)
     }
     pub(crate) fn next_logits(&self, hidden: &Tensor) -> Result<Tensor> {
-        let normed = la::rms_norm_plus1(
+        let normed = norm::rms_norm_plus1(
             self.ctx(),
             hidden,
             &self.weights.final_norm,
@@ -1241,7 +973,7 @@ pub(super) mod vision {
     use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
     use crate::qwen_drive::backend::{nvtx, ops, transfers, Context, DeviceBuffer};
-    use ops::{activation, elementwise, fused, gemm, linear_attention as la, norm};
+    use ops::{activation, elementwise, fused, gemm, norm};
 
     use crate::qwen_drive::config::QwenDriveConfig;
     use crate::qwen_drive::weights::bf16::VisionDeviceWeights;
@@ -1506,7 +1238,7 @@ pub(super) mod vision {
         let merged = normed.reshape(vec![rows / factor, cols * factor])?;
         let h = gemm::bf16_bias(ctx, &merged, &weights.merger_fc1_w, &weights.merger_fc1_b)?;
         super::dump_attention_probe(ctx, 112, &[("merger_fc1", &h)])?;
-        let h = la::gelu_exact(ctx, &h)?;
+        let h = activation::gelu_exact(ctx, &h)?;
         super::dump_attention_probe(ctx, 113, &[("merger_gelu", &h)])?;
         let primary = gemm::bf16_bias(ctx, &h, &weights.merger_fc2_w, &weights.merger_fc2_b)?;
         super::dump_attention_probe(ctx, 114, &[("vision_output", &primary)])?;
@@ -1645,8 +1377,10 @@ pub(crate) mod expert {
     use super::FIXED_SCENE_TOKENS;
     use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-    use crate::qwen_drive::backend::{ops, nvtx, transfers, Context, DeviceBuffer};
-    use ops::{activation, elementwise, embedding, fused, gemm, linear_attention as la, norm};
+    use crate::qwen_drive::backend::{nvtx, ops, transfers, Context, DeviceBuffer};
+    use ops::{
+        activation, attention, elementwise, embedding, fused, gemm, norm, preprocess, quantization,
+    };
 
     use crate::qwen_drive::config::{PlanningExpertConfig, QwenDriveConfig};
     use crate::qwen_drive::inputs::ExpertConditioning;
@@ -2224,14 +1958,14 @@ pub(crate) mod expert {
             })?;
 
         let wp_bf16 = device_tensor(ctx, &[length, point_dim], DType::BF16)?;
-        la::cast_f32_to_bf16(ctx, &waypoints, &wp_bf16)?;
+        quantization::cast_f32_to_bf16(ctx, &waypoints, &wp_bf16)?;
         let traj = gemm::bf16_bias(
             ctx,
             &wp_bf16,
             &weights.trajectory_proj_w,
             &weights.trajectory_proj_b,
         )?;
-        let fourier_feat = la::fourier_features(
+        let fourier_feat = preprocess::fourier_features(
             ctx,
             &wp_bf16,
             &weights.fourier_freqs,
@@ -2241,7 +1975,7 @@ pub(crate) mod expert {
         let fourier = mlp(ctx, &weights.fourier, &fourier_feat)?;
 
         // broadcast bits: time(2), pose(3), velocity(5), acceleration(6).
-        let fused = la::concat7_cols(
+        let fused = preprocess::concat7_cols(
             ctx,
             [
                 &traj,
@@ -2276,7 +2010,7 @@ pub(crate) mod expert {
 
             let x = match normalized.take() {
                 Some(value) => value,
-                None => la::adaln_rms_norm(
+                None => norm::adaln_rms_norm(
                     ctx,
                     &hidden,
                     &layer.input_norm,
@@ -2289,7 +2023,7 @@ pub(crate) mod expert {
 
             let q_out = device_tensor(ctx, &[length, heads, head_dim], DType::BF16)?;
             let gate_out = device_tensor(ctx, &[length, heads, head_dim], DType::BF16)?;
-            la::expert_qkv_prepare(
+            attention::expert_qkv_prepare(
                 ctx,
                 &qkv,
                 &layer.q_norm,
@@ -2310,7 +2044,7 @@ pub(crate) mod expert {
                 (Some(k), Some(v)) => {
                     super::noncausal_kv_gqa_l3(ctx, &q_out, k, v, input.scene_len + length)?
                 }
-                _ => la::gqa_bf16(
+                _ => attention::gqa_bf16(
                     ctx,
                     &q_out,
                     &joint.key,
@@ -2319,7 +2053,7 @@ pub(crate) mod expert {
                 )?,
             };
 
-            la::expert_sigmoid_gate_mul(ctx, &attn, &gate_out)?;
+            attention::expert_sigmoid_gate_mul(ctx, &attn, &gate_out)?;
             let attn = attn.reshape(vec![length, heads * head_dim])?;
             let proj = gemm::bf16(ctx, &attn, &layer.o_w)?;
 
@@ -2356,7 +2090,7 @@ pub(crate) mod expert {
                 hidden = residual_norm.hidden;
                 normalized = Some(residual_norm.normalized);
             } else {
-                hidden = la::adaln_gate_residual(ctx, &down, &hidden, &gate_ffn)?;
+                hidden = norm::adaln_gate_residual(ctx, &down, &hidden, &gate_ffn)?;
             }
         }
 
@@ -2366,9 +2100,9 @@ pub(crate) mod expert {
             gemm::bf16_bias(ctx, &final_normed, &weights.out_proj_w, &weights.out_proj_b)?;
         let endpoint_f32 = device_tensor(ctx, &[length, point_dim], DType::F32)?;
 
-        la::cast_bf16_to_f32(ctx, &endpoint, &endpoint_f32)?;
+        quantization::cast_bf16_to_f32(ctx, &endpoint, &endpoint_f32)?;
         let remaining = (1.0f64 - t_f64).max(config.min_one_minus_t as f64) as f32;
-        la::flow_update(ctx, &waypoints, &endpoint_f32, remaining, step_f64 as f32)?;
+        preprocess::flow_update(ctx, &waypoints, &endpoint_f32, remaining, step_f64 as f32)?;
 
         Ok(())
     }

@@ -8,6 +8,15 @@ use apxinf_core::{DType, Error, Result, Shape, Tensor};
 use crate::buffer::{CudaBuffer, CudaDeviceAddress};
 use crate::context::CudaContext;
 
+pub(super) fn expect_bf16(tensor: &Tensor, name: &str) -> Result<()> {
+    if tensor.dtype() != DType::BF16 {
+        return Err(Error::Other(format!(
+            "linear-attention {name} expects BF16"
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn checked_bytes(dtype: DType, dims: &[usize], operation: &str) -> Result<usize> {
     if !matches!(dtype, DType::F32 | DType::F16 | DType::BF16) {
         return Err(Error::Other(format!(
@@ -76,12 +85,6 @@ pub(super) fn require_finite(operation: &str, values: &[f32]) -> Result<()> {
             "{operation} received a non-finite scalar"
         )))
     }
-}
-
-pub(super) fn unsupported_dtype<T>(operation: &str, dtype: DType) -> Result<T> {
-    Err(Error::Other(format!(
-        "CUDA {operation} does not support {dtype}"
-    )))
 }
 
 pub(super) fn tensor_ptr(tensor: &Tensor) -> Result<*mut c_void> {
@@ -154,14 +157,6 @@ pub(super) fn f16_output(ctx: &CudaContext, rows: usize, cols: usize) -> Result<
         rows.checked_mul(cols)
             .and_then(|elements| elements.checked_mul(DType::F16.size_in_bytes()))
             .ok_or_else(|| Error::Other("FP16 output size overflow".into()))?,
-    )
-}
-
-pub(super) fn fp8_output(ctx: &CudaContext, rows: usize, cols: usize) -> Result<CudaBuffer> {
-    crate::workspace::output_buffer_uninitialized(
-        ctx,
-        rows.checked_mul(cols)
-            .ok_or_else(|| Error::Other("FP8 output size overflow".into()))?,
     )
 }
 

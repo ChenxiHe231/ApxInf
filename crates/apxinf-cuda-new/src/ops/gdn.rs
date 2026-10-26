@@ -12,7 +12,12 @@ use crate::ffi::abi::{gdn as abi, status};
 use crate::ops::gemm::contracts::{invalid, tensor_storage};
 use crate::{CudaBuffer, CudaContext};
 
+mod launches;
+
+pub use crate::ops::norm::gated_rms_silu;
+
 const FIRST_PREFILL_CHUNK: usize = 64;
+const CONTINUATION_CHUNK: usize = 64;
 
 /// Complete first-prefill causal-convolution + gated-delta scan semantic.
 ///
@@ -47,6 +52,34 @@ fn zeroed(ctx: &CudaContext, bytes: usize) -> Result<CudaBuffer> {
     crate::ops::scratch_buffer_zeroed(ctx, bytes.max(1))
 }
 
+fn prepare_fixed(
+    ctx: &CudaContext,
+    key_dim: usize,
+    value_dim: usize,
+    chunk_size: usize,
+) -> Result<()> {
+    if crate::workspace::may_prepare_native_resources() {
+        unsafe {
+            status::check(abi::apxinf_gdn_prepare_fixed(
+                ctx.device_id() as i32,
+                key_dim as i32,
+                value_dim as i32,
+                chunk_size as i32,
+            ))?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_chunk_scan(ctx: &CudaContext) -> Result<()> {
+    if crate::workspace::may_prepare_native_resources() {
+        unsafe {
+            status::check(abi::apxinf_gdn_chunk_scan_prepare(ctx.device_id() as i32))?;
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn gdn_first_prefill(ctx: &CudaContext, args: GdnFirstPrefillArgs<'_>) -> Result<()> {
     let [key_heads, value_heads, key_dim, value_dim] = args.geometry;
@@ -75,7 +108,7 @@ pub fn gdn_first_prefill(ctx: &CudaContext, args: GdnFirstPrefillArgs<'_>) -> Re
         return Err(invalid("invalid first-prefill GDN contract"));
     }
     let final_state = CudaBuffer::from_tensor(args.final_state).map_err(Error::Cuda)?;
-    if let Some(fast) = crate::ops::linear_attention::try_causal_conv_gdn_prefill_bf16(
+    if let Some(fast) = launches::try_causal_conv_gdn_prefill_bf16(
         ctx,
         args.zba,
         args.conv_weight,
@@ -93,7 +126,9 @@ pub fn gdn_first_prefill(ctx: &CudaContext, args: GdnFirstPrefillArgs<'_>) -> Re
         return Ok(());
     }
 
-    use crate::ops::linear_attention as la;
+    prepare_fixed(ctx, key_dim, value_dim, FIRST_PREFILL_CHUNK)?;
+
+    use launches as la;
     let conv_out =
         ctx.allocate_output(apxinf_core::Shape::new(vec![seq, conv_width]), DType::BF16)?;
     la::causal_conv1d_silu_bf16(
@@ -320,6 +355,320 @@ pub fn gdn_first_prefill(ctx: &CudaContext, args: GdnFirstPrefillArgs<'_>) -> Re
             key_dim,
             value_dim,
             FIRST_PREFILL_CHUNK,
+        )?;
+    }
+    Ok(())
+}
+
+/// Complete stateful GDN execution after the first prefill.
+///
+/// The model supplies only semantic tensors. Physical Q/K representation,
+/// scratch layout and the recurrent-versus-chunked candidate are private to
+/// this family.
+pub struct GdnContinuationArgs<'a> {
+    pub zba: &'a Tensor,
+    pub conv_weight: &'a Tensor,
+    pub current_conv_state: &'a Tensor,
+    pub new_conv_state: &'a Tensor,
+    pub a_log: &'a Tensor,
+    pub dt_bias: &'a Tensor,
+    pub recurrent_state: &'a Tensor,
+    pub output: &'a Tensor,
+    pub kernel_width: usize,
+    /// `[key_heads, value_heads, key_dim, value_dim]`.
+    pub geometry: [usize; 4],
+}
+
+#[allow(clippy::too_many_lines)]
+pub fn gdn_continue(ctx: &CudaContext, args: GdnContinuationArgs<'_>) -> Result<()> {
+    use launches as la;
+
+    let [key_heads, value_heads, key_dim, value_dim] = args.geometry;
+    let seq = args.zba.shape().dims().first().copied().unwrap_or(0);
+    let key_width = key_heads
+        .checked_mul(key_dim)
+        .ok_or_else(|| invalid("GDN key width overflow"))?;
+    let value_width = value_heads
+        .checked_mul(value_dim)
+        .ok_or_else(|| invalid("GDN value width overflow"))?;
+    let conv_width = 2 * key_width + value_width;
+    let row_width = conv_width + value_width + 2 * value_heads;
+    if seq == 0
+        || key_heads == 0
+        || value_heads == 0
+        || value_heads % key_heads != 0
+        || key_dim != value_dim
+        || args.kernel_width == 0
+        || args.zba.shape().dims() != [seq, row_width]
+        || args.conv_weight.shape().dims() != [conv_width, args.kernel_width]
+        || args.current_conv_state.shape().dims() != [conv_width, args.kernel_width]
+        || args.new_conv_state.shape().dims() != [conv_width, args.kernel_width]
+        || args.a_log.shape().dims() != [value_heads]
+        || args.dt_bias.shape().dims() != [value_heads]
+        || args.recurrent_state.shape().dims() != [value_heads, value_dim, key_dim]
+        || args.output.shape().dims() != [seq, value_width]
+    {
+        return Err(invalid("invalid stateful GDN contract"));
+    }
+
+    prepare_fixed(ctx, key_dim, value_dim, CONTINUATION_CHUNK)?;
+
+    let conv_out =
+        ctx.allocate_output(apxinf_core::Shape::new(vec![seq, conv_width]), DType::BF16)?;
+    la::causal_conv1d_silu_bf16(
+        ctx,
+        args.zba,
+        args.conv_weight,
+        Some(args.current_conv_state),
+        &conv_out,
+        args.new_conv_state,
+        args.kernel_width,
+    )?;
+
+    let recurrent_decode = seq == 1;
+    let seq_pad = if recurrent_decode {
+        1
+    } else {
+        seq.div_ceil(CONTINUATION_CHUNK) * CONTINUATION_CHUNK
+    };
+    let f32_bytes = DType::F32.size_in_bytes();
+    let qk_bf16 = la::gdn_qk_bf16_prefill_supported(
+        ctx,
+        recurrent_decode,
+        key_dim,
+        value_dim,
+        CONTINUATION_CHUNK,
+    );
+    let qk_bytes = if qk_bf16 {
+        DType::BF16.size_in_bytes()
+    } else {
+        f32_bytes
+    };
+    let q_buf = scan_scratch(ctx, value_heads, seq_pad, seq, key_dim * qk_bytes)?;
+    let k_buf = scan_scratch(ctx, value_heads, seq_pad, seq, key_dim * qk_bytes)?;
+    let v_buf = if qk_bf16 {
+        None
+    } else {
+        Some(scan_scratch(
+            ctx,
+            value_heads,
+            seq_pad,
+            seq,
+            value_dim * DType::BF16.size_in_bytes(),
+        )?)
+    };
+    let beta_buf = scan_scratch(ctx, value_heads, seq_pad, seq, f32_bytes)?;
+    let g_buf = scan_scratch(ctx, value_heads, seq_pad, seq, f32_bytes)?;
+
+    if qk_bf16 {
+        la::gdn_qk_prep_qk_bf16(
+            ctx,
+            &conv_out,
+            &q_buf,
+            &k_buf,
+            seq_pad,
+            key_heads,
+            value_heads,
+            key_dim,
+            key_width,
+            false,
+            1e-6,
+        )?;
+        la::gdn_gate_prep(
+            ctx,
+            args.zba,
+            conv_width + value_width,
+            conv_width + value_width + value_heads,
+            args.dt_bias,
+            args.a_log,
+            &beta_buf,
+            &g_buf,
+            seq_pad,
+            value_heads,
+        )?;
+    } else {
+        la::gdn_qk_prep(
+            ctx,
+            &conv_out,
+            &q_buf,
+            &k_buf,
+            seq_pad,
+            key_heads,
+            value_heads,
+            key_dim,
+            key_width,
+            recurrent_decode,
+            1e-6,
+        )?;
+        la::gdn_vb_prep(
+            ctx,
+            &conv_out,
+            args.zba,
+            conv_width + value_width,
+            conv_width + value_width + value_heads,
+            args.dt_bias,
+            args.a_log,
+            v_buf
+                .as_ref()
+                .ok_or_else(|| invalid("GDN V scratch missing"))?,
+            &beta_buf,
+            &g_buf,
+            seq_pad,
+            value_heads,
+            value_dim,
+            2 * key_width,
+        )?;
+    }
+
+    let recurrent_state = CudaBuffer::from_tensor(args.recurrent_state).map_err(Error::Cuda)?;
+    if recurrent_decode {
+        la::gdn_recurrent(
+            ctx,
+            &q_buf,
+            &k_buf,
+            v_buf
+                .as_ref()
+                .ok_or_else(|| invalid("GDN V scratch missing"))?,
+            &beta_buf,
+            &g_buf,
+            &recurrent_state,
+            args.output,
+            value_heads,
+            key_dim,
+            value_dim,
+        )?;
+        return Ok(());
+    }
+
+    let chunks = seq_pad / CONTINUATION_CHUNK;
+    let g_cum = zeroed(ctx, value_heads * seq_pad * f32_bytes)?;
+    let a_buf = zeroed(
+        ctx,
+        value_heads * chunks * CONTINUATION_CHUNK * CONTINUATION_CHUNK * f32_bytes,
+    )?;
+    let t_buf = zeroed(
+        ctx,
+        value_heads
+            * chunks
+            * CONTINUATION_CHUNK
+            * CONTINUATION_CHUNK
+            * DType::BF16.size_in_bytes(),
+    )?;
+    let vt_buf = scan_scratch(
+        ctx,
+        value_heads,
+        seq_pad,
+        seq,
+        value_dim * DType::BF16.size_in_bytes(),
+    )?;
+    let kcd_buf = scan_scratch(
+        ctx,
+        value_heads,
+        seq_pad,
+        seq,
+        key_dim * DType::BF16.size_in_bytes(),
+    )?;
+    la::gdn_cumsum(
+        ctx,
+        &g_buf,
+        &g_cum,
+        seq_pad,
+        value_heads,
+        CONTINUATION_CHUNK,
+    )?;
+    if qk_bf16 {
+        la::gdn_attn_raw_solve_f1_qk_bf16(
+            ctx,
+            &q_buf,
+            &k_buf,
+            &beta_buf,
+            &g_cum,
+            &a_buf,
+            &t_buf,
+            seq_pad,
+            value_heads,
+            key_dim,
+            CONTINUATION_CHUNK,
+        )?;
+        la::gdn_chunk_gemm_tri_k_bf16_direct_v(
+            ctx,
+            &a_buf,
+            &conv_out,
+            &k_buf,
+            &beta_buf,
+            &g_cum,
+            &vt_buf,
+            &kcd_buf,
+            seq_pad,
+            value_heads,
+            key_dim,
+            value_dim,
+            CONTINUATION_CHUNK,
+            2 * key_width,
+        )?;
+        la::gdn_chunk_state_qk_bf16(
+            ctx,
+            &q_buf,
+            &k_buf,
+            &g_cum,
+            &t_buf,
+            &vt_buf,
+            &kcd_buf,
+            &recurrent_state,
+            args.output,
+            seq_pad,
+            value_heads,
+            key_dim,
+            value_dim,
+            CONTINUATION_CHUNK,
+        )?;
+    } else {
+        la::gdn_attn_raw(
+            ctx,
+            &q_buf,
+            &k_buf,
+            &beta_buf,
+            &g_cum,
+            &a_buf,
+            &t_buf,
+            seq_pad,
+            value_heads,
+            key_dim,
+            CONTINUATION_CHUNK,
+        )?;
+        la::gdn_tri_solve(ctx, &a_buf, value_heads * chunks, CONTINUATION_CHUNK)?;
+        la::gdn_chunk_gemm(
+            ctx,
+            &a_buf,
+            v_buf
+                .as_ref()
+                .ok_or_else(|| invalid("GDN V scratch missing"))?,
+            &k_buf,
+            &beta_buf,
+            &g_cum,
+            &vt_buf,
+            &kcd_buf,
+            seq_pad,
+            value_heads,
+            key_dim,
+            value_dim,
+            CONTINUATION_CHUNK,
+        )?;
+        la::gdn_chunk_state(
+            ctx,
+            &q_buf,
+            &k_buf,
+            &g_cum,
+            &t_buf,
+            &vt_buf,
+            &kcd_buf,
+            &recurrent_state,
+            args.output,
+            seq_pad,
+            value_heads,
+            key_dim,
+            value_dim,
+            CONTINUATION_CHUNK,
         )?;
     }
     Ok(())
@@ -788,6 +1137,7 @@ pub fn gdn_chunk_scan(
     let beta_buffer = tensor_storage(ctx, beta, DType::F32, &[seq_padded, v_heads])?;
     let out_buffer = tensor_storage(ctx, out, DType::BF16, &[seq_padded, v_heads, v_dim])?;
     let state_buffer = tensor_storage(ctx, state, DType::F32, &state_dims)?;
+    prepare_chunk_scan(ctx)?;
     unsafe {
         status::check(abi::apxinf_gdn_chunk_scan(
             q_buffer.ptr(),
@@ -856,6 +1206,7 @@ pub fn gdn_chunk_scan_interleaved(
     let beta_buffer = tensor_storage(ctx, beta, DType::F32, &[seq_padded, v_heads])?;
     let out_buffer = tensor_storage(ctx, out, DType::BF16, &[seq_padded, v_heads, k_dim])?;
     let state_buffer = tensor_storage(ctx, state, DType::F32, &[v_heads, k_dim, k_dim])?;
+    prepare_chunk_scan(ctx)?;
 
     // Byte offsets into the one fused allocation; the kernel walks rows itself.
     let base = fused_buffer.ptr() as *const u8;

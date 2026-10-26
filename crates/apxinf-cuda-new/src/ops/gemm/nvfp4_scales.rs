@@ -127,7 +127,9 @@ pub fn nvfp4_quantize_activation(
 ) -> Result<()> {
     let dims = activation.shape().dims().to_vec();
     if dims.len() != 2 {
-        return Err(invalid("NVFP4 activation quantization requires a rank-2 tensor"));
+        return Err(invalid(
+            "NVFP4 activation quantization requires a rank-2 tensor",
+        ));
     }
     let (rows, k) = (dims[0], dims[1]);
     if block_size == 0 || k % block_size as usize != 0 {
@@ -166,7 +168,7 @@ pub fn nvfp4_quantize_activation(
 
 /// RMSNorm fused with NVFP4 quantization.
 ///
-/// Equivalent to [`crate::ops::mlp::rms_norm`] followed by
+/// Equivalent to [`crate::ops::norm::rms_norm_weight_offset`] followed by
 /// [`nvfp4_quantize_activation`], but never materializes the normalized BF16
 /// tensor. At prefill widths that round trip dominates both ops' arithmetic.
 pub fn nvfp4_quantize_rms_norm(
@@ -182,7 +184,9 @@ pub fn nvfp4_quantize_rms_norm(
 ) -> Result<()> {
     let dims = input.shape().dims().to_vec();
     if dims.len() != 2 {
-        return Err(invalid("fused RMSNorm quantization requires a rank-2 tensor"));
+        return Err(invalid(
+            "fused RMSNorm quantization requires a rank-2 tensor",
+        ));
     }
     let (rows, k) = (dims[0], dims[1]);
     if block_size == 0 || k % block_size as usize != 0 {

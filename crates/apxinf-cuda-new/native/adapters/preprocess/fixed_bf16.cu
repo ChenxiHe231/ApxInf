@@ -1,59 +1,6 @@
-// Copyright 2026 ApxInf contributors.
-// Fixed implementation for this operator family; ported without numerical changes.
-#include <cuda_fp16.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
-#include <mma.h>
+#include "../../kernels/preprocess/fixed_bf16.cuh"
 
-#include <cmath>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <limits>
-
-namespace {
-#include "../../kernels/custom/gdn_policy.h"
-#include "../../kernels/custom/math.cuh"
-#include "../../kernels/custom/reduction.cuh"
-#include "../../kernels/custom/pillow_bicubic_u8.cuh"
-#include "../../kernels/custom/linear_attention.cuh"
-#include "../../kernels/custom/gdn_raw_inverse_f1.cuh"
-#include "../../kernels/custom/gdn_chunk_state_wmma.cuh"
-#include "../../kernels/custom/gdn_chunk_gemm_tri.cuh"
-__global__ void rgb_u8_to_temporal2_merge2_rect_bf16_kernel(
-    const uint8_t* __restrict__ rgb, uint16_t* __restrict__ patches,
-    const uint16_t* __restrict__ lut, int grid_h, int grid_w) {
-  constexpr int kPatch = 16;
-  constexpr int kArea = 256;
-  constexpr int kRowWidth = 3 * 2 * kArea;
-  const int row = blockIdx.x;
-  int rem = row;
-  const int merge_x = rem & 1;
-  rem >>= 1;
-  const int merge_y = rem & 1;
-  rem >>= 1;
-  const int groups_w = grid_w / 2;
-  const int group_x = rem % groups_w;
-  const int group_y = rem / groups_w;
-  const int patch_y = group_y * 2 + merge_y;
-  const int patch_x = group_x * 2 + merge_x;
-  const int dy = threadIdx.x / kPatch;
-  const int dx = threadIdx.x % kPatch;
-  const int64_t pixel = ((static_cast<int64_t>(patch_y) * kPatch + dy) *
-                         (static_cast<int64_t>(grid_w) * kPatch) +
-                         static_cast<int64_t>(patch_x) * kPatch + dx) * 3;
-  const int64_t base = static_cast<int64_t>(row) * kRowWidth + threadIdx.x;
-#pragma unroll
-  for (int channel = 0; channel < 3; ++channel) {
-    const uint16_t normalized = lut[rgb[pixel + channel]];
-    patches[base + channel * 2 * kArea] = normalized;
-    patches[base + channel * 2 * kArea + kArea] = normalized;
-  }
-}
-
-}  // namespace
-
-extern "C" cudaError_t apxinf_hybrid_rgb_u8_to_temporal2_merge2_rect_bf16(
+extern "C" cudaError_t apxinf_preprocess_rgb_u8_to_temporal2_merge2_rect_bf16(
     const void* rgb, void* patches, const void* lut, int grid_h, int grid_w,
     cudaStream_t stream) {
   if (!rgb || !patches || !lut || grid_h <= 0 || grid_w <= 0 ||
@@ -66,7 +13,7 @@ extern "C" cudaError_t apxinf_hybrid_rgb_u8_to_temporal2_merge2_rect_bf16(
   return cudaGetLastError();
 }
 
-extern "C" cudaError_t apxinf_hybrid_pillow_bicubic_u8_axis(
+extern "C" cudaError_t apxinf_preprocess_pillow_bicubic_u8_axis(
     const void* input, void* output, const void* input_offsets,
     const void* output_offsets, const void* bounds, const void* weights,
     int ksize, int in_w, int in_h, int out_w, int out_h,

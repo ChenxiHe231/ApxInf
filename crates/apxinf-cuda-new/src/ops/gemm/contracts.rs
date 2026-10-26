@@ -60,6 +60,7 @@ pub struct GemmArgs<'a> {
     /// Canonical row-major output `[M, N]`. GEMM mutates this tensor.
     pub out: &'a mut Tensor,
     pub quantization: GemmQuantization<'a>,
+    pub weight_layout: GemmWeightLayout,
     pub alpha: f32,
     pub output_scale: f32,
     pub policy: GemmPolicy,
@@ -70,6 +71,14 @@ pub struct GemmArgs<'a> {
     /// identity: both the tensor address and this version identify a prepared
     /// weight.
     pub weight_version: Option<WeightVersion>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GemmWeightLayout {
+    #[default]
+    Kn,
+    /// Physical checkpoint layout `[N, K]`, used by W8A8 and packed NVFP4.
+    OutputMajor,
 }
 
 /// Quantization contract for the operands supplied to one GEMM call.
@@ -123,6 +132,7 @@ impl<'a> GemmArgs<'a> {
             b,
             out,
             quantization: GemmQuantization::None,
+            weight_layout: GemmWeightLayout::Kn,
             alpha: 1.0,
             output_scale: 1.0,
             policy: GemmPolicy::default(),
@@ -145,6 +155,7 @@ impl<'a> GemmArgs<'a> {
                 row_scales,
                 channel_scales,
             },
+            weight_layout: GemmWeightLayout::Kn,
             alpha: 1.0,
             output_scale: 1.0,
             policy: GemmPolicy::default(),
@@ -171,6 +182,7 @@ impl<'a> GemmArgs<'a> {
                 row_scales,
                 channel_scales,
             },
+            weight_layout: GemmWeightLayout::Kn,
             alpha: 1.0,
             output_scale: 1.0,
             policy,
@@ -182,6 +194,12 @@ impl<'a> GemmArgs<'a> {
     /// created from these arguments and attach its caller-managed version.
     pub fn with_immutable_weight(mut self, version: WeightVersion) -> Self {
         self.weight_version = Some(version);
+        self
+    }
+
+    /// Consume a W8A8 checkpoint weight stored physically as `[N, K]`.
+    pub fn with_output_major_weight(mut self) -> Self {
+        self.weight_layout = GemmWeightLayout::OutputMajor;
         self
     }
 
@@ -207,6 +225,7 @@ impl<'a> GemmArgs<'a> {
                 b_block_scales,
                 block_size,
             },
+            weight_layout: GemmWeightLayout::OutputMajor,
             alpha,
             output_scale: 1.0,
             policy: GemmPolicy::default(),
@@ -385,6 +404,7 @@ fn normalize_fused<'a>(
         return Err(invalid("GEMM requires rank-2 tensors"));
     }
     let nvfp4 = matches!(args.quantization, GemmQuantization::Nvfp4 { .. });
+    let output_major = args.weight_layout == GemmWeightLayout::OutputMajor;
     // Public storage is deliberately canonical and candidate-independent.
     // Candidates may transpose or pack internally while preparing an execution.
     //
@@ -400,6 +420,8 @@ fn normalize_fused<'a>(
     };
     let (weight_k, n) = if nvfp4 {
         (b_shape[1] * 2, b_shape[0])
+    } else if output_major {
+        (b_shape[1], b_shape[0])
     } else {
         (b_shape[0], b_shape[1])
     };
@@ -508,6 +530,11 @@ fn normalize_fused<'a>(
         }
     };
     let has_row_channel_scales = matches!(quantization, 2 | 3);
+    if (output_major && !matches!(quantization, 3 | 4)) || (nvfp4 && !output_major) {
+        return Err(invalid(
+            "output-major GEMM weights are supported only by W8A8 and NVFP4",
+        ));
+    }
     if matches!(
         semantic,
         Semantic::GemmGeglu | Semantic::GemmSwiGluPairInterleaved256
@@ -656,13 +683,17 @@ fn normalize_fused<'a>(
 
     Ok(Normalized {
         spec: abi::Spec {
-            version: 6,
+            version: 7,
             semantic: semantic as u32,
             a_dtype: dtype(args.a.dtype())?,
             b_dtype: dtype(args.b.dtype())?,
             accumulation_dtype: dtype(args.policy.accumulation_dtype)?,
             output_dtype: dtype(args.out.dtype())?,
             quantization,
+            b_layout: match args.weight_layout {
+                GemmWeightLayout::Kn => 0,
+                GemmWeightLayout::OutputMajor => 1,
+            },
             b_is_immutable: bindings.b_is_immutable,
             a_alignment: alignment_class(bindings.a),
             b_alignment: alignment_class(bindings.b),

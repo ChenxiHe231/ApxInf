@@ -29,6 +29,10 @@ bool supports_vendor(const Spec& spec) {
            spec.accumulation_dtype == APXINF_DTYPE_F32));
 }
 
+bool supports_cublaslt(const Spec& spec) {
+  return spec.b_layout == APXINF_GEMM_LAYOUT_KN && supports_vendor(spec);
+}
+
 bool supports_native_fp8(const Spec& spec) {
   return supports_vendor(spec) && spec.a_dtype == APXINF_DTYPE_E4M3 &&
          spec.quantization != APXINF_GEMM_QUANT_FP8_ROW_CHANNEL &&
@@ -151,6 +155,24 @@ bool supports_cutlass_w8a8(const Spec& spec) {
          spec.b_is_immutable != 0 &&
          spec.k % 16 == 0 && spec.n % 8 == 0 &&
          spec.alpha_is_unit != 0 && spec.output_scale_is_unit != 0;
+}
+
+bool supports_cutlass_w8a8_m41_n6144_k1536(const Spec& spec) {
+  return supports_cutlass_w8a8(spec) &&
+         spec.b_layout == APXINF_GEMM_LAYOUT_NK && spec.m == 41 &&
+         spec.n == 6144 && spec.k == 1536;
+}
+
+bool supports_cutlass_w8a8_bias_m41_n4608_k1536(const Spec& spec) {
+  return spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+         spec.a_dtype == APXINF_DTYPE_I8 && spec.b_dtype == APXINF_DTYPE_I8 &&
+         spec.accumulation_dtype == APXINF_DTYPE_I32 &&
+         spec.output_dtype == APXINF_DTYPE_BF16 &&
+         spec.quantization == APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL &&
+         spec.b_is_immutable != 0 &&
+         spec.b_layout == APXINF_GEMM_LAYOUT_NK && spec.m == 41 &&
+         spec.n == 4608 && spec.k == 1536 && spec.alpha_is_unit != 0 &&
+         spec.output_scale_is_unit != 0;
 }
 #endif
 
@@ -364,7 +386,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
-       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
       {kProviderCublasLt, 3, 1, "cublasLt-native-fp8-gelu-bias",
@@ -381,7 +403,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
-       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
       {kProviderCublasLt, 2, 1, "cublasLt-native-fp8-bias",
@@ -389,13 +411,21 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        cublaslt_alignment, cublaslt_native_fp8_resource_requirements,
        cublaslt_configurations, prepare_cublaslt_native_fp8, launch_cublaslt,
        destroy_cublaslt},
+#ifdef APXINF_GEMM_CUTLASS_SM87_W8A8
+      {kProviderCutlass, 9, 1, "cutlass-w8a8-bias-m41-n4608-k1536-sm87",
+       kDeviceFeatureCutlassSm87W8A8, true, true, false,
+       supports_cutlass_w8a8_bias_m41_n4608_k1536,
+       cutlass_w8a8_alignment, cutlass_w8a8_resource_requirements,
+       one_configuration, prepare_cutlass_w8a8,
+       launch_cutlass_w8a8_bias_m41_n4608_k1536, destroy_cutlass},
+#endif
   };
   static const ImplementationRegistry gemm_bias_residual_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
-       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
       {kProviderCublasLt, 3, 1, "cublasLt-native-fp8-bias-residual",
@@ -409,7 +439,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
-       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
       {kProviderCublasLt, 2, 1, "cublasLt-native-fp8+custom-epilogue",
@@ -441,6 +471,12 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        prepare_cutlass_nvfp4, launch_cutlass_nvfp4, destroy_cutlass},
 #endif
 #ifdef APXINF_GEMM_CUTLASS_SM87_W8A8
+      {kProviderCutlass, 8, 1, "cutlass-w8a8-m41-n6144-k1536-sm87",
+       kDeviceFeatureCutlassSm87W8A8, true, true, false,
+       supports_cutlass_w8a8_m41_n6144_k1536, cutlass_w8a8_alignment,
+       cutlass_w8a8_resource_requirements, one_configuration,
+       prepare_cutlass_w8a8, launch_cutlass_w8a8_m41_n6144_k1536,
+       destroy_cutlass},
       {kProviderCutlass, 6, 1, "cutlass-w8a8-sm87",
        kDeviceFeatureCutlassSm87W8A8, true, true, false,
        supports_cutlass_w8a8, cutlass_w8a8_alignment,
@@ -453,7 +489,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 2, "cublasLt+custom-epilogue", 0, true, false, false,
-       supports_vendor, cublaslt_alignment, cublaslt_resource_requirements,
+       supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
        cublaslt_configurations, prepare_cublaslt, launch_cublaslt,
        destroy_cublaslt},
       {kProviderCublasLt, 2, 1, "cublasLt-native-fp8+geglu",
@@ -492,12 +528,12 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        supports_vendor, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+rounded-swiglu", 0, true, false,
-       false, supports_vendor, cublaslt_alignment,
+       false, supports_cublaslt, cublaslt_alignment,
        cublaslt_resource_requirements, cublaslt_configurations,
        prepare_cublaslt, launch_cublaslt, destroy_cublaslt},
 #if defined(APXINF_GEMM_CUTLASS) && defined(APXINF_SEGMENTED_ATTENTION_SM110)
       {kProviderCutlass, 7, 1, "cutlass-bf16-swiglu-sm110",
-       kDeviceFeatureQwenDriveSm110, true, true, false,
+       kDeviceFeatureFixedSm110, true, true, false,
        supports_cutlass_bf16_swiglu_sm110, cutlass_geglu_alignment,
        cutlass_bf16_swiglu_resource_requirements, one_configuration,
        prepare_cutlass_bf16_swiglu, launch_cutlass_bf16_swiglu,

@@ -154,7 +154,9 @@ pub fn append(
     append_len: usize,
 ) -> Result<()> {
     let cache_dims = cache.shape().dims();
-    if cache_dims != [max_seq_len, n_kv_heads, head_dim] && cache_dims != [1, max_seq_len, n_kv_heads, head_dim] {
+    if cache_dims != [max_seq_len, n_kv_heads, head_dim]
+        && cache_dims != [1, max_seq_len, n_kv_heads, head_dim]
+    {
         return Err(Error::Other(format!(
             "KV cache append expects [1, {max_seq_len}, {n_kv_heads}, {head_dim}] or [{max_seq_len}, {n_kv_heads}, {head_dim}], got {cache_dims:?}"
         )));
@@ -192,4 +194,3 @@ pub fn append(
         ))
     }
 }
-
