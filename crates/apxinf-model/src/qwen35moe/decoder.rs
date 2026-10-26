@@ -443,41 +443,47 @@ impl Qwen35Decoder {
                 &resident.input_layernorm,
                 &mut scratch.normalized,
                 self.rms_norm_eps,
-            )?;
-
+            )
+            .map_err(|error| layer_error(layer.index, "input RMSNorm", error))?;
 
             match (&layer.mixer, &resident.mixer) {
                 (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) => {
                     let state = &gdn_states[gdn_index];
                     match phase {
-                        DecoderPhase::Prefill => {
-                            scratch.gdn.prefill(ctx, gdn, state, &scratch.normalized)?
-                        }
-                        DecoderPhase::Decode => {
-                            scratch.gdn.decode(ctx, gdn, state, &scratch.normalized)?
-                        }
+                        DecoderPhase::Prefill => scratch
+                            .gdn
+                            .prefill(ctx, gdn, state, &scratch.normalized)
+                            .map_err(|error| layer_error(layer.index, "GDN prefill", error))?,
+                        DecoderPhase::Decode => scratch
+                            .gdn
+                            .decode(ctx, gdn, state, &scratch.normalized)
+                            .map_err(|error| layer_error(layer.index, "GDN decode", error))?,
                     }
-                    ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)?;
+                    ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
+                        .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
                     gdn_index += 1;
                 }
                 (
                     MixerKind::FullAttention(geometry),
                     DeviceMixerWeights::FullAttention(full_attention),
                 ) => {
-                    attention.run(
-                        ctx,
-                        FullAttentionRequest {
-                            layer_index: layer.index,
-                            phase,
-                            start_position,
-                            geometry: *geometry,
-                            weights: full_attention,
-                            normalized_hidden: &scratch.normalized,
-                            output: &scratch.mixer_output,
-                        },
-                        &mut attention_caches[attention_index],
-                    )?;
-                    ops::add_into(ctx, &scratch.mixer_output, &scratch.hidden)?;
+                    attention
+                        .run(
+                            ctx,
+                            FullAttentionRequest {
+                                layer_index: layer.index,
+                                phase,
+                                start_position,
+                                geometry: *geometry,
+                                weights: full_attention,
+                                normalized_hidden: &scratch.normalized,
+                                output: &scratch.mixer_output,
+                            },
+                            &mut attention_caches[attention_index],
+                        )
+                        .map_err(|error| layer_error(layer.index, "attention", error))?;
+                    ops::add_into(ctx, &scratch.mixer_output, &scratch.hidden)
+                        .map_err(|error| layer_error(layer.index, "attention residual", error))?;
                     attention_index += 1;
                 }
                 _ => {
@@ -488,16 +494,20 @@ impl Qwen35Decoder {
                 }
             }
 
-
             qwen35_rms_norm(
                 ctx,
                 &scratch.hidden,
                 &resident.post_attention_layernorm,
                 &mut scratch.normalized,
                 self.rms_norm_eps,
-            )?;
-            scratch.moe.run(ctx, &resident.moe, &scratch.normalized)?;
-            ops::add_into(ctx, scratch.moe.output(), &scratch.hidden)?;
+            )
+            .map_err(|error| layer_error(layer.index, "post-attention RMSNorm", error))?;
+            scratch
+                .moe
+                .run(ctx, &resident.moe, &scratch.normalized)
+                .map_err(|error| layer_error(layer.index, "MoE", error))?;
+            ops::add_into(ctx, scratch.moe.output(), &scratch.hidden)
+                .map_err(|error| layer_error(layer.index, "MoE residual", error))?;
         }
 
         scratch.finish(
@@ -811,7 +821,6 @@ fn validate_tensor(
     Ok(())
 }
 
-
 fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
     let bytes = shape
         .iter()
@@ -827,6 +836,10 @@ fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
+}
+
+fn layer_error(layer: usize, stage: &str, error: Error) -> Error {
+    Error::Other(format!("Qwen3.5 layer {layer} {stage}: {error}"))
 }
 
 #[cfg(test)]

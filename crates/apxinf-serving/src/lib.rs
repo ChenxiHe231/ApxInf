@@ -4,6 +4,7 @@
 //! worker thread, and that thread constructs and retains the mutable model and
 //! device context for their complete lifetime.
 
+pub mod anthropic;
 mod api;
 mod engine;
 mod error;

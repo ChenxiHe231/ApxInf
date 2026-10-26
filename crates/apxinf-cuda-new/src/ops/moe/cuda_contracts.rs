@@ -1,7 +1,7 @@
 use apxinf_core::{DType, Result, Tensor};
 
 use super::contracts::RoutedMoeConfig;
-use crate::ffi::abi::moe as abi;
+use crate::ffi::abi::{moe as abi, status};
 use crate::ops::gemm::contracts::{dtype, invalid, tensor_storage};
 use crate::ops::gemm::ScaleLayout;
 use crate::{CudaBuffer, CudaContext};
@@ -29,6 +29,16 @@ pub struct RoutedMoeRouteArgs<'a> {
     pub expert_offsets: &'a mut Tensor,
 }
 
+pub struct RoutedMoeRouteTopkArgs<'a> {
+    pub config: RoutedMoeConfig,
+    /// Router logits `[tokens, experts]`, in F32, F16, or BF16.
+    pub logits: &'a Tensor,
+    /// Token-major selected expert IDs `[tokens, top_k]`, I32.
+    pub expert_ids: &'a mut Tensor,
+    /// Token-major selected weights `[tokens, top_k]`, F32.
+    pub expert_weights: &'a mut Tensor,
+}
+
 pub struct RoutedMoeCombineArgs<'a> {
     /// Expert-major outputs `[routes, hidden]`.
     pub assignment_output: &'a Tensor,
@@ -41,6 +51,17 @@ pub struct RoutedMoeCombineArgs<'a> {
     /// Pre-sigmoid shared gate logits `[tokens]`.
     pub shared_gate_logits: &'a Tensor,
     /// Combined output `[tokens, hidden]`.
+    pub output: &'a mut Tensor,
+}
+
+pub struct RoutedMoeAddSharedArgs<'a> {
+    /// Token-major routed contribution `[tokens, hidden]`.
+    pub routed_output: &'a Tensor,
+    /// Token-major shared-expert output `[tokens, hidden]`.
+    pub shared_output: &'a Tensor,
+    /// Pre-sigmoid shared gate logits `[tokens]`.
+    pub shared_gate_logits: &'a Tensor,
+    /// `routed + sigmoid(gate) * shared`, `[tokens, hidden]`.
     pub output: &'a mut Tensor,
 }
 
@@ -81,7 +102,46 @@ pub struct RoutedMoeNvfp4ExpertsArgs<'a> {
     pub shared_output: &'a mut Tensor,
 }
 
+/// TensorRT-Edge-LLM/CuTeDSL packed routed-expert weights.
+///
+/// FC1 uses 64-row `[up, gate]` interleaving. Scale tensors use the physical
+/// 128x4 CuTe MMA layout; their rank documents that layout but the kernel
+/// consumes the storage as bytes.
+#[derive(Clone, Copy)]
+pub struct EdgeNvfp4MoeWeights<'a> {
+    pub fc1_weight: &'a Tensor,
+    pub fc1_scales: &'a Tensor,
+    pub fc1_alpha: &'a Tensor,
+    pub input_global_scale: &'a Tensor,
+    pub fc2_weight: &'a Tensor,
+    pub fc2_scales: &'a Tensor,
+    pub fc2_alpha: &'a Tensor,
+    pub down_input_scale: &'a Tensor,
+}
+
+pub struct EdgeNvfp4MoeArgs<'a> {
+    pub config: RoutedMoeConfig,
+    pub intermediate: usize,
+    /// BF16 `[tokens, hidden]`.
+    pub input: &'a Tensor,
+    /// Token-major I32 `[tokens, top_k]`.
+    pub expert_ids: &'a Tensor,
+    /// Token-major F32 `[tokens, top_k]`.
+    pub expert_weights: &'a Tensor,
+    pub weights: EdgeNvfp4MoeWeights<'a>,
+    pub workspace: &'a CudaBuffer,
+    /// BF16 routed contribution `[tokens, hidden]`; routing weights are
+    /// already applied by FC2.
+    pub output: &'a mut Tensor,
+}
+
 pub(crate) struct NormalizedRoute {
+    pub spec: abi::RouteSpec,
+    pub bindings: abi::RouteBindings,
+    pub storage: Vec<CudaBuffer>,
+}
+
+pub(crate) struct NormalizedRouteTopk {
     pub spec: abi::RouteSpec,
     pub bindings: abi::RouteBindings,
     pub storage: Vec<CudaBuffer>,
@@ -93,10 +153,190 @@ pub(crate) struct NormalizedCombine {
     pub storage: Vec<CudaBuffer>,
 }
 
+pub(crate) struct NormalizedAddShared {
+    pub spec: abi::CombineSpec,
+    pub bindings: abi::AddSharedBindings,
+    pub storage: Vec<CudaBuffer>,
+}
+
 pub(crate) struct NormalizedNvfp4Experts {
     pub spec: abi::Nvfp4ExpertsSpec,
     pub bindings: abi::Nvfp4ExpertsBindings,
     pub storage: Vec<CudaBuffer>,
+}
+
+pub(crate) struct NormalizedEdgeNvfp4 {
+    pub spec: abi::EdgeNvfp4Spec,
+    pub bindings: abi::EdgeNvfp4Bindings,
+    pub storage: Vec<CudaBuffer>,
+}
+
+fn edge_spec(
+    config: RoutedMoeConfig,
+    tokens: usize,
+    hidden: usize,
+    intermediate: usize,
+) -> Result<abi::EdgeNvfp4Spec> {
+    config.validate()?;
+    if config.experts != 256 || config.top_k != 8 {
+        return Err(invalid(
+            "Edge NVFP4 MoE currently requires exactly 256 experts and top-8",
+        ));
+    }
+    if tokens == 0
+        || hidden == 0
+        || hidden % 128 != 0
+        || intermediate == 0
+        || intermediate % 64 != 0
+    {
+        return Err(invalid(
+            "Edge NVFP4 MoE requires non-zero tokens, hidden multiple of 128, and intermediate multiple of 64",
+        ));
+    }
+    Ok(abi::EdgeNvfp4Spec {
+        version: abi::EDGE_NVFP4_SPEC_VERSION,
+        dtype: dtype(DType::BF16)?,
+        tokens: u32::try_from(tokens).map_err(|_| invalid("Edge NVFP4 token count exceeds u32"))?,
+        experts: u32::try_from(config.experts)
+            .map_err(|_| invalid("Edge NVFP4 expert count exceeds u32"))?,
+        top_k: u32::try_from(config.top_k).map_err(|_| invalid("Edge NVFP4 top-k exceeds u32"))?,
+        hidden: u32::try_from(hidden).map_err(|_| invalid("Edge NVFP4 hidden size exceeds u32"))?,
+        intermediate: u32::try_from(intermediate)
+            .map_err(|_| invalid("Edge NVFP4 intermediate size exceeds u32"))?,
+    })
+}
+
+pub(crate) fn edge_nvfp4_workspace_size(
+    config: RoutedMoeConfig,
+    tokens: usize,
+    hidden: usize,
+    intermediate: usize,
+) -> Result<usize> {
+    let spec = edge_spec(config, tokens, hidden, intermediate)?;
+    let mut bytes = 0usize;
+    unsafe {
+        status::check(abi::apxinf_moe_edge_nvfp4_workspace_size(&spec, &mut bytes))?;
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn normalize_edge_nvfp4(
+    ctx: &CudaContext,
+    args: EdgeNvfp4MoeArgs<'_>,
+) -> Result<NormalizedEdgeNvfp4> {
+    let shape = args.input.shape().dims();
+    if shape.len() != 2 {
+        return Err(invalid("Edge NVFP4 input must have shape [tokens, hidden]"));
+    }
+    let (tokens, hidden) = (shape[0], shape[1]);
+    let spec = edge_spec(args.config, tokens, hidden, args.intermediate)?;
+    let input = tensor_storage(ctx, args.input, DType::BF16, &[tokens, hidden])?;
+    let expert_ids = tensor_storage(
+        ctx,
+        args.expert_ids,
+        DType::I32,
+        &[tokens, args.config.top_k],
+    )?;
+    let expert_weights = tensor_storage(
+        ctx,
+        args.expert_weights,
+        DType::F32,
+        &[tokens, args.config.top_k],
+    )?;
+    let experts = args.config.experts;
+    let inter = args.intermediate;
+    let fc1_weight = tensor_storage(
+        ctx,
+        args.weights.fc1_weight,
+        DType::E2M1Pair,
+        &[experts, 2 * inter, hidden / 2],
+    )?;
+    let fc1_scales = tensor_storage(
+        ctx,
+        args.weights.fc1_scales,
+        DType::F8E4M3,
+        &[
+            experts,
+            (2 * inter).div_ceil(128),
+            (hidden / 16).div_ceil(4),
+            32,
+            4,
+            4,
+        ],
+    )?;
+    let fc1_alpha = tensor_storage(ctx, args.weights.fc1_alpha, DType::F32, &[experts])?;
+    let input_global_scale =
+        tensor_storage(ctx, args.weights.input_global_scale, DType::F32, &[experts])?;
+    let fc2_weight = tensor_storage(
+        ctx,
+        args.weights.fc2_weight,
+        DType::E2M1Pair,
+        &[experts, hidden, inter / 2],
+    )?;
+    let fc2_scales = tensor_storage(
+        ctx,
+        args.weights.fc2_scales,
+        DType::F8E4M3,
+        &[
+            experts,
+            hidden.div_ceil(128),
+            (inter / 16).div_ceil(4),
+            32,
+            4,
+            4,
+        ],
+    )?;
+    let fc2_alpha = tensor_storage(ctx, args.weights.fc2_alpha, DType::F32, &[experts])?;
+    let down_input_scale =
+        tensor_storage(ctx, args.weights.down_input_scale, DType::F32, &[experts])?;
+    let output = tensor_storage(ctx, args.output, DType::BF16, &[tokens, hidden])?;
+    if args.workspace.device() != ctx.device_id() {
+        return Err(invalid("Edge NVFP4 workspace is on the wrong CUDA device"));
+    }
+    let required = edge_nvfp4_workspace_size(args.config, tokens, hidden, inter)?;
+    if args.workspace.len() < required {
+        return Err(invalid(format!(
+            "Edge NVFP4 workspace requires {required} bytes, got {}",
+            args.workspace.len()
+        )));
+    }
+    let workspace = args.workspace.clone();
+    let bindings = abi::EdgeNvfp4Bindings {
+        input: input.ptr(),
+        expert_ids: expert_ids.ptr().cast(),
+        expert_weights: expert_weights.ptr().cast(),
+        fc1_weight: fc1_weight.ptr(),
+        fc1_scales: fc1_scales.ptr(),
+        fc1_alpha: fc1_alpha.ptr().cast(),
+        input_global_scale: input_global_scale.ptr().cast(),
+        fc2_weight: fc2_weight.ptr(),
+        fc2_scales: fc2_scales.ptr(),
+        fc2_alpha: fc2_alpha.ptr().cast(),
+        down_input_scale: down_input_scale.ptr().cast(),
+        workspace: workspace.ptr(),
+        workspace_bytes: workspace.len(),
+        output: output.ptr(),
+        stream: ctx.stream().handle(),
+    };
+    Ok(NormalizedEdgeNvfp4 {
+        spec,
+        bindings,
+        storage: vec![
+            input,
+            expert_ids,
+            expert_weights,
+            fc1_weight,
+            fc1_scales,
+            fc1_alpha,
+            input_global_scale,
+            fc2_weight,
+            fc2_scales,
+            fc2_alpha,
+            down_input_scale,
+            output,
+            workspace,
+        ],
+    })
 }
 
 struct ProjectionBuffers {
@@ -208,6 +448,67 @@ pub(crate) fn normalize_route(
     })
 }
 
+pub(crate) fn normalize_route_topk(
+    ctx: &CudaContext,
+    args: RoutedMoeRouteTopkArgs<'_>,
+) -> Result<NormalizedRouteTopk> {
+    args.config.validate()?;
+    if args.config.experts > 256 || args.config.top_k > 8 {
+        return Err(invalid(
+            "the routed MoE CUDA candidate supports at most 256 experts and top-8",
+        ));
+    }
+    let shape = args.logits.shape().dims();
+    if shape.len() != 2 || shape[0] == 0 || shape[1] != args.config.experts {
+        return Err(invalid(
+            "routed MoE logits must have shape [tokens, experts]",
+        ));
+    }
+    let tokens = shape[0];
+    let logits_dtype = args.logits.dtype();
+    let logits = tensor_storage(ctx, args.logits, logits_dtype, shape)?;
+    let expert_ids = tensor_storage(
+        ctx,
+        args.expert_ids,
+        DType::I32,
+        &[tokens, args.config.top_k],
+    )?;
+    let expert_weights = tensor_storage(
+        ctx,
+        args.expert_weights,
+        DType::F32,
+        &[tokens, args.config.top_k],
+    )?;
+    let spec = abi::RouteSpec {
+        version: abi::ROUTE_SPEC_VERSION,
+        logits_dtype: supported_float(logits_dtype)?,
+        tokens: u32::try_from(tokens)
+            .map_err(|_| invalid("routed MoE token count exceeds the CUDA range"))?,
+        experts: u32::try_from(args.config.experts)
+            .map_err(|_| invalid("routed MoE expert count exceeds the CUDA range"))?,
+        top_k: u32::try_from(args.config.top_k)
+            .map_err(|_| invalid("routed MoE top-k exceeds the CUDA range"))?,
+        renormalize: u32::from(args.config.renormalize),
+    };
+    let bindings = abi::RouteBindings {
+        logits: logits.ptr(),
+        expert_ids: expert_ids.ptr().cast(),
+        expert_weights: expert_weights.ptr().cast(),
+        assignment_expert_ids: std::ptr::null_mut(),
+        assignment_token_ids: std::ptr::null_mut(),
+        assignment_slots: std::ptr::null_mut(),
+        token_assignment_indices: std::ptr::null_mut(),
+        assignment_weights: std::ptr::null_mut(),
+        expert_offsets: std::ptr::null_mut(),
+        stream: ctx.stream().handle(),
+    };
+    Ok(NormalizedRouteTopk {
+        spec,
+        bindings,
+        storage: vec![logits, expert_ids, expert_weights],
+    })
+}
+
 pub(crate) fn normalize_combine(
     ctx: &CudaContext,
     args: RoutedMoeCombineArgs<'_>,
@@ -290,6 +591,46 @@ pub(crate) fn normalize_combine(
             shared_gate_logits,
             output,
         ],
+    })
+}
+
+pub(crate) fn normalize_add_shared(
+    ctx: &CudaContext,
+    args: RoutedMoeAddSharedArgs<'_>,
+) -> Result<NormalizedAddShared> {
+    let shape = args.routed_output.shape().dims();
+    if shape.len() != 2 || shape[0] == 0 || shape[1] == 0 {
+        return Err(invalid("routed MoE add-shared expects [tokens, hidden]"));
+    }
+    let (tokens, hidden) = (shape[0], shape[1]);
+    let activation_dtype = args.routed_output.dtype();
+    let routed_output = tensor_storage(ctx, args.routed_output, activation_dtype, shape)?;
+    let shared_output = tensor_storage(ctx, args.shared_output, activation_dtype, shape)?;
+    let shared_gate_logits =
+        tensor_storage(ctx, args.shared_gate_logits, activation_dtype, &[tokens])?;
+    let output = tensor_storage(ctx, args.output, activation_dtype, shape)?;
+    let spec = abi::CombineSpec {
+        version: abi::COMBINE_SPEC_VERSION,
+        dtype: supported_float(activation_dtype)?,
+        tokens: u32::try_from(tokens)
+            .map_err(|_| invalid("routed MoE token count exceeds the CUDA range"))?,
+        routes: u32::try_from(tokens)
+            .map_err(|_| invalid("routed MoE token count exceeds the CUDA range"))?,
+        top_k: 1,
+        hidden: u32::try_from(hidden)
+            .map_err(|_| invalid("routed MoE hidden width exceeds the CUDA range"))?,
+    };
+    let bindings = abi::AddSharedBindings {
+        routed_output: routed_output.ptr(),
+        shared_output: shared_output.ptr(),
+        shared_gate_logits: shared_gate_logits.ptr(),
+        output: output.ptr(),
+        stream: ctx.stream().handle(),
+    };
+    Ok(NormalizedAddShared {
+        spec,
+        bindings,
+        storage: vec![routed_output, shared_output, shared_gate_logits, output],
     })
 }
 

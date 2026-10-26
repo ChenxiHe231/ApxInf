@@ -37,14 +37,11 @@ fn prompt() -> Vec<u32> {
         151_644, 8948, 198, 9707, 16_357, 220, 19_687, 25, 198, 151_645, 198, 151_644, 77091, 198,
         35_064, 16_933,
     ];
-    let Some(target) = std::env::var(PROMPT_TOKENS_ENV)
-        .ok()
-        .map(|value| {
-            value
-                .parse::<usize>()
-                .unwrap_or_else(|_| panic!("{PROMPT_TOKENS_ENV} must be a positive integer"))
-        })
-    else {
+    let Some(target) = std::env::var(PROMPT_TOKENS_ENV).ok().map(|value| {
+        value
+            .parse::<usize>()
+            .unwrap_or_else(|_| panic!("{PROMPT_TOKENS_ENV} must be a positive integer"))
+    }) else {
         return base;
     };
     assert!(target > 0, "{PROMPT_TOKENS_ENV} must be positive");
@@ -102,7 +99,10 @@ fn write_diagnostics(
     mtp_token_ids: &[u32],
     scalar_token_ids: &[u32],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
         std::fs::create_dir_all(parent)?;
     }
     let diagnostics = serde_json::json!({
@@ -143,17 +143,15 @@ fn neutral_mtp_matches_forced_scalar_greedy() -> Result<(), Box<dyn std::error::
         ..LoadOptions::default()
     };
     let checkpoint = checkpoint();
-    let mut model = AutoModel::load_model(
-        Device::Cuda(cuda_device()),
-        checkpoint.clone(),
-        &options,
-    )?;
+    let mut model =
+        AutoModel::load_model(Device::Cuda(cuda_device()), checkpoint.clone(), &options)?;
 
     let mtp = model.generate_streaming_with_options(
         LlmInput::text(&prompt),
         &mtp_options(output_tokens),
         |_token| {},
     )?;
+    eprintln!("Qwen3.5 MTP profile:\n{}", mtp.profile.summary());
     let stats = model
         .speculative_generation_stats()?
         .expect("neutral greedy request must expose real MTP counters");
@@ -178,6 +176,7 @@ fn neutral_mtp_matches_forced_scalar_greedy() -> Result<(), Box<dyn std::error::
         &forced_scalar_options(output_tokens),
         |_token| {},
     )?;
+    eprintln!("Qwen3.5 scalar profile:\n{}", scalar.profile.summary());
     assert!(
         model.speculative_generation_stats()?.is_none(),
         "forced-scalar request unexpectedly used MTP"

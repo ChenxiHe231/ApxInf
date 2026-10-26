@@ -8,13 +8,19 @@ mod contracts;
 mod cuda_contracts;
 mod execution;
 mod launch;
+mod packing;
 mod reference;
 
 pub use contracts::{
     ExpertAssignment, RoutePlan, RoutedMoeConfig, RoutedMoeSemantic, SharedExpertOutput,
 };
 pub use cuda_contracts::{
-    Nvfp4ExpertProjection, RoutedMoeCombineArgs, RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs,
+    EdgeNvfp4MoeArgs, EdgeNvfp4MoeWeights, Nvfp4ExpertProjection, RoutedMoeAddSharedArgs,
+    RoutedMoeCombineArgs, RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs,
 };
-pub use execution::{routed_moe_combine, routed_moe_nvfp4_experts, routed_moe_route};
+pub use execution::{
+    edge_nvfp4_moe, edge_nvfp4_moe_available, edge_nvfp4_moe_workspace_size, routed_moe_add_shared,
+    routed_moe_combine, routed_moe_nvfp4_experts, routed_moe_route, routed_moe_route_topk,
+};
+pub use packing::{edge_nvfp4_interleave_fc1, edge_nvfp4_rescale_e4m3, edge_nvfp4_swizzle_scales};
 pub use reference::{combine_reference, route_topk_reference};

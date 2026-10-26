@@ -18,6 +18,10 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::anthropic::{
+    empty_options, response_content, stop_reason as anthropic_stop_reason, MessagesApiError,
+    MessagesRequest, MessagesResponse, MessagesUsage,
+};
 use crate::engine::{ApxInfChatEngine, ApxInfEngineConfig, EngineRequest};
 use crate::error::ApiError;
 use crate::protocol::{
@@ -61,6 +65,7 @@ pub fn router(api: ApiConfig, worker: WorkerClient) -> Router {
         .route("/healthz", get(health))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/messages", post(messages))
         .with_state(Arc::new(state))
 }
 
@@ -213,6 +218,97 @@ async fn chat_completions(
     .into_response())
 }
 
+async fn messages(
+    State(state): State<Arc<AppState>>,
+    payload: Result<Json<MessagesRequest>, JsonRejection>,
+) -> Result<Response, MessagesApiError> {
+    let Json(request) = payload.map_err(|error| {
+        MessagesApiError(ApiError::invalid(
+            format!("invalid JSON request: {}", error.body_text()),
+            Some("body".to_owned()),
+        ))
+    })?;
+    let converted = request.into_openai()?;
+    let openai_request = ChatCompletionRequest {
+        model: converted.model,
+        messages: converted.messages,
+        tools: converted.tools,
+        tool_choice: converted.tool_choice,
+        parallel_tool_calls: converted.parallel_tool_calls,
+        stream: converted.stream,
+        stream_options: None,
+        max_tokens: Some(converted.max_tokens),
+        max_completion_tokens: None,
+        temperature: converted.temperature,
+        top_p: converted.top_p,
+        frequency_penalty: None,
+        presence_penalty: None,
+        seed: None,
+        n: None,
+        stop: None,
+        logprobs: None,
+        response_format: None,
+        enable_thinking: Some(converted.enable_thinking),
+        chat_template_kwargs: empty_options(),
+    };
+    validate_request(&openai_request, &state.api)?;
+    let registry = ToolRegistry::validate(&openai_request.tools)?;
+    let tool_choice = validate_tool_choice(openai_request.tool_choice.as_ref(), &registry)?;
+    let parallel_tool_calls = openai_request.parallel_tool_calls;
+    let stream = openai_request.stream;
+    let max_tokens = openai_request
+        .max_tokens
+        .expect("Anthropic max_tokens was validated as required");
+    let engine_request = EngineRequest {
+        messages: openai_request.messages,
+        tools: openai_request.tools,
+        tool_choice: tool_choice.clone(),
+        chat_template_kwargs: openai_request.chat_template_kwargs,
+        enable_thinking: openai_request.enable_thinking.unwrap_or(false),
+        max_tokens,
+        temperature: openai_request.temperature,
+        top_p: openai_request.top_p,
+        frequency_penalty: None,
+        presence_penalty: None,
+        seed: None,
+    };
+    let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let id = format!("msg-{sequence:016x}");
+    if stream {
+        let receiver = state.worker.submit_stream(engine_request)?;
+        return Ok(anthropic_streaming_response(
+            receiver,
+            registry,
+            tool_choice,
+            parallel_tool_calls,
+            sequence,
+            id,
+            state.api.served_model_name.clone(),
+        ));
+    }
+    let output = state.worker.complete(engine_request).await?;
+    let prepared = prepare_completion(
+        output,
+        &registry,
+        &tool_choice,
+        parallel_tool_calls,
+        sequence,
+    )?;
+    let stop_reason = anthropic_stop_reason(&prepared.finish_reason).to_owned();
+    let content = response_content(prepared.content, prepared.tool_calls)?;
+    Ok(Json(MessagesResponse {
+        id,
+        kind: "message",
+        role: "assistant",
+        content,
+        model: state.api.served_model_name.clone(),
+        stop_reason,
+        stop_sequence: None,
+        usage: prepared.usage.into(),
+    })
+    .into_response())
+}
+
 struct PreparedCompletion {
     content: Option<String>,
     tool_calls: Vec<crate::protocol::ToolCall>,
@@ -360,10 +456,8 @@ fn streaming_response(
                             return;
                         }
                     };
-                    if !role_sent {
-                        if !send_stream_role(&sender, &envelope).await {
-                            return;
-                        }
+                    if !role_sent && !send_stream_role(&sender, &envelope).await {
+                        return;
                     }
                     for update in updates {
                         if !send_stream_update(&sender, &envelope, update).await {
@@ -415,6 +509,305 @@ fn streaming_response(
         .header("x-accel-buffering", "no")
         .body(Body::from_stream(ReceiverStream::new(body_receiver)))
         .expect("static SSE response headers are valid")
+}
+
+fn anthropic_streaming_response(
+    mut receiver: mpsc::Receiver<Result<EngineStreamEvent, ApiError>>,
+    registry: ToolRegistry,
+    tool_choice: crate::tool_calling::ToolChoice,
+    parallel_tool_calls: bool,
+    sequence: u64,
+    id: String,
+    model: String,
+) -> Response {
+    let (sender, body_receiver) = mpsc::channel::<Result<Bytes, Infallible>>(8);
+    tokio::spawn(async move {
+        if !send_anthropic_sse(
+            &sender,
+            "message_start",
+            &json!({
+                "type":"message_start",
+                "message":{
+                    "id":id,
+                    "type":"message",
+                    "role":"assistant",
+                    "content":[],
+                    "model":model,
+                    "stop_reason":null,
+                    "stop_sequence":null,
+                    "usage":{"input_tokens":0,"output_tokens":0},
+                }
+            }),
+        )
+        .await
+        {
+            return;
+        }
+
+        let mut protocol = ProtocolStreamState::new();
+        let mut wire = AnthropicWireState::new();
+        loop {
+            let event = tokio::select! {
+                _ = sender.closed() => return,
+                event = receiver.recv() => event,
+            };
+            let Some(event) = event else {
+                send_anthropic_stream_error(
+                    &sender,
+                    ApiError::unavailable("model worker stopped before responding"),
+                )
+                .await;
+                return;
+            };
+            let event = match event {
+                Ok(event) => event,
+                Err(error) => {
+                    send_anthropic_stream_error(&sender, error).await;
+                    return;
+                }
+            };
+            match event {
+                EngineStreamEvent::TextDelta(delta) => {
+                    let updates = match protocol.push(
+                        &delta,
+                        &registry,
+                        &tool_choice,
+                        parallel_tool_calls,
+                        sequence,
+                    ) {
+                        Ok(updates) => updates,
+                        Err(error) => {
+                            send_anthropic_stream_error(&sender, error).await;
+                            return;
+                        }
+                    };
+                    if !wire.send_updates(&sender, updates).await {
+                        return;
+                    }
+                }
+                EngineStreamEvent::Complete(output) => {
+                    if protocol.raw != output.text {
+                        send_anthropic_stream_error(
+                            &sender,
+                            ApiError::internal(
+                                "streamed text did not match the completed generation",
+                            ),
+                        )
+                        .await;
+                        return;
+                    }
+                    let prepared = match prepare_completion(
+                        output,
+                        &registry,
+                        &tool_choice,
+                        parallel_tool_calls,
+                        sequence,
+                    ) {
+                        Ok(prepared) => prepared,
+                        Err(error) => {
+                            send_anthropic_stream_error(&sender, error).await;
+                            return;
+                        }
+                    };
+                    let updates = match protocol.finish(&prepared) {
+                        Ok(updates) => updates,
+                        Err(error) => {
+                            send_anthropic_stream_error(&sender, error).await;
+                            return;
+                        }
+                    };
+                    if !wire.send_updates(&sender, updates).await || !wire.close_text(&sender).await
+                    {
+                        return;
+                    }
+                    if !send_anthropic_sse(
+                        &sender,
+                        "message_delta",
+                        &json!({
+                            "type":"message_delta",
+                            "delta":{
+                                "stop_reason":anthropic_stop_reason(&prepared.finish_reason),
+                                "stop_sequence":null,
+                            },
+                            "usage":MessagesUsage::from(prepared.usage),
+                        }),
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    let _ = send_anthropic_sse(
+                        &sender,
+                        "message_stop",
+                        &json!({"type":"message_stop"}),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .header("x-accel-buffering", "no")
+        .body(Body::from_stream(ReceiverStream::new(body_receiver)))
+        .expect("static SSE response headers are valid")
+}
+
+struct AnthropicWireState {
+    next_index: usize,
+    text_index: Option<usize>,
+    text_open: bool,
+}
+
+impl AnthropicWireState {
+    fn new() -> Self {
+        Self {
+            next_index: 0,
+            text_index: None,
+            text_open: false,
+        }
+    }
+
+    async fn send_updates(
+        &mut self,
+        sender: &mpsc::Sender<Result<Bytes, Infallible>>,
+        updates: Vec<StreamUpdate>,
+    ) -> bool {
+        for update in updates {
+            match update {
+                StreamUpdate::Content(content) => {
+                    let index = match self.text_index {
+                        Some(index) => index,
+                        None => {
+                            let index = self.next_index;
+                            self.next_index += 1;
+                            self.text_index = Some(index);
+                            self.text_open = true;
+                            if !send_anthropic_sse(
+                                sender,
+                                "content_block_start",
+                                &json!({
+                                    "type":"content_block_start",
+                                    "index":index,
+                                    "content_block":{"type":"text","text":""},
+                                }),
+                            )
+                            .await
+                            {
+                                return false;
+                            }
+                            index
+                        }
+                    };
+                    if !send_anthropic_sse(
+                        sender,
+                        "content_block_delta",
+                        &json!({
+                            "type":"content_block_delta",
+                            "index":index,
+                            "delta":{"type":"text_delta","text":content},
+                        }),
+                    )
+                    .await
+                    {
+                        return false;
+                    }
+                }
+                StreamUpdate::ToolCall { call, .. } => {
+                    if !self.close_text(sender).await {
+                        return false;
+                    }
+                    let index = self.next_index;
+                    self.next_index += 1;
+                    if !send_anthropic_sse(
+                        sender,
+                        "content_block_start",
+                        &json!({
+                            "type":"content_block_start",
+                            "index":index,
+                            "content_block":{
+                                "type":"tool_use",
+                                "id":call.id,
+                                "name":call.function.name,
+                                "input":{},
+                            },
+                        }),
+                    )
+                    .await
+                        || !send_anthropic_sse(
+                            sender,
+                            "content_block_delta",
+                            &json!({
+                                "type":"content_block_delta",
+                                "index":index,
+                                "delta":{
+                                    "type":"input_json_delta",
+                                    "partial_json":call.function.arguments,
+                                },
+                            }),
+                        )
+                        .await
+                        || !send_anthropic_sse(
+                            sender,
+                            "content_block_stop",
+                            &json!({"type":"content_block_stop","index":index}),
+                        )
+                        .await
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    async fn close_text(&mut self, sender: &mpsc::Sender<Result<Bytes, Infallible>>) -> bool {
+        if !self.text_open {
+            return true;
+        }
+        self.text_open = false;
+        send_anthropic_sse(
+            sender,
+            "content_block_stop",
+            &json!({
+                "type":"content_block_stop",
+                "index":self.text_index.expect("open text has an index"),
+            }),
+        )
+        .await
+    }
+}
+
+async fn send_anthropic_sse(
+    sender: &mpsc::Sender<Result<Bytes, Infallible>>,
+    event: &str,
+    value: &Value,
+) -> bool {
+    let data = format!(
+        "event: {event}\ndata: {}\n\n",
+        serde_json::to_string(value).expect("serde_json::Value is serializable")
+    );
+    sender.send(Ok(Bytes::from(data))).await.is_ok()
+}
+
+async fn send_anthropic_stream_error(
+    sender: &mpsc::Sender<Result<Bytes, Infallible>>,
+    error: ApiError,
+) {
+    let _ = send_anthropic_sse(
+        sender,
+        "error",
+        &json!({
+            "type":"error",
+            "error":{"type":error.error_type,"message":error.message},
+        }),
+    )
+    .await;
 }
 
 struct StreamEnvelope<'a> {

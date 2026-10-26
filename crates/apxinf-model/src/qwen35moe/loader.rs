@@ -536,7 +536,7 @@ fn load_dense_expert<L: ManifestAccess>(
     })
 }
 
-fn load_nvfp4_moe<L: ManifestAccess>(
+pub(super) fn load_nvfp4_moe<L: ManifestAccess>(
     loader: &mut L,
     prefix: &str,
     hidden: usize,

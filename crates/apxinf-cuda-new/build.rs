@@ -220,6 +220,7 @@ fn configure_nvtx(cuda: &str, library_directories: &[PathBuf]) {
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(apxinf_nvfp4_gemm_swiglu)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_segmented_attention_sm110)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_edge_nvfp4_moe)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_decode)");
     println!("cargo:rustc-check-cfg=cfg(nvtx_header)");
     println!("cargo:rustc-check-cfg=cfg(nvtx_v2)");
@@ -299,6 +300,14 @@ fn main() {
     }
     if native_sm110 {
         println!("cargo:rustc-cfg=apxinf_segmented_attention_sm110");
+    }
+    // CUDA 12 reports Thor as SM101 and aliases CuTeDSL's SM110a path to
+    // SM101a. Keep the selection exact; CUDA 13 reports the same hardware as
+    // SM110 and requires a separately generated archive.
+    let edge_nvfp4_moe =
+        cpu_arch == "aarch64" && selection.targets.len() == 1 && selection.targets[0].sm() == 101;
+    if edge_nvfp4_moe {
+        println!("cargo:rustc-cfg=apxinf_edge_nvfp4_moe");
     }
 
     let id = env::var("APXINF_KERNEL_BUILD_ID").unwrap_or_else(|_| {
@@ -421,6 +430,11 @@ fn main() {
     generic_sources.push(native.join("kernels/custom/gather_embedding.cu"));
     generic_sources.push(native.join("kernels/custom/sampling_argmax.cu"));
     generic_sources.push(native.join("tests/framework_backend.cu"));
+    if edge_nvfp4_moe {
+        generic_sources.push(native.join("kernels/edge_nvfp4_moe/runner.cu"));
+    } else {
+        generic_sources.push(native.join("kernels/edge_nvfp4_moe/stub.cpp"));
+    }
     let cutlass_root = native.join("kernels/cutlass");
     let fa2_root = native.join("kernels/fa2");
     let fa2_compat_root = native.join("kernels/fa2_compat");
@@ -880,6 +894,11 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=apxinf_gemm_native");
+    if edge_nvfp4_moe {
+        let edge_aot = native.join("kernels/edge_nvfp4_moe/aot/aarch64-sm110-cuda12");
+        println!("cargo:rustc-link-search=native={}", edge_aot.display());
+        println!("cargo:rustc-link-lib=static=apxinf_edge_nvfp4_moe_sm110_cuda12");
+    }
     println!("cargo:rustc-link-lib=cublasLt");
     println!("cargo:rustc-link-lib=cublas");
     println!("cargo:rustc-link-lib=cudart");

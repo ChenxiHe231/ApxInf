@@ -9,11 +9,16 @@
 use std::path::Path;
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
-use apxinf_cuda_new::{transfers, CudaContext};
+use apxinf_cuda_new::{
+    edge_nvfp4_interleave_fc1, edge_nvfp4_moe_available, edge_nvfp4_rescale_e4m3,
+    edge_nvfp4_swizzle_scales, ops, transfers, CudaBuffer, CudaContext,
+};
 
 use super::architecture::{MixerKind, Qwen35MoeArchitecture};
 use super::config::Qwen35MoeConfig;
-use super::loader::{load_qwen35_layer, load_qwen35_mtp, ManifestAccess, Qwen35SafetensorsLoader};
+use super::loader::{
+    load_nvfp4_moe, load_qwen35_layer, load_qwen35_mtp, ManifestAccess, Qwen35SafetensorsLoader,
+};
 use super::runtime_weights::{
     AttentionWeights, DenseLinearWeights, GdnWeights, MixerWeights, Nvfp4LinearWeights,
     Qwen35LayerWeights, Qwen35MtpLayerWeights, Qwen35MtpWeights, Qwen35RuntimeWeights,
@@ -37,13 +42,43 @@ pub struct DeviceNvfp4Linear {
     pub packed_weight: Tensor,
     /// Unsigned-E4M3 block scales, `[N, K / 16]`, row-major.
     pub block_scales: Tensor,
+    /// tcgen05 atom layout used by the SM110 shared-expert GEMM.
+    pub gemm_block_scales: Option<Tensor>,
     /// Static activation scale retained for a future quantized GEMM candidate.
     pub input_scale: f32,
     /// Per-tensor weight scale consumed by the current BF16-input correctness
     /// candidate.
     pub weight_scale_2: Tensor,
+    /// Host scalar mirror used to configure quantized GEMM without a D2H copy.
+    pub weight_scale_2_value: f32,
     pub input_features: usize,
     pub output_features: usize,
+}
+
+/// TensorRT-Edge-LLM's SM110 CuTeDSL routed-expert layout.
+#[derive(Debug)]
+pub struct DeviceEdgeNvfp4Experts {
+    pub fc1_weight: Tensor,
+    pub fc1_scales: Tensor,
+    pub fc1_alpha: Tensor,
+    pub input_global_scale: Tensor,
+    pub fc2_weight: Tensor,
+    pub fc2_scales: Tensor,
+    pub fc2_alpha: Tensor,
+    pub down_input_scale: Tensor,
+    pub experts: usize,
+    pub hidden: usize,
+    pub intermediate: usize,
+}
+
+#[derive(Debug)]
+pub enum DeviceNvfp4RoutedExperts {
+    Reference {
+        gate: DeviceNvfp4ExpertProjection,
+        up: DeviceNvfp4ExpertProjection,
+        down: DeviceNvfp4ExpertProjection,
+    },
+    Edge(DeviceEdgeNvfp4Experts),
 }
 
 /// One projection from all routed experts, packed into expert-major storage.
@@ -67,9 +102,7 @@ pub struct DeviceNvfp4ExpertProjection {
 #[derive(Debug)]
 pub struct DeviceNvfp4Moe {
     pub router: DeviceDenseLinear,
-    pub expert_gate: DeviceNvfp4ExpertProjection,
-    pub expert_up: DeviceNvfp4ExpertProjection,
-    pub expert_down: DeviceNvfp4ExpertProjection,
+    pub routed_experts: DeviceNvfp4RoutedExperts,
     pub shared_gate: DeviceNvfp4Linear,
     pub shared_up: DeviceNvfp4Linear,
     pub shared_down: DeviceNvfp4Linear,
@@ -258,6 +291,33 @@ pub fn load_qwen35_device_weights_from_path(
     })
 }
 
+/// Load and prepare one real routed-MoE layer without materializing the rest
+/// of the checkpoint. This is intended for operator validation and profiling;
+/// full model execution should use [`load_qwen35_device_weights_from_path`].
+pub fn load_qwen35_moe_layer_from_path(
+    ctx: &CudaContext,
+    config: &Qwen35MoeConfig,
+    path: &Path,
+    layer_index: usize,
+) -> Result<DeviceNvfp4Moe> {
+    let architecture = Qwen35MoeArchitecture::from_config(config)?;
+    let layer = architecture
+        .layers
+        .get(layer_index)
+        .ok_or_else(|| invalid(format!("Qwen3.5 layer index {layer_index} is out of range")))?;
+    let mut loader = Qwen35SafetensorsLoader::open(config, path)?;
+    let prefix = format!("model.language_model.layers.{layer_index}.mlp");
+    let host = load_nvfp4_moe(
+        &mut loader,
+        &prefix,
+        architecture.hidden_size,
+        layer.moe.experts,
+        layer.moe.expert_intermediate_size,
+        layer.moe.shared_expert_intermediate_size,
+    )?;
+    upload_nvfp4_moe(ctx, host)
+}
+
 fn upload_layer(
     ctx: &CudaContext,
     weights: Qwen35LayerWeights<Tensor>,
@@ -386,11 +446,18 @@ fn upload_nvfp4_moe(
         up.push(expert.up_proj);
         down.push(expert.down_proj);
     }
+    let routed_experts = if edge_nvfp4_moe_available() {
+        DeviceNvfp4RoutedExperts::Edge(pack_and_upload_edge_nvfp4_experts(ctx, gate, up, down)?)
+    } else {
+        DeviceNvfp4RoutedExperts::Reference {
+            gate: upload_nvfp4_expert_projection(ctx, gate, "expert gate")?,
+            up: upload_nvfp4_expert_projection(ctx, up, "expert up")?,
+            down: upload_nvfp4_expert_projection(ctx, down, "expert down")?,
+        }
+    };
     Ok(DeviceNvfp4Moe {
         router: upload_dense(ctx, router, "MoE router")?,
-        expert_gate: upload_nvfp4_expert_projection(ctx, gate, "expert gate")?,
-        expert_up: upload_nvfp4_expert_projection(ctx, up, "expert up")?,
-        expert_down: upload_nvfp4_expert_projection(ctx, down, "expert down")?,
+        routed_experts,
         shared_gate: upload_nvfp4(ctx, shared_expert.gate_proj, "shared expert gate")?,
         shared_up: upload_nvfp4(ctx, shared_expert.up_proj, "shared expert up")?,
         shared_down: upload_nvfp4(ctx, shared_expert.down_proj, "shared expert down")?,
@@ -471,13 +538,188 @@ fn upload_nvfp4(
         ],
         &format!("{label} block scales"),
     )?;
+    let weight_scale_2_value = weights.weight_scale_2;
+    let packed_weight = upload_unchanged(ctx, weights.packed_weight)?;
+    let block_scales = upload_unchanged(ctx, weights.block_scales)?;
+    let gemm_block_scales = if edge_nvfp4_moe_available() {
+        let bytes = ops::nvfp4_scale_buffer_bytes(
+            weights.output_features,
+            weights.input_features,
+            NVFP4_BLOCK_SIZE as u32,
+        )?;
+        let tensor = CudaBuffer::alloc(bytes, ctx.device_id())
+            .map_err(Error::Cuda)?
+            .as_tensor(Shape::new(vec![bytes]), DType::F8E4M3)
+            .map_err(Error::Cuda)?;
+        ops::nvfp4_pack_block_scales(
+            ctx,
+            &block_scales,
+            &tensor,
+            weights.output_features,
+            weights.input_features,
+            NVFP4_BLOCK_SIZE as u32,
+        )?;
+        Some(tensor)
+    } else {
+        None
+    };
     Ok(DeviceNvfp4Linear {
-        packed_weight: upload_unchanged(ctx, weights.packed_weight)?,
-        block_scales: upload_unchanged(ctx, weights.block_scales)?,
+        packed_weight,
+        block_scales,
+        gemm_block_scales,
         input_scale: weights.input_scale,
-        weight_scale_2: upload_f32(ctx, &[weights.weight_scale_2])?,
+        weight_scale_2: upload_f32(ctx, &[weight_scale_2_value])?,
+        weight_scale_2_value,
         input_features: weights.input_features,
         output_features: weights.output_features,
+    })
+}
+
+fn pack_and_upload_edge_nvfp4_experts(
+    ctx: &CudaContext,
+    gate: Vec<Nvfp4LinearWeights<Tensor>>,
+    up: Vec<Nvfp4LinearWeights<Tensor>>,
+    down: Vec<Nvfp4LinearWeights<Tensor>>,
+) -> Result<DeviceEdgeNvfp4Experts> {
+    let experts = gate.len();
+    if experts != 256 || up.len() != experts || down.len() != experts {
+        return Err(invalid(
+            "Edge NVFP4 routed experts require 256 gate/up/down projections",
+        ));
+    }
+    let first = gate
+        .first()
+        .ok_or_else(|| invalid("Edge NVFP4 routed expert set is empty"))?;
+    let hidden = first.input_features;
+    let intermediate = first.output_features;
+    if hidden % 128 != 0 || intermediate % 64 != 0 {
+        return Err(invalid(
+            "Edge NVFP4 routed expert geometry is not SM110-kernel compatible",
+        ));
+    }
+
+    let mut fc1_weight = Vec::new();
+    let mut fc1_scales = Vec::new();
+    let mut fc1_alpha = Vec::with_capacity(experts);
+    let mut input_global_scale = Vec::with_capacity(experts);
+    let mut fc2_weight = Vec::new();
+    let mut fc2_scales = Vec::new();
+    let mut fc2_alpha = Vec::with_capacity(experts);
+    let mut down_input_scale = Vec::with_capacity(experts);
+    let fc1_scale_columns = hidden / NVFP4_BLOCK_SIZE;
+    let fc2_scale_columns = intermediate / NVFP4_BLOCK_SIZE;
+
+    for (expert, ((gate, up), down)) in gate.into_iter().zip(up).zip(down).enumerate() {
+        gate.validate()?;
+        up.validate()?;
+        down.validate()?;
+        if gate.input_features != hidden
+            || gate.output_features != intermediate
+            || up.input_features != hidden
+            || up.output_features != intermediate
+            || down.input_features != intermediate
+            || down.output_features != hidden
+        {
+            return Err(invalid(format!(
+                "Edge NVFP4 expert {expert} projection geometry mismatch"
+            )));
+        }
+        if gate.input_scale.to_bits() != up.input_scale.to_bits() {
+            return Err(invalid(format!(
+                "Edge NVFP4 expert {expert} gate/up input scales differ"
+            )));
+        }
+        if !gate.weight_scale_2.is_finite()
+            || !(gate.weight_scale_2 > 0.0)
+            || !up.weight_scale_2.is_finite()
+            || !(up.weight_scale_2 > 0.0)
+            || !down.weight_scale_2.is_finite()
+            || !(down.weight_scale_2 > 0.0)
+            || !gate.input_scale.is_finite()
+            || !(gate.input_scale > 0.0)
+            || !down.input_scale.is_finite()
+            || !(down.input_scale > 0.0)
+        {
+            return Err(invalid(format!(
+                "Edge NVFP4 expert {expert} scales must be finite and positive"
+            )));
+        }
+
+        let shared_alpha = gate.weight_scale_2.max(up.weight_scale_2);
+        let gate_scales = edge_nvfp4_rescale_e4m3(
+            cpu_bytes(&gate.block_scales, "Edge expert gate scales")?,
+            gate.weight_scale_2 / shared_alpha,
+        )?;
+        let up_scales = edge_nvfp4_rescale_e4m3(
+            cpu_bytes(&up.block_scales, "Edge expert up scales")?,
+            up.weight_scale_2 / shared_alpha,
+        )?;
+        let interleaved_weight = edge_nvfp4_interleave_fc1(
+            cpu_bytes(&gate.packed_weight, "Edge expert gate weight")?,
+            cpu_bytes(&up.packed_weight, "Edge expert up weight")?,
+            intermediate,
+            hidden / 2,
+        )?;
+        let interleaved_scales =
+            edge_nvfp4_interleave_fc1(&gate_scales, &up_scales, intermediate, fc1_scale_columns)?;
+        let (swizzled_fc1, _) =
+            edge_nvfp4_swizzle_scales(&interleaved_scales, 2 * intermediate, fc1_scale_columns)?;
+        let (swizzled_fc2, _) = edge_nvfp4_swizzle_scales(
+            cpu_bytes(&down.block_scales, "Edge expert down scales")?,
+            hidden,
+            fc2_scale_columns,
+        )?;
+
+        fc1_weight.extend_from_slice(&interleaved_weight);
+        fc1_scales.extend_from_slice(&swizzled_fc1);
+        fc1_alpha.push(shared_alpha);
+        input_global_scale.push(gate.input_scale);
+        fc2_weight.extend_from_slice(cpu_bytes(&down.packed_weight, "Edge expert down weight")?);
+        fc2_scales.extend_from_slice(&swizzled_fc2);
+        fc2_alpha.push(down.weight_scale_2);
+        down_input_scale.push(down.input_scale);
+    }
+
+    let upload_raw = |shape: Vec<usize>, dtype: DType, bytes: Vec<u8>| -> Result<Tensor> {
+        let host = Tensor::from_raw(Shape::new(shape), dtype, Device::Cpu, bytes)?;
+        transfers::to_cuda(&host, ctx.device_id())
+    };
+    let fc1_scale_shape = vec![
+        experts,
+        (2 * intermediate).div_ceil(128),
+        fc1_scale_columns.div_ceil(4),
+        32,
+        4,
+        4,
+    ];
+    let fc2_scale_shape = vec![
+        experts,
+        hidden.div_ceil(128),
+        fc2_scale_columns.div_ceil(4),
+        32,
+        4,
+        4,
+    ];
+    Ok(DeviceEdgeNvfp4Experts {
+        fc1_weight: upload_raw(
+            vec![experts, 2 * intermediate, hidden / 2],
+            DType::E2M1Pair,
+            fc1_weight,
+        )?,
+        fc1_scales: upload_raw(fc1_scale_shape, DType::F8E4M3, fc1_scales)?,
+        fc1_alpha: upload_f32(ctx, &fc1_alpha)?,
+        input_global_scale: upload_f32(ctx, &input_global_scale)?,
+        fc2_weight: upload_raw(
+            vec![experts, hidden, intermediate / 2],
+            DType::E2M1Pair,
+            fc2_weight,
+        )?,
+        fc2_scales: upload_raw(fc2_scale_shape, DType::F8E4M3, fc2_scales)?,
+        fc2_alpha: upload_f32(ctx, &fc2_alpha)?,
+        down_input_scale: upload_f32(ctx, &down_input_scale)?,
+        experts,
+        hidden,
+        intermediate,
     })
 }
 

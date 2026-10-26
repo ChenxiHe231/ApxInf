@@ -44,16 +44,19 @@ pub use ops::{
     routed_moe_nvfp4_experts, routed_moe_route, RoutePlan, RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs,
     RoutedMoeRouteArgs, RoutedMoeSemantic, SegmentedAttentionArgs, SharedExpertOutput,
     decode_e4m3, encode_e4m3, qwen35_attention_fp8, qwen35_attention_reference,
+    edge_nvfp4_interleave_fc1, edge_nvfp4_moe, edge_nvfp4_moe_available,
+    edge_nvfp4_moe_workspace_size, edge_nvfp4_rescale_e4m3, edge_nvfp4_swizzle_scales,
+    routed_moe_add_shared, routed_moe_route_topk, EdgeNvfp4MoeArgs, EdgeNvfp4MoeWeights,
     Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput, Qwen35AttentionScratch,
-    Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales,
-    FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
-    QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_Q_HEADS,
-    QWEN35_ATTENTION_Q_PROJECTION_WIDTH, QWEN35_ATTENTION_RMS_EPSILON,
-    QWEN35_ATTENTION_ROTARY_DIM,
-    qwen35_mtp_moe, qwen35_mtp_moe_reference, Qwen35MtpMoeArgs, Qwen35MtpMoeScratch,
-    Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput,
-    Qwen35MtpReferenceWeights, QWEN35_MTP_DRAFT_STEPS, QWEN35_MTP_EXPERTS,
-    QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_LAYERS,
+    Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales, Qwen35MtpMoeArgs,
+    Qwen35MtpMoeScratch, Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput,
+    Qwen35MtpReferenceWeights, RmsNormArgs, RopeArgs, RopeSemantic, RoutePlan,
+    RoutedMoeAddSharedArgs, RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs,
+    RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs, RoutedMoeSemantic, SegmentedAttentionArgs,
+    SharedExpertOutput, FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
+    QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_Q_PROJECTION_WIDTH,
+    QWEN35_ATTENTION_RMS_EPSILON, QWEN35_ATTENTION_ROTARY_DIM, QWEN35_MTP_DRAFT_STEPS,
+    QWEN35_MTP_EXPERTS, QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_LAYERS,
     QWEN35_MTP_TOP_K, QWEN35_MTP_VOCAB_SIZE,
 };
 pub use phase::PreparedPhase;
@@ -67,6 +70,10 @@ pub use ops::{Conv3dArgs, Conv3dPolicy, PreparedConv3d, Unfold3dGeometry};
 /// The name describes the mathematical operator rather than its current model
 /// consumer. Unsupported targets use the unfused GEMM + SwiGLU fallback.
 pub const NVFP4_GEMM_SWIGLU: bool = cfg!(apxinf_nvfp4_gemm_swiglu);
+
+/// Whether this build includes the aarch64 SM110 TensorRT-Edge-LLM CuTeDSL
+/// routed NVFP4 MoE provider.
+pub const EDGE_NVFP4_MOE: bool = cfg!(apxinf_edge_nvfp4_moe);
 
 /// Whether this build compiled the allocation-free FA2 decode kernel
 /// (`apxinf_decode_attention`). When `false` that ABI returns
