@@ -22,7 +22,11 @@ const TARGET_HIDDEN_SIZE: usize = 2_048;
 const TARGET_LAYERS: usize = 40;
 const FULL_ATTENTION_INTERVAL: usize = 4;
 
-/// Persistent FP8 cache for one base-model full-attention layer.
+/// Persistent BF16 cache for one base-model full-attention layer.
+///
+/// Formerly FP8-E4M3; now BF16 so `ops::kv_cache_attention` dispatches to FA2.
+/// The per-tensor FP8 scales that the old scalar kernel consumed are no longer
+/// needed and are kept only for the session contract — `run` does not read them.
 #[derive(Debug)]
 pub struct Qwen35AttentionCache {
     layer_index: usize,
@@ -116,8 +120,8 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             geometry,
             capacity,
             scales,
-            key: zeros(ctx, shape.clone(), DType::F8E4M3)?,
-            value: zeros(ctx, shape, DType::F8E4M3)?,
+            key: zeros(ctx, shape.clone(), DType::BF16)?,
+            value: zeros(ctx, shape, DType::BF16)?,
         })
     }
 
@@ -158,13 +162,13 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
                 .map_err(Error::Cuda)?
                 .view(byte_offset, byte_len)
                 .map_err(Error::Cuda)?
-                .as_tensor(shape.clone(), DType::F8E4M3)
+                .as_tensor(shape.clone(), DType::BF16)
                 .map_err(Error::Cuda)?;
             let destination_view = CudaBuffer::from_tensor(destination_tensor)
                 .map_err(Error::Cuda)?
                 .view(byte_offset, byte_len)
                 .map_err(Error::Cuda)?
-                .as_tensor(shape.clone(), DType::F8E4M3)
+                .as_tensor(shape.clone(), DType::BF16)
                 .map_err(Error::Cuda)?;
             transfers::copy_cuda_to_cuda(ctx, &source_view, &destination_view)?;
         }
@@ -180,13 +184,9 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         let tokens = validate_request(ctx, self.hidden_size, &request, cache)?;
         let rope_theta = self.rope_theta;
         let scratch = self.scratch(ctx, tokens)?;
-        // All ten attention layers in one decoder pass share this scratch
-        // profile and identical positions. Avoid rewriting the buffer while a
-        // previous layer may still read it on the non-blocking CUDA stream.
-        // Qwen35Session synchronizes between decoder calls, so changing the
-        // start position on the next decode is safe.
         scratch.ensure_text_positions(request.start_position)?;
 
+        // ---- q/k/v projection GEMMs ----
         for (linear, output) in [
             (&request.weights.q_proj, &mut scratch.projected_query_gate),
             (&request.weights.k_proj, &mut scratch.projected_key),
@@ -198,38 +198,177 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             )?;
         }
 
-        let scales = request
-            .weights
-            .kv_cache_scales
-            .ok_or_else(|| invalid("Qwen3.5 base full attention is missing FP8 K/V scales"))?;
-        ops::qwen35_attention_fp8(
+        // ---- Decomposed pre/post processing (shared with old scalar path) ----
+        // Split fused query+gate → query / gate [tokens, Q_HEADS, HEAD_DIM]
+        let q_fused = view(
+            &scratch.projected_query_gate,
+            vec![
+                tokens,
+                ops::QWEN35_ATTENTION_Q_HEADS,
+                2 * ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        ops::split_query_and_gate(ctx, &q_fused, &scratch.query, &scratch.gate)?;
+
+        // Head RMSNorm: the kernel wants [rows, head_dim], so flatten the head
+        // dimension before calling, then use the 3D views for the RoPE that
+        // follows.
+        let q_2d = view(
+            &scratch.query,
+            vec![
+                tokens * ops::QWEN35_ATTENTION_Q_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        ops::head_rms_norm(
             ctx,
-            tokens,
-            ops::Qwen35Fp8AttentionArgs {
-                projected_query_gate: &scratch.projected_query_gate,
-                projected_key: &scratch.projected_key,
-                projected_value: &scratch.projected_value,
-                query_norm: &request.weights.q_norm,
-                key_norm: &request.weights.k_norm,
-                positions: &scratch.positions,
-                cache: ops::Qwen35Fp8KvCache {
-                    key: &cache.key,
-                    value: &cache.value,
-                },
-                scratch: ops::Qwen35AttentionScratch {
-                    query: &scratch.query,
-                    gate: &scratch.gate,
-                    output: &scratch.attention_output,
-                },
-                cache_offset: request.start_position,
-                scales: ops::Qwen35KvCacheScales {
-                    key: scales.key,
-                    value: scales.value,
-                },
-                rope_theta,
-            },
+            &q_2d,
+            &request.weights.q_norm,
+            ops::QWEN35_ATTENTION_RMS_EPSILON,
         )?;
 
+        let key_heads = view(
+            &scratch.projected_key,
+            vec![
+                tokens,
+                ops::QWEN35_ATTENTION_KV_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        let key_2d = view(
+            &scratch.projected_key,
+            vec![
+                tokens * ops::QWEN35_ATTENTION_KV_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        ops::head_rms_norm(
+            ctx,
+            &key_2d,
+            &request.weights.k_norm,
+            ops::QWEN35_ATTENTION_RMS_EPSILON,
+        )?;
+
+        // Partial RoPE (mRoPE) on query and key.
+        // `partial_rope` expects 1-D positions [tokens]; `ensure_text_positions`
+        // fills [3, tokens] for mRoPE, whose three channels are identical in
+        // text mode.  Take the first channel as a view.
+        let pos_bytes = tokens * DType::I32.size_in_bytes();
+        let positions_1d = CudaBuffer::from_tensor(&scratch.positions)
+            .map_err(Error::Cuda)?
+            .view(0, pos_bytes)
+            .map_err(Error::Cuda)?
+            .as_tensor(Shape::new(vec![tokens]), DType::I32)
+            .map_err(Error::Cuda)?;
+        ops::partial_rope(
+            ctx,
+            &scratch.query,
+            &positions_1d,
+            ops::QWEN35_ATTENTION_ROTARY_DIM,
+            rope_theta,
+        )?;
+        ops::partial_rope(
+            ctx,
+            &key_heads,
+            &positions_1d,
+            ops::QWEN35_ATTENTION_ROTARY_DIM,
+            rope_theta,
+        )?;
+
+        // ---- Write K/V to BF16 cache at cache_offset ----
+        let kv_bytes = tokens * ops::QWEN35_ATTENTION_KV_WIDTH * DType::BF16.size_in_bytes();
+        let cache_offset_bytes =
+            request.start_position * ops::QWEN35_ATTENTION_KV_WIDTH * DType::BF16.size_in_bytes();
+        for (src, dst_tensor) in [
+            (&scratch.projected_key, &cache.key),
+            (&scratch.projected_value, &cache.value),
+        ] {
+            let src_view = CudaBuffer::from_tensor(src)
+                .map_err(Error::Cuda)?
+                .as_tensor(
+                    Shape::new(vec![tokens, ops::QWEN35_ATTENTION_KV_WIDTH]),
+                    DType::BF16,
+                )
+                .map_err(Error::Cuda)?;
+            let dst_view = CudaBuffer::from_tensor(dst_tensor)
+                .map_err(Error::Cuda)?
+                .view(cache_offset_bytes, kv_bytes)
+                .map_err(Error::Cuda)?
+                .as_tensor(
+                    Shape::new(vec![tokens, ops::QWEN35_ATTENTION_KV_WIDTH]),
+                    DType::BF16,
+                )
+                .map_err(Error::Cuda)?;
+            transfers::copy_cuda_to_cuda(ctx, &src_view, &dst_view)?;
+        }
+
+        // ---- FA2 attention over the full prefix ----
+        let valid = request.start_position + tokens;
+        let key_prefix = cache_prefix_view(
+            &cache.key,
+            valid,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_HEAD_DIM,
+        )?;
+        let value_prefix = cache_prefix_view(
+            &cache.value,
+            valid,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_HEAD_DIM,
+        )?;
+        let query_fa2 = view(
+            &scratch.query,
+            vec![
+                1,
+                tokens,
+                ops::QWEN35_ATTENTION_Q_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        let mut attn_out = view(
+            &scratch.attention_output,
+            vec![
+                1,
+                tokens,
+                ops::QWEN35_ATTENTION_Q_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        let scale = 1.0 / (ops::QWEN35_ATTENTION_HEAD_DIM as f32).sqrt();
+        let mut fa2_args =
+            ops::KvCacheAttentionArgs::new(&query_fa2, &key_prefix, &value_prefix, &mut attn_out);
+        fa2_args.valid_key_tokens = valid;
+        fa2_args.query_start = request.start_position;
+        fa2_args.scale = scale;
+        fa2_args.policy.allow_fallback = false;
+        ops::kv_cache_attention(ctx, fa2_args)?;
+
+        // ---- Output gate (sigmoid, not silu) ----
+        let gate_2d = view(
+            &scratch.gate,
+            vec![
+                tokens * ops::QWEN35_ATTENTION_Q_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        let output_2d = view(
+            &scratch.attention_output,
+            vec![
+                tokens * ops::QWEN35_ATTENTION_Q_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        ops::apply_output_gate(ctx, &output_2d, &gate_2d)?;
+
+        // ---- o_proj GEMM ----
         let attention_output = view(
             &scratch.attention_output,
             vec![
@@ -238,8 +377,6 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             ],
             DType::BF16,
         )?;
-        // The request owns the allocation. Cloning only creates a mutable
-        // tensor handle required by GEMM's output contract.
         let mut output = request.output.clone();
         ops::gemm(
             ctx,
@@ -339,7 +476,7 @@ fn validate_request(
         .ok_or_else(|| invalid("Qwen3.5 attention position range overflow"))?;
     if end > cache.capacity || i32::try_from(end).is_err() {
         return Err(invalid(
-            "Qwen3.5 attention append exceeds FP8 cache capacity",
+            "Qwen3.5 attention append exceeds BF16 cache capacity",
         ));
     }
     validate_tensor(
@@ -364,7 +501,7 @@ fn validate_request(
     validate_scales(scales)?;
     if scales != cache.scales {
         return Err(invalid(
-            "Qwen3.5 attention weights and FP8 cache use different K/V scales",
+            "Qwen3.5 attention weights and cache metadata use different K/V scales",
         ));
     }
     Ok(tokens)
@@ -448,7 +585,7 @@ fn validate_cache_contract(
 ) -> Result<()> {
     validate_geometry(geometry)?;
     if capacity == 0 || i32::try_from(capacity).is_err() {
-        return Err(invalid("Qwen3.5 FP8 cache capacity is invalid"));
+        return Err(invalid("Qwen3.5 BF16 cache capacity is invalid"));
     }
     validate_scales(scales)
 }
@@ -472,7 +609,7 @@ fn validate_geometry(geometry: AttentionGeometry) -> Result<()> {
         && geometry.output_gate;
     if !exact {
         return Err(invalid(
-            "unsupported Qwen3.5 full-attention geometry for FP8 K/V cache",
+            "unsupported Qwen3.5 full-attention geometry for BF16 K/V cache",
         ));
     }
     Ok(())
@@ -503,7 +640,7 @@ fn validate_cache_device(ctx: &CudaContext, cache: &Qwen35AttentionCache) -> Res
     validate_tensor(
         &cache.key,
         ctx,
-        DType::F8E4M3,
+        DType::BF16,
         &[
             cache.capacity,
             ops::QWEN35_ATTENTION_KV_HEADS,
@@ -514,7 +651,7 @@ fn validate_cache_device(ctx: &CudaContext, cache: &Qwen35AttentionCache) -> Res
     validate_tensor(
         &cache.value,
         ctx,
-        DType::F8E4M3,
+        DType::BF16,
         &[
             cache.capacity,
             ops::QWEN35_ATTENTION_KV_HEADS,
@@ -538,29 +675,30 @@ fn validate_cache_pair(
         || source.scales != destination.scales
     {
         return Err(invalid(
-            "Qwen3.5 FP8 cache copy requires matching layer, geometry, capacity and scales",
+            "Qwen3.5 BF16 cache copy requires matching layer, geometry, capacity and metadata",
         ));
     }
     if positions.start > positions.end || positions.end > source.capacity {
-        return Err(invalid("Qwen3.5 FP8 cache copy range is out of bounds"));
+        return Err(invalid("Qwen3.5 BF16 cache copy range is out of bounds"));
     }
     Ok(())
 }
 
 fn cache_byte_range(positions: Range<usize>) -> Result<(usize, usize)> {
     if positions.start > positions.end {
-        return Err(invalid("Qwen3.5 FP8 cache copy range is reversed"));
+        return Err(invalid("Qwen3.5 BF16 cache copy range is reversed"));
     }
     let row_bytes = ops::QWEN35_ATTENTION_KV_HEADS
         .checked_mul(ops::QWEN35_ATTENTION_HEAD_DIM)
-        .ok_or_else(|| invalid("Qwen3.5 FP8 cache row size overflow"))?;
+        .and_then(|elements| elements.checked_mul(DType::BF16.size_in_bytes()))
+        .ok_or_else(|| invalid("Qwen3.5 BF16 cache row size overflow"))?;
     let offset = positions
         .start
         .checked_mul(row_bytes)
-        .ok_or_else(|| invalid("Qwen3.5 FP8 cache copy offset overflow"))?;
+        .ok_or_else(|| invalid("Qwen3.5 BF16 cache copy offset overflow"))?;
     let len = (positions.end - positions.start)
         .checked_mul(row_bytes)
-        .ok_or_else(|| invalid("Qwen3.5 FP8 cache copy length overflow"))?;
+        .ok_or_else(|| invalid("Qwen3.5 BF16 cache copy length overflow"))?;
     Ok((offset, len))
 }
 
@@ -627,6 +765,23 @@ fn view(tensor: &Tensor, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
         .map_err(Error::Cuda)
 }
 
+/// View of the first `valid` rows of a `[capacity, kv_heads, head_dim]` cache
+/// tensor, shaped `[1, valid, kv_heads, head_dim]` for `ops::kv_cache_attention`.
+fn cache_prefix_view(
+    cache: &Tensor,
+    valid: usize,
+    kv_heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    let bytes = valid * kv_heads * head_dim * DType::BF16.size_in_bytes();
+    CudaBuffer::from_tensor(cache)
+        .map_err(Error::Cuda)?
+        .view(0, bytes)
+        .map_err(Error::Cuda)?
+        .as_tensor(Shape::new(vec![1, valid, kv_heads, head_dim]), DType::BF16)
+        .map_err(Error::Cuda)
+}
+
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
 }
@@ -656,8 +811,12 @@ mod tests {
     }
 
     #[test]
-    fn cache_range_uses_real_one_byte_fp8_rows() {
-        assert_eq!(cache_byte_range(4..9).unwrap(), (4 * 512, 5 * 512));
+    fn cache_range_uses_bf16_rows() {
+        let row_bytes = 512 * DType::BF16.size_in_bytes();
+        assert_eq!(
+            cache_byte_range(4..9).unwrap(),
+            (4 * row_bytes, 5 * row_bytes)
+        );
     }
 
     #[test]
@@ -688,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_ten_hybrid_full_attention_layers_own_fp8_caches() {
+    fn only_the_ten_hybrid_full_attention_layers_own_caches() {
         let layers = (0..TARGET_LAYERS)
             .filter(|&layer| validate_full_attention_layer(layer).is_ok())
             .collect::<Vec<_>>();

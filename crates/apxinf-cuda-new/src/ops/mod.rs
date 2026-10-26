@@ -56,10 +56,13 @@ pub use gemm::{
 pub use mlp::{add_into, fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu};
 pub use model::{argmax, embedding_gather};
 pub use moe::{
-    combine_reference as routed_moe_combine_reference, route_topk_reference, routed_moe_combine,
-    routed_moe_nvfp4_experts, routed_moe_route, ExpertAssignment, Nvfp4ExpertProjection, RoutePlan,
-    RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs,
-    RoutedMoeSemantic, SharedExpertOutput,
+    combine_reference as routed_moe_combine_reference, edge_nvfp4_interleave_fc1, edge_nvfp4_moe,
+    edge_nvfp4_moe_available, edge_nvfp4_moe_workspace_size, edge_nvfp4_rescale_e4m3,
+    edge_nvfp4_swizzle_scales, route_topk_reference, routed_moe_add_shared, routed_moe_combine,
+    routed_moe_nvfp4_experts, routed_moe_route, routed_moe_route_topk, EdgeNvfp4MoeArgs,
+    EdgeNvfp4MoeWeights, ExpertAssignment, Nvfp4ExpertProjection, RoutePlan,
+    RoutedMoeAddSharedArgs, RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs,
+    RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs, RoutedMoeSemantic, SharedExpertOutput,
 };
 pub use norm::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,
@@ -73,25 +76,23 @@ pub use quantization::{quantization, QuantizationArgs, QuantizationSemantic};
 pub use qwen35_attention::{
     decode_e4m3, encode_e4m3, qwen35_attention_fp8, qwen35_attention_reference,
     Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput, Qwen35AttentionScratch,
-    Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales,
-    FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
-    QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_Q_HEADS,
-    QWEN35_ATTENTION_Q_PROJECTION_WIDTH, QWEN35_ATTENTION_RMS_EPSILON,
+    Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales, FP8_E4M3_MAX_FINITE,
+    QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_KV_WIDTH,
+    QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_Q_PROJECTION_WIDTH, QWEN35_ATTENTION_RMS_EPSILON,
     QWEN35_ATTENTION_ROTARY_DIM,
 };
 pub use qwen35_mixers::{
     qwen35_gdn_decode, qwen35_gdn_prefill, Qwen35GdnCakeScratch, Qwen35GdnCoreWeights,
     Qwen35GdnDecodeArgs, Qwen35GdnDecodeScratch, Qwen35GdnPrefillArgs, Qwen35GdnPrefillScratch,
     Qwen35GdnState, QWEN35_GDN_CONV_WIDTH, QWEN35_GDN_EPSILON, QWEN35_GDN_HEAD_DIM,
-    QWEN35_GDN_KEY_HEADS, QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_Q_WIDTH,
-    QWEN35_GDN_SCAN_CHUNK, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_VALUE_WIDTH,
+    QWEN35_GDN_KEY_HEADS, QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_Q_WIDTH, QWEN35_GDN_SCAN_CHUNK,
+    QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_VALUE_WIDTH,
 };
 pub use qwen35_mtp::{
     qwen35_mtp_moe, qwen35_mtp_moe_reference, Qwen35MtpMoeArgs, Qwen35MtpMoeScratch,
-    Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput,
-    Qwen35MtpReferenceWeights, QWEN35_MTP_DRAFT_STEPS, QWEN35_MTP_EXPERTS,
-    QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_LAYERS,
-    QWEN35_MTP_TOP_K, QWEN35_MTP_VOCAB_SIZE,
+    Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput, Qwen35MtpReferenceWeights,
+    QWEN35_MTP_DRAFT_STEPS, QWEN35_MTP_EXPERTS, QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE,
+    QWEN35_MTP_LAYERS, QWEN35_MTP_TOP_K, QWEN35_MTP_VOCAB_SIZE,
 };
 pub use rope::{
     decode_rope, multimodal_rope, rope, split_qkv_axial_rope, AxialRopeArgs, DecodeRopeArgs,

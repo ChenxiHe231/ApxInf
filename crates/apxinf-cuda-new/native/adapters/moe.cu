@@ -416,6 +416,26 @@ __global__ void combine_kernel(
   }
 }
 
+template <class T>
+__global__ void add_shared_kernel(
+    const T* __restrict__ routed_output,
+    const T* __restrict__ shared_output,
+    const T* __restrict__ shared_gate_logits, T* __restrict__ output,
+    int tokens, int hidden) {
+  const int token = static_cast<int>(blockIdx.x);
+  if (token >= tokens) return;
+  const float gate_logit = as_float(shared_gate_logits[token]);
+  const float gate = gate_logit >= 0.0f
+                         ? 1.0f / (1.0f + expf(-gate_logit))
+                         : expf(gate_logit) / (1.0f + expf(gate_logit));
+  for (int dimension = threadIdx.x; dimension < hidden;
+       dimension += blockDim.x) {
+    const int64_t offset = static_cast<int64_t>(token) * hidden + dimension;
+    output[offset] = from_float<T>(as_float(routed_output[offset]) +
+                                   gate * as_float(shared_output[offset]));
+  }
+}
+
 void validate_route_spec(const apxinf_moe_route_spec_t& spec) {
   if (spec.version != APXINF_MOE_ROUTE_SPEC_VERSION ||
       (spec.logits_dtype != APXINF_DTYPE_F32 &&
@@ -474,15 +494,22 @@ int blocks_for_output_tiles(int rows, int outputs) {
 }
 
 template <class T>
-cudaError_t launch_route(const apxinf_moe_route_spec_t& spec,
-                         const apxinf_moe_route_bindings_t& bindings) {
+cudaError_t launch_route_topk(const apxinf_moe_route_spec_t& spec,
+                              const apxinf_moe_route_bindings_t& bindings) {
   auto stream = static_cast<cudaStream_t>(bindings.stream);
   route_topk_kernel<T><<<static_cast<int>(spec.tokens), 1, 0, stream>>>(
       static_cast<const T*>(bindings.logits), bindings.expert_ids,
       bindings.expert_weights, static_cast<int>(spec.tokens),
       static_cast<int>(spec.experts), static_cast<int>(spec.top_k),
       spec.renormalize != 0);
-  cudaError_t status = cudaGetLastError();
+  return cudaGetLastError();
+}
+
+template <class T>
+cudaError_t launch_route(const apxinf_moe_route_spec_t& spec,
+                         const apxinf_moe_route_bindings_t& bindings) {
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+  cudaError_t status = launch_route_topk<T>(spec, bindings);
   if (status != cudaSuccess) return status;
   build_assignments_kernel<<<1, 1, 0, stream>>>(
       bindings.expert_ids, bindings.expert_weights,
@@ -505,6 +532,20 @@ cudaError_t launch_combine(const apxinf_moe_combine_spec_t& spec,
       static_cast<const T*>(bindings.shared_gate_logits),
       static_cast<T*>(bindings.output), static_cast<int>(spec.tokens),
       static_cast<int>(spec.top_k), static_cast<int>(spec.hidden));
+  return cudaGetLastError();
+}
+
+template <class T>
+cudaError_t launch_add_shared(
+    const apxinf_moe_combine_spec_t& spec,
+    const apxinf_moe_add_shared_bindings_t& bindings) {
+  add_shared_kernel<T><<<static_cast<int>(spec.tokens), kThreads, 0,
+                         static_cast<cudaStream_t>(bindings.stream)>>>(
+      static_cast<const T*>(bindings.routed_output),
+      static_cast<const T*>(bindings.shared_output),
+      static_cast<const T*>(bindings.shared_gate_logits),
+      static_cast<T*>(bindings.output), static_cast<int>(spec.tokens),
+      static_cast<int>(spec.hidden));
   return cudaGetLastError();
 }
 
@@ -617,6 +658,33 @@ extern "C" apxinf_status_t apxinf_moe_route_topk(
   });
 }
 
+extern "C" apxinf_status_t apxinf_moe_route_topk_only(
+    apxinf_runtime_t runtime, const apxinf_moe_route_spec_t* spec,
+    const apxinf_moe_route_bindings_t* bindings) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "null routed-MoE top-k-only argument");
+    }
+    validate_route_spec(*spec);
+    if (bindings->logits == nullptr || bindings->expert_ids == nullptr ||
+        bindings->expert_weights == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "missing routed-MoE top-k-only binding");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    cudaError_t status = cudaErrorInvalidValue;
+    if (spec->logits_dtype == APXINF_DTYPE_F32) {
+      status = launch_route_topk<float>(*spec, *bindings);
+    } else if (spec->logits_dtype == APXINF_DTYPE_BF16) {
+      status = launch_route_topk<__nv_bfloat16>(*spec, *bindings);
+    } else {
+      status = launch_route_topk<__half>(*spec, *bindings);
+    }
+    apxinf::framework::check_cuda(status);
+  });
+}
+
 extern "C" apxinf_status_t apxinf_moe_combine(
     apxinf_runtime_t runtime, const apxinf_moe_combine_spec_t* spec,
     const apxinf_moe_combine_bindings_t* bindings) {
@@ -643,6 +711,34 @@ extern "C" apxinf_status_t apxinf_moe_combine(
       status = launch_combine<__nv_bfloat16>(*spec, *bindings);
     } else {
       status = launch_combine<__half>(*spec, *bindings);
+    }
+    apxinf::framework::check_cuda(status);
+  });
+}
+
+extern "C" apxinf_status_t apxinf_moe_add_shared(
+    apxinf_runtime_t runtime, const apxinf_moe_combine_spec_t* spec,
+    const apxinf_moe_add_shared_bindings_t* bindings) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "null routed-MoE add-shared argument");
+    }
+    validate_combine_spec(*spec);
+    if (bindings->routed_output == nullptr ||
+        bindings->shared_output == nullptr ||
+        bindings->shared_gate_logits == nullptr || bindings->output == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "missing routed-MoE add-shared binding");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    cudaError_t status = cudaErrorInvalidValue;
+    if (spec->dtype == APXINF_DTYPE_F32) {
+      status = launch_add_shared<float>(*spec, *bindings);
+    } else if (spec->dtype == APXINF_DTYPE_BF16) {
+      status = launch_add_shared<__nv_bfloat16>(*spec, *bindings);
+    } else {
+      status = launch_add_shared<__half>(*spec, *bindings);
     }
     apxinf::framework::check_cuda(status);
   });

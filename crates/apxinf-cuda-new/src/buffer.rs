@@ -243,7 +243,8 @@ impl CudaBuffer {
             .ok_or_else(|| "CUDA tensor byte size overflow".to_string())?;
         if expected != self.len {
             return Err(format!(
-                "CUDA tensor view needs {expected} bytes, buffer has {}",
+                "CUDA tensor view needs {expected} bytes for {dtype} {:?}, buffer has {}",
+                shape.dims(),
                 self.len
             ));
         }

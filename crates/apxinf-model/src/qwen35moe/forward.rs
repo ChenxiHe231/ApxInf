@@ -8,11 +8,14 @@
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 use apxinf_cuda_new::{
-    ops, transfers, CudaBuffer, CudaContext, Nvfp4ExpertProjection, RoutedMoeCombineArgs,
-    RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs,
+    ops, transfers, CudaBuffer, CudaContext, EdgeNvfp4MoeArgs, EdgeNvfp4MoeWeights,
+    Nvfp4ExpertProjection, RoutedMoeAddSharedArgs, RoutedMoeCombineArgs, RoutedMoeConfig,
+    RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs,
 };
 
-use super::device_weights::{DeviceGdnWeights, DeviceNvfp4Moe, Qwen35DeviceWeights};
+use super::device_weights::{
+    DeviceGdnWeights, DeviceNvfp4Moe, DeviceNvfp4RoutedExperts, Qwen35DeviceWeights,
+};
 
 const NVFP4_BLOCK_SIZE: u32 = 16;
 
@@ -137,7 +140,10 @@ impl TextBoundaryScratch {
 }
 
 /// Stable, capture-compatible scratch for one base routed-MoE invocation.
-#[derive(Debug)]
+///
+/// The `expert_*` / `act_*` / `inter_*` fields back either the experimental
+/// per-expert cuBLASLt path or the shared expert paired with the SM110 Edge
+/// routed kernel. Unsupported builds keep the original warp-kernel fallback.
 pub struct BaseMoeScratch {
     router_logits: Tensor,
     expert_ids: Tensor,
@@ -154,6 +160,19 @@ pub struct BaseMoeScratch {
     shared_output: Tensor,
     shared_gate_logits: Tensor,
     output: Tensor,
+    /// Per-expert gate+up interleaved workspace.  The first half is gate output,
+    /// the second half is up output; `ops::swiglu` consumes this layout.
+    expert_fused: Option<Tensor>,
+    /// Per-expert quantised-gathered activation, `[routes, hidden/2]` E2M1Pair.
+    act_packed: Option<Tensor>,
+    /// Block scales for the per-expert quantised activation, `[routes, hidden/16]` F8E4M3.
+    act_scales: Option<Tensor>,
+    /// Per-expert quantised intermediate, `[routes, intermediate/2]` E2M1Pair.
+    inter_packed: Option<Tensor>,
+    /// Block scales for the per-expert quantised intermediate, `[routes, intermediate/16]` F8E4M3.
+    inter_scales: Option<Tensor>,
+    /// CuTeDSL scratch required by the SM110 TensorRT-Edge-LLM provider.
+    edge_workspace: Option<CudaBuffer>,
     tokens: usize,
     hidden: usize,
     experts: usize,
@@ -184,6 +203,16 @@ impl BaseMoeScratch {
         let routes = tokens
             .checked_mul(top_k)
             .ok_or_else(|| invalid("Qwen3.5 routed-MoE route count overflow"))?;
+        let nvfp4_ok = std::env::var("APXINF_GEMM_CUBLASLT_NVFP4").as_deref() == Ok("1");
+        let edge_ok = ops::edge_nvfp4_moe_available();
+        let quant_rows = if nvfp4_ok { routes } else { tokens };
+        let edge_workspace = edge_ok
+            .then(|| {
+                let bytes =
+                    ops::edge_nvfp4_moe_workspace_size(config, tokens, hidden, intermediate)?;
+                CudaBuffer::alloc(bytes, ctx.device_id()).map_err(Error::Cuda)
+            })
+            .transpose()?;
         Ok(Self {
             router_logits: zeros(ctx, vec![tokens, experts], DType::BF16)?,
             expert_ids: zeros(ctx, vec![tokens, top_k], DType::I32)?,
@@ -200,6 +229,32 @@ impl BaseMoeScratch {
             shared_output: zeros(ctx, vec![tokens, hidden], DType::BF16)?,
             shared_gate_logits: zeros(ctx, vec![tokens, 1], DType::BF16)?,
             output: zeros(ctx, vec![tokens, hidden], DType::BF16)?,
+            expert_fused: (nvfp4_ok || edge_ok)
+                .then(|| zeros(ctx, vec![quant_rows, 2 * intermediate], DType::BF16))
+                .transpose()?,
+            act_packed: (nvfp4_ok || edge_ok)
+                .then(|| zeros(ctx, vec![quant_rows, hidden / 2], DType::E2M1Pair))
+                .transpose()?,
+            act_scales: if edge_ok {
+                let bytes = ops::nvfp4_scale_buffer_bytes(tokens, hidden, NVFP4_BLOCK_SIZE)?;
+                Some(zeros(ctx, vec![bytes], DType::F8E4M3)?)
+            } else {
+                nvfp4_ok
+                    .then(|| zeros(ctx, vec![quant_rows, hidden / 16], DType::F8E4M3))
+                    .transpose()?
+            },
+            inter_packed: (nvfp4_ok || edge_ok)
+                .then(|| zeros(ctx, vec![quant_rows, intermediate / 2], DType::E2M1Pair))
+                .transpose()?,
+            inter_scales: if edge_ok {
+                let bytes = ops::nvfp4_scale_buffer_bytes(tokens, intermediate, NVFP4_BLOCK_SIZE)?;
+                Some(zeros(ctx, vec![bytes], DType::F8E4M3)?)
+            } else {
+                nvfp4_ok
+                    .then(|| zeros(ctx, vec![quant_rows, intermediate / 16], DType::F8E4M3))
+                    .transpose()?
+            },
+            edge_workspace,
             tokens,
             hidden,
             experts,
@@ -218,72 +273,465 @@ impl BaseMoeScratch {
     ) -> Result<()> {
         self.validate(ctx, weights, input)?;
         let config = RoutedMoeConfig::new(self.experts, self.top_k);
+        let nvfp4_ok = std::env::var("APXINF_GEMM_CUBLASLT_NVFP4").as_deref() == Ok("1");
 
         ops::gemm(
             ctx,
             ops::GemmArgs::new(input, &weights.router.weight, &mut self.router_logits),
         )?;
-        ops::routed_moe_route(
-            ctx,
-            RoutedMoeRouteArgs {
-                config,
-                logits: &self.router_logits,
-                expert_ids: &mut self.expert_ids,
-                expert_weights: &mut self.expert_weights,
-                assignment_expert_ids: &mut self.assignment_expert_ids,
-                assignment_token_ids: &mut self.assignment_token_ids,
-                assignment_slots: &mut self.assignment_slots,
-                token_assignment_indices: &mut self.token_assignment_indices,
-                assignment_weights: &mut self.assignment_weights,
-                expert_offsets: &mut self.expert_offsets,
-            },
-        )?;
-        ops::routed_moe_nvfp4_experts(
-            ctx,
-            RoutedMoeNvfp4ExpertsArgs {
-                config,
-                intermediate: self.intermediate,
-                block_size: NVFP4_BLOCK_SIZE,
-                scale_layout: ops::ScaleLayout::RowMajor,
+        if matches!(&weights.routed_experts, DeviceNvfp4RoutedExperts::Edge(_)) {
+            ops::routed_moe_route_topk(
+                ctx,
+                RoutedMoeRouteTopkArgs {
+                    config,
+                    logits: &self.router_logits,
+                    expert_ids: &mut self.expert_ids,
+                    expert_weights: &mut self.expert_weights,
+                },
+            )?;
+        } else {
+            ops::routed_moe_route(
+                ctx,
+                RoutedMoeRouteArgs {
+                    config,
+                    logits: &self.router_logits,
+                    expert_ids: &mut self.expert_ids,
+                    expert_weights: &mut self.expert_weights,
+                    assignment_expert_ids: &mut self.assignment_expert_ids,
+                    assignment_token_ids: &mut self.assignment_token_ids,
+                    assignment_slots: &mut self.assignment_slots,
+                    token_assignment_indices: &mut self.token_assignment_indices,
+                    assignment_weights: &mut self.assignment_weights,
+                    expert_offsets: &mut self.expert_offsets,
+                },
+            )?;
+        }
+
+        if let DeviceNvfp4RoutedExperts::Edge(edge) = &weights.routed_experts {
+            let workspace = self
+                .edge_workspace
+                .as_ref()
+                .ok_or_else(|| invalid("SM110 Edge NVFP4 workspace is unavailable"))?;
+            let mut routed_output = CudaBuffer::from_tensor(&self.assignment_output)
+                .map_err(Error::Cuda)?
+                .view(0, self.tokens * self.hidden * DType::BF16.size_in_bytes())
+                .map_err(Error::Cuda)?
+                .as_tensor(Shape::new(vec![self.tokens, self.hidden]), DType::BF16)
+                .map_err(Error::Cuda)?;
+            ops::edge_nvfp4_moe(
+                ctx,
+                EdgeNvfp4MoeArgs {
+                    config,
+                    intermediate: self.intermediate,
+                    input,
+                    expert_ids: &self.expert_ids,
+                    expert_weights: &self.expert_weights,
+                    weights: EdgeNvfp4MoeWeights {
+                        fc1_weight: &edge.fc1_weight,
+                        fc1_scales: &edge.fc1_scales,
+                        fc1_alpha: &edge.fc1_alpha,
+                        input_global_scale: &edge.input_global_scale,
+                        fc2_weight: &edge.fc2_weight,
+                        fc2_scales: &edge.fc2_scales,
+                        fc2_alpha: &edge.fc2_alpha,
+                        down_input_scale: &edge.down_input_scale,
+                    },
+                    workspace,
+                    output: &mut routed_output,
+                },
+            )?;
+            self.run_shared_nvfp4(ctx, weights, input)?;
+            ops::gemm(
+                ctx,
+                ops::GemmArgs::new(
+                    input,
+                    &weights.shared_expert_gate.weight,
+                    &mut self.shared_gate_logits,
+                ),
+            )?;
+            let shared_gate_logits =
+                view(&self.shared_gate_logits, vec![self.tokens], DType::BF16)?;
+            return ops::routed_moe_add_shared(
+                ctx,
+                RoutedMoeAddSharedArgs {
+                    routed_output: &routed_output,
+                    shared_output: &self.shared_output,
+                    shared_gate_logits: &shared_gate_logits,
+                    output: &mut self.output,
+                },
+            );
+        }
+
+        let (expert_gate, expert_up, expert_down) = match &weights.routed_experts {
+            DeviceNvfp4RoutedExperts::Reference { gate, up, down } => (gate, up, down),
+            DeviceNvfp4RoutedExperts::Edge(_) => unreachable!(),
+        };
+        if let (
+            true,
+            Some(expert_fused),
+            Some(act_packed),
+            Some(act_scales),
+            Some(inter_packed),
+            Some(inter_scales),
+        ) = (
+            nvfp4_ok,
+            self.expert_fused.as_ref(),
+            self.act_packed.as_ref(),
+            self.act_scales.as_ref(),
+            self.inter_packed.as_ref(),
+            self.inter_scales.as_ref(),
+        ) {
+            // --- NVFP4 cuBLASLt per-expert path ---
+            // D2H the expert offsets and per-expert scales so the CPU loop knows
+            // how many tokens each expert owns and what its per-tensor alpha is.
+            let host_offsets = transfers::to_cpu(&self.expert_offsets)?;
+            let off: Vec<i32> = host_offsets.as_i32()?.to_vec();
+            let host_scales = transfers::to_cpu(&expert_gate.input_scales)?;
+            let input_scales: Vec<f32> = host_scales.as_f32()?.to_vec();
+            let host_ws2_gate = transfers::to_cpu(&expert_gate.weight_scales_2)?;
+            let ws2_gate: Vec<f32> = host_ws2_gate.as_f32()?.to_vec();
+            let host_ws2_up = transfers::to_cpu(&expert_up.weight_scales_2)?;
+            let ws2_up: Vec<f32> = host_ws2_up.as_f32()?.to_vec();
+            let host_ws2_down = transfers::to_cpu(&expert_down.weight_scales_2)?;
+            let ws2_down: Vec<f32> = host_ws2_down.as_f32()?.to_vec();
+
+            fn nvfp4_gemm_expert(
+                ctx: &CudaContext,
+                a: &Tensor,
+                a_s: &Tensor,
+                b: &Tensor,
+                b_s: &Tensor,
+                alpha: f32,
+                out: &mut Tensor,
+            ) -> Result<()> {
+                let mut args = ops::GemmArgs::nvfp4(a, a_s, b, b_s, NVFP4_BLOCK_SIZE, alpha, out);
+                args.policy.allow_fallback = false;
+                ops::gemm(ctx, args)
+            }
+
+            // ---------- routed experts ----------
+            for e in 0..self.experts {
+                let start = off[e] as usize;
+                let end = off.get(e + 1).copied().unwrap_or(0) as usize;
+                let expert_tokens = end.saturating_sub(start);
+                if expert_tokens == 0 {
+                    continue;
+                }
+                let alpha_gate = input_scales[e] * ws2_gate[e];
+                let alpha_up = input_scales[e] * ws2_up[e];
+                let alpha_down = input_scales[e] * ws2_down[e];
+
+                let ids_view = i32_slice(&self.assignment_token_ids, start, expert_tokens)?;
+                let gather_offset = start * self.hidden * DType::BF16.size_in_bytes();
+                let gather_bytes = expert_tokens * self.hidden * DType::BF16.size_in_bytes();
+                let gather_out = CudaBuffer::from_tensor(&self.assignment_output)
+                    .map_err(Error::Cuda)?
+                    .view(gather_offset, gather_bytes)
+                    .map_err(Error::Cuda)?
+                    .as_tensor(Shape::new(vec![expert_tokens, self.hidden]), DType::BF16)
+                    .map_err(Error::Cuda)?;
+                ops::embedding_gather(ctx, input, &ids_view, &gather_out)?;
+                // After gather, the expert's input is in the assignment_output
+                // slice. Quantise it in-place inside the per-expert packed
+                // workspace, then gate/up → swiglu → down writes the final
+                // result back over the same slice.
+                let packed_view = view(
+                    act_packed,
+                    vec![expert_tokens, self.hidden / 2],
+                    DType::E2M1Pair,
+                )?;
+                let scales_view = view(
+                    act_scales,
+                    vec![expert_tokens, self.hidden / 16],
+                    DType::F8E4M3,
+                )?;
+                ops::nvfp4_quantize_activation(
+                    ctx,
+                    &gather_out,
+                    &packed_view,
+                    &scales_view,
+                    input_scales[e],
+                    NVFP4_BLOCK_SIZE,
+                    ops::ScaleLayout::RowMajor,
+                )?;
+
+                let gw = expert_weight_view(
+                    &expert_gate.packed_weight,
+                    e,
+                    self.intermediate,
+                    self.hidden / 2,
+                    DType::E2M1Pair,
+                )?;
+                let gws = expert_weight_view(
+                    &expert_gate.block_scales,
+                    e,
+                    self.intermediate,
+                    self.hidden / 16,
+                    DType::F8E4M3,
+                )?;
+                let uw = expert_weight_view(
+                    &expert_up.packed_weight,
+                    e,
+                    self.intermediate,
+                    self.hidden / 2,
+                    DType::E2M1Pair,
+                )?;
+                let uws = expert_weight_view(
+                    &expert_up.block_scales,
+                    e,
+                    self.intermediate,
+                    self.hidden / 16,
+                    DType::F8E4M3,
+                )?;
+                let dw = expert_weight_view(
+                    &expert_down.packed_weight,
+                    e,
+                    self.hidden,
+                    self.intermediate / 2,
+                    DType::E2M1Pair,
+                )?;
+                let dws = expert_weight_view(
+                    &expert_down.block_scales,
+                    e,
+                    self.hidden,
+                    self.intermediate / 16,
+                    DType::F8E4M3,
+                )?;
+
+                let mut gate_out = view(
+                    expert_fused,
+                    vec![expert_tokens, self.intermediate],
+                    DType::BF16,
+                )?;
+                nvfp4_gemm_expert(
+                    ctx,
+                    &packed_view,
+                    &scales_view,
+                    &gw,
+                    &gws,
+                    alpha_gate,
+                    &mut gate_out,
+                )?;
+                let up_offset_bytes =
+                    expert_tokens * self.intermediate * DType::BF16.size_in_bytes();
+                let mut up_out = CudaBuffer::from_tensor(expert_fused)
+                    .map_err(Error::Cuda)?
+                    .view(
+                        up_offset_bytes,
+                        expert_tokens * self.intermediate * DType::BF16.size_in_bytes(),
+                    )
+                    .map_err(Error::Cuda)?
+                    .as_tensor(
+                        Shape::new(vec![expert_tokens, self.intermediate]),
+                        DType::BF16,
+                    )
+                    .map_err(Error::Cuda)?;
+                nvfp4_gemm_expert(
+                    ctx,
+                    &packed_view,
+                    &scales_view,
+                    &uw,
+                    &uws,
+                    alpha_up,
+                    &mut up_out,
+                )?;
+
+                let fused_view = view(
+                    expert_fused,
+                    vec![expert_tokens, 2 * self.intermediate],
+                    DType::BF16,
+                )?;
+                let mut inter_out = view(
+                    &self.route_intermediate,
+                    vec![expert_tokens, self.intermediate],
+                    DType::BF16,
+                )?;
+                ops::swiglu(ctx, &fused_view, &mut inter_out)?;
+
+                let inter_p = view(
+                    inter_packed,
+                    vec![expert_tokens, self.intermediate / 2],
+                    DType::E2M1Pair,
+                )?;
+                let inter_s = view(
+                    inter_scales,
+                    vec![expert_tokens, self.intermediate / 16],
+                    DType::F8E4M3,
+                )?;
+                ops::nvfp4_quantize_activation(
+                    ctx,
+                    &inter_out,
+                    &inter_p,
+                    &inter_s,
+                    1.0,
+                    NVFP4_BLOCK_SIZE,
+                    ops::ScaleLayout::RowMajor,
+                )?;
+
+                let mut down_out = CudaBuffer::from_tensor(&self.assignment_output)
+                    .map_err(Error::Cuda)?
+                    .view(gather_offset, gather_bytes)
+                    .map_err(Error::Cuda)?
+                    .as_tensor(Shape::new(vec![expert_tokens, self.hidden]), DType::BF16)
+                    .map_err(Error::Cuda)?;
+                nvfp4_gemm_expert(
+                    ctx,
+                    &inter_p,
+                    &inter_s,
+                    &dw,
+                    &dws,
+                    alpha_down,
+                    &mut down_out,
+                )?;
+            }
+
+            // ---------- shared expert ----------
+            let s_alpha_gate = weights.shared_gate.input_scale;
+            let s_alpha_up = weights.shared_up.input_scale;
+            let s_alpha_down = weights.shared_down.input_scale;
+
+            let s_packed = view(
+                act_packed,
+                vec![self.tokens, self.hidden / 2],
+                DType::E2M1Pair,
+            )?;
+            let s_scales = view(
+                act_scales,
+                vec![self.tokens, self.hidden / 16],
+                DType::F8E4M3,
+            )?;
+            ops::nvfp4_quantize_activation(
+                ctx,
                 input,
-                assignment_expert_ids: &self.assignment_expert_ids,
-                assignment_token_ids: &self.assignment_token_ids,
-                expert_gate: Nvfp4ExpertProjection {
-                    packed_weight: &weights.expert_gate.packed_weight,
-                    block_scales: &weights.expert_gate.block_scales,
-                    alpha: &weights.expert_gate.weight_scales_2,
+                &s_packed,
+                &s_scales,
+                s_alpha_gate,
+                NVFP4_BLOCK_SIZE,
+                ops::ScaleLayout::RowMajor,
+            )?;
+
+            let mut s_gate = view(
+                expert_fused,
+                vec![self.tokens, self.intermediate],
+                DType::BF16,
+            )?;
+            nvfp4_gemm_expert(
+                ctx,
+                &s_packed,
+                &s_scales,
+                &weights.shared_gate.packed_weight,
+                &weights.shared_gate.block_scales,
+                s_alpha_gate,
+                &mut s_gate,
+            )?;
+            let s_up_offset = self.tokens * self.intermediate * DType::BF16.size_in_bytes();
+            let mut s_up = CudaBuffer::from_tensor(expert_fused)
+                .map_err(Error::Cuda)?
+                .view(
+                    s_up_offset,
+                    self.tokens * self.intermediate * DType::BF16.size_in_bytes(),
+                )
+                .map_err(Error::Cuda)?
+                .as_tensor(
+                    Shape::new(vec![self.tokens, self.intermediate]),
+                    DType::BF16,
+                )
+                .map_err(Error::Cuda)?;
+            nvfp4_gemm_expert(
+                ctx,
+                &s_packed,
+                &s_scales,
+                &weights.shared_up.packed_weight,
+                &weights.shared_up.block_scales,
+                s_alpha_up,
+                &mut s_up,
+            )?;
+
+            let s_fused = view(
+                expert_fused,
+                vec![self.tokens, 2 * self.intermediate],
+                DType::BF16,
+            )?;
+            ops::swiglu(ctx, &s_fused, &mut self.shared_intermediate)?;
+
+            let s_inter_p = view(
+                inter_packed,
+                vec![self.tokens, self.intermediate / 2],
+                DType::E2M1Pair,
+            )?;
+            let s_inter_s = view(
+                inter_scales,
+                vec![self.tokens, self.intermediate / 16],
+                DType::F8E4M3,
+            )?;
+            ops::nvfp4_quantize_activation(
+                ctx,
+                &self.shared_intermediate,
+                &s_inter_p,
+                &s_inter_s,
+                1.0,
+                NVFP4_BLOCK_SIZE,
+                ops::ScaleLayout::RowMajor,
+            )?;
+
+            nvfp4_gemm_expert(
+                ctx,
+                &s_inter_p,
+                &s_inter_s,
+                &weights.shared_down.packed_weight,
+                &weights.shared_down.block_scales,
+                s_alpha_down,
+                &mut self.shared_output,
+            )?;
+        } else {
+            // --- original correctness-first warp kernel ---
+            ops::routed_moe_nvfp4_experts(
+                ctx,
+                RoutedMoeNvfp4ExpertsArgs {
+                    config,
+                    intermediate: self.intermediate,
+                    block_size: NVFP4_BLOCK_SIZE,
+                    scale_layout: ops::ScaleLayout::RowMajor,
+                    input,
+                    assignment_expert_ids: &self.assignment_expert_ids,
+                    assignment_token_ids: &self.assignment_token_ids,
+                    expert_gate: Nvfp4ExpertProjection {
+                        packed_weight: &expert_gate.packed_weight,
+                        block_scales: &expert_gate.block_scales,
+                        alpha: &expert_gate.weight_scales_2,
+                    },
+                    expert_up: Nvfp4ExpertProjection {
+                        packed_weight: &expert_up.packed_weight,
+                        block_scales: &expert_up.block_scales,
+                        alpha: &expert_up.weight_scales_2,
+                    },
+                    expert_down: Nvfp4ExpertProjection {
+                        packed_weight: &expert_down.packed_weight,
+                        block_scales: &expert_down.block_scales,
+                        alpha: &expert_down.weight_scales_2,
+                    },
+                    shared_gate: Nvfp4ExpertProjection {
+                        packed_weight: &weights.shared_gate.packed_weight,
+                        block_scales: &weights.shared_gate.block_scales,
+                        alpha: &weights.shared_gate.weight_scale_2,
+                    },
+                    shared_up: Nvfp4ExpertProjection {
+                        packed_weight: &weights.shared_up.packed_weight,
+                        block_scales: &weights.shared_up.block_scales,
+                        alpha: &weights.shared_up.weight_scale_2,
+                    },
+                    shared_down: Nvfp4ExpertProjection {
+                        packed_weight: &weights.shared_down.packed_weight,
+                        block_scales: &weights.shared_down.block_scales,
+                        alpha: &weights.shared_down.weight_scale_2,
+                    },
+                    route_intermediate: &mut self.route_intermediate,
+                    shared_intermediate: &mut self.shared_intermediate,
+                    assignment_output: &mut self.assignment_output,
+                    shared_output: &mut self.shared_output,
                 },
-                expert_up: Nvfp4ExpertProjection {
-                    packed_weight: &weights.expert_up.packed_weight,
-                    block_scales: &weights.expert_up.block_scales,
-                    alpha: &weights.expert_up.weight_scales_2,
-                },
-                expert_down: Nvfp4ExpertProjection {
-                    packed_weight: &weights.expert_down.packed_weight,
-                    block_scales: &weights.expert_down.block_scales,
-                    alpha: &weights.expert_down.weight_scales_2,
-                },
-                shared_gate: Nvfp4ExpertProjection {
-                    packed_weight: &weights.shared_gate.packed_weight,
-                    block_scales: &weights.shared_gate.block_scales,
-                    alpha: &weights.shared_gate.weight_scale_2,
-                },
-                shared_up: Nvfp4ExpertProjection {
-                    packed_weight: &weights.shared_up.packed_weight,
-                    block_scales: &weights.shared_up.block_scales,
-                    alpha: &weights.shared_up.weight_scale_2,
-                },
-                shared_down: Nvfp4ExpertProjection {
-                    packed_weight: &weights.shared_down.packed_weight,
-                    block_scales: &weights.shared_down.block_scales,
-                    alpha: &weights.shared_down.weight_scale_2,
-                },
-                route_intermediate: &mut self.route_intermediate,
-                shared_intermediate: &mut self.shared_intermediate,
-                assignment_output: &mut self.assignment_output,
-                shared_output: &mut self.shared_output,
-            },
-        )?;
+            )?;
+        }
         ops::gemm(
             ctx,
             ops::GemmArgs::new(
@@ -304,6 +752,156 @@ impl BaseMoeScratch {
                 shared_gate_logits: &shared_gate_logits,
                 output: &mut self.output,
             },
+        )
+    }
+
+    fn run_shared_nvfp4(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceNvfp4Moe,
+        input: &Tensor,
+    ) -> Result<()> {
+        let expert_fused = self
+            .expert_fused
+            .as_ref()
+            .ok_or_else(|| invalid("shared NVFP4 fused scratch is unavailable"))?;
+        let act_packed = self
+            .act_packed
+            .as_ref()
+            .ok_or_else(|| invalid("shared NVFP4 activation scratch is unavailable"))?;
+        let act_scales = self
+            .act_scales
+            .as_ref()
+            .ok_or_else(|| invalid("shared NVFP4 activation scales are unavailable"))?;
+        let inter_packed = self
+            .inter_packed
+            .as_ref()
+            .ok_or_else(|| invalid("shared NVFP4 intermediate scratch is unavailable"))?;
+        let inter_scales = self
+            .inter_scales
+            .as_ref()
+            .ok_or_else(|| invalid("shared NVFP4 intermediate scales are unavailable"))?;
+
+        let nvfp4_gemm = |a: &Tensor,
+                          a_scales: &Tensor,
+                          b: &Tensor,
+                          b_scales: &Tensor,
+                          alpha: f32,
+                          output: &mut Tensor|
+         -> Result<()> {
+            let mut args =
+                ops::GemmArgs::nvfp4(a, a_scales, b, b_scales, NVFP4_BLOCK_SIZE, alpha, output);
+            args.policy.allow_fallback = false;
+            ops::gemm(ctx, args)
+        };
+
+        let packed = view(
+            act_packed,
+            vec![self.tokens, self.hidden / 2],
+            DType::E2M1Pair,
+        )?;
+        let scales = act_scales;
+        let half_fused_bytes = self.tokens * self.intermediate * DType::BF16.size_in_bytes();
+        let mut gate_output = CudaBuffer::from_tensor(expert_fused)
+            .map_err(Error::Cuda)?
+            .view(0, half_fused_bytes)
+            .map_err(Error::Cuda)?
+            .as_tensor(
+                Shape::new(vec![self.tokens, self.intermediate]),
+                DType::BF16,
+            )
+            .map_err(Error::Cuda)?;
+        ops::nvfp4_quantize_activation(
+            ctx,
+            input,
+            &packed,
+            &scales,
+            weights.shared_gate.input_scale,
+            NVFP4_BLOCK_SIZE,
+            ops::ScaleLayout::GemmAtom,
+        )?;
+        let gate_weight_scales = weights
+            .shared_gate
+            .gemm_block_scales
+            .as_ref()
+            .ok_or_else(|| invalid("shared gate GEMM scales are unavailable"))?;
+        nvfp4_gemm(
+            &packed,
+            scales,
+            &weights.shared_gate.packed_weight,
+            gate_weight_scales,
+            weights.shared_gate.input_scale * weights.shared_gate.weight_scale_2_value,
+            &mut gate_output,
+        )?;
+
+        let up_offset = half_fused_bytes;
+        let mut up_output = CudaBuffer::from_tensor(expert_fused)
+            .map_err(Error::Cuda)?
+            .view(
+                up_offset,
+                self.tokens * self.intermediate * DType::BF16.size_in_bytes(),
+            )
+            .map_err(Error::Cuda)?
+            .as_tensor(
+                Shape::new(vec![self.tokens, self.intermediate]),
+                DType::BF16,
+            )
+            .map_err(Error::Cuda)?;
+        ops::nvfp4_quantize_activation(
+            ctx,
+            input,
+            &packed,
+            &scales,
+            weights.shared_up.input_scale,
+            NVFP4_BLOCK_SIZE,
+            ops::ScaleLayout::GemmAtom,
+        )?;
+        let up_weight_scales = weights
+            .shared_up
+            .gemm_block_scales
+            .as_ref()
+            .ok_or_else(|| invalid("shared up GEMM scales are unavailable"))?;
+        nvfp4_gemm(
+            &packed,
+            scales,
+            &weights.shared_up.packed_weight,
+            up_weight_scales,
+            weights.shared_up.input_scale * weights.shared_up.weight_scale_2_value,
+            &mut up_output,
+        )?;
+
+        let fused = view(
+            expert_fused,
+            vec![self.tokens, 2 * self.intermediate],
+            DType::BF16,
+        )?;
+        ops::swiglu(ctx, &fused, &mut self.shared_intermediate)?;
+        let inter_packed = view(
+            inter_packed,
+            vec![self.tokens, self.intermediate / 2],
+            DType::E2M1Pair,
+        )?;
+        ops::nvfp4_quantize_activation(
+            ctx,
+            &self.shared_intermediate,
+            &inter_packed,
+            inter_scales,
+            weights.shared_down.input_scale,
+            NVFP4_BLOCK_SIZE,
+            ops::ScaleLayout::GemmAtom,
+        )?;
+        let down_weight_scales = weights
+            .shared_down
+            .gemm_block_scales
+            .as_ref()
+            .ok_or_else(|| invalid("shared down GEMM scales are unavailable"))?;
+        nvfp4_gemm(
+            &inter_packed,
+            inter_scales,
+            &weights.shared_down.packed_weight,
+            down_weight_scales,
+            weights.shared_down.input_scale * weights.shared_down.weight_scale_2_value,
+            &mut self.shared_output,
         )
     }
 
@@ -333,31 +931,28 @@ impl BaseMoeScratch {
             1,
             "shared expert gate",
         )?;
-        for (projection, input_features, output_features, label) in [
-            (
-                &weights.expert_gate,
-                self.hidden,
-                self.intermediate,
-                "expert gate",
-            ),
-            (
-                &weights.expert_up,
-                self.hidden,
-                self.intermediate,
-                "expert up",
-            ),
-            (
-                &weights.expert_down,
-                self.intermediate,
-                self.hidden,
-                "expert down",
-            ),
-        ] {
-            if projection.experts != self.experts
-                || projection.input_features != input_features
-                || projection.output_features != output_features
-            {
-                return Err(invalid(format!("Qwen3.5 {label} geometry mismatch")));
+        match &weights.routed_experts {
+            DeviceNvfp4RoutedExperts::Reference { gate, up, down } => {
+                for (projection, input_features, output_features, label) in [
+                    (gate, self.hidden, self.intermediate, "expert gate"),
+                    (up, self.hidden, self.intermediate, "expert up"),
+                    (down, self.intermediate, self.hidden, "expert down"),
+                ] {
+                    if projection.experts != self.experts
+                        || projection.input_features != input_features
+                        || projection.output_features != output_features
+                    {
+                        return Err(invalid(format!("Qwen3.5 {label} geometry mismatch")));
+                    }
+                }
+            }
+            DeviceNvfp4RoutedExperts::Edge(edge) => {
+                if edge.experts != self.experts
+                    || edge.hidden != self.hidden
+                    || edge.intermediate != self.intermediate
+                {
+                    return Err(invalid("Qwen3.5 Edge NVFP4 expert geometry mismatch"));
+                }
             }
         }
         for (projection, input_features, output_features, label) in [
@@ -833,6 +1428,36 @@ fn view(tensor: &Tensor, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
     CudaBuffer::from_tensor(tensor)
         .map_err(Error::Cuda)?
         .as_tensor(Shape::new(shape), dtype)
+        .map_err(Error::Cuda)
+}
+
+/// A single expert's slice from a `[experts, rows, cols]` stacked tensor.
+fn expert_weight_view(
+    stacked: &Tensor,
+    expert: usize,
+    rows: usize,
+    cols: usize,
+    dtype: DType,
+) -> Result<Tensor> {
+    let elem_size = dtype.size_in_bytes();
+    let expert_bytes = rows * cols * elem_size;
+    let offset = expert * expert_bytes;
+    CudaBuffer::from_tensor(stacked)
+        .map_err(Error::Cuda)?
+        .view(offset, expert_bytes)
+        .map_err(Error::Cuda)?
+        .as_tensor(Shape::new(vec![rows, cols]), dtype)
+        .map_err(Error::Cuda)
+}
+
+/// View an `[N]` I32 tensor for `len` elements starting at `offset`.
+fn i32_slice(tensor: &Tensor, offset: usize, len: usize) -> Result<Tensor> {
+    let byte_offset = offset * 4;
+    CudaBuffer::from_tensor(tensor)
+        .map_err(Error::Cuda)?
+        .view(byte_offset, len * 4)
+        .map_err(Error::Cuda)?
+        .as_tensor(Shape::new(vec![len]), DType::I32)
         .map_err(Error::Cuda)
 }
 

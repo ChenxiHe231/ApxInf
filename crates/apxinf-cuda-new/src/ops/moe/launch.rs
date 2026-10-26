@@ -1,6 +1,9 @@
 use apxinf_core::Result;
 
-use super::cuda_contracts::{NormalizedCombine, NormalizedNvfp4Experts, NormalizedRoute};
+use super::cuda_contracts::{
+    NormalizedAddShared, NormalizedCombine, NormalizedEdgeNvfp4, NormalizedNvfp4Experts,
+    NormalizedRoute, NormalizedRouteTopk,
+};
 use crate::ffi::abi::{moe as abi, status};
 use crate::CudaContext;
 
@@ -12,6 +15,21 @@ pub(crate) fn route(ctx: &CudaContext, normalized: NormalizedRoute) -> Result<()
     )?;
     unsafe {
         status::check(abi::apxinf_moe_route_topk(
+            ctx.runtime(),
+            &normalized.spec,
+            &normalized.bindings,
+        ))
+    }
+}
+
+pub(crate) fn route_topk(ctx: &CudaContext, normalized: NormalizedRouteTopk) -> Result<()> {
+    let _storage = &normalized.storage;
+    crate::workspace::validate_capture_target(
+        ctx.device_id(),
+        normalized.bindings.stream as usize,
+    )?;
+    unsafe {
+        status::check(abi::apxinf_moe_route_topk_only(
             ctx.runtime(),
             &normalized.spec,
             &normalized.bindings,
@@ -34,6 +52,21 @@ pub(crate) fn combine(ctx: &CudaContext, normalized: NormalizedCombine) -> Resul
     }
 }
 
+pub(crate) fn add_shared(ctx: &CudaContext, normalized: NormalizedAddShared) -> Result<()> {
+    let _storage = &normalized.storage;
+    crate::workspace::validate_capture_target(
+        ctx.device_id(),
+        normalized.bindings.stream as usize,
+    )?;
+    unsafe {
+        status::check(abi::apxinf_moe_add_shared(
+            ctx.runtime(),
+            &normalized.spec,
+            &normalized.bindings,
+        ))
+    }
+}
+
 pub(crate) fn nvfp4_experts(ctx: &CudaContext, normalized: NormalizedNvfp4Experts) -> Result<()> {
     let _storage = &normalized.storage;
     crate::workspace::validate_capture_target(
@@ -42,6 +75,21 @@ pub(crate) fn nvfp4_experts(ctx: &CudaContext, normalized: NormalizedNvfp4Expert
     )?;
     unsafe {
         status::check(abi::apxinf_moe_nvfp4_experts(
+            ctx.runtime(),
+            &normalized.spec,
+            &normalized.bindings,
+        ))
+    }
+}
+
+pub(crate) fn edge_nvfp4(ctx: &CudaContext, normalized: NormalizedEdgeNvfp4) -> Result<()> {
+    let _storage = &normalized.storage;
+    crate::workspace::validate_capture_target(
+        ctx.device_id(),
+        normalized.bindings.stream as usize,
+    )?;
+    unsafe {
+        status::check(abi::apxinf_moe_edge_nvfp4(
             ctx.runtime(),
             &normalized.spec,
             &normalized.bindings,

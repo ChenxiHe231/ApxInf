@@ -283,11 +283,37 @@ fn attention_f16_action_cache_uses_fa2() {
     let normalized = super::normalize_kv_cache_attention(&ctx, args).unwrap();
     let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
     assert!(
-        execution.summary().starts_with("flash-attention-2-split-kv ")
-            || execution.summary().starts_with("flash-attention-2-kv-cache "),
+        execution
+            .summary()
+            .starts_with("flash-attention-2-split-kv ")
+            || execution
+                .summary()
+                .starts_with("flash-attention-2-kv-cache "),
         "unexpected F16 action KV-cache provider: {}",
         execution.summary()
     );
+}
+
+#[test]
+fn attention_bf16_qwen35_causal_cache_uses_fa2() {
+    let ctx = CudaContext::new(0).unwrap();
+    for (query_tokens, key_tokens) in [(128, 128), (1, 129)] {
+        let query_shape = vec![1, query_tokens, 16, 256];
+        let cache_shape = vec![1, key_tokens, 2, 256];
+        let query = zeros_tensor(0, query_shape.clone(), DType::BF16);
+        let key = zeros_tensor(0, cache_shape.clone(), DType::BF16);
+        let value = zeros_tensor(0, cache_shape, DType::BF16);
+        let mut out = zeros_tensor(0, query_shape, DType::BF16);
+        let mut args = KvCacheAttentionArgs::new(&query, &key, &value, &mut out);
+        args.policy.allow_fallback = false;
+        let normalized = super::normalize_kv_cache_attention(&ctx, args).unwrap();
+        let execution = super::attention_execution::prepare(&ctx, normalized).unwrap();
+        assert!(
+            execution.summary().starts_with("flash-attention-2"),
+            "unexpected Qwen3.5 BF16 KV-cache provider: {}",
+            execution.summary()
+        );
+    }
 }
 
 #[test]
