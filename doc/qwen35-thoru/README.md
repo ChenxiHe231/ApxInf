@@ -8,13 +8,28 @@ The guide includes fast builds,
 the fixed 4,096-token benchmark, precision comparisons, text generation and
 the OpenAI-compatible server.
 
-> **Current validation status:** the Qwen3.6 checkpoint completes a one-token
-> prefill plus scalar decode with BF16 KV cache. The current dual-orientation
-> FP8 weight layout still makes the 4,096-token prefill exhaust or stall
-> Thor-U's unified-memory environment and render the host temporarily
-> unreachable. Treat the 4,096-token command below as a target benchmark, not
-> a production-ready validation, until the duplicate FP8 transpose storage is
-> removed or the inference HugeTLB/ordinary-memory split is requalified.
+> **Current validation status (two separate things, do not conflate them):**
+>
+> *Long prefill is fixed.* The 4,096-token FP8 prefill is validated on Thor-U
+> **subject to the 1206 MHz GPU cap** described in the root `README.md`
+> section “Thor-U Qwen3.6 long-prefill stability”. With that cap applied,
+> repeated 4,096-token prefills complete with the host fully responsive and no
+> OOM, CUDA Xid, or kernel panic; a cache-warm run measures 1.02-1.06 s TTFT
+> (3,874-4,008 prefill tokens/s). The earlier claim that this workload
+> exhausts unified memory and renders the host unreachable was a
+> clock-frequency problem, not a memory-layout problem, and is superseded.
+> The cap is **not persistent across reboot** - re-apply it every session and
+> read the values back before benchmarking.
+>
+> *The section 3 benchmark still does not complete,* for an unrelated reason:
+> scalar decode is not reproducible across repeated identical generate calls,
+> so `qwen35_mtp_bench`'s own token-equality assertion aborts the run at the
+> second iteration. The divergence is always at generated token 1 (token 0,
+> produced by the fixed-shape prefill, is stable). Root cause: the attention
+> autotuner's recipe key includes the live KV length, so every decode step is
+> a cache miss and re-selects `num_splits` by noisy timing, changing the
+> floating-point reduction order and occasionally flipping the greedy argmax.
+> Until that is fixed, treat the section 3 command as a target benchmark.
 
 ## 1. Connect and prepare the environment
 
@@ -108,6 +123,13 @@ cargo tree -p apxinf-model --features qwen35-cuda \
 The output should contain `apxinf-cuda-new` only.
 
 ## 3. Standard benchmark: 4096 prompt + 256 output
+
+> **Run the benchmark from the repository root.** The attention/GEMM tuning
+> recipe cache directory is built as a *relative* path
+> (`adapters/runtime.cpp:41` returns `configs/tuning/nvidia/<family>-sm<cc>/...`),
+> so it resolves against the process working directory. Launching from
+> elsewhere silently starts with a cold recipe cache, which changes both the
+> first-iteration timings and which kernels get selected.
 
 The benchmark generates a deterministic prompt of exactly 4,096 token IDs,
 loads the model once, performs two warmups, then records five iterations. EOS

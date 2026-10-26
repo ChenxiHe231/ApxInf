@@ -89,6 +89,23 @@ impl CudaBuffer {
         Ok(buf)
     }
 
+    /// Fill the whole allocation with a repeated byte, ordered on `stream`.
+    ///
+    /// Stream-ordered on purpose: a plain `cudaMemset` runs on the legacy
+    /// default stream and would race the compute stream of the model,
+    /// manufacturing exactly the kind of nondeterminism this is meant to find.
+    pub fn memset_async(&self, byte: u8, stream: &crate::CudaStream) -> Result<(), String> {
+        unsafe {
+            ffi::check_cuda(ffi::cudaMemsetAsync(
+                self.ptr,
+                byte as i32,
+                self.len,
+                stream.handle(),
+            ))?;
+        }
+        Ok(())
+    }
+
     /// Allocate and zero-fill asynchronously on the given stream.
     pub fn alloc_zeros_async(
         num_bytes: usize,

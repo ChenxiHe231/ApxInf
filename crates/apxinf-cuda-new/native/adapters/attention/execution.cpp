@@ -4,6 +4,8 @@
 #include <cuda_fp8.h>
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #if defined(APXINF_ATTENTION_FA2)
@@ -446,6 +448,34 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
         " config=" + std::to_string(recipe.configuration) +
         " workspace=" + std::to_string(execution->resource_bytes) +
         " source=" + source;
+    // The autotune report and the chosen implementation are otherwise only
+    // reachable from unit tests inside the library crate, which is exactly
+    // where an integration run cannot see them. APXINF_ATTENTION_REPORT=1 puts
+    // them on stderr. `source` already carries the full candidate timing table
+    // when this call actually tuned, and is a short cache-hit marker
+    // otherwise, so one line per prepare stays readable.
+    //
+    // This is the diagnostic that identifies a tuning key which moves with the
+    // live KV length: watch `k=` change while `dyn=0` and `source=` reports a
+    // fresh tune on every decode step.
+    static const bool report = std::getenv("APXINF_ATTENTION_REPORT") != nullptr;
+    if (report) {
+      std::fprintf(stderr,
+                   "[apxinf-attn] sem=%u b=%lld q=%lld k=%lld cap=%lld "
+                   "qh=%lld kvh=%lld d=%lld dyn=%u qs=%lld det=%u | %s\n",
+                   normalized.semantic,
+                   static_cast<long long>(normalized.batch),
+                   static_cast<long long>(normalized.query_tokens),
+                   static_cast<long long>(normalized.key_tokens),
+                   static_cast<long long>(normalized.key_capacity),
+                   static_cast<long long>(normalized.query_heads),
+                   static_cast<long long>(normalized.kv_heads),
+                   static_cast<long long>(normalized.head_dim),
+                   normalized.dynamic_decode,
+                   static_cast<long long>(normalized.query_start),
+                   policy->deterministic,
+                   execution->summary.c_str());
+    }
     auto wrapper = std::make_unique<apxinf_attention_execution>();
     wrapper->state = std::move(execution);
     *output = wrapper.release();
