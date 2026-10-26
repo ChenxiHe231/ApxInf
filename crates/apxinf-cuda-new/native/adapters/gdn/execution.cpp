@@ -121,21 +121,6 @@ extern "C" apxinf_status_t apxinf_gdn_causal_conv_step(
   });
 }
 
-extern "C" apxinf_status_t apxinf_gdn_widen_f16_to_bf16(
-    const void* input, void* output, int64_t count,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (input == nullptr || output == nullptr || !extent(count)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid FP16 widening arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_widen_f16_to_bf16(
-              input, output, static_cast<long long>(count),
-              static_cast<cudaStream_t>(stream)),
-          "FP16 widening");
-  });
-}
-
 extern "C" apxinf_status_t apxinf_gdn_prepare_prefill(
     const void* fused, void* q_out, void* k_out, void* v_out, const void* g,
     void* alpha, int64_t tokens, int64_t row_width, int64_t k_heads,

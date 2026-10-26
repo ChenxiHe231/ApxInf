@@ -2740,12 +2740,7 @@ fn prefill_step(
                     let fuse_norm =
                         std::env::var("APXINF_GDN_FUSED_WIDEN_NORM").as_deref() == Ok("1");
                     if !fuse_norm || shadow_state.is_some() {
-                        ops::gdn_widen_f16_to_bf16(
-                            ctx,
-                            &out_rows,
-                            &readout_bf,
-                            tokens * GDN_V_HEADS * GDN_HEAD_DIM,
-                        )
+                        ops::quantization::cast(ctx, &out_rows, &readout_bf)
                         .unwrap();
                     }
                     if fuse_norm {

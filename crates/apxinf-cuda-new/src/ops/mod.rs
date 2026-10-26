@@ -48,8 +48,7 @@ pub use gdn::{
     gdn_continue, gdn_conv_prepare, gdn_decay_and_beta, gdn_decay_and_beta_seq, gdn_first_prefill,
     gdn_gated_norm, gdn_gated_norm_quantize, gdn_gated_norm_seq, gdn_gated_norm_seq_f16,
     gdn_l2_normalize_heads, gdn_prefill, gdn_prefill_workspace_bytes, gdn_prepare_prefill,
-    gdn_recurrent_step, gdn_state_elements, gdn_widen_f16_to_bf16, GdnContinuationArgs,
-    GdnFirstPrefillArgs,
+    gdn_recurrent_step, gdn_state_elements, GdnContinuationArgs, GdnFirstPrefillArgs,
 };
 pub use gemm::{
     fp8_gemv, gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu,

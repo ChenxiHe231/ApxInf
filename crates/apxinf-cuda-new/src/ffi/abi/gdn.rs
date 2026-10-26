@@ -77,12 +77,6 @@ unsafe extern "C" {
         kernel_width: i64,
         stream: CudaStream,
     ) -> i32;
-    pub(crate) fn apxinf_gdn_widen_f16_to_bf16(
-        input: *const c_void,
-        output: *mut c_void,
-        count: i64,
-        stream: CudaStream,
-    ) -> i32;
     pub(crate) fn apxinf_gdn_prepare_prefill(
         fused: *const c_void,
         q_out: *mut c_void,

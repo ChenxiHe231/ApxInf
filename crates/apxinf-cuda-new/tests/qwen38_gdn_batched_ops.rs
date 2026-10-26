@@ -181,7 +181,7 @@ fn fused_fp16_gated_norm_matches_explicit_bf16_conversion() {
         let actual = zeros(&ctx, dims, DType::BF16);
         CudaBuffer::from_tensor(&expected).unwrap().copy_from_host(&vec![0xaa; count * 2]).unwrap();
         CudaBuffer::from_tensor(&actual).unwrap().copy_from_host(&vec![0x55; count * 2]).unwrap();
-        ops::gdn_widen_f16_to_bf16(&ctx, &input, &wide, count).unwrap();
+        ops::quantization::cast(&ctx, &input, &wide).unwrap();
         ops::gdn_gated_norm_seq(&ctx, &wide, &gate, &weight, &expected, tokens, heads, head_dim, 1e-6).unwrap();
         ops::gdn_gated_norm_seq(&ctx, &input, &gate, &weight, &actual, tokens, heads, head_dim, 1e-6).unwrap();
         ctx.synchronize().unwrap();

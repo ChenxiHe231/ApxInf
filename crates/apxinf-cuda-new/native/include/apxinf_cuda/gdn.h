@@ -57,10 +57,6 @@ apxinf_status_t apxinf_gdn_causal_conv_step(void* window, const void* input,
 //
 // q/k/v/out are FP16 and q/k must already be L2-normalized; `gate_log` is the
 // natural-log decay. See native/kernels/flashinfer_gdn/README.md.
-apxinf_status_t apxinf_gdn_widen_f16_to_bf16(const void* input, void* output,
-                                             int64_t count,
-                                             apxinf_cuda_stream_t stream);
-
 apxinf_status_t apxinf_gdn_prepare_prefill(
     const void* fused, void* q_out, void* k_out, void* v_out, const void* g,
     void* alpha, int64_t tokens, int64_t row_width, int64_t k_heads,

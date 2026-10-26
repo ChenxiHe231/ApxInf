@@ -34,7 +34,6 @@ pub struct GdnFirstPrefillArgs<'a> {
     /// `[key_heads, value_heads, key_dim, value_dim]`.
     pub geometry: [usize; 4],
 }
-
 fn scan_scratch(
     ctx: &CudaContext,
     heads: usize,
@@ -1422,32 +1421,6 @@ pub fn gdn_conv_prepare(
             k_heads as i64,
             v_heads as i64,
             epsilon,
-            ctx.stream().handle(),
-        ))
-    }
-}
-
-/// Widen an FP16 buffer to BF16.
-///
-/// The FlashInfer scan emits FP16 because the head-generic variant our 48
-/// value heads force has no BF16 build; everything downstream of it here is
-/// BF16.
-pub fn gdn_widen_f16_to_bf16(
-    ctx: &CudaContext,
-    input: &Tensor,
-    output: &Tensor,
-    count: usize,
-) -> Result<()> {
-    let input_buffer = tensor_storage(ctx, input, DType::F16, input.shape().dims())?;
-    let output_buffer = tensor_storage(ctx, output, DType::BF16, output.shape().dims())?;
-    if input.shape().numel() < count || output.shape().numel() < count {
-        return Err(invalid("FP16 widening runs past one of its buffers"));
-    }
-    unsafe {
-        status::check(abi::apxinf_gdn_widen_f16_to_bf16(
-            input_buffer.ptr(),
-            output_buffer.ptr(),
-            count as i64,
             ctx.stream().handle(),
         ))
     }
