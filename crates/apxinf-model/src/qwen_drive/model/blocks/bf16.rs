@@ -1154,7 +1154,7 @@ pub(super) mod vision {
                 super::dump_attention_probe(ctx, 106, &[("block0_proj", &proj)])?;
             }
 
-            let residual_norm = norm::bias_residual_layer_bf16(
+            let residual_norm = crate::cuda_ops::norm::bias_residual_layer_norm(
                 ctx,
                 &proj,
                 None,
@@ -1199,7 +1199,7 @@ pub(super) mod vision {
                 .map(|next| (&next.norm1_w, &next.norm1_b))
                 .unwrap_or((&weights.merger_norm_w, &weights.merger_norm_b));
             let residual_norm =
-                norm::bias_residual_layer_bf16(ctx, &h2, None, &x, next_w, next_b, eps)?;
+                crate::cuda_ops::norm::bias_residual_layer_norm(ctx, &h2, None, &x, next_w, next_b, eps)?;
             if block_idx == 0 {
                 super::dump_attention_probe(
                     ctx,

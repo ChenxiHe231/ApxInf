@@ -1012,7 +1012,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                         }
                     }
                 }
-                let fused = ops::norm::bias_residual_layer_bf16(
+                let fused = crate::cuda_ops::norm::bias_residual_layer_norm(
                     self.backend.context(),
                     projection,
                     Some(projection_bias),
@@ -1044,7 +1044,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                         residual,
                     )
                 } else {
-                    ops::norm::bias_residual_bf16(
+                    crate::cuda_ops::norm::bias_residual(
                         self.backend.context(),
                         projection,
                         Some(bias),

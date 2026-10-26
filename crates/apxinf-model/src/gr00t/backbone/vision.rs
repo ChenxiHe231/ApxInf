@@ -718,7 +718,7 @@ fn apply_bias_residual(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return ops::norm::bias_residual_bf16(
+        return crate::cuda_ops::norm::bias_residual(
             cuda.context(),
             projection,
             Some(bias),
@@ -768,7 +768,7 @@ fn apply_bias_residual_layer_norm(
                 eps,
             )?
         } else {
-            ops::norm::bias_residual_layer_bf16(
+            crate::cuda_ops::norm::bias_residual_layer_norm(
                 cuda.context(),
                 projection,
                 Some(projection_bias),

@@ -49,7 +49,7 @@ pub fn language_layer_bf16(
     let attention = attention::mqa(ctx, &qkv.q, &qkv.k, &qkv.v, tokens)?
         .reshape(vec![tokens, config.num_heads * config.head_dim])?;
     let projected = gemm::bf16(ctx, &attention, &weights.output.weight)?;
-    let fused = norm::bias_residual_rms_bf16(
+    let fused = crate::cuda_ops::norm::bias_residual_rms_norm(
         ctx,
         &projected,
         weights.output.bias.as_ref(),
@@ -60,7 +60,7 @@ pub fn language_layer_bf16(
     let activated = gemm::bf16_geglu_fused(ctx, &fused.normalized, &weights.gate_up.weight)?;
     let projected = gemm::bf16(ctx, &activated, &weights.down.weight)?;
     let hidden =
-        norm::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)?;
+        crate::cuda_ops::norm::bias_residual(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)?;
     Ok(Bf16LanguageLayerOutput {
         hidden,
         key: qkv.key_2d(tokens, config.head_dim)?,
@@ -114,7 +114,7 @@ pub fn vision_layer_bf16(
     let attention = attention::mha(ctx, &qkv.q, &qkv.k, &qkv.v, patches_per_view)?
         .reshape(vec![input.shape().dims()[0], heads * head_dim])?;
     let projection = gemm::bf16(ctx, &attention, &weights.output.weight)?;
-    let fused = norm::bias_residual_layer_bf16(
+    let fused = crate::cuda_ops::norm::bias_residual_layer_norm(
         ctx,
         &projection,
         weights.output.bias.as_ref(),
@@ -131,7 +131,7 @@ pub fn vision_layer_bf16(
         pointwise::PointwiseActivation::Gelu,
     )?;
     let projection = gemm::bf16(ctx, &activation, &weights.fc2.weight)?;
-    norm::bias_residual_bf16(ctx, &projection, weights.fc2.bias.as_ref(), &fused.hidden)
+    crate::cuda_ops::norm::bias_residual(ctx, &projection, weights.fc2.bias.as_ref(), &fused.hidden)
 }
 
 trait QkvViews {
@@ -215,7 +215,7 @@ pub fn language_layer_cached_decode_bf16(
     let attention = attention::mqa(ctx, &q, key_cache, value_cache, position_offset + tokens)?
         .reshape(vec![tokens, config.num_heads * config.head_dim])?;
     let projected = projection(ctx, &attention, &weights.output.weight)?;
-    let fused = norm::bias_residual_rms_bf16(
+    let fused = crate::cuda_ops::norm::bias_residual_rms_norm(
         ctx,
         &projected,
         weights.output.bias.as_ref(),
@@ -226,7 +226,7 @@ pub fn language_layer_cached_decode_bf16(
     let gate_up = projection(ctx, &fused.normalized, &weights.gate_up.weight)?;
     let activated = pointwise::geglu(ctx, &gate_up)?;
     let projected = projection(ctx, &activated, &weights.down.weight)?;
-    norm::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)
+    crate::cuda_ops::norm::bias_residual(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)
 }
 
 /// The LM head uses the same decode-tuned projection; at one token it is the
@@ -268,7 +268,7 @@ pub fn language_layer_cached_bf16(
             vec![tokens, config.num_heads * config.head_dim],
         )?;
     let projected = gemm::bf16(ctx, &attention, &weights.output.weight)?;
-    let fused = norm::bias_residual_rms_bf16(
+    let fused = crate::cuda_ops::norm::bias_residual_rms_norm(
         ctx,
         &projected,
         weights.output.bias.as_ref(),
@@ -278,5 +278,5 @@ pub fn language_layer_cached_bf16(
     )?;
     let activated = gemm::bf16_geglu_fused(ctx, &fused.normalized, &weights.gate_up.weight)?;
     let projected = gemm::bf16(ctx, &activated, &weights.down.weight)?;
-    norm::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)
+    crate::cuda_ops::norm::bias_residual(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)
 }
