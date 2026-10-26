@@ -203,29 +203,6 @@ impl DeviceLinearWeights for Gr00tInt8LinearWeights {
         )?))
     }
 
-    fn packed_bias_then_residual(
-        &self,
-        projection: &Tensor,
-        bias: Option<&Tensor>,
-        residual: &Tensor,
-        backend: &RuntimeBackend,
-    ) -> Result<Option<Tensor>> {
-        if backend.context().caps().sm != 87 {
-            return Ok(None);
-        }
-        if std::env::var_os("APXINF_GR00T_W8A8_LEGACY_BIAS_RESIDUAL").is_some()
-            || self.output_dim % 4 != 0
-        {
-            return Ok(None);
-        }
-        Ok(Some(ops::norm::bias_then_residual_bf16_packed4(
-            backend.context(),
-            projection,
-            bias,
-            residual,
-        )?))
-    }
-
     fn adaptive_layer_norm_quantized(
         &self,
         input: &Tensor,

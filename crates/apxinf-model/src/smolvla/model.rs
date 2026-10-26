@@ -395,7 +395,7 @@ impl SmolVlaModel {
             )?;
             self.backend.add(&projected, input)?
         } else {
-            ops::norm::bias_then_residual_bf16_packed4(
+            crate::cuda_ops::norm::bias_then_residual(
                 ctx,
                 &projected,
                 Some(weights.attention_output.bias.as_ref().unwrap()),
@@ -422,7 +422,7 @@ impl SmolVlaModel {
                 self.add_bias(ctx, &projected, weights.fc2.bias.as_ref().unwrap())?;
             self.backend.add(&projected, &hidden)
         } else {
-            ops::norm::bias_then_residual_bf16_packed4(
+            crate::cuda_ops::norm::bias_then_residual(
                 ctx,
                 &projected,
                 Some(weights.fc2.bias.as_ref().unwrap()),

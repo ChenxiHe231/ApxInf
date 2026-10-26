@@ -13,6 +13,15 @@ extern "C" cudaError_t apxinf_norm_rms_norm_f16(
 extern "C" cudaError_t apxinf_norm_layer_norm_f16(
     const void* input, const void* weight, const void* bias, void* output,
     int rows, int cols, float eps, cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_bias_then_residual_bf16(
+    const void* projection, const void* bias, const void* residual,
+    void* output, int rows, int cols, cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_bias_residual_bf16_packed4(
+    const void* projection, const void* bias, const void* residual,
+    void* output, int rows, int cols, cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_bias_then_residual_bf16_packed4(
+    const void* projection, const void* bias, const void* residual,
+    void* output, int rows, int cols, cudaStream_t stream);
 
 namespace {
 
@@ -232,6 +241,34 @@ cudaError_t launch_fixed_f16(const apxinf_norm_spec_t& spec,
   return launch<__half>(spec, bindings);
 }
 
+cudaError_t launch_fixed_bf16(const apxinf_norm_spec_t& spec,
+                              const apxinf_norm_bindings_t& bindings) {
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+  const int rows = static_cast<int>(spec.rows);
+  const int cols = static_cast<int>(spec.cols);
+  const bool packed4 = (cols & 3) == 0 && spec.input_alignment >= 8 &&
+      spec.bias_alignment >= 8 && spec.residual_alignment >= 8 &&
+      spec.hidden_alignment >= 8;
+
+  if (spec.semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL &&
+      bindings.bias != nullptr && packed4) {
+    return apxinf_norm_bias_residual_bf16_packed4(
+        bindings.input, bindings.bias, bindings.residual, bindings.hidden,
+        rows, cols, stream);
+  }
+  if (spec.semantic == APXINF_NORM_SEMANTIC_BIAS_THEN_RESIDUAL) {
+    if (packed4) {
+      return apxinf_norm_bias_then_residual_bf16_packed4(
+          bindings.input, bindings.bias, bindings.residual, bindings.hidden,
+          rows, cols, stream);
+    }
+    return apxinf_norm_bias_then_residual_bf16(
+        bindings.input, bindings.bias, bindings.residual, bindings.hidden,
+        rows, cols, stream);
+  }
+  return launch<__nv_bfloat16>(spec, bindings);
+}
+
 template <class T>
 cudaError_t launch(const apxinf_norm_spec_t& spec,
                    const apxinf_norm_bindings_t& bindings) {
@@ -314,7 +351,7 @@ extern "C" apxinf_status_t apxinf_norm_launch(
         spec->output_dtype == APXINF_DTYPE_E4M3
             ? launch_quantized_f16(*spec, *bindings)
             : (spec->dtype == APXINF_DTYPE_BF16
-                   ? launch<__nv_bfloat16>(*spec, *bindings)
+                   ? launch_fixed_bf16(*spec, *bindings)
                    : launch_fixed_f16(*spec, *bindings)));
   });
 }

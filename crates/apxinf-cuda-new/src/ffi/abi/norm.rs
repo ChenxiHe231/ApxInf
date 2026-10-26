@@ -243,33 +243,6 @@ mod fixed_launchers {
             scale: f32,
             stream: cudaStream_t,
         ) -> cudaError_t;
-        pub(crate) fn apxinf_norm_bias_then_residual_bf16(
-            projection: *const c_void,
-            bias: *const c_void,
-            residual: *const c_void,
-            output: *mut c_void,
-            rows: i32,
-            cols: i32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_norm_bias_residual_bf16_packed4(
-            projection: *const c_void,
-            bias: *const c_void,
-            residual: *const c_void,
-            output: *mut c_void,
-            rows: i32,
-            cols: i32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_norm_bias_then_residual_bf16_packed4(
-            projection: *const c_void,
-            bias: *const c_void,
-            residual: *const c_void,
-            output: *mut c_void,
-            rows: i32,
-            cols: i32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
         pub(crate) fn apxinf_norm_bias_residual_layer_norm_bf16_cached_1024(
             projection: *const c_void,
             projection_bias: *const c_void,

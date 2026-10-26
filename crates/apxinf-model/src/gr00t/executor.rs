@@ -80,7 +80,6 @@ pub(super) trait Gr00tPrecisionExecution: Sized + 'static {
     const USE_VISION_POINTWISE_PACK: bool = false;
     const USE_BATCHED_VISION_ATTENTION: bool = false;
     const USE_PACKED_ATTENTION_BIAS_RESIDUAL: bool = false;
-    const USE_PACKED_VISION_FC2_RESIDUAL: bool = false;
     const VISION_POINTWISE_LEGACY_ENV: Option<&'static str> = None;
 
     fn transfer_dense(
@@ -1032,25 +1031,12 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             };
         let vision_bias_residual =
             |_name: &str, projection: &Tensor, bias: &Tensor, residual: &Tensor| {
-                if E::USE_PACKED_VISION_FC2_RESIDUAL
-                    && self.backend.context().caps().sm == 87
-                    && projection.shape().dims() == [512, 1024]
-                    && std::env::var_os("APXINF_GR00T_LEGACY_VISION_FC2_RESIDUAL").is_none()
-                {
-                    ops::norm::bias_residual_bf16_packed4(
-                        self.backend.context(),
-                        projection,
-                        bias,
-                        residual,
-                    )
-                } else {
-                    crate::cuda_ops::norm::bias_residual(
-                        self.backend.context(),
-                        projection,
-                        Some(bias),
-                        residual,
-                    )
-                }
+                crate::cuda_ops::norm::bias_residual(
+                    self.backend.context(),
+                    projection,
+                    Some(bias),
+                    residual,
+                )
             };
         let vision_output = vision::forward_with_prepared_positions_and_matmul(
             &self.backbone_config,
@@ -1472,7 +1458,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                     normalized_quantized = None;
                 } else {
                     residual = if fuse_attention_bias_residual {
-                        ops::norm::bias_then_residual_bf16_packed4(
+                        crate::cuda_ops::norm::bias_then_residual(
                             self.backend.context(),
                             &attention,
                             block.attention.output.bias(),
@@ -2205,7 +2191,12 @@ fn forward_feed_forward_residual_quantized<E: Gr00tPrecisionExecution>(
     let output = weights
         .output
         .forward_reusable_quantized(&hidden, backend)?;
-    ops::norm::bias_then_residual_bf16(backend.context(), &output, weights.output.bias(), residual)
+    crate::cuda_ops::norm::bias_then_residual(
+        backend.context(),
+        &output,
+        weights.output.bias(),
+        residual,
+    )
 }
 
 fn forward_feed_forward_residual<E: Gr00tPrecisionExecution>(
@@ -2230,15 +2221,12 @@ fn forward_feed_forward_residual_with_quantized_input<E: Gr00tPrecisionExecution
         quantized_input,
         weights,
     )?;
-    if let Some(output) = weights.output.packed_bias_then_residual(
+    crate::cuda_ops::norm::bias_then_residual(
+        backend.context(),
         &output,
         weights.output.bias(),
         residual,
-        backend,
-    )? {
-        return Ok(output);
-    }
-    ops::norm::bias_then_residual_bf16(backend.context(), &output, weights.output.bias(), residual)
+    )
 }
 
 fn noncausal_attention<E: Gr00tPrecisionExecution>(

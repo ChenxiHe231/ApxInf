@@ -42,6 +42,21 @@ pub(crate) fn bias_residual(
     Ok(hidden)
 }
 
+pub(crate) fn bias_then_residual(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    bias: Option<&Tensor>,
+    residual: &Tensor,
+) -> Result<Tensor> {
+    let mut hidden =
+        ctx.allocate_output(Shape::new(projection.shape().dims().to_vec()), DType::BF16)?;
+    ops::bias_then_residual(
+        ctx,
+        ops::BiasThenResidualArgs::new(projection, bias, residual, &mut hidden),
+    )?;
+    Ok(hidden)
+}
+
 pub(crate) fn bias_residual_rms_norm(
     ctx: &CudaContext,
     projection: &Tensor,
