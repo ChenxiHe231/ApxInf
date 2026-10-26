@@ -885,20 +885,6 @@ fn w8a8_gemm(
     Ok(output)
 }
 
-/// `try_fp8_bias_then_residual_bf16`: fixed-shape sm110 FP8 fusion. Not
-/// vendored; callers fall back to the generic route.
-#[allow(clippy::too_many_arguments)]
-pub fn try_fp8_bias_then_residual_bf16(
-    _ctx: &CudaContext,
-    _activation: &Tensor,
-    _activation_scale: f32,
-    _weight: Fp8WeightView<'_>,
-    _bias: &Tensor,
-    _residual: &Tensor,
-) -> Result<Option<Tensor>> {
-    Ok(None)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn try_gemm_quantized_w8a8_bias_gelu_quantized(
     ctx: &CudaContext,

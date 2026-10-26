@@ -426,40 +426,6 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         self.forward_quantized_tensor(input, backend)
     }
 
-    fn forward_reusable_quantized_bias_residual(
-        &self,
-        input: &Self::ReusableInput,
-        residual: &Tensor,
-        backend: &RuntimeBackend,
-    ) -> Result<Option<Tensor>> {
-        let Some(bias) = self.bias.as_ref() else {
-            return Ok(None);
-        };
-        let use_thor_m41_fc2_epilogue = backend.context().caps().sm == 110
-            && input.shape().dims() == [41, 6144]
-            && self.weight.shape().dims() == [6144, 1536]
-            && bias.shape().dims() == [1536]
-            && residual.shape().dims() == [41, 1536]
-            && std::env::var_os("APXINF_GR00T_FP8_LEGACY_M41_FC2_EPILOGUE").is_none();
-        if !use_thor_m41_fc2_epilogue {
-            return Ok(None);
-        }
-        let weight = ops::gemm::Fp8WeightView {
-            values_e4m3: &self.weight,
-            scale: self.weight_scale,
-            dual_geglu_interleaved: false,
-            dual_geglu_auto_interleaved: None,
-        };
-        ops::gemm::try_fp8_bias_then_residual_bf16(
-            backend.context(),
-            input,
-            self.activation_scale,
-            weight,
-            bias,
-            residual,
-        )
-    }
-
     fn quantize_tensor_input(
         &self,
         input: &Tensor,
