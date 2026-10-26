@@ -89,6 +89,20 @@ __global__ void swiglu_kernel(const __nv_bfloat16* __restrict__ fused,
   output[index] = __float2bfloat16(activated * up);
 }
 
+__global__ void swiglu_round_product_kernel(
+    const __nv_bfloat16* __restrict__ fused,
+    __nv_bfloat16* __restrict__ output, int rows, int width) {
+  const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  const long long total = (long long)rows * width;
+  if (index >= total) return;
+  const int row = static_cast<int>(index / width);
+  const int column = static_cast<int>(index % width);
+  const long long base = (long long)row * 2 * width;
+  const float gate = __bfloat162float(fused[base + column]);
+  const float up = __bfloat162float(fused[base + width + column]);
+  output[index] = __float2bfloat16((gate / (1.0f + expf(-gate))) * up);
+}
+
 // Eight elements per thread through 16-byte vectors. One bf16 per thread
 // (round-05 nsys: 46.7 ms of a 874 ms prefill across 130 calls) leaves the
 // kernel launch-and-index bound; the tail elements run scalar so any count
@@ -555,6 +569,17 @@ int swiglu_bf16(const void* fused_gate_up, void* output, int rows, int width,
       static_cast<const __nv_bfloat16*>(fused_gate_up),
       static_cast<__nv_bfloat16*>(output), rows, width);
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int swiglu_bf16_round_product(const void* fused_gate_up, void* output, int rows,
+                              int width, cudaStream_t stream) {
+  const int threads = 256;
+  const long long count = static_cast<long long>(rows) * width;
+  const int blocks = static_cast<int>((count + threads - 1) / threads);
+  swiglu_round_product_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(fused_gate_up),
+      static_cast<__nv_bfloat16*>(output), rows, width);
+  return static_cast<int>(cudaGetLastError());
 }
 
 int add_bf16(const void* addend, void* accumulator, long long count,

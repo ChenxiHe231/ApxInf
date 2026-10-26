@@ -134,6 +134,26 @@ Attention computes `softmax(mask(scale * (Q @ K^T))) @ V`. Q/K/V have the same d
 | Constraints | offsets contain at least two elements, are monotonically nondecreasing, begin at 0, and end at `total_tokens`; empty segments are allowed; causal and differing Q/KV head counts are unsupported |
 | Reference test | `segmented_attention_all_candidates_match_reference` |
 
+## Routed MoE Building Blocks
+
+Routed-MoE execution keeps router selection and expert data movement on the
+CUDA stream. `routed_moe_route_topk` maps `[tokens, experts]` BF16/F16/F32
+logits to token-major I32 IDs and F32 weights with deterministic lower-ID tie
+breaks and selected-weight renormalization. `routed_moe_add_shared` computes
+`routed + sigmoid(shared_gate) * shared` in BF16.
+
+`edge_bf16_decode_moe(ctx, EdgeBf16DecodeMoeArgs)` is the fixed one-token
+BF16 routed-expert building block used by Qwen3.5 MTP on Thor. It accepts
+`input=[1,H]`, IDs/weights `[1,K]`, BF16 FC1 `[E,2I,H]` in 64-row
+`[up,gate]` interleaving, and BF16 FC2 `[E,H,I]`; it returns the weighted
+routed contribution `[1,H]`. The semantic is grouped BF16 GEMM with FP32
+accumulation, BF16 FC1 materialization, SwiGLU, BF16 FC2 materialization, and
+F32-weighted BF16 output reduction. The caller owns a preallocated workspace
+and adds the shared expert separately. The SM110 TensorRT-Edge-LLM provider is
+prepared when the workspace is queried; enqueue performs no allocation,
+selection, module loading, device query, or synchronization. Unsupported
+builds expose the same ABI through an explicit unsupported stub.
+
 ## Testing Responsibilities
 
 The catalog test ensures only that semantics are neither missing nor duplicated; it cannot validate the written contracts. A new L3 semantic must also add a semantic test to `src/ops/tests/l3_behavior.rs` and an independent-reference all-candidate numerical test to `src/ops/tests/precision/precision.rs`.

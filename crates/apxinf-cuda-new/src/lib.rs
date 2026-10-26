@@ -16,27 +16,30 @@ pub use graph::{capture, CapturedGraph};
 pub use ops::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, attention, bias_residual,
     bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, concat_rows, decode_e4m3,
-    decode_rope, edge_nvfp4_interleave_fc1, edge_nvfp4_moe, edge_nvfp4_moe_available,
-    edge_nvfp4_moe_workspace_size, edge_nvfp4_rescale_e4m3, edge_nvfp4_swizzle_scales, encode_e4m3,
-    gather, kv_cache_attention, layer_norm, multimodal_rope, packed_qkv_attention, pointwise,
-    quantization, qwen35_attention_fp8, qwen35_attention_reference, qwen35_mtp_moe,
-    qwen35_mtp_moe_reference, reserve_prefix, rms_norm, rope, route_topk_reference,
-    routed_moe_add_shared, routed_moe_combine, routed_moe_combine_reference,
-    routed_moe_nvfp4_experts, routed_moe_route, routed_moe_route_topk, segmented_attention,
-    split_qkv_axial_rope, AdaGateResidualArgs, AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs,
-    AttentionArgs, AttentionMask, AttentionPolicy, AxialRopeArgs, BiasResidualArgs,
-    BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, BiasThenResidualArgs, DecodeRopeArgs,
-    EdgeNvfp4MoeArgs, EdgeNvfp4MoeWeights, ExecutionSession, ExpertAssignment, GatherArgs,
-    GatherPatchGeometry, GatherSemantic, GraphWorkspace, KvCacheAttentionArgs, KvCacheDecodeMeta,
-    LayerNormArgs, MultimodalRopeArgs, Nvfp4ExpertProjection, PackedQkvAttentionArgs,
-    PointwiseActivation, PointwiseArgs, PointwiseSemantic, QuantizationArgs, QuantizationSemantic,
-    Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput, Qwen35AttentionScratch,
-    Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales, Qwen35MtpMoeArgs,
-    Qwen35MtpMoeScratch, Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput,
-    Qwen35MtpReferenceWeights, RmsNormArgs, RopeArgs, RopeSemantic, RoutePlan,
-    RoutedMoeAddSharedArgs, RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs,
-    RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs, RoutedMoeSemantic, SegmentedAttentionArgs,
-    SharedExpertOutput, FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
+    decode_rope, edge_bf16_decode_moe, edge_bf16_decode_moe_available,
+    edge_bf16_decode_moe_workspace_size, edge_nvfp4_interleave_fc1, edge_nvfp4_moe,
+    edge_nvfp4_moe_available, edge_nvfp4_moe_workspace_size, edge_nvfp4_rescale_e4m3,
+    edge_nvfp4_swizzle_scales, encode_e4m3, gather, kv_cache_attention, layer_norm,
+    multimodal_rope, packed_qkv_attention, pointwise, quantization, qwen35_attention_fp8,
+    qwen35_attention_reference, qwen35_mtp_moe, qwen35_mtp_moe_reference, reserve_prefix, rms_norm,
+    rope, route_topk_reference, routed_moe_add_shared, routed_moe_combine,
+    routed_moe_combine_reference, routed_moe_nvfp4_experts, routed_moe_route,
+    routed_moe_route_topk, segmented_attention, split_qkv_axial_rope, AdaGateResidualArgs,
+    AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, AttentionArgs,
+    AttentionMask, AttentionPolicy, AxialRopeArgs, BiasResidualArgs, BiasResidualLayerNormArgs,
+    BiasResidualRmsNormArgs, BiasThenResidualArgs, DecodeRopeArgs, EdgeBf16DecodeMoeArgs,
+    EdgeBf16DecodeMoeWeights, EdgeNvfp4MoeArgs, EdgeNvfp4MoeWeights, ExecutionSession,
+    ExpertAssignment, GatherArgs, GatherPatchGeometry, GatherSemantic, GraphWorkspace,
+    KvCacheAttentionArgs, KvCacheDecodeMeta, LayerNormArgs, MultimodalRopeArgs,
+    Nvfp4ExpertProjection, PackedQkvAttentionArgs, PointwiseActivation, PointwiseArgs,
+    PointwiseSemantic, QuantizationArgs, QuantizationSemantic, Qwen35AttentionReferenceArgs,
+    Qwen35AttentionReferenceOutput, Qwen35AttentionScratch, Qwen35Fp8AttentionArgs,
+    Qwen35Fp8KvCache, Qwen35KvCacheScales, Qwen35MtpMoeArgs, Qwen35MtpMoeScratch,
+    Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput, Qwen35MtpReferenceWeights,
+    RmsNormArgs, RopeArgs, RopeSemantic, RoutePlan, RoutedMoeAddSharedArgs, RoutedMoeCombineArgs,
+    RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs,
+    RoutedMoeSemantic, SegmentedAttentionArgs, SharedExpertOutput, FP8_E4M3_MAX_FINITE,
+    QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
     QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_Q_PROJECTION_WIDTH,
     QWEN35_ATTENTION_RMS_EPSILON, QWEN35_ATTENTION_ROTARY_DIM, QWEN35_MTP_DRAFT_STEPS,
     QWEN35_MTP_EXPERTS, QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_LAYERS,
@@ -56,6 +59,10 @@ pub const NVFP4_GEMM_SWIGLU: bool = cfg!(apxinf_nvfp4_gemm_swiglu);
 /// Whether this build includes the aarch64 SM110 TensorRT-Edge-LLM CuTeDSL
 /// routed NVFP4 MoE provider.
 pub const EDGE_NVFP4_MOE: bool = cfg!(apxinf_edge_nvfp4_moe);
+
+/// Whether this build includes the aarch64 SM110 TensorRT-Edge-LLM BF16
+/// grouped-MoE provider used by Qwen3.5 MTP decode.
+pub const EDGE_BF16_MOE: bool = cfg!(apxinf_edge_bf16_moe);
 
 /// Whether this build compiled the allocation-free FA2 decode kernel
 /// (`apxinf_decode_attention`). When `false` that ABI returns

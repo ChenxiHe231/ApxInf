@@ -180,6 +180,7 @@ fn run(command: &mut Command, action: &str) {
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(apxinf_nvfp4_gemm_swiglu)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_edge_nvfp4_moe)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_edge_bf16_moe)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_decode)");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
@@ -260,6 +261,24 @@ fn main() {
     if edge_nvfp4_moe {
         println!("cargo:rustc-cfg=apxinf_edge_nvfp4_moe");
     }
+    let edge_bf16_root = native.join("kernels/edge_bf16_moe");
+    let edge_bf16_header = edge_bf16_root
+        .join("generated")
+        .join("edge_bf16_moe_sm110_grouped.h");
+    let edge_bf16_archive = edge_bf16_root
+        .join("aot/aarch64-sm110-cuda12")
+        .join("libapxinf_edge_bf16_moe_sm110_cuda12.a");
+    // The BF16 CuTeDSL archive is emitted for CUDA 12's SM101a spelling, but
+    // CUDA 13 identifies the same Thor GPU as SM110 and loads that archive.
+    // Its small CUDA runner is compiled for the toolchain's native spelling.
+    let edge_bf16_target = cpu_arch == "aarch64"
+        && selection.targets.len() == 1
+        && matches!(selection.targets[0].sm(), 101 | 110);
+    let edge_bf16_moe =
+        edge_bf16_target && edge_bf16_header.is_file() && edge_bf16_archive.is_file();
+    if edge_bf16_moe {
+        println!("cargo:rustc-cfg=apxinf_edge_bf16_moe");
+    }
 
     let id = env::var("APXINF_KERNEL_BUILD_ID").unwrap_or_else(|_| {
         gemm_fingerprint::build_id(
@@ -331,6 +350,11 @@ fn main() {
         generic_sources.push(native.join("kernels/edge_nvfp4_moe/runner.cu"));
     } else {
         generic_sources.push(native.join("kernels/edge_nvfp4_moe/stub.cpp"));
+    }
+    if edge_bf16_moe {
+        generic_sources.push(native.join("kernels/edge_bf16_moe/runner.cu"));
+    } else {
+        generic_sources.push(native.join("kernels/edge_bf16_moe/stub.cpp"));
     }
     let cutlass_root = native.join("kernels/cutlass");
     let fa2_root = native.join("kernels/fa2");
@@ -775,6 +799,11 @@ fn main() {
         let edge_aot = native.join("kernels/edge_nvfp4_moe/aot/aarch64-sm110-cuda12");
         println!("cargo:rustc-link-search=native={}", edge_aot.display());
         println!("cargo:rustc-link-lib=static=apxinf_edge_nvfp4_moe_sm110_cuda12");
+    }
+    if edge_bf16_moe {
+        let edge_aot = native.join("kernels/edge_bf16_moe/aot/aarch64-sm110-cuda12");
+        println!("cargo:rustc-link-search=native={}", edge_aot.display());
+        println!("cargo:rustc-link-lib=static=apxinf_edge_bf16_moe_sm110_cuda12");
     }
     println!("cargo:rustc-link-lib=cublasLt");
     println!("cargo:rustc-link-lib=cublas");

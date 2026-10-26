@@ -1,10 +1,11 @@
 use apxinf_core::Result;
 
 use super::cuda_contracts::{
+    edge_bf16_decode_workspace_size as bf16_workspace_size,
     edge_nvfp4_workspace_size as workspace_size, normalize_add_shared, normalize_combine,
-    normalize_edge_nvfp4, normalize_nvfp4_experts, normalize_route, normalize_route_topk,
-    EdgeNvfp4MoeArgs, RoutedMoeAddSharedArgs, RoutedMoeCombineArgs, RoutedMoeNvfp4ExpertsArgs,
-    RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs,
+    normalize_edge_bf16_decode, normalize_edge_nvfp4, normalize_nvfp4_experts, normalize_route,
+    normalize_route_topk, EdgeBf16DecodeMoeArgs, EdgeNvfp4MoeArgs, RoutedMoeAddSharedArgs,
+    RoutedMoeCombineArgs, RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs,
 };
 use super::launch;
 use super::RoutedMoeConfig;
@@ -61,4 +62,23 @@ pub fn edge_nvfp4_moe_workspace_size(
 /// caller remains responsible for adding the gated shared expert.
 pub fn edge_nvfp4_moe(ctx: &CudaContext, args: EdgeNvfp4MoeArgs<'_>) -> Result<()> {
     launch::edge_nvfp4(ctx, normalize_edge_nvfp4(ctx, args)?)
+}
+
+pub const fn edge_bf16_decode_moe_available() -> bool {
+    cfg!(apxinf_edge_bf16_moe)
+}
+
+pub fn edge_bf16_decode_moe_workspace_size(
+    config: RoutedMoeConfig,
+    hidden: usize,
+    intermediate: usize,
+) -> Result<usize> {
+    bf16_workspace_size(config, hidden, intermediate)
+}
+
+/// Execute one BF16 decode row through TensorRT-Edge-LLM's grouped Tensor
+/// Core FC1/SwiGLU/FC2 path. The output contains only the weighted routed
+/// contribution; the caller adds the gated shared expert.
+pub fn edge_bf16_decode_moe(ctx: &CudaContext, args: EdgeBf16DecodeMoeArgs<'_>) -> Result<()> {
+    launch::edge_bf16_decode(ctx, normalize_edge_bf16_decode(ctx, args)?)
 }

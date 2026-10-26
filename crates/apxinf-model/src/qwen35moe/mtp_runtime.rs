@@ -11,7 +11,10 @@ use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext};
 use super::architecture::AttentionGeometry;
 use super::config::Qwen35MoeConfig;
 use super::decoder::{DecoderOutput, FullAttentionBackend, Qwen35Decoder};
-use super::device_weights::{DeviceMtpWeights, Qwen35DeviceWeights};
+use super::device_weights::{
+    DeviceDenseMoe, DeviceDenseRoutedExperts, DeviceEdgeBf16Experts, DeviceMtpWeights,
+    Qwen35DeviceWeights,
+};
 use super::mtp_schedule::{
     MtpCommit, Qwen35MtpSchedule, RoundOutcome, TokenId, QWEN35_MTP_DRAFT_STEPS,
 };
@@ -23,6 +26,7 @@ const VOCAB: usize = ops::QWEN35_MTP_VOCAB_SIZE;
 const EXPERTS: usize = ops::QWEN35_MTP_EXPERTS;
 const TOP_K: usize = ops::QWEN35_MTP_TOP_K;
 const INTERMEDIATE: usize = ops::QWEN35_MTP_INTERMEDIATE;
+const MTP_PREFILL_CHUNK: usize = 2_048;
 pub const QWEN35_MTP_KV_DTYPE: DType = DType::BF16;
 
 /// Logical/physical MTP position contract.
@@ -140,6 +144,7 @@ pub struct Qwen35MtpRuntime {
     rms_norm_eps: f32,
     rope_theta: f32,
     scratch: Option<MtpScratch>,
+    prefill_scratch: Option<MtpPrefillScratch>,
     pending_draft: Option<PendingDraft>,
 }
 
@@ -167,6 +172,7 @@ impl Qwen35MtpRuntime {
             rms_norm_eps: text.rms_norm_eps,
             rope_theta: text.rope_parameters.rope_theta,
             scratch: None,
+            prefill_scratch: None,
             pending_draft: None,
         })
     }
@@ -176,6 +182,20 @@ impl Qwen35MtpRuntime {
             self.scratch = Some(MtpScratch::new(ctx, self.geometry)?);
         }
         Ok(self.scratch.as_mut().expect("MTP scratch was initialized"))
+    }
+
+    fn ensure_prefill_scratch(&mut self, ctx: &CudaContext) -> Result<&mut MtpPrefillScratch> {
+        if self.prefill_scratch.is_none() {
+            self.prefill_scratch = Some(MtpPrefillScratch::new(
+                ctx,
+                self.geometry,
+                MTP_PREFILL_CHUNK,
+            )?);
+        }
+        Ok(self
+            .prefill_scratch
+            .as_mut()
+            .expect("MTP prefill scratch was initialized"))
     }
 
     fn validate_weights(&self, ctx: &CudaContext, weights: &Qwen35DeviceWeights) -> Result<()> {
@@ -339,15 +359,16 @@ impl MtpBackend for Qwen35MtpRuntime {
                 &Tensor::from_i32(vec![position.cache_rows], &shifted_positions)?,
                 ctx.device_id(),
             )?;
-            for row in 0..position.cache_rows {
-                let base_hidden = row_view(target_hidden, row, HIDDEN)?;
-                let token = element_view(&shifted_tokens, row)?;
-                let rope_position = element_view(&shifted_positions, row)?;
+            for start in (0..position.cache_rows).step_by(MTP_PREFILL_CHUNK) {
+                let rows = (position.cache_rows - start).min(MTP_PREFILL_CHUNK);
+                let base_hidden = rows_view(target_hidden, start, rows, HIDDEN)?;
+                let tokens = vector_view(&shifted_tokens, start, rows)?;
+                let rope_positions = vector_view(&shifted_positions, start, rows)?;
                 let geometry = self.geometry;
                 let eps = self.rms_norm_eps;
                 let theta = self.rope_theta;
-                let scratch = self.ensure_scratch(ctx)?;
-                forward_one(
+                let scratch = self.ensure_prefill_scratch(ctx)?;
+                prefill_kv_chunk(
                     ctx,
                     weights,
                     shadow,
@@ -356,11 +377,9 @@ impl MtpBackend for Qwen35MtpRuntime {
                     eps,
                     theta,
                     &base_hidden,
-                    &token,
-                    &rope_position,
-                    row,
-                    0,
-                    false,
+                    &tokens,
+                    &rope_positions,
+                    start,
                 )?;
             }
         }
@@ -434,19 +453,28 @@ impl MtpBackend for Qwen35MtpRuntime {
             ctx.device_id(),
         )?;
 
-        for row in 0..chunk_tokens.len() {
-            let base_hidden = if row == 0 {
-                previous_target_hidden.clone()
-            } else {
-                row_view(target_hidden, row - 1, HIDDEN)?
-            };
-            let token = element_view(&tokens, row)?;
-            let rope_position = element_view(&positions, row)?;
+        for start_row in (0..chunk_tokens.len()).step_by(MTP_PREFILL_CHUNK) {
+            let rows = (chunk_tokens.len() - start_row).min(MTP_PREFILL_CHUNK);
+            let tokens = vector_view(&tokens, start_row, rows)?;
+            let rope_positions = vector_view(&positions, start_row, rows)?;
             let geometry = self.geometry;
             let eps = self.rms_norm_eps;
             let theta = self.rope_theta;
-            let scratch = self.ensure_scratch(ctx)?;
-            forward_one(
+            let scratch = self.ensure_prefill_scratch(ctx)?;
+            let base_hidden = rows_view(&scratch.base_hidden, 0, rows, HIDDEN)?;
+            if start_row == 0 {
+                let first = rows_view(&scratch.base_hidden, 0, 1, HIDDEN)?;
+                transfers::copy_cuda_to_cuda(ctx, previous_target_hidden, &first)?;
+                if rows > 1 {
+                    let source = rows_view(target_hidden, 0, rows - 1, HIDDEN)?;
+                    let destination = rows_view(&scratch.base_hidden, 1, rows - 1, HIDDEN)?;
+                    transfers::copy_cuda_to_cuda(ctx, &source, &destination)?;
+                }
+            } else {
+                let source = rows_view(target_hidden, start_row - 1, rows, HIDDEN)?;
+                transfers::copy_cuda_to_cuda(ctx, &source, &base_hidden)?;
+            }
+            prefill_kv_chunk(
                 ctx,
                 weights,
                 shadow,
@@ -455,11 +483,9 @@ impl MtpBackend for Qwen35MtpRuntime {
                 eps,
                 theta,
                 &base_hidden,
-                &token,
-                &rope_position,
-                start.cache_rows + row,
-                0,
-                false,
+                &tokens,
+                &rope_positions,
+                start.cache_rows + start_row,
             )?;
         }
         ctx.synchronize().map_err(Error::Cuda)?;
@@ -1094,6 +1120,145 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
     }
 }
 
+/// Reusable bounded workspace for shifted-token teacher forcing.
+///
+/// Only K/V materialization is required during prompt ingestion: every MTP
+/// row receives its base hidden state directly from the target decoder, and
+/// later proposal rows depend on the prompt only through this layer's K/V
+/// cache. Running attention, routed experts, final norm, and LM head here was
+/// therefore pure discarded work.
+struct MtpPrefillScratch {
+    max_tokens: usize,
+    base_hidden: Tensor,
+    embedding: Tensor,
+    norm_embedding: Tensor,
+    norm_hidden: Tensor,
+    joined: Tensor,
+    hidden: Tensor,
+    normalized: Tensor,
+}
+
+impl MtpPrefillScratch {
+    fn new(ctx: &CudaContext, _geometry: AttentionGeometry, max_tokens: usize) -> Result<Self> {
+        if max_tokens == 0 {
+            return Err(invalid("Qwen3.5 MTP prefill chunk must be non-zero"));
+        }
+        Ok(Self {
+            max_tokens,
+            base_hidden: zeros(ctx, vec![max_tokens, HIDDEN], DType::BF16)?,
+            embedding: zeros(ctx, vec![max_tokens, HIDDEN], DType::BF16)?,
+            norm_embedding: zeros(ctx, vec![max_tokens, HIDDEN], DType::BF16)?,
+            norm_hidden: zeros(ctx, vec![max_tokens, HIDDEN], DType::BF16)?,
+            joined: zeros(ctx, vec![max_tokens, 2 * HIDDEN], DType::BF16)?,
+            hidden: zeros(ctx, vec![max_tokens, HIDDEN], DType::BF16)?,
+            normalized: zeros(ctx, vec![max_tokens, HIDDEN], DType::BF16)?,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prefill_kv_chunk(
+    ctx: &CudaContext,
+    weights: &Qwen35DeviceWeights,
+    state: &mut Qwen35MtpState,
+    scratch: &mut MtpPrefillScratch,
+    geometry: AttentionGeometry,
+    eps: f32,
+    rope_theta: f32,
+    base_hidden: &Tensor,
+    tokens: &Tensor,
+    positions: &Tensor,
+    cache_row: usize,
+) -> Result<()> {
+    let rows = tokens.shape().dims().first().copied().unwrap_or(0);
+    if rows == 0 || rows > scratch.max_tokens {
+        return Err(invalid(
+            "Qwen3.5 MTP prefill chunk exceeds scratch capacity",
+        ));
+    }
+    if cache_row
+        .checked_add(rows)
+        .is_none_or(|end| end > state.capacity)
+    {
+        return Err(invalid("Qwen3.5 MTP prefill chunk exceeds KV capacity"));
+    }
+    validate_tensor(
+        base_hidden,
+        ctx,
+        DType::BF16,
+        &[rows, HIDDEN],
+        "MTP prefill base hidden",
+    )?;
+    validate_tensor(tokens, ctx, DType::I32, &[rows], "MTP prefill tokens")?;
+    validate_tensor(positions, ctx, DType::I32, &[rows], "MTP prefill positions")?;
+
+    let embedding = rows_view(&scratch.embedding, 0, rows, HIDDEN)?;
+    let norm_embedding = rows_view(&scratch.norm_embedding, 0, rows, HIDDEN)?;
+    let norm_hidden = rows_view(&scratch.norm_hidden, 0, rows, HIDDEN)?;
+    let joined = rows_view(&scratch.joined, 0, rows, 2 * HIDDEN)?;
+    let mut hidden = rows_view(&scratch.hidden, 0, rows, HIDDEN)?;
+    let normalized = rows_view(&scratch.normalized, 0, rows, HIDDEN)?;
+    let mtp = &weights.mtp;
+
+    ops::embedding_gather(ctx, &weights.embedding, tokens, &embedding)?;
+    ops::mlp::rms_norm(
+        ctx,
+        &embedding,
+        &mtp.pre_fc_norm_embedding,
+        &norm_embedding,
+        eps,
+    )?;
+    ops::mlp::rms_norm(ctx, base_hidden, &mtp.pre_fc_norm_hidden, &norm_hidden, eps)?;
+    transfers::copy_cuda_columns(ctx, &norm_embedding, &joined, 0)?;
+    transfers::copy_cuda_columns(ctx, &norm_hidden, &joined, HIDDEN)?;
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(&joined, &mtp.fc.weight, &mut hidden),
+    )?;
+    ops::mlp::rms_norm(ctx, &hidden, &mtp.layer.input_layernorm, &normalized, eps)?;
+
+    let attention = &mtp.layer.attention;
+    let key_slot = cache_rows_view(
+        &state.key,
+        cache_row,
+        rows,
+        geometry.kv_heads,
+        geometry.head_dim,
+    )?;
+    let value_slot = cache_rows_view(
+        &state.value,
+        cache_row,
+        rows,
+        geometry.kv_heads,
+        geometry.head_dim,
+    )?;
+    let mut key_flat = reshape(
+        &key_slot,
+        vec![rows, geometry.kv_heads * geometry.head_dim],
+        DType::BF16,
+    )?;
+    let mut value_flat = reshape(
+        &value_slot,
+        vec![rows, geometry.kv_heads * geometry.head_dim],
+        DType::BF16,
+    )?;
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(&normalized, &attention.k_proj.weight, &mut key_flat),
+    )?;
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(&normalized, &attention.v_proj.weight, &mut value_flat),
+    )?;
+    let key_heads = reshape(
+        &key_slot,
+        vec![rows * geometry.kv_heads, geometry.head_dim],
+        DType::BF16,
+    )?;
+    ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, eps)?;
+    ops::partial_rope(ctx, &key_slot, positions, geometry.rotary_dim, rope_theta)
+}
+
 struct MtpScratch {
     token: Tensor,
     position: Tensor,
@@ -1121,6 +1286,7 @@ struct MtpScratch {
     shared_intermediate: Tensor,
     shared_output: Tensor,
     shared_gate_logit: Tensor,
+    edge_workspace: Option<CudaBuffer>,
 }
 
 impl MtpScratch {
@@ -1164,6 +1330,16 @@ impl MtpScratch {
             shared_intermediate: zeros(ctx, vec![1, INTERMEDIATE], DType::BF16)?,
             shared_output: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             shared_gate_logit: zeros(ctx, vec![1], DType::BF16)?,
+            edge_workspace: ops::edge_bf16_decode_moe_available()
+                .then(|| {
+                    let bytes = ops::edge_bf16_decode_moe_workspace_size(
+                        ops::RoutedMoeConfig::new(EXPERTS, TOP_K),
+                        HIDDEN,
+                        INTERMEDIATE,
+                    )?;
+                    CudaBuffer::alloc(bytes, ctx.device_id()).map_err(Error::Cuda)
+                })
+                .transpose()?,
         })
     }
 }
@@ -1334,38 +1510,45 @@ fn forward_one(
         .checked_sub(draft_step)
         .and_then(|row| row.checked_add(1))
         .ok_or_else(|| invalid("Qwen3.5 MTP MoE position underflow"))?;
-    ops::qwen35_mtp_moe(
-        ctx,
-        ops::Qwen35MtpMoeArgs {
-            state: ops::Qwen35MtpMoeState {
-                base_committed_position: moe_committed_position,
-                mtp_committed_position: moe_committed_position,
-                draft_step,
-            },
-            input: &scratch.normalized,
-            weights: ops::Qwen35MtpMoeWeights {
-                router: &moe.router.weight,
-                expert_gate: &moe.expert_gate.weight,
-                expert_up: &moe.expert_up.weight,
-                expert_down: &moe.expert_down.weight,
-                shared_gate: &moe.shared_gate.weight,
-                shared_up: &moe.shared_up.weight,
-                shared_down: &moe.shared_down.weight,
-                shared_expert_gate: &moe.shared_expert_gate.weight,
-            },
-            scratch: ops::Qwen35MtpMoeScratch {
-                router_logits: &mut scratch.router_logits,
-                expert_ids: &mut scratch.expert_ids,
-                expert_weights: &mut scratch.expert_weights,
-                route_intermediate: &mut scratch.route_intermediate,
-                route_output: &mut scratch.route_output,
-                shared_intermediate: &mut scratch.shared_intermediate,
-                shared_output: &mut scratch.shared_output,
-                shared_gate_logit: &mut scratch.shared_gate_logit,
-            },
-            output: &mut moe_out,
-        },
-    )?;
+    match &moe.routed_experts {
+        DeviceDenseRoutedExperts::Reference { gate, up, down } => {
+            ops::qwen35_mtp_moe(
+                ctx,
+                ops::Qwen35MtpMoeArgs {
+                    state: ops::Qwen35MtpMoeState {
+                        base_committed_position: moe_committed_position,
+                        mtp_committed_position: moe_committed_position,
+                        draft_step,
+                    },
+                    input: &scratch.normalized,
+                    weights: ops::Qwen35MtpMoeWeights {
+                        router: &moe.router.weight,
+                        expert_gate: &gate.weight,
+                        expert_up: &up.weight,
+                        expert_down: &down.weight,
+                        shared_gate: &moe.shared_gate.weight,
+                        shared_up: &moe.shared_up.weight,
+                        shared_down: &moe.shared_down.weight,
+                        shared_expert_gate: &moe.shared_expert_gate.weight,
+                    },
+                    scratch: ops::Qwen35MtpMoeScratch {
+                        router_logits: &mut scratch.router_logits,
+                        expert_ids: &mut scratch.expert_ids,
+                        expert_weights: &mut scratch.expert_weights,
+                        route_intermediate: &mut scratch.route_intermediate,
+                        route_output: &mut scratch.route_output,
+                        shared_intermediate: &mut scratch.shared_intermediate,
+                        shared_output: &mut scratch.shared_output,
+                        shared_gate_logit: &mut scratch.shared_gate_logit,
+                    },
+                    output: &mut moe_out,
+                },
+            )?;
+        }
+        DeviceDenseRoutedExperts::Edge(edge) => {
+            run_edge_bf16_mtp_moe(ctx, moe, edge, scratch, &mut moe_out)?;
+        }
+    }
     ops::add_into(ctx, &scratch.moe_out, &scratch.hidden)?;
     ops::mlp::rms_norm(ctx, &scratch.hidden, &mtp.norm, &scratch.final_hidden, eps)?;
     if produce_logits {
@@ -1377,6 +1560,103 @@ fn forward_one(
         ops::argmax(ctx, &scratch.logits, &scratch.next_token)?;
     }
     Ok(())
+}
+
+fn run_edge_bf16_mtp_moe(
+    ctx: &CudaContext,
+    moe: &DeviceDenseMoe,
+    experts: &DeviceEdgeBf16Experts,
+    scratch: &mut MtpScratch,
+    output: &mut Tensor,
+) -> Result<()> {
+    let workspace = scratch
+        .edge_workspace
+        .as_ref()
+        .ok_or_else(|| invalid("Qwen3.5 Edge BF16 MoE workspace is unavailable"))?;
+    let mut router_logits = scratch.router_logits.clone();
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(&scratch.normalized, &moe.router.weight, &mut router_logits),
+    )?;
+    let config = ops::RoutedMoeConfig::new(EXPERTS, TOP_K);
+    let mut expert_ids = reshape(&scratch.expert_ids, vec![1, TOP_K], DType::I32)?;
+    let mut expert_weights = reshape(&scratch.expert_weights, vec![1, TOP_K], DType::F32)?;
+    ops::routed_moe_route_topk(
+        ctx,
+        ops::RoutedMoeRouteTopkArgs {
+            config,
+            logits: &scratch.router_logits,
+            expert_ids: &mut expert_ids,
+            expert_weights: &mut expert_weights,
+        },
+    )?;
+    let mut routed_output = rows_view(&scratch.route_output, 0, 1, HIDDEN)?;
+    ops::edge_bf16_decode_moe(
+        ctx,
+        ops::EdgeBf16DecodeMoeArgs {
+            config,
+            intermediate: INTERMEDIATE,
+            input: &scratch.normalized,
+            expert_ids: &expert_ids,
+            expert_weights: &expert_weights,
+            weights: ops::EdgeBf16DecodeMoeWeights {
+                fc1_weight: &experts.fc1_weight,
+                fc2_weight: &experts.fc2_weight,
+            },
+            workspace,
+            output: &mut routed_output,
+        },
+    )?;
+
+    let mut shared_gate = rows_view(&scratch.route_intermediate, 0, 1, INTERMEDIATE)?;
+    let mut shared_up = rows_view(&scratch.route_intermediate, 1, 1, INTERMEDIATE)?;
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(
+            &scratch.normalized,
+            &moe.shared_gate.weight,
+            &mut shared_gate,
+        ),
+    )?;
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(&scratch.normalized, &moe.shared_up.weight, &mut shared_up),
+    )?;
+    let shared_fused = reshape(
+        &scratch.route_intermediate,
+        vec![TOP_K * INTERMEDIATE],
+        DType::BF16,
+    )?;
+    let shared_fused = vector_view(&shared_fused, 0, 2 * INTERMEDIATE)?;
+    let shared_fused = reshape(&shared_fused, vec![1, 2 * INTERMEDIATE], DType::BF16)?;
+    ops::swiglu_round_product(ctx, &shared_fused, &mut scratch.shared_intermediate)?;
+    let mut shared_output = scratch.shared_output.clone();
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(
+            &scratch.shared_intermediate,
+            &moe.shared_down.weight,
+            &mut shared_output,
+        ),
+    )?;
+    let mut shared_gate_logit = reshape(&scratch.shared_gate_logit, vec![1, 1], DType::BF16)?;
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(
+            &scratch.normalized,
+            &moe.shared_expert_gate.weight,
+            &mut shared_gate_logit,
+        ),
+    )?;
+    ops::routed_moe_add_shared(
+        ctx,
+        ops::RoutedMoeAddSharedArgs {
+            routed_output: &routed_output,
+            shared_output: &scratch.shared_output,
+            shared_gate_logits: &scratch.shared_gate_logit,
+            output,
+        },
+    )
 }
 
 fn validate_checkpoint_geometry(geometry: AttentionGeometry) -> Result<()> {
@@ -1504,27 +1784,51 @@ fn validate_mtp_weights(
         EXPERTS,
         "MTP router",
     )?;
-    validate_tensor(
-        &moe.expert_gate.weight,
-        ctx,
-        DType::BF16,
-        &[EXPERTS, HIDDEN, INTERMEDIATE],
-        "MTP expert gate",
-    )?;
-    validate_tensor(
-        &moe.expert_up.weight,
-        ctx,
-        DType::BF16,
-        &[EXPERTS, HIDDEN, INTERMEDIATE],
-        "MTP expert up",
-    )?;
-    validate_tensor(
-        &moe.expert_down.weight,
-        ctx,
-        DType::BF16,
-        &[EXPERTS, INTERMEDIATE, HIDDEN],
-        "MTP expert down",
-    )?;
+    match &moe.routed_experts {
+        DeviceDenseRoutedExperts::Reference { gate, up, down } => {
+            validate_tensor(
+                &gate.weight,
+                ctx,
+                DType::BF16,
+                &[EXPERTS, HIDDEN, INTERMEDIATE],
+                "MTP expert gate",
+            )?;
+            validate_tensor(
+                &up.weight,
+                ctx,
+                DType::BF16,
+                &[EXPERTS, HIDDEN, INTERMEDIATE],
+                "MTP expert up",
+            )?;
+            validate_tensor(
+                &down.weight,
+                ctx,
+                DType::BF16,
+                &[EXPERTS, INTERMEDIATE, HIDDEN],
+                "MTP expert down",
+            )?;
+        }
+        DeviceDenseRoutedExperts::Edge(edge) => {
+            if edge.experts != EXPERTS || edge.hidden != HIDDEN || edge.intermediate != INTERMEDIATE
+            {
+                return Err(invalid("MTP Edge BF16 expert metadata mismatch"));
+            }
+            validate_tensor(
+                &edge.fc1_weight,
+                ctx,
+                DType::BF16,
+                &[EXPERTS, 2 * INTERMEDIATE, HIDDEN],
+                "MTP Edge BF16 FC1",
+            )?;
+            validate_tensor(
+                &edge.fc2_weight,
+                ctx,
+                DType::BF16,
+                &[EXPERTS, HIDDEN, INTERMEDIATE],
+                "MTP Edge BF16 FC2",
+            )?;
+        }
+    }
     validate_dense(
         &moe.shared_gate.weight,
         moe.shared_gate.input_features,
@@ -1660,19 +1964,46 @@ fn reshape(tensor: &Tensor, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
         .map_err(Error::Cuda)
 }
 
-fn row_view(tensor: &Tensor, row: usize, width: usize) -> Result<Tensor> {
-    let bytes = width
+fn rows_view(tensor: &Tensor, row: usize, rows: usize, width: usize) -> Result<Tensor> {
+    if rows == 0 {
+        return Err(invalid("Qwen3.5 MTP row view must be non-empty"));
+    }
+    let row_bytes = width
         .checked_mul(tensor.dtype().size_in_bytes())
         .ok_or_else(|| invalid("Qwen3.5 MTP row size overflow"))?;
+    let bytes = rows
+        .checked_mul(row_bytes)
+        .ok_or_else(|| invalid("Qwen3.5 MTP row range overflow"))?;
     CudaBuffer::from_tensor(tensor)
         .map_err(Error::Cuda)?
         .view(
-            row.checked_mul(bytes)
+            row.checked_mul(row_bytes)
                 .ok_or_else(|| invalid("Qwen3.5 MTP row offset overflow"))?,
             bytes,
         )
         .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(vec![1, width]), tensor.dtype())
+        .as_tensor(Shape::new(vec![rows, width]), tensor.dtype())
+        .map_err(Error::Cuda)
+}
+
+fn vector_view(tensor: &Tensor, start: usize, len: usize) -> Result<Tensor> {
+    if len == 0 {
+        return Err(invalid("Qwen3.5 MTP vector view must be non-empty"));
+    }
+    let element_bytes = tensor.dtype().size_in_bytes();
+    let bytes = len
+        .checked_mul(element_bytes)
+        .ok_or_else(|| invalid("Qwen3.5 MTP vector range overflow"))?;
+    CudaBuffer::from_tensor(tensor)
+        .map_err(Error::Cuda)?
+        .view(
+            start
+                .checked_mul(element_bytes)
+                .ok_or_else(|| invalid("Qwen3.5 MTP vector offset overflow"))?,
+            bytes,
+        )
+        .map_err(Error::Cuda)?
+        .as_tensor(Shape::new(vec![len]), tensor.dtype())
         .map_err(Error::Cuda)
 }
 
@@ -1692,21 +2023,37 @@ fn element_view(tensor: &Tensor, index: usize) -> Result<Tensor> {
 }
 
 fn cache_row_view(cache: &Tensor, row: usize, heads: usize, head_dim: usize) -> Result<Tensor> {
-    let elements = heads
+    cache_rows_view(cache, row, 1, heads, head_dim)
+}
+
+fn cache_rows_view(
+    cache: &Tensor,
+    row: usize,
+    rows: usize,
+    heads: usize,
+    head_dim: usize,
+) -> Result<Tensor> {
+    if rows == 0 {
+        return Err(invalid("Qwen3.5 MTP cache row view must be non-empty"));
+    }
+    let row_elements = heads
         .checked_mul(head_dim)
         .ok_or_else(|| invalid("Qwen3.5 MTP cache row overflow"))?;
-    let bytes = elements
+    let row_bytes = row_elements
         .checked_mul(DType::BF16.size_in_bytes())
         .ok_or_else(|| invalid("Qwen3.5 MTP cache bytes overflow"))?;
+    let bytes = rows
+        .checked_mul(row_bytes)
+        .ok_or_else(|| invalid("Qwen3.5 MTP cache range overflow"))?;
     CudaBuffer::from_tensor(cache)
         .map_err(Error::Cuda)?
         .view(
-            row.checked_mul(bytes)
+            row.checked_mul(row_bytes)
                 .ok_or_else(|| invalid("Qwen3.5 MTP cache offset overflow"))?,
             bytes,
         )
         .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(vec![1, heads, head_dim]), DType::BF16)
+        .as_tensor(Shape::new(vec![rows, heads, head_dim]), DType::BF16)
         .map_err(Error::Cuda)
 }
 

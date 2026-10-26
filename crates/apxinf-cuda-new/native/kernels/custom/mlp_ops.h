@@ -19,6 +19,11 @@ int rms_norm_bf16(const void* input, const void* weight, void* output,
 int swiglu_bf16(const void* fused_gate_up, void* output, int rows, int width,
                 cudaStream_t stream);
 
+// Same expression, but only the final product is rounded to BF16. Qwen3.5's
+// MTP reference kernel uses this operation order for its BF16 expert MLPs.
+int swiglu_bf16_round_product(const void* fused_gate_up, void* output, int rows,
+                              int width, cudaStream_t stream);
+
 // accumulator += addend, elementwise. Residual connections.
 int add_bf16(const void* addend, void* accumulator, long long count,
              cudaStream_t stream);

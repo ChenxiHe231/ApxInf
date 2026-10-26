@@ -135,6 +135,30 @@ pub struct EdgeNvfp4MoeArgs<'a> {
     pub output: &'a mut Tensor,
 }
 
+#[derive(Clone, Copy)]
+pub struct EdgeBf16DecodeMoeWeights<'a> {
+    /// BF16 `[experts, 2 * intermediate, hidden]`, with 64-row
+    /// `[up, gate]` interleaving matching TensorRT-Edge-LLM.
+    pub fc1_weight: &'a Tensor,
+    /// BF16 `[experts, hidden, intermediate]`.
+    pub fc2_weight: &'a Tensor,
+}
+
+pub struct EdgeBf16DecodeMoeArgs<'a> {
+    pub config: RoutedMoeConfig,
+    pub intermediate: usize,
+    /// One BF16 decode row `[1, hidden]`.
+    pub input: &'a Tensor,
+    /// Token-major I32 `[1, top_k]`.
+    pub expert_ids: &'a Tensor,
+    /// Token-major F32 `[1, top_k]`.
+    pub expert_weights: &'a Tensor,
+    pub weights: EdgeBf16DecodeMoeWeights<'a>,
+    pub workspace: &'a CudaBuffer,
+    /// BF16 routed contribution `[1, hidden]`.
+    pub output: &'a mut Tensor,
+}
+
 pub(crate) struct NormalizedRoute {
     pub spec: abi::RouteSpec,
     pub bindings: abi::RouteBindings,
@@ -169,6 +193,127 @@ pub(crate) struct NormalizedEdgeNvfp4 {
     pub spec: abi::EdgeNvfp4Spec,
     pub bindings: abi::EdgeNvfp4Bindings,
     pub storage: Vec<CudaBuffer>,
+}
+
+pub(crate) struct NormalizedEdgeBf16Decode {
+    pub spec: abi::EdgeBf16DecodeSpec,
+    pub bindings: abi::EdgeBf16DecodeBindings,
+    pub storage: Vec<CudaBuffer>,
+}
+
+fn edge_bf16_decode_spec(
+    config: RoutedMoeConfig,
+    hidden: usize,
+    intermediate: usize,
+) -> Result<abi::EdgeBf16DecodeSpec> {
+    config.validate()?;
+    if config.experts != 256 || config.top_k != 8 {
+        return Err(invalid(
+            "Edge BF16 decode MoE requires exactly 256 experts and top-8",
+        ));
+    }
+    if hidden == 0 || hidden % 128 != 0 || intermediate == 0 || intermediate % 64 != 0 {
+        return Err(invalid(
+            "Edge BF16 decode MoE requires hidden multiple of 128 and intermediate multiple of 64",
+        ));
+    }
+    Ok(abi::EdgeBf16DecodeSpec {
+        version: abi::EDGE_BF16_DECODE_SPEC_VERSION,
+        dtype: dtype(DType::BF16)?,
+        experts: u32::try_from(config.experts)
+            .map_err(|_| invalid("Edge BF16 expert count exceeds u32"))?,
+        top_k: u32::try_from(config.top_k).map_err(|_| invalid("Edge BF16 top-k exceeds u32"))?,
+        hidden: u32::try_from(hidden).map_err(|_| invalid("Edge BF16 hidden exceeds u32"))?,
+        intermediate: u32::try_from(intermediate)
+            .map_err(|_| invalid("Edge BF16 intermediate exceeds u32"))?,
+    })
+}
+
+pub(crate) fn edge_bf16_decode_workspace_size(
+    config: RoutedMoeConfig,
+    hidden: usize,
+    intermediate: usize,
+) -> Result<usize> {
+    let spec = edge_bf16_decode_spec(config, hidden, intermediate)?;
+    let mut bytes = 0usize;
+    unsafe {
+        status::check(abi::apxinf_moe_edge_bf16_decode_workspace_size(
+            &spec, &mut bytes,
+        ))?;
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn normalize_edge_bf16_decode(
+    ctx: &CudaContext,
+    args: EdgeBf16DecodeMoeArgs<'_>,
+) -> Result<NormalizedEdgeBf16Decode> {
+    let shape = args.input.shape().dims();
+    if shape.len() != 2 || shape[0] != 1 {
+        return Err(invalid(
+            "Edge BF16 decode input must have shape [1, hidden]",
+        ));
+    }
+    let hidden = shape[1];
+    let spec = edge_bf16_decode_spec(args.config, hidden, args.intermediate)?;
+    let input = tensor_storage(ctx, args.input, DType::BF16, &[1, hidden])?;
+    let expert_ids = tensor_storage(ctx, args.expert_ids, DType::I32, &[1, args.config.top_k])?;
+    let expert_weights = tensor_storage(
+        ctx,
+        args.expert_weights,
+        DType::F32,
+        &[1, args.config.top_k],
+    )?;
+    let fc1_weight = tensor_storage(
+        ctx,
+        args.weights.fc1_weight,
+        DType::BF16,
+        &[args.config.experts, 2 * args.intermediate, hidden],
+    )?;
+    let fc2_weight = tensor_storage(
+        ctx,
+        args.weights.fc2_weight,
+        DType::BF16,
+        &[args.config.experts, hidden, args.intermediate],
+    )?;
+    let output = tensor_storage(ctx, args.output, DType::BF16, &[1, hidden])?;
+    if args.workspace.device() != ctx.device_id() {
+        return Err(invalid(
+            "Edge BF16 decode workspace is on the wrong CUDA device",
+        ));
+    }
+    let required = edge_bf16_decode_workspace_size(args.config, hidden, args.intermediate)?;
+    if args.workspace.len() < required {
+        return Err(invalid(format!(
+            "Edge BF16 decode workspace requires {required} bytes, got {}",
+            args.workspace.len()
+        )));
+    }
+    let workspace = args.workspace.clone();
+    let bindings = abi::EdgeBf16DecodeBindings {
+        input: input.ptr(),
+        expert_ids: expert_ids.ptr().cast(),
+        expert_weights: expert_weights.ptr().cast(),
+        fc1_weight: fc1_weight.ptr(),
+        fc2_weight: fc2_weight.ptr(),
+        workspace: workspace.ptr(),
+        workspace_bytes: workspace.len(),
+        output: output.ptr(),
+        stream: ctx.stream().handle(),
+    };
+    Ok(NormalizedEdgeBf16Decode {
+        spec,
+        bindings,
+        storage: vec![
+            input,
+            expert_ids,
+            expert_weights,
+            fc1_weight,
+            fc2_weight,
+            workspace,
+            output,
+        ],
+    })
 }
 
 fn edge_spec(

@@ -19,6 +19,13 @@ unsafe extern "C" {
         width: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_swiglu_bf16_round_product(
+        fused_gate_up: *const c_void,
+        output: *mut c_void,
+        rows: i64,
+        width: i64,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_quantize_fp8_per_tensor(
         input: *const c_void,
         output: *mut c_void,

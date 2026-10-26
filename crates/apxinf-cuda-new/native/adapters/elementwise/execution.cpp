@@ -65,6 +65,22 @@ extern "C" apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up,
   });
 }
 
+extern "C" apxinf_status_t apxinf_swiglu_bf16_round_product(
+    const void* fused_gate_up, void* output, int64_t rows, int64_t width,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (fused_gate_up == nullptr || output == nullptr || !valid_extent(rows) ||
+        !valid_extent(width)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid round-product SwiGLU arguments");
+    }
+    check(apxinf::cuda_new::mlp_ops::swiglu_bf16_round_product(
+              fused_gate_up, output, static_cast<int>(rows),
+              static_cast<int>(width), static_cast<cudaStream_t>(stream)),
+          "round-product SwiGLU");
+  });
+}
+
 extern "C" apxinf_status_t apxinf_new_add_bf16(const void* addend,
                                            void* accumulator, int64_t count,
                                            apxinf_cuda_stream_t stream) {

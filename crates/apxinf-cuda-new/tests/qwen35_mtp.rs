@@ -2,9 +2,11 @@
 
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda_new::{
-    qwen35_mtp_moe, qwen35_mtp_moe_reference, transfers, CudaBuffer, CudaContext,
+    edge_bf16_decode_moe, edge_bf16_decode_moe_available,
+    edge_bf16_decode_moe_workspace_size, ops, qwen35_mtp_moe, qwen35_mtp_moe_reference,
+    transfers, CudaBuffer, CudaContext, EdgeBf16DecodeMoeArgs, EdgeBf16DecodeMoeWeights,
     Qwen35MtpMoeArgs, Qwen35MtpMoeScratch, Qwen35MtpMoeState, Qwen35MtpMoeWeights,
-    Qwen35MtpReferenceWeights, QWEN35_MTP_EXPERTS, QWEN35_MTP_HIDDEN,
+    Qwen35MtpReferenceWeights, RoutedMoeConfig, QWEN35_MTP_EXPERTS, QWEN35_MTP_HIDDEN,
     QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_TOP_K,
 };
 use half::bf16;
@@ -69,6 +71,26 @@ impl Qwen35MtpReferenceWeights for SparseReference {
     }
 
     fn shared_expert_gate(&self, _: usize) -> f32 { 0.0 }
+}
+
+#[test]
+fn mtp_swiglu_rounds_only_the_final_product() {
+    let ctx = CudaContext::new(0).unwrap();
+    let input = Tensor::from_bf16(
+        vec![1, 2],
+        &[bf16::from_f32(4.71875), bf16::from_f32(-3.640625)],
+    )
+    .unwrap();
+    let input = transfers::to_cuda(&input, ctx.device_id()).unwrap();
+    let (_output_buffer, output) = zeros(&ctx, vec![1, 1], DType::BF16);
+    ops::swiglu_round_product(&ctx, &input, &output).unwrap();
+    ctx.synchronize().unwrap();
+    let actual = transfers::to_cpu(&output)
+        .unwrap()
+        .as_bf16()
+        .unwrap()[0];
+    assert_eq!(actual, bf16::from_f32(-17.0));
+    assert_ne!(actual, bf16::from_f32(-17.125));
 }
 
 #[test]
@@ -229,6 +251,115 @@ fn exact_qwen35_mtp_bf16_selected_experts_match_cpu_reference() {
         .iter()
         .map(|value| value.to_f32())
         .collect::<Vec<_>>();
+
+    if edge_bf16_decode_moe_available() {
+        let (fc1_buffer, fc1) = zeros(
+            &ctx,
+            vec![
+                QWEN35_MTP_EXPERTS,
+                2 * QWEN35_MTP_INTERMEDIATE,
+                QWEN35_MTP_HIDDEN,
+            ],
+            DType::BF16,
+        );
+        let (fc2_buffer, fc2) = zeros(
+            &ctx,
+            vec![
+                QWEN35_MTP_EXPERTS,
+                QWEN35_MTP_HIDDEN,
+                QWEN35_MTP_INTERMEDIATE,
+            ],
+            DType::BF16,
+        );
+        for expert in 0..QWEN35_MTP_TOP_K {
+            let fc1_base = expert
+                * 2
+                * QWEN35_MTP_INTERMEDIATE
+                * QWEN35_MTP_HIDDEN;
+            // TensorRT-Edge-LLM stores each 64-row chunk as [up, gate].
+            set_bf16(&fc1_buffer, fc1_base, 1.0);
+            set_bf16(
+                &fc1_buffer,
+                fc1_base + 64 * QWEN35_MTP_HIDDEN,
+                0.5 + expert as f32 * 0.125,
+            );
+            let fc2_base = expert
+                * QWEN35_MTP_HIDDEN
+                * QWEN35_MTP_INTERMEDIATE;
+            set_bf16(&fc2_buffer, fc2_base, 1.0);
+        }
+        let ids = _expert_ids_buffer
+            .as_tensor(
+                Shape::new(vec![1, QWEN35_MTP_TOP_K]),
+                DType::I32,
+            )
+            .unwrap();
+        let weights = _expert_weights_buffer
+            .as_tensor(
+                Shape::new(vec![1, QWEN35_MTP_TOP_K]),
+                DType::F32,
+            )
+            .unwrap();
+        let config = RoutedMoeConfig::new(QWEN35_MTP_EXPERTS, QWEN35_MTP_TOP_K);
+        let workspace = CudaBuffer::alloc(
+            edge_bf16_decode_moe_workspace_size(
+                config,
+                QWEN35_MTP_HIDDEN,
+                QWEN35_MTP_INTERMEDIATE,
+            )
+            .unwrap(),
+            ctx.device_id(),
+        )
+        .unwrap();
+        let (_edge_output_buffer, mut edge_output) =
+            zeros(&ctx, vec![1, QWEN35_MTP_HIDDEN], DType::BF16);
+        edge_bf16_decode_moe(
+            &ctx,
+            EdgeBf16DecodeMoeArgs {
+                config,
+                intermediate: QWEN35_MTP_INTERMEDIATE,
+                input: &input,
+                expert_ids: &ids,
+                expert_weights: &weights,
+                weights: EdgeBf16DecodeMoeWeights {
+                    fc1_weight: &fc1,
+                    fc2_weight: &fc2,
+                },
+                workspace: &workspace,
+                output: &mut edge_output,
+            },
+        )
+        .unwrap();
+        ctx.synchronize().unwrap();
+        let edge_output = transfers::to_cpu(&edge_output)
+            .unwrap()
+            .as_bf16()
+            .unwrap()
+            .iter()
+            .map(|value| value.to_f32())
+            .collect::<Vec<_>>();
+        let route_output = transfers::to_cpu(&route_output)
+            .unwrap()
+            .as_bf16()
+            .unwrap()
+            .iter()
+            .map(|value| value.to_f32())
+            .collect::<Vec<_>>();
+        for feature in 0..QWEN35_MTP_HIDDEN {
+            let expected = (0..QWEN35_MTP_TOP_K)
+                .map(|route| {
+                    actual_weights[route]
+                        * route_output[route * QWEN35_MTP_HIDDEN + feature]
+                })
+                .sum::<f32>();
+            let tolerance = 0.01 * expected.abs().max(1.0);
+            assert!(
+                (edge_output[feature] - expected).abs() <= tolerance,
+                "edge BF16 feature {feature}: {} != {expected}",
+                edge_output[feature]
+            );
+        }
+    }
     let mut reference_input = vec![0.0f32; QWEN35_MTP_HIDDEN];
     reference_input[0] = 1.0;
     let reference = qwen35_mtp_moe_reference(&reference_input, &SparseReference).unwrap();
