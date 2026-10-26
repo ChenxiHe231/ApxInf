@@ -17,9 +17,9 @@ pub enum ImageLayout {
     Nchw,
 }
 
-/// `rgb_u8_to_patches_bf16`: normalize a `u8` RGB batch to `[-1, 1]` and
-/// patchify into `[views*(size/patch)^2, 3*patch^2]` BF16.
-pub fn rgb_u8_to_patches_bf16(
+/// Normalize a `u8` RGB batch to `[-1, 1]` and patchify into
+/// `[views*(size/patch)^2, 3*patch^2]`. Output dtype is read from `patches`.
+pub fn rgb_u8_to_patches(
     ctx: &CudaContext,
     images: &CudaBuffer,
     patches: &Tensor,
@@ -28,43 +28,13 @@ pub fn rgb_u8_to_patches_bf16(
     patch_size: usize,
     layout: ImageLayout,
 ) -> Result<()> {
-    if patches.dtype() != DType::BF16 {
+    if !matches!(patches.dtype(), DType::F32 | DType::F16 | DType::BF16) {
         return Err(Error::Other(
-            "cuda-new RGB preprocessing writes BF16 patches".into(),
+            "RGB preprocessing writes F32, F16, or BF16 patches".into(),
         ));
     }
     // GatherArgs mutates only device memory; clone the handle for the &mut
     // contract without copying storage.
-    let mut out = patches.clone();
-    let args = ops::GatherArgs::rgb_to_patches(
-        images,
-        &mut out,
-        ops::GatherPatchGeometry {
-            views,
-            image_size,
-            patch_size,
-            nhwc: layout == ImageLayout::Nhwc,
-        },
-    );
-    ops::gather(ctx, args)
-}
-
-/// `rgb_u8_to_patches_f32`: the F32-output variant of the patchification,
-/// used by pi0-fast whose vision tower keeps F32 until the first projection.
-pub fn rgb_u8_to_patches_f32(
-    ctx: &CudaContext,
-    images: &CudaBuffer,
-    patches: &Tensor,
-    views: usize,
-    image_size: usize,
-    patch_size: usize,
-    layout: ImageLayout,
-) -> Result<()> {
-    if patches.dtype() != DType::F32 {
-        return Err(Error::Other(
-            "rgb_u8_to_patches_f32 writes F32 patches".into(),
-        ));
-    }
     let mut out = patches.clone();
     let args = ops::GatherArgs::rgb_to_patches(
         images,
@@ -355,45 +325,30 @@ pub fn rgb_u8_to_temporal2_merge2_rect_bf16(
     Ok(())
 }
 
-/// `rgb_u8_to_patches_f16`: the FP16-output variant of the patchification
-/// (SmolVLA's Xavier FP16 path). The gather kernel is dtype-templated with
-/// identical addressing and normalization arithmetic.
-pub fn rgb_u8_to_patches_f16(
-    ctx: &CudaContext,
-    images: &CudaBuffer,
-    patches: &Tensor,
-    views: usize,
-    image_size: usize,
-    patch_size: usize,
-    layout: ImageLayout,
-) -> Result<()> {
-    if patches.dtype() != DType::F16 {
-        return Err(Error::Other(
-            "rgb_u8_to_patches_f16 writes FP16 patches".into(),
-        ));
-    }
-    let mut out = patches.clone();
-    let args = ops::GatherArgs::rgb_to_patches(
-        images,
-        &mut out,
-        ops::GatherPatchGeometry {
-            views,
-            image_size,
-            patch_size,
-            nhwc: layout == ImageLayout::Nhwc,
-        },
-    );
-    ops::gather(ctx, args)
-}
-
 // ── smolvla pixel shuffle ───────────────────────────────────────────────────
 //
 // Ported verbatim from the legacy FP16 preprocessing wrappers over the
 // `family-specific FP16` launchers (native/adapters/preprocess/fixed_f16.cu).
 
+/// SmolVLA's 4x4 pixel shuffle. Input dtype selects the unchanged BF16 or F16
+/// launcher.
+pub fn pixel_shuffle_4(
+    ctx: &CudaContext,
+    input: &Tensor,
+    tokens_per_view: usize,
+) -> Result<Tensor> {
+    match input.dtype() {
+        DType::BF16 => pixel_shuffle_4_bf16(ctx, input, tokens_per_view),
+        DType::F16 => pixel_shuffle_4_f16(ctx, input, tokens_per_view),
+        _ => Err(Error::Other(
+            "pixel-shuffle-4 requires BF16 or F16 input".into(),
+        )),
+    }
+}
+
 /// `pixel_shuffle_4_bf16`: SmolVLA's 4x4 pixel shuffle over per-view token
 /// grids, `[views*T, W] -> [views*T/16, W*16]`.
-pub fn pixel_shuffle_4_bf16(
+fn pixel_shuffle_4_bf16(
     ctx: &CudaContext,
     input: &Tensor,
     tokens_per_view: usize,
@@ -440,7 +395,7 @@ pub fn pixel_shuffle_4_bf16(
 }
 
 /// `pixel_shuffle_4_f16`: the FP16 variant of the 4x4 pixel shuffle.
-pub fn pixel_shuffle_4_f16(
+fn pixel_shuffle_4_f16(
     ctx: &CudaContext,
     input: &Tensor,
     tokens_per_view: usize,

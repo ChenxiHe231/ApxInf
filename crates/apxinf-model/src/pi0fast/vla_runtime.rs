@@ -148,7 +148,7 @@ impl Pi0FastVlaRuntime {
                 let images = CudaBuffer::alloc(bytes.len(), self.backend.device_id())
                     .map_err(Error::Cuda)?;
                 images.copy_from_host(bytes).map_err(Error::Cuda)?;
-                ops::preprocess::rgb_u8_to_patches_f32(
+                ops::preprocess::rgb_u8_to_patches(
                     self.backend.context(),
                     &images,
                     &patches,

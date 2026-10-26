@@ -160,11 +160,7 @@ impl SmolVlaModel {
                     ],
                     self.dtype(),
                 ))?;
-                (if self.fp16_gemm {
-                    ops::preprocess::rgb_u8_to_patches_f16
-                } else {
-                    ops::preprocess::rgb_u8_to_patches_bf16
-                })(
+                ops::preprocess::rgb_u8_to_patches(
                     ctx,
                     &raw,
                     &patches,
@@ -258,11 +254,7 @@ impl SmolVlaModel {
         time_embeddings: &[Tensor],
     ) -> Result<Tensor> {
         if let Some(raw_images) = raw_images {
-            (if self.fp16_gemm {
-                ops::preprocess::rgb_u8_to_patches_f16
-            } else {
-                ops::preprocess::rgb_u8_to_patches_bf16
-            })(
+            ops::preprocess::rgb_u8_to_patches(
                 self.backend.context(),
                 raw_images,
                 patches,
@@ -366,11 +358,7 @@ impl SmolVlaModel {
             self.weights.vision_post_norm.bias.as_ref().unwrap(),
             self.config.layer_norm_eps,
         )?;
-        let shuffled = (if self.fp16_gemm {
-            ops::preprocess::pixel_shuffle_4_f16
-        } else {
-            ops::preprocess::pixel_shuffle_4_bf16
-        })(
+        let shuffled = ops::preprocess::pixel_shuffle_4(
             ctx,
             &hidden,
             self.config.patches_per_view(),
