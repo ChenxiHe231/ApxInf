@@ -25,7 +25,6 @@ extern "C" cudaError_t apxinf_activation_silu_mul_separate_bf16(
       (__nv_bfloat16*)output, count);
   return cudaGetLastError();
 }
-
 extern "C" cudaError_t apxinf_activation_silu_mul_quant_bf16_e4m3(
     const void* gate, const void* up, void* output, int64_t count,
     float scale, cudaStream_t stream) {
@@ -58,23 +57,5 @@ extern "C" cudaError_t apxinf_activation_bias_gelu_quant_bf16_e4m3(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const __nv_bfloat16*>(bias),
       static_cast<__nv_fp8_e4m3*>(output), quad_count, cols, 1.0f / scale);
-  return cudaGetLastError();
-}
-
-extern "C" cudaError_t apxinf_activation_bias_gelu_bf16_packed8(
-    const void* input, const void* bias, void* output, int rows, int cols,
-    cudaStream_t stream) {
-  if (input == nullptr || bias == nullptr || output == nullptr || rows <= 0 ||
-      cols <= 0 || cols % 8 != 0 ||
-      reinterpret_cast<uintptr_t>(input) % alignof(Bf16Pairx8) != 0 ||
-      reinterpret_cast<uintptr_t>(bias) % alignof(Bf16Pairx8) != 0 ||
-      reinterpret_cast<uintptr_t>(output) % alignof(Bf16Pairx8) != 0)
-    return cudaErrorInvalidValue;
-  const int64_t octet_count = static_cast<int64_t>(rows) * cols / 8;
-  const int threads = rows >= 512 ? 256 : 128;
-  const int blocks = static_cast<int>((octet_count + threads - 1) / threads);
-  bias_gelu_bf16_packed8_kernel<<<blocks, threads, 0, stream>>>(
-      static_cast<const Bf16Pairx8*>(input), static_cast<const Bf16Pairx8*>(bias),
-      static_cast<Bf16Pairx8*>(output), octet_count, cols / 8);
   return cudaGetLastError();
 }

@@ -267,50 +267,6 @@ pub fn bias_gelu_quant_bf16_e4m3(
     Ok(output)
 }
 
-/// `bias_gelu_bf16_packed8`: broadcast bias then tanh-GELU through a 16-byte
-/// packed-8 IO path. Requires a BF16 matrix with a width divisible by eight.
-pub fn bias_gelu_bf16_packed8(ctx: &CudaContext, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
-    use crate::ffi::abi::activation as abi;
-    use crate::ffi::raw::cuda_runtime as raw;
-    use crate::CudaBuffer;
-    let dims = input.shape().dims();
-    if dims.len() != 2 {
-        return Err(Error::Other(
-            "packed8 bias GELU expects a rank-2 input".into(),
-        ));
-    }
-    let (rows, cols) = (dims[0], dims[1]);
-    if input.dtype() != DType::BF16
-        || bias.dtype() != DType::BF16
-        || bias.shape().dims() != [cols]
-        || cols % 8 != 0
-    {
-        return Err(Error::Other(
-            "packed8 BF16 bias GELU has incompatible dtype or shape".into(),
-        ));
-    }
-    let rows_i32 = i32::try_from(rows)
-        .map_err(|_| Error::Other("packed8 bias GELU rows exceed i32".into()))?;
-    let cols_i32 = i32::try_from(cols)
-        .map_err(|_| Error::Other("packed8 bias GELU cols exceed i32".into()))?;
-    let output = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
-    let input_buffer = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
-    let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
-    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
-    unsafe {
-        raw::check_cuda(abi::apxinf_activation_bias_gelu_bf16_packed8(
-            input_buffer.ptr(),
-            bias_buffer.ptr(),
-            output_buffer.ptr(),
-            rows_i32,
-            cols_i32,
-            ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
-    }
-    Ok(output)
-}
-
 /// `swiglu_quantize_rows_bf16_e4m3`: SwiGLU over a packed gate/up projection
 /// followed by rowwise E4M3 quantization, zero-padded to `output_cols`.
 pub fn swiglu_quantize_rows_bf16_e4m3(

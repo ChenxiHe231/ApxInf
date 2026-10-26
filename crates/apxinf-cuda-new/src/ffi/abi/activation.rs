@@ -80,14 +80,6 @@ mod fixed_launchers {
             scale: f32,
             stream: cudaStream_t,
         ) -> cudaError_t;
-        pub(crate) fn apxinf_activation_bias_gelu_bf16_packed8(
-            input: *const c_void,
-            bias: *const c_void,
-            output: *mut c_void,
-            rows: i32,
-            cols: i32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
         pub(crate) fn apxinf_activation_swiglu_f16(
             gate_up: *const c_void,
             output: *mut c_void,

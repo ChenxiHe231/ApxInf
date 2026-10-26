@@ -347,6 +347,7 @@ fn main() {
         "cache/ops.cpp",
         "norm/rowwise_quant.cpp",
         "pointwise/rowwise_quant.cpp",
+        "pointwise/fixed_bf16.cu",
         "attention/multimodal.cpp",
         "activation/fixed_bf16.cu",
         "activation/fixed_decode.cu",

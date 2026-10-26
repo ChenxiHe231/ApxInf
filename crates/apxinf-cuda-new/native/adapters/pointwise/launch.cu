@@ -1,6 +1,7 @@
 #include "../../include/apxinf_cuda/pointwise.h"
 #include "../../framework/runtime_internal.h"
 #include "../../kernels/custom/pointwise.cuh"
+#include "candidates.h"
 
 #include <climits>
 #include <cmath>
@@ -180,6 +181,15 @@ cudaError_t launch_bf16_bias_activation(
     __nv_bfloat16* output, int rows, int cols, int activation,
     cudaStream_t stream) {
   const int64_t count = static_cast<int64_t>(rows) * cols;
+  const bool packed8_gelu =
+      activation == APXINF_POINTWISE_ACTIVATION_GELU && bias != nullptr &&
+      cols % 8 == 0 && reinterpret_cast<uintptr_t>(input) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(bias) % 16 == 0 &&
+      reinterpret_cast<uintptr_t>(output) % 16 == 0;
+  if (packed8_gelu) {
+    return apxinf::pointwise::candidates::launch_bias_gelu_bf16_packed8(
+        input, bias, output, rows, cols, stream);
+  }
   const bool packed4 =
       cols % 4 == 0 &&
       reinterpret_cast<uintptr_t>(input) % alignof(Bf16x4) == 0 &&

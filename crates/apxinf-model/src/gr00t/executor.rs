@@ -950,15 +950,6 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                     }
                 }
             }
-            if use_vision_pointwise_pack
-                && matches!(input.shape().dims(), [512, 4096] | [128, 4096])
-            {
-                return ops::pointwise::bias_gelu_bf16_packed8(
-                    self.backend.context(),
-                    input,
-                    bias,
-                );
-            }
             ops::pointwise::bias_activation(
                 self.backend.context(),
                 input,
