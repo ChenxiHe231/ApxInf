@@ -384,7 +384,6 @@ fn main() {
         "preprocess/ops.cpp",
         "gdn/execution.cpp",
         "pointwise/elementwise.cpp",
-        "gather/embedding.cpp",
         "sampling/argmax.cpp",
         "sampling/suppress_bf16.cu",
         "sampling/launch.cu",

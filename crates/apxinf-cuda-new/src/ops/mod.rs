@@ -41,14 +41,15 @@ pub use elementwise::core::{
     mul as elementwise_mul, scale as elementwise_scale, ElementwiseActivation,
 };
 pub use gather::{
-    embedding_gather, gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry,
+    embedding_gather, gather, EmbeddingScale, GatherArgs, GatherSemantic,
+    PatchGeometry as GatherPatchGeometry,
 };
 pub use gdn::{
     gdn_causal_conv_forward, gdn_causal_conv_step, gdn_chunk_scan, gdn_chunk_scan_interleaved,
     gdn_continue, gdn_conv_prepare, gdn_decay_and_beta, gdn_decay_and_beta_seq, gdn_first_prefill,
-    gdn_gated_norm, gdn_gated_norm_quantize, gdn_gated_norm_seq,
-    gdn_l2_normalize_heads, gdn_prefill, gdn_prefill_workspace_bytes, gdn_prepare_prefill,
-    gdn_recurrent_step, gdn_state_elements, GdnContinuationArgs, GdnFirstPrefillArgs,
+    gdn_gated_norm, gdn_gated_norm_quantize, gdn_gated_norm_seq, gdn_l2_normalize_heads,
+    gdn_prefill, gdn_prefill_workspace_bytes, gdn_prepare_prefill, gdn_recurrent_step,
+    gdn_state_elements, GdnContinuationArgs, GdnFirstPrefillArgs,
 };
 pub use gemm::{
     fp8_gemv, gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu,
@@ -63,15 +64,14 @@ pub use norm::{
     bias_residual_adaptive_layer_norm, bias_residual_layer_norm, bias_residual_rms_norm,
     head_rms_norm, layer_norm, rms_norm, rms_norm_weight_offset, AdaGateResidualArgs,
     AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, BiasOrder, BiasResidualAdaptiveLayerNormArgs,
-    BiasResidualArgs, BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, LayerNormArgs, RmsNormArgs,
+    BiasResidualArgs, BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, LayerNormArgs,
+    RmsNormArgs,
 };
 pub use pointwise::{
     add_into, pointwise, swiglu_into, PointwiseActivation, PointwiseArgs, PointwiseSemantic,
 };
 pub use preprocess::{vision_position, VisionPositionArgs};
-pub use quantization::{
-    quantization, quantize_per_tensor, QuantizationArgs, QuantizationSemantic,
-};
+pub use quantization::{quantization, quantize_per_tensor, QuantizationArgs, QuantizationSemantic};
 pub use rope::apply_vision_2d as rope_apply_vision_2d;
 pub use rope::{
     decode_rope, execute_batched as rope_apply_batched, execute_mrope as rope_apply_mrope,

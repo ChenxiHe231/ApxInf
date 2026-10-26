@@ -3,7 +3,7 @@ use std::ffi::c_void;
 pub(crate) use super::types::CudaStream;
 use super::types::Runtime;
 
-pub(crate) const SPEC_VERSION: u32 = 2;
+pub(crate) const SPEC_VERSION: u32 = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -12,6 +12,7 @@ pub(crate) struct Spec {
     pub semantic: u32,
     pub dtype: u32,
     pub has_bias: u32,
+    pub embedding_scale: u32,
     pub vocab_size: u32,
     pub replacement_rows: u32,
     pub tokens_per_view: u32,
@@ -40,15 +41,6 @@ pub(crate) struct Bindings {
 }
 
 unsafe extern "C" {
-    pub(crate) fn apxinf_gather_embedding(
-        table: *const c_void,
-        ids: *const c_void,
-        output: *mut c_void,
-        tokens: i64,
-        hidden: i64,
-        vocab: i64,
-        stream: CudaStream,
-    ) -> i32;
     pub(crate) fn apxinf_gather_launch(
         runtime: Runtime,
         spec: *const Spec,

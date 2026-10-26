@@ -27,22 +27,16 @@ pub fn lookup(
         ));
     }
     let cols = dims[1];
-    let output = ctx.allocate_output(Shape::new(vec![seq_len, cols]), DType::BF16)?;
-    let table_buffer = CudaBuffer::from_tensor(table).map_err(Error::Cuda)?;
-    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
-    let rows = i64::try_from(seq_len).map_err(|_| Error::Other("lookup rows exceed i64".into()))?;
-    let cols_i64 =
-        i64::try_from(cols).map_err(|_| Error::Other("lookup cols exceed i64".into()))?;
-    unsafe {
-        status::check(abi::apxinf_elementwise_gather_rows_bf16(
-            table_buffer.ptr(),
-            ids.ptr(),
-            output_buffer.ptr(),
-            rows,
-            cols_i64,
-            ctx.stream().handle(),
-        ))?;
-    }
+    let mut output = ctx.allocate_output(Shape::new(vec![seq_len, cols]), DType::BF16)?;
+    let mut args = crate::ops::GatherArgs::new(
+        crate::ops::GatherSemantic::EmbeddingLookup,
+        table,
+        &mut output,
+    );
+    args.ids = Some(ids);
+    args.vocab_size = dims[0];
+    args.embedding_scale = crate::ops::EmbeddingScale::None;
+    crate::ops::gather(ctx, args)?;
     Ok(output)
 }
 
@@ -169,6 +163,7 @@ pub fn lookup_scaled(
     let mut args = ops::GatherArgs::new(ops::GatherSemantic::EmbeddingLookup, table, &mut output);
     args.ids = Some(ids);
     args.vocab_size = dims[0];
+    args.embedding_scale = ops::EmbeddingScale::SqrtWidth;
     ops::gather(ctx, args)?;
     Ok(output)
 }

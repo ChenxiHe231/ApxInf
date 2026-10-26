@@ -1,6 +1,7 @@
 #include "../../include/apxinf_cuda/gather.h"
 #include "../../framework/runtime_internal.h"
 #include "../../kernels/custom/gather.cuh"
+#include "../../kernels/custom/gather_embedding.h"
 
 #include <climits>
 #include <cstdint>
@@ -32,7 +33,9 @@ void validate_spec(const apxinf_gather_spec_t& spec) {
   if (spec.version != APXINF_GATHER_SPEC_VERSION ||
       spec.semantic > APXINF_GATHER_SEMANTIC_REPLACE_ROWS ||
       !dtype_ok ||
-      spec.has_bias > 1 || spec.nhwc > 1 || spec.rows <= 0 || spec.cols <= 0 ||
+      spec.has_bias > 1 ||
+      spec.embedding_scale > APXINF_GATHER_EMBEDDING_SCALE_SQRT_WIDTH ||
+      spec.nhwc > 1 || spec.rows <= 0 || spec.cols <= 0 ||
       spec.rows > INT32_MAX || spec.cols > INT32_MAX ||
       spec.vocab_size > INT32_MAX || spec.tokens_per_view > INT32_MAX ||
       spec.replacement_rows > INT32_MAX ||
@@ -50,6 +53,17 @@ void validate_spec(const apxinf_gather_spec_t& spec) {
       spec.vocab_size == 0) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "embedding lookup requires a vocabulary size");
+  }
+  if (spec.semantic != APXINF_GATHER_SEMANTIC_EMBEDDING_LOOKUP &&
+      spec.embedding_scale != APXINF_GATHER_EMBEDDING_SCALE_NONE) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "Gather semantic does not take embedding scale");
+  }
+  if (spec.semantic == APXINF_GATHER_SEMANTIC_EMBEDDING_LOOKUP &&
+      spec.embedding_scale == APXINF_GATHER_EMBEDDING_SCALE_NONE &&
+      spec.dtype != APXINF_DTYPE_BF16) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "unscaled embedding lookup requires BF16");
   }
   if (spec.semantic == APXINF_GATHER_SEMANTIC_BIAS_POSITION &&
       (spec.tokens_per_view == 0 ||
@@ -145,6 +159,12 @@ cudaError_t launch(const apxinf_gather_spec_t& spec,
 
   switch (spec.semantic) {
     case APXINF_GATHER_SEMANTIC_EMBEDDING_LOOKUP:
+      if (spec.embedding_scale == APXINF_GATHER_EMBEDDING_SCALE_NONE) {
+        return static_cast<cudaError_t>(
+            apxinf::cuda_new::gather::embedding_gather(
+                input, reinterpret_cast<const int32_t*>(bindings.ids), output,
+                rows, cols, static_cast<int>(spec.vocab_size), stream));
+      }
       kernels::embedding_lookup<T><<<grid, kThreads, 0, stream>>>(
           input, bindings.ids, output, rows, cols,
           static_cast<int>(spec.vocab_size));
