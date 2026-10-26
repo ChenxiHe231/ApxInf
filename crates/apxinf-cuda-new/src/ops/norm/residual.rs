@@ -22,7 +22,7 @@ pub struct DynamicResidualNormTensors {
 /// `bias_residual_rms_quantize_rows_bf16_e4m3`: residual update, RMS norm,
 /// and rowwise E4M3 quantization in one launch. The hidden write rounds to
 /// BF16 before the square-sum, matching the legacy contract bit for bit.
-pub fn bias_residual_rms_quantize_rows_bf16_e4m3(
+pub fn bias_residual_rms_quantize_rows(
     ctx: &CudaContext,
     projection: &Tensor,
     bias: Option<&Tensor>,
@@ -91,7 +91,7 @@ pub fn bias_residual_rms_quantize_rows_bf16_e4m3(
 /// `rms(hidden) * weight * (1 + scale) + shift`. Direct port of the legacy
 /// fused kernel.
 #[allow(clippy::too_many_arguments)]
-pub fn adaln_gate_residual_rms_bf16(
+pub fn adaln_gate_residual_rms(
     ctx: &CudaContext,
     projection: &Tensor,
     residual: &Tensor,
@@ -423,7 +423,7 @@ pub fn bias_then_residual_adaptive_layer_bf16_cached_1536(
 /// `bias_residual_layer_quant_bf16_e4m3`: fused residual + LayerNorm whose
 /// `normalized` output is a calibrated E4M3 matrix.
 #[allow(clippy::too_many_arguments)]
-pub fn bias_residual_layer_quant_bf16_e4m3(
+pub fn bias_residual_layer_quantized(
     ctx: &CudaContext,
     projection: &Tensor,
     projection_bias: Option<&Tensor>,

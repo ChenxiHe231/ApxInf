@@ -2057,7 +2057,7 @@ pub(crate) mod expert {
             let attn = attn.reshape(vec![length, heads * head_dim])?;
             let proj = gemm::bf16(ctx, &attn, &layer.o_w)?;
 
-            let residual_norm = norm::adaln_gate_residual_rms_bf16(
+            let residual_norm = norm::adaln_gate_residual_rms(
                 ctx,
                 &proj,
                 &hidden,
@@ -2077,7 +2077,7 @@ pub(crate) mod expert {
                 let next_shift = row_col_slice(&modulations[layer_index + 1], 0, hidden_size)?;
                 let next_scale =
                     row_col_slice(&modulations[layer_index + 1], hidden_size, hidden_size)?;
-                let residual_norm = norm::adaln_gate_residual_rms_bf16(
+                let residual_norm = norm::adaln_gate_residual_rms(
                     ctx,
                     &down,
                     &hidden,

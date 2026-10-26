@@ -6,7 +6,7 @@ use crate::CudaContext;
 
 /// `rms_quantize_rows_bf16_e4m3`: RMS-normalize then rowwise-quantize to
 /// E4M3, zero-padding to `output_cols`. Returns values plus per-row scales.
-pub fn rms_quantize_rows_bf16_e4m3(
+pub fn rms_quantize_rows(
     ctx: &CudaContext,
     input: &Tensor,
     weight: &Tensor,
@@ -102,7 +102,7 @@ pub fn adaptive_layer(
 
 /// `adaptive_layer_quant_bf16_e4m3`: adaptive LayerNorm plus a calibrated
 /// E4M3 view of the rounded normalized output. Returns `(bf16, e4m3)`.
-pub fn adaptive_layer_quant_bf16_e4m3(
+pub fn adaptive_layer_quantized(
     ctx: &CudaContext,
     input: &Tensor,
     modulation: &Tensor,
@@ -156,7 +156,7 @@ pub fn adaptive_layer_quant_bf16_e4m3(
 }
 
 /// `rms_quant_bf16_e4m3`: RMS-normalize then apply a static E4M3 scale.
-pub fn rms_quant_bf16_e4m3(
+pub fn rms_quantized(
     ctx: &CudaContext,
     input: &Tensor,
     weight: &Tensor,
@@ -202,7 +202,7 @@ pub fn rms_quant_bf16_e4m3(
 }
 
 /// `layer_quant_bf16_e4m3`: LayerNorm then apply a static E4M3 scale.
-pub fn layer_quant_bf16_e4m3(
+pub fn layer_quantized(
     ctx: &CudaContext,
     input: &Tensor,
     weight: &Tensor,
@@ -320,7 +320,7 @@ pub fn rms_into(
 /// Writes `residual + delta` back into `residual` and the normed result into
 /// `output`, exactly like the legacy `rms_norm_add_bf16`.
 #[allow(clippy::too_many_arguments)]
-pub fn residual_add_rms_bf16_into(
+pub fn residual_add_rms_into(
     ctx: &CudaContext,
     residual: &crate::CudaBuffer,
     delta: &crate::CudaBuffer,

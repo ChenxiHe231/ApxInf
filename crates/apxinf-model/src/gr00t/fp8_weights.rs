@@ -390,7 +390,7 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         eps: f32,
         backend: &RuntimeBackend,
     ) -> Result<Option<(Tensor, Self::ReusableInput)>> {
-        let fused = ops::norm::bias_residual_layer_quant_bf16_e4m3(
+        let fused = ops::norm::bias_residual_layer_quantized(
             backend.context(),
             projection,
             None,
@@ -440,7 +440,7 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         eps: f32,
         backend: &RuntimeBackend,
     ) -> Result<Option<(Tensor, Self::ReusableInput)>> {
-        let (normalized, quantized) = ops::norm::adaptive_layer_quant_bf16_e4m3(
+        let (normalized, quantized) = ops::norm::adaptive_layer_quantized(
             backend.context(),
             input,
             modulation,
@@ -457,7 +457,7 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         eps: f32,
         backend: &RuntimeBackend,
     ) -> Result<Option<Self::ReusableInput>> {
-        Ok(Some(ops::norm::rms_quant_bf16_e4m3(
+        Ok(Some(ops::norm::rms_quantized(
             backend.context(),
             input,
             weight,

@@ -910,7 +910,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                     let scale = linear
                         .activation_scale()
                         .ok_or_else(|| Error::Other(format!("{name} is not an FP8 linear")))?;
-                    let quantized = ops::norm::layer_quant_bf16_e4m3(
+                    let quantized = ops::norm::layer_quantized(
                         self.backend.context(),
                         input,
                         norm_weight,
@@ -996,7 +996,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                 if use_fused_vision_residual_norm_quant {
                     if let Some(linear) = self.backbone_linears.get(name) {
                         if let Some(scale) = linear.activation_scale() {
-                            let fused = ops::norm::bias_residual_layer_quant_bf16_e4m3(
+                            let fused = ops::norm::bias_residual_layer_quantized(
                                 self.backend.context(),
                                 projection,
                                 Some(projection_bias),
@@ -2644,7 +2644,7 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
     let shared_qkv_input = shared_qkv
         .map(|((query, _), _)| {
             if fused_qkv_norm {
-                ops::norm::rms_quant_bf16_e4m3(
+                ops::norm::rms_quantized(
                     backend.context(),
                     input,
                     &layer.attn_norm_weight,

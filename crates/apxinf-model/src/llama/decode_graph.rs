@@ -385,7 +385,7 @@ fn decode_forward_capturable(
         // Fused post-attn residual add + pre-FFN norm
         let ffn_norm_weight = weight_view(layer.ffn_norm_weight, device_id)?;
         if is_bf16 {
-            ops::norm::residual_add_rms_bf16_into(
+            ops::norm::residual_add_rms_into(
                 ctx,
                 &ws.x,
                 &ws.attn_proj,
@@ -458,7 +458,7 @@ fn decode_forward_capturable(
         };
         if is_bf16 {
             let next_norm_weight = weight_view(next_norm_w, device_id)?;
-            ops::norm::residual_add_rms_bf16_into(
+            ops::norm::residual_add_rms_into(
                 ctx,
                 &ws.x,
                 &ws.mlp_out,

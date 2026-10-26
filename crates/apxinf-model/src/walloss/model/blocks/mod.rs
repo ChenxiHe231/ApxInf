@@ -126,7 +126,7 @@ fn qkv_after_rms(
             ops::gemm::bf16(context, &normalized, weight)
         }
         MatrixRef::DynamicFp8(weight) => {
-            let normalized = ops::norm::rms_quantize_rows_bf16_e4m3(
+            let normalized = ops::norm::rms_quantize_rows(
                 context,
                 input,
                 norm_weight,
@@ -148,7 +148,7 @@ fn dynamic_residual_norm(
     eps: f32,
     output_cols: usize,
 ) -> Result<(Tensor, ops::quantization::DynamicFp8Tensor)> {
-    let fused = ops::norm::bias_residual_rms_quantize_rows_bf16_e4m3(
+    let fused = ops::norm::bias_residual_rms_quantize_rows(
         context,
         projected,
         output_bias,
