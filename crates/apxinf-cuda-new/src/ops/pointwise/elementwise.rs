@@ -7,7 +7,7 @@ use crate::ops::gemm::contracts::{invalid, tensor_storage};
 use crate::CudaContext;
 
 /// `y[r,c] = silu(fused[r,c]) * fused[r,width+c]`.
-pub fn swiglu(ctx: &CudaContext, fused: &Tensor, output: &Tensor) -> Result<()> {
+pub fn swiglu_into(ctx: &CudaContext, fused: &Tensor, output: &Tensor) -> Result<()> {
     let fused_dims = fused.shape().dims().to_vec();
     let output_dims = output.shape().dims().to_vec();
     if fused_dims.len() != 2 || output_dims.len() != 2 {

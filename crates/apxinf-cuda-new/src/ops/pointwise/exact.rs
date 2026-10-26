@@ -5,7 +5,7 @@ use crate::ffi::abi::activation as activation_abi;
 use crate::ops::validation::{check_cuda, expect_bf16, gpu_ptr, make_gpu_tensor};
 use crate::workspace::output_buffer;
 
-/// Exact (erf) GELU with BF16 storage.
+/// Exact (erf) GELU with BF16 storage, owned by the pointwise family.
 pub fn gelu_exact(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
     expect_bf16(input, "gelu exact")?;
     let output = output_buffer(ctx, input.size_in_bytes())?;

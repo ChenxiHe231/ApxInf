@@ -74,7 +74,6 @@ pub(super) trait Gr00tPrecisionExecution: Sized + 'static {
     const USE_DIRECT_BF16_VISION_SEGMENT_OUTPUT: bool = false;
     const USE_PRECOMPUTED_BF16_VISION_ROPE: bool = false;
     const USE_FUSED_BF16_VISION_MLP_RESIDUAL_NORM: bool = false;
-    const USE_PACKED8_BF16_BIAS_ACTIVATION: bool = false;
     const USE_BIAS_RESIDUAL_ADAPTIVE_LAYER_NORM: bool = false;
     const USE_BIAS_RESIDUAL_LAYER_NORM: bool = false;
     /// Architectures covered by this precision's accepted execution plan.
@@ -942,7 +941,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                 let output_name = format!("{prefix}.fc2");
                 if let Some(linear) = self.backbone_linears.get(&output_name) {
                     if let Some(scale) = linear.activation_scale() {
-                        return ops::activation::bias_gelu_quant_bf16_e4m3(
+                        return ops::pointwise::bias_gelu_quant_bf16_e4m3(
                             self.backend.context(),
                             input,
                             bias,
@@ -954,20 +953,13 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             if use_vision_pointwise_pack
                 && matches!(input.shape().dims(), [512, 4096] | [128, 4096])
             {
-                return ops::activation::bias_gelu_bf16_packed8(
+                return ops::pointwise::bias_gelu_bf16_packed8(
                     self.backend.context(),
                     input,
                     bias,
                 );
             }
-            if E::USE_PACKED8_BF16_BIAS_ACTIVATION {
-                if let Some(output) =
-                    super::backend::try_packed8_bias_activation(&self.backend, input, bias, 1)?
-                {
-                    return Ok(output);
-                }
-            }
-            ops::activation::bias_gelu_bf16(self.backend.context(), input, Some(bias))
+            ops::pointwise::bias_gelu_bf16(self.backend.context(), input, Some(bias))
         };
         // BF16 explicitly opts into this exact-shape path. The legacy composed
         // path remains in the same ELF for controlled benchmark comparisons.
@@ -2087,7 +2079,7 @@ fn linear_relu<L: DeviceLinearWeights>(
     weights: &L,
 ) -> Result<Tensor> {
     let output = weights.forward(input, backend)?;
-    ops::activation::bias_relu_bf16(backend.context(), &output, weights.bias())
+    ops::pointwise::bias_relu_bf16(backend.context(), &output, weights.bias())
 }
 
 fn linear_silu<L: DeviceLinearWeights>(
@@ -2096,7 +2088,7 @@ fn linear_silu<L: DeviceLinearWeights>(
     weights: &L,
 ) -> Result<Tensor> {
     let output = weights.forward(input, backend)?;
-    ops::activation::bias_silu_bf16(backend.context(), &output, weights.bias())
+    ops::pointwise::bias_silu_bf16(backend.context(), &output, weights.bias())
 }
 
 fn linear_gelu<L: DeviceLinearWeights>(
@@ -2108,7 +2100,7 @@ fn linear_gelu<L: DeviceLinearWeights>(
     if let Some(output) = weights.packed8_bias_gelu(&output, backend)? {
         return Ok(output);
     }
-    ops::activation::bias_gelu_bf16(backend.context(), &output, weights.bias())
+    ops::pointwise::bias_gelu_bf16(backend.context(), &output, weights.bias())
 }
 
 fn forward_feed_forward<E: Gr00tPrecisionExecution>(
@@ -2178,7 +2170,7 @@ fn forward_feed_forward_projection_with_quantized_input<E: Gr00tPrecisionExecuti
         let hidden = weights
             .input
             .forward_reusable_quantized(quantized, backend)?;
-        ops::activation::bias_gelu_bf16(backend.context(), &hidden, weights.input.bias())?
+        ops::pointwise::bias_gelu_bf16(backend.context(), &hidden, weights.input.bias())?
     } else {
         linear_gelu(backend, input, &weights.input)?
     };
@@ -2896,7 +2888,7 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
         .get(&down_name)
         .filter(|down| down.activation_scale().is_some())
     {
-        let gated = ops::activation::silu_mul_quant_bf16_e4m3(
+        let gated = ops::pointwise::silu_mul_quant_bf16_e4m3(
             backend.context(),
             &gate,
             &up,
@@ -2916,7 +2908,7 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
             output
         } else {
             let gated = if USE_FUSED_BF16_SILU_MUL {
-                ops::activation::silu_mul_bf16(backend.context(), &gate, &up)?
+                ops::pointwise::silu_mul_bf16(backend.context(), &gate, &up)?
             } else {
                 let gate = backend.silu(&gate)?;
                 backend.mul(&gate, &up)?

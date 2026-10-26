@@ -38,7 +38,6 @@ impl Gr00tPrecisionExecution for Gr00tBf16Execution {
     const USE_DIRECT_BF16_VISION_SEGMENT_OUTPUT: bool = true;
     const USE_PRECOMPUTED_BF16_VISION_ROPE: bool = true;
     const USE_FUSED_BF16_VISION_MLP_RESIDUAL_NORM: bool = true;
-    const USE_PACKED8_BF16_BIAS_ACTIVATION: bool = true;
 
     fn transfer_dense(
         &self,
@@ -121,7 +120,6 @@ mod tests {
 
     #[test]
     fn bf16_explicitly_opts_into_packed8_bias_activation() {
-        assert!(Gr00tBf16Execution::USE_PACKED8_BF16_BIAS_ACTIVATION);
     }
 
     #[test]

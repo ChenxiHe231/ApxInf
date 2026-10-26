@@ -167,7 +167,7 @@ fn dynamic_swiglu(
     logical_inner: usize,
     output_cols: usize,
 ) -> Result<ops::quantization::DynamicFp8Tensor> {
-    ops::activation::swiglu_quantize_rows_bf16_e4m3(
+    ops::pointwise::swiglu_quantize_rows_bf16_e4m3(
         context,
         gate_up,
         gate_up_bias,
@@ -206,7 +206,7 @@ fn residual_mlp(
                 Some(bias) => ops::elementwise::bias_bf16(context, &gate_up, Some(bias))?,
                 None => gate_up,
             };
-            let activated = ops::activation::swiglu_bf16(context, &gate_up)?;
+            let activated = ops::pointwise::swiglu_bf16(context, &gate_up)?;
             let down = ops::gemm::bf16(context, &activated, down)?;
             ops::norm::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
         }
@@ -259,7 +259,7 @@ fn residual_mlp(
                 Some(bias) => ops::elementwise::bias_bf16(context, &gate_up, Some(bias))?,
                 None => gate_up,
             };
-            let activated = ops::activation::swiglu_bf16(context, &gate_up)?;
+            let activated = ops::pointwise::swiglu_bf16(context, &gate_up)?;
             let down = ops::gemm::bf16(context, &activated, down)?;
             ops::norm::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
         }
@@ -787,7 +787,7 @@ fn vision_merger<W: VisionTowerWeights>(
             .reshape(vec![merged_tokens, merge_unit * config.hidden_size])?;
     let hidden = linear(context, &normalized, weights.merger_hidden())?;
     let hidden =
-        ops::activation::bias_gelu_bf16(context, &hidden, Some(weights.merger_hidden_bias()))?;
+        ops::pointwise::bias_gelu_bf16(context, &hidden, Some(weights.merger_hidden_bias()))?;
     let output = linear(context, &hidden, weights.merger_output())?;
     let output =
         ops::elementwise::bias_bf16(context, &output, Some(weights.merger_output_bias()))?;
@@ -821,7 +821,7 @@ pub fn action_embedding(
         .map_err(|e| Error::Other(format!("time_projection gemm: {e}")))?;
     let fused = ops::elementwise::add(context, &action_part, &time_part)
         .map_err(|e| Error::Other(format!("fused add: {e}")))?;
-    let activated = ops::activation::silu(context, &fused)
+    let activated = ops::pointwise::silu(context, &fused)
         .map_err(|e| Error::Other(format!("silu: {e}")))?;
     ops::gemm::bf16(context, &activated, &weights.action_embedding_projection)
         .map_err(|e| Error::Other(format!("action_embedding_projection gemm: {e}")))

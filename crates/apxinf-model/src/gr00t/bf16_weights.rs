@@ -40,18 +40,6 @@ impl DeviceLinearWeights for Gr00tBf16LinearWeights {
         Some(&self.weights.bias)
     }
 
-    fn packed8_bias(&self, input: &Tensor, backend: &RuntimeBackend) -> Result<Option<Tensor>> {
-        super::backend::try_packed8_bias_activation(backend, input, &self.weights.bias, 0)
-    }
-
-    fn packed8_bias_gelu(
-        &self,
-        input: &Tensor,
-        backend: &RuntimeBackend,
-    ) -> Result<Option<Tensor>> {
-        super::backend::try_packed8_bias_activation(backend, input, &self.weights.bias, 1)
-    }
-
     fn bias_residual_adaptive_layer_norm(
         &self,
         projection: &Tensor,

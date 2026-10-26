@@ -1,6 +1,5 @@
 //! Semantic CUDA APIs with selection and native state behind L1.
 
-pub mod activation;
 pub mod attention;
 pub mod cache;
 pub mod elementwise;
@@ -68,7 +67,7 @@ pub use norm::{
     BiasThenResidualArgs, LayerNormArgs, RmsNormArgs,
 };
 pub use pointwise::{
-    add_into, pointwise, swiglu, PointwiseActivation, PointwiseArgs, PointwiseSemantic,
+    add_into, pointwise, swiglu_into, PointwiseActivation, PointwiseArgs, PointwiseSemantic,
 };
 pub use preprocess::{vision_position, VisionPositionArgs};
 pub use quantization::{

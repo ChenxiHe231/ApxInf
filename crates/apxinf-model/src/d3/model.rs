@@ -844,7 +844,7 @@ fn mlp(
         vec![tokens, text.intermediate_size],
         DType::BF16,
     )?;
-    ops::pointwise::swiglu(ctx, &fused, &activation)?;
+    ops::pointwise::swiglu_into(ctx, &fused, &activation)?;
     let mut projected = prefix(
         &scratch.projected,
         vec![tokens, text.hidden_size],

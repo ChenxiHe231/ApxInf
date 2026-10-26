@@ -227,7 +227,7 @@ pub fn nvfp4_quantize_rms_norm(
 /// SwiGLU fused with NVFP4 quantization.
 ///
 /// `fused` is the `[rows, 2*k]` gate/up projection, gate first. Equivalent to
-/// [`crate::ops::swiglu`] followed by [`nvfp4_quantize_activation`] without the
+/// [`crate::ops::swiglu_into`] followed by [`nvfp4_quantize_activation`] without the
 /// `[rows, k]` BF16 intermediate.
 pub fn nvfp4_quantize_swiglu(
     ctx: &CudaContext,

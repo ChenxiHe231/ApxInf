@@ -264,7 +264,7 @@ fn mlp_block(
             ops::ScaleLayout::GemmAtom,
         )?;
     } else {
-        ops::swiglu(ctx, &scratch.fused, &scratch.activated)?;
+        ops::swiglu_into(ctx, &scratch.fused, &scratch.activated)?;
         ops::nvfp4_quantize_activation(
             ctx,
             &scratch.activated,

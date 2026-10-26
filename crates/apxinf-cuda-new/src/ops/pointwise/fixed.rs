@@ -1,12 +1,8 @@
-//! Activation operators and direct-launch specializations.
+//! Fixed pointwise operators and direct-launch specializations.
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
 use crate::{ops, CudaContext};
-
-mod exact;
-
-pub use exact::gelu_exact;
 
 /// `silu`: elementwise SiLU into a fresh tensor.
 pub fn silu(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
@@ -274,18 +270,6 @@ pub fn bias_gelu_bf16_packed8(ctx: &CudaContext, input: &Tensor, bias: &Tensor) 
     Ok(output)
 }
 
-/// `try_bias_activation_bf16_packed8`: the legacy packed-8 bias activation
-/// policy hook. cuda-new does not expose this fast path; the caller falls back
-/// to the generic `bias_gelu_bf16` / `bias_silu_bf16` contract.
-pub fn try_bias_activation_bf16_packed8(
-    _ctx: &CudaContext,
-    _input: &Tensor,
-    _bias: &Tensor,
-    _activation: i32,
-) -> Result<Option<Tensor>> {
-    Ok(None)
-}
-
 /// `swiglu_quantize_rows_bf16_e4m3`: SwiGLU over a packed gate/up projection
 /// followed by rowwise E4M3 quantization, zero-padded to `output_cols`.
 pub fn swiglu_quantize_rows_bf16_e4m3(
@@ -294,7 +278,7 @@ pub fn swiglu_quantize_rows_bf16_e4m3(
     bias: Option<&Tensor>,
     logical_inner: usize,
     output_cols: usize,
-) -> Result<super::quantization::DynamicFp8Tensor> {
+) -> Result<crate::ops::quantization::DynamicFp8Tensor> {
     use crate::ffi::abi::{pointwise as abi, status};
     use crate::CudaBuffer;
     let dims = gate_up.shape().dims();
@@ -336,7 +320,7 @@ pub fn swiglu_quantize_rows_bf16_e4m3(
             ctx.stream().handle(),
         ))?;
     }
-    Ok(super::quantization::DynamicFp8Tensor { values, scales })
+    Ok(crate::ops::quantization::DynamicFp8Tensor { values, scales })
 }
 
 /// `swiglu_bf16_rounded`: SwiGLU whose SiLU intermediate rounds to BF16
@@ -377,7 +361,7 @@ pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor
 
 /// `swiglu_f16`: FP16 SwiGLU over packed `[rows, 2*inner]` gate/up halves.
 pub fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
-    use super::validation::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
+    use crate::ops::validation::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
     use crate::ffi::abi::activation as abi;
     let (rows, twice_inner) = matrix_shape(gate_up, "SwiGLU")?;
     if gate_up.dtype() != DType::F16 || twice_inner % 2 != 0 {
@@ -406,7 +390,7 @@ pub fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
 
 /// `bias_gelu_f16`: optional-bias tanh-GELU over an FP16 matrix.
 pub fn bias_gelu_f16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
-    use super::validation::{
+    use crate::ops::validation::{
         check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
     };
     use crate::ffi::abi::activation as abi;
@@ -439,7 +423,7 @@ pub fn bias_gelu_f16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) 
 
 /// `bias_silu_f16`: optional-bias SiLU over an FP16 matrix.
 pub fn bias_silu_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
-    use super::validation::{
+    use crate::ops::validation::{
         check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
     };
     use crate::ffi::abi::activation as abi;
@@ -484,7 +468,7 @@ pub fn silu_into(
     output: &crate::CudaBuffer,
     count: usize,
 ) -> Result<()> {
-    use super::validation::{check_cuda, checked_bytes, require_buffers};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
     use crate::ffi::abi::activation as abi;
     let bytes = checked_bytes(dtype, &[count], "decode SiLU")?;
     require_buffers(
@@ -523,7 +507,7 @@ pub fn silu_mul_bf16_into(
     output: &crate::CudaBuffer,
     intermediate: usize,
 ) -> Result<()> {
-    use super::validation::{check_cuda, checked_bytes, require_buffers};
+    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
     use crate::ffi::abi::activation as abi;
     require_buffers(
         ctx,

@@ -697,7 +697,7 @@ fn unfused_mlp(
         u.0.extend_from_slice(up);
     }
 
-    ops::swiglu(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
+    ops::swiglu_into(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
     dump.push_bf16(ctx, names.3, swiglu_out, INTERMEDIATE);
     ops::nvfp4_quantize_activation(
         ctx,

@@ -480,9 +480,9 @@ impl SmolVlaModel {
         )?;
         let activated = self.gemm(ctx, &normalized, &weights.fc1.weight)?;
         let activated = (if self.fp16_gemm {
-            ops::activation::bias_gelu_f16
+            ops::pointwise::bias_gelu_f16
         } else {
-            ops::activation::bias_gelu_bf16
+            ops::pointwise::bias_gelu_bf16
         })(
             ctx,
             &activated,
@@ -670,9 +670,9 @@ impl SmolVlaModel {
         let activated =
             self.gemm(ctx, &normalized, &gate_up.weight)?;
         let activated = (if self.fp16_gemm {
-            ops::activation::swiglu_f16
+            ops::pointwise::swiglu_f16
         } else {
-            ops::activation::swiglu_bf16
+            ops::pointwise::swiglu_bf16
         })(ctx, &activated)?;
         let projected = self.gemm(ctx, &activated, &down.weight)?;
         self.backend.add(&projected, input)
@@ -720,9 +720,9 @@ impl SmolVlaModel {
             self.weights.action_time_in.bias.as_ref().unwrap(),
         )?;
         let fused = if self.fp16_gemm {
-            ops::activation::bias_silu_f16(ctx, &fused, None)?
+            ops::pointwise::bias_silu_f16(ctx, &fused, None)?
         } else {
-            ops::activation::silu(ctx, &fused)?
+            ops::pointwise::silu(ctx, &fused)?
         };
         let mut hidden = self.gemm(ctx, &fused, &self.weights.action_time_out.weight)?;
         hidden = self.add_bias(

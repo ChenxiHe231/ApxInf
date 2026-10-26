@@ -419,9 +419,9 @@ fn decode_forward_capturable(
                 .view(inter * elem, inter * elem)
                 .map_err(Error::Cuda)?;
             if is_bf16 {
-                ops::activation::silu_mul_bf16_into(ctx, &ws.gate_up, &ws.mlp_hidden, inter)?;
+                ops::pointwise::silu_mul_bf16_into(ctx, &ws.gate_up, &ws.mlp_hidden, inter)?;
             } else {
-                ops::activation::silu_into(ctx, dtype, &ws.gate_up, &ws.gate_silu, inter)?;
+                ops::pointwise::silu_into(ctx, dtype, &ws.gate_up, &ws.gate_silu, inter)?;
                 ops::elementwise::mul_into(
                     ctx,
                     dtype,
@@ -436,7 +436,7 @@ fn decode_forward_capturable(
             let wu_v = weight_view(layer.w_up, device_id)?;
             ops::gemm::write(ctx, dtype, 1, inter, hidden, 1.0, &fn_view, &wg_v, 0.0, &ws.gate)?;
             ops::gemm::write(ctx, dtype, 1, inter, hidden, 1.0, &fn_view, &wu_v, 0.0, &ws.up)?;
-            ops::activation::silu_into(ctx, dtype, &ws.gate, &ws.gate_silu, inter)?;
+            ops::pointwise::silu_into(ctx, dtype, &ws.gate, &ws.gate_silu, inter)?;
             ops::elementwise::mul_into(
                 ctx,
                 dtype,

@@ -114,7 +114,7 @@ impl Backend for CudaNewBackend {
     }
 
     fn silu(&self, input: &Tensor) -> Result<Tensor> {
-        ops::activation::silu(&self.ctx, input)
+        ops::pointwise::silu(&self.ctx, input)
     }
 
     fn add(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
@@ -179,7 +179,7 @@ impl Backend for CudaNewBackend {
     }
 
     fn gelu_tanh(&self, input: &Tensor) -> Result<Tensor> {
-        ops::activation::gelu_tanh(&self.ctx, input)
+        ops::pointwise::gelu_tanh(&self.ctx, input)
     }
 
     fn add_bias(&self, input: &Tensor, bias: &Tensor) -> Result<Tensor> {

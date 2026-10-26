@@ -13,7 +13,7 @@
 
 use super::backend::{ops, Context};
 use apxinf_core::{Result, Tensor};
-use ops::{activation, attention, gemm, norm, quantization, rope};
+use ops::{attention, gemm, norm, pointwise, quantization, rope};
 
 use super::{
     Fp8DeviceLanguageLayer, Fp8DeviceVisionBlock, Pi0FastLanguageConfig,
@@ -178,7 +178,7 @@ pub fn language_layer_fp8(
         rms_eps,
     )?;
     let gate_up = fp8_projection(ctx, &fused.normalized, &weights.gate_up, scales.gate_up_input)?;
-    let activated = activation::geglu_bf16(ctx, &gate_up)?;
+    let activated = pointwise::geglu_bf16(ctx, &gate_up)?;
     let projected = fp8_projection(ctx, &activated, &weights.down, scales.down_input)?;
     let hidden =
         norm::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)?;
@@ -223,7 +223,7 @@ pub fn vision_layer_fp8(
         layer_norm_eps,
     )?;
     let activation = fp8_projection(ctx, &fused.normalized, &weights.fc1, scales.fc1_input)?;
-    let activation = activation::bias_gelu_bf16(ctx, &activation, weights.fc1.bias.as_ref())?;
+    let activation = pointwise::bias_gelu_bf16(ctx, &activation, weights.fc1.bias.as_ref())?;
     let projection = fp8_projection(ctx, &activation, &weights.fc2, scales.fc2_input)?;
     norm::bias_residual_bf16(ctx, &projection, weights.fc2.bias.as_ref(), &fused.hidden)
 }
@@ -270,7 +270,7 @@ pub fn language_layer_cached_decode_fp8(
         rms_eps,
     )?;
     let gate_up = fp8_projection(ctx, &fused.normalized, &weights.gate_up, scales.gate_up_input)?;
-    let activated = activation::geglu_bf16(ctx, &gate_up)?;
+    let activated = pointwise::geglu_bf16(ctx, &gate_up)?;
     let projected = fp8_projection(ctx, &activated, &weights.down, scales.down_input)?;
     norm::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)
 }

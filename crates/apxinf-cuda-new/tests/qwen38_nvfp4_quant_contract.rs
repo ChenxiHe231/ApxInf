@@ -163,7 +163,7 @@ fn swiglu_bf16_boundaries_match_independent_vllm_fixture() {
             .collect();
         let input = upload(&ctx, &input_bytes, vec![rows, 64], DType::BF16);
         let output = upload(&ctx, &vec![0xff; rows * 64], vec![rows, 32], DType::BF16);
-        ops::swiglu(&ctx, &input, &output).unwrap();
+        ops::swiglu_into(&ctx, &input, &output).unwrap();
         ctx.synchronize().unwrap();
         assert_eq!(download(&output, rows * 64), expected_bf16);
         for vector in ["0", "1"] {

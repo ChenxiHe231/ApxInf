@@ -3551,7 +3551,7 @@ fn unfused_mlp(
     // split on the comparison side.
     dump.push_bf16(ctx, names.1, &scratch.mlp_fused, 2 * INTERMEDIATE);
 
-    ops::swiglu(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
+    ops::swiglu_into(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
     dump.push_bf16(ctx, names.2, swiglu_out, INTERMEDIATE);
     ops::nvfp4_quantize_activation(
         ctx,
@@ -4029,7 +4029,7 @@ fn unfused_mlp_quiet(
         ),
     )
     .unwrap();
-    ops::swiglu(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
+    ops::swiglu_into(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
     ops::nvfp4_quantize_activation(
         ctx,
         swiglu_out,

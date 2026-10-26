@@ -973,7 +973,7 @@ pub(super) mod vision {
     use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
     use crate::qwen_drive::backend::{nvtx, ops, transfers, Context, DeviceBuffer};
-    use ops::{activation, elementwise, gemm, norm};
+    use ops::{elementwise, gemm, norm, pointwise};
 
     use crate::qwen_drive::config::QwenDriveConfig;
     use crate::qwen_drive::weights::bf16::VisionDeviceWeights;
@@ -1183,7 +1183,7 @@ pub(super) mod vision {
             } else {
                 let h = gemm::bf16_bias(ctx, &normed, &block.fc1_w, &block.fc1_b)?;
 
-                activation::gelu_tanh(ctx, &h)?
+                pointwise::gelu_tanh(ctx, &h)?
             };
             if block_idx == 0 {
                 super::dump_attention_probe(ctx, 108, &[("block0_fc1_gelu", &h)])?;
@@ -1238,7 +1238,7 @@ pub(super) mod vision {
         let merged = normed.reshape(vec![rows / factor, cols * factor])?;
         let h = gemm::bf16_bias(ctx, &merged, &weights.merger_fc1_w, &weights.merger_fc1_b)?;
         super::dump_attention_probe(ctx, 112, &[("merger_fc1", &h)])?;
-        let h = activation::gelu_exact(ctx, &h)?;
+        let h = pointwise::gelu_exact(ctx, &h)?;
         super::dump_attention_probe(ctx, 113, &[("merger_gelu", &h)])?;
         let primary = gemm::bf16_bias(ctx, &h, &weights.merger_fc2_w, &weights.merger_fc2_b)?;
         super::dump_attention_probe(ctx, 114, &[("vision_output", &primary)])?;
@@ -1379,7 +1379,7 @@ pub(crate) mod expert {
 
     use crate::qwen_drive::backend::{nvtx, ops, transfers, Context, DeviceBuffer};
     use ops::{
-        activation, attention, elementwise, embedding, gemm, norm, preprocess, quantization,
+        attention, elementwise, embedding, gemm, norm, pointwise, preprocess, quantization,
     };
 
     use crate::qwen_drive::config::{PlanningExpertConfig, QwenDriveConfig};
@@ -1452,7 +1452,7 @@ pub(crate) mod expert {
         } else {
             gemm::bf16_bias(ctx, x, &mlp.fc1_w, &mlp.fc1_b)?
         };
-        let h = activation::silu(ctx, &h)?;
+        let h = pointwise::silu(ctx, &h)?;
         if mlp.checkpoint_layout {
             gemm::bf16_addmv(
                 ctx,
@@ -1608,7 +1608,7 @@ pub(crate) mod expert {
             let time_condition = mlp(ctx, &weights.time_mlp, &time_embedding)?;
             let condition = elementwise::add(ctx, &time_condition, nav_out)?;
             let condition = elementwise::add(ctx, &condition, ego_out)?;
-            let condition_silu = activation::silu(ctx, &condition)?;
+            let condition_silu = pointwise::silu(ctx, &condition)?;
             if condition_silu.dtype() != DType::BF16
                 || condition_silu.shape().dims() != [1, hidden_size]
             {
@@ -2070,7 +2070,7 @@ pub(crate) mod expert {
             hidden = residual_norm.hidden;
             let x2 = residual_norm.normalized;
             let gu = gemm::bf16(ctx, &x2, &layer.gate_up_w)?;
-            let act = activation::swiglu_bf16_rounded(ctx, &gu)?;
+            let act = pointwise::swiglu_bf16_rounded(ctx, &gu)?;
             let down = gemm::bf16(ctx, &act, &layer.down_w)?;
 
             if let Some(next) = weights.layers.get(layer_index + 1) {
