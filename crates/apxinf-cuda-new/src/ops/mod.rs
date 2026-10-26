@@ -16,6 +16,13 @@ pub mod rope;
 pub mod sampling;
 pub(crate) mod validation;
 mod volume;
+pub mod mlp;
+mod attn_ops;
+mod model;
+mod moe;
+mod qwen35_attention;
+mod qwen35_mixers;
+mod qwen35_mtp;
 
 // Keep these crate-private aliases while graph/workspace and unit tests still
 // refer to the GEMM implementation through `crate::ops`.
@@ -62,6 +69,13 @@ pub use gemm::{
     GemmQuantization, GemmSwiGluArgs, GemmWeightLayout, GemvArgs, GemvBiasArgs, GemvBlockScales,
     RepackedWeight, WeightVersion,
 };
+pub use mlp::{fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu, rms_norm};
+pub use moe::{
+    combine_reference as routed_moe_combine_reference, route_topk_reference, routed_moe_combine,
+    routed_moe_nvfp4_experts, routed_moe_route, ExpertAssignment, Nvfp4ExpertProjection, RoutePlan,
+    RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs,
+    RoutedMoeSemantic, SharedExpertOutput,
+};
 pub use norm::{
     channel_l2_norm, channel_l2_norm_silu, fused_add_channel_l2_norm_silu, fused_add_norm,
     residual_add, Affine, BiasOrder, ChannelL2NormArgs, FusedAddChannelL2NormArgs,
@@ -77,6 +91,29 @@ pub use quantization::{
     QuantizationSemantic, ScaleLayout,
 };
 pub use rope::apply_vision_2d as rope_apply_vision_2d;
+pub use qwen35_attention::{
+    decode_e4m3, encode_e4m3, qwen35_attention_fp8, qwen35_attention_reference,
+    Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput, Qwen35AttentionScratch,
+    Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales,
+    FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
+    QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_Q_HEADS,
+    QWEN35_ATTENTION_Q_PROJECTION_WIDTH, QWEN35_ATTENTION_RMS_EPSILON,
+    QWEN35_ATTENTION_ROTARY_DIM,
+};
+pub use qwen35_mixers::{
+    qwen35_gdn_decode, qwen35_gdn_prefill, Qwen35GdnCakeScratch, Qwen35GdnCoreWeights,
+    Qwen35GdnDecodeArgs, Qwen35GdnDecodeScratch, Qwen35GdnPrefillArgs, Qwen35GdnPrefillScratch,
+    Qwen35GdnState, QWEN35_GDN_CONV_WIDTH, QWEN35_GDN_EPSILON, QWEN35_GDN_HEAD_DIM,
+    QWEN35_GDN_KEY_HEADS, QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_Q_WIDTH,
+    QWEN35_GDN_SCAN_CHUNK, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_VALUE_WIDTH,
+};
+pub use qwen35_mtp::{
+    qwen35_mtp_moe, qwen35_mtp_moe_reference, Qwen35MtpMoeArgs, Qwen35MtpMoeScratch,
+    Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput,
+    Qwen35MtpReferenceWeights, QWEN35_MTP_DRAFT_STEPS, QWEN35_MTP_EXPERTS,
+    QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_LAYERS,
+    QWEN35_MTP_TOP_K, QWEN35_MTP_VOCAB_SIZE,
+};
 pub use rope::{
     decode_rope, decode_rotation, execute_batched as rope_apply_batched,
     execute_mrope as rope_apply_mrope, multimodal_rope, partial_rope, rms_norm_apply_precomputed,

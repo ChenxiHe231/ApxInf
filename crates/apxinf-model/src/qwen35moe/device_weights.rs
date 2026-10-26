@@ -1,0 +1,736 @@
+//! CUDA-resident weight layout for Qwen3.5-35B-A3B.
+//!
+//! The checkpoint loader deliberately preserves checkpoint-native tensors:
+//! dense weights are `[N, K]`, and every routed expert is a separate tensor.
+//! cuda-new's GEMM contract consumes dense weights as `[K, N]`, while its
+//! routed-NVFP4 operator consumes one expert-major allocation per projection.
+//! This module performs those fixed transformations once, during model load.
+
+use std::path::Path;
+
+use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
+use apxinf_cuda_new::{transfers, CudaContext};
+
+use super::architecture::{MixerKind, Qwen35MoeArchitecture};
+use super::config::Qwen35MoeConfig;
+use super::loader::{load_qwen35_layer, load_qwen35_mtp, ManifestAccess, Qwen35SafetensorsLoader};
+use super::runtime_weights::{
+    AttentionWeights, DenseLinearWeights, GdnWeights, MixerWeights, Nvfp4LinearWeights,
+    Qwen35LayerWeights, Qwen35MtpLayerWeights, Qwen35MtpWeights, Qwen35RuntimeWeights,
+    RoutedMoeWeights,
+};
+
+const NVFP4_BLOCK_SIZE: usize = 16;
+
+/// A BF16 linear operand in cuda-new GEMM's canonical `[K, N]` layout.
+#[derive(Debug)]
+pub struct DeviceDenseLinear {
+    pub weight: Tensor,
+    pub input_features: usize,
+    pub output_features: usize,
+}
+
+/// One checkpoint-native ModelOpt NVFP4 projection on CUDA.
+#[derive(Debug)]
+pub struct DeviceNvfp4Linear {
+    /// Packed E2M1 pairs, `[N, K / 2]`.
+    pub packed_weight: Tensor,
+    /// Unsigned-E4M3 block scales, `[N, K / 16]`, row-major.
+    pub block_scales: Tensor,
+    /// Static activation scale retained for a future quantized GEMM candidate.
+    pub input_scale: f32,
+    /// Per-tensor weight scale consumed by the current BF16-input correctness
+    /// candidate.
+    pub weight_scale_2: Tensor,
+    pub input_features: usize,
+    pub output_features: usize,
+}
+
+/// One projection from all routed experts, packed into expert-major storage.
+#[derive(Debug)]
+pub struct DeviceNvfp4ExpertProjection {
+    /// `[experts, N, K / 2]`.
+    pub packed_weight: Tensor,
+    /// `[experts, N, K / 16]`, row-major.
+    pub block_scales: Tensor,
+    /// `[experts]`; kept because an optimized quantized-input candidate needs
+    /// the exact per-expert activation scale rather than one guessed value.
+    pub input_scales: Tensor,
+    /// `[experts]`; this is `Nvfp4ExpertProjection::alpha` for the current
+    /// BF16-input routed-MoE CUDA semantic.
+    pub weight_scales_2: Tensor,
+    pub experts: usize,
+    pub input_features: usize,
+    pub output_features: usize,
+}
+
+#[derive(Debug)]
+pub struct DeviceNvfp4Moe {
+    pub router: DeviceDenseLinear,
+    pub expert_gate: DeviceNvfp4ExpertProjection,
+    pub expert_up: DeviceNvfp4ExpertProjection,
+    pub expert_down: DeviceNvfp4ExpertProjection,
+    pub shared_gate: DeviceNvfp4Linear,
+    pub shared_up: DeviceNvfp4Linear,
+    pub shared_down: DeviceNvfp4Linear,
+    pub shared_expert_gate: DeviceDenseLinear,
+}
+
+/// BF16 MTP experts are packed by projection and remain `[E, K, N]`, the
+/// native selected-expert layout consumed by `qwen35_mtp_moe`.
+#[derive(Debug)]
+pub struct DeviceDenseExpertProjection {
+    pub weight: Tensor,
+    pub experts: usize,
+    pub input_features: usize,
+    pub output_features: usize,
+}
+
+#[derive(Debug)]
+pub struct DeviceDenseMoe {
+    pub router: DeviceDenseLinear,
+    pub expert_gate: DeviceDenseExpertProjection,
+    pub expert_up: DeviceDenseExpertProjection,
+    pub expert_down: DeviceDenseExpertProjection,
+    pub shared_gate: DeviceDenseLinear,
+    pub shared_up: DeviceDenseLinear,
+    pub shared_down: DeviceDenseLinear,
+    pub shared_expert_gate: DeviceDenseLinear,
+}
+
+#[derive(Debug)]
+pub struct DeviceAttentionWeights {
+    pub q_proj: DeviceDenseLinear,
+    pub k_proj: DeviceDenseLinear,
+    pub v_proj: DeviceDenseLinear,
+    pub o_proj: DeviceDenseLinear,
+    pub q_norm: Tensor,
+    pub k_norm: Tensor,
+    pub kv_cache_scales: Option<super::runtime_weights::KvCacheScales>,
+}
+
+#[derive(Debug)]
+pub struct DeviceGdnWeights {
+    pub a_log: Tensor,
+    pub conv1d: Tensor,
+    pub dt_bias: Tensor,
+    pub in_proj_a: DeviceDenseLinear,
+    pub in_proj_b: DeviceDenseLinear,
+    pub in_proj_qkv: DeviceDenseLinear,
+    pub in_proj_z: DeviceDenseLinear,
+    pub norm: Tensor,
+    pub out_proj: DeviceDenseLinear,
+}
+
+#[derive(Debug)]
+pub enum DeviceMixerWeights {
+    Gdn(DeviceGdnWeights),
+    FullAttention(DeviceAttentionWeights),
+}
+
+#[derive(Debug)]
+pub struct DeviceLayerWeights {
+    pub input_layernorm: Tensor,
+    pub post_attention_layernorm: Tensor,
+    pub mixer: DeviceMixerWeights,
+    pub moe: DeviceNvfp4Moe,
+}
+
+#[derive(Debug)]
+pub struct DeviceMtpLayerWeights {
+    pub input_layernorm: Tensor,
+    pub post_attention_layernorm: Tensor,
+    pub attention: DeviceAttentionWeights,
+    pub moe: DeviceDenseMoe,
+}
+
+#[derive(Debug)]
+pub struct DeviceMtpWeights {
+    pub pre_fc_norm_embedding: Tensor,
+    pub pre_fc_norm_hidden: Tensor,
+    pub fc: DeviceDenseLinear,
+    pub norm: Tensor,
+    pub layer: DeviceMtpLayerWeights,
+}
+
+/// Complete resident weight tree. No CPU tensor is retained by this object.
+#[derive(Debug)]
+pub struct Qwen35DeviceWeights {
+    pub embedding: Tensor,
+    pub layers: Vec<DeviceLayerWeights>,
+    pub final_norm: Tensor,
+    /// `[hidden, vocab]`, ready for cuda-new GEMM.
+    pub lm_head: Tensor,
+    pub mtp: DeviceMtpWeights,
+}
+
+/// Validate, transform, and upload the complete text+MTP weight tree.
+///
+/// This operation intentionally consumes the host tree so individual source
+/// tensors can be released after their device representation is materialized.
+/// It does not catch CUDA OOM: the caller receives the original allocation
+/// error, which is important on DRIVE guests with a restricted GPU carveout.
+pub fn upload_qwen35_device_weights(
+    ctx: &CudaContext,
+    config: &Qwen35MoeConfig,
+    host: Qwen35RuntimeWeights<Tensor>,
+) -> Result<Qwen35DeviceWeights> {
+    host.validate_against(config)?;
+    let architecture = Qwen35MoeArchitecture::from_config(config)?;
+
+    let Qwen35RuntimeWeights {
+        embedding,
+        layers,
+        final_norm,
+        lm_head,
+        mtp,
+    } = host;
+    if layers.len() != architecture.layers.len() {
+        return Err(invalid("Qwen3.5 device upload layer count mismatch"));
+    }
+
+    let embedding = upload_unchanged(ctx, embedding)?;
+    let final_norm = upload_unchanged(ctx, final_norm)?;
+    let lm_head = transpose_and_upload_bf16(
+        ctx,
+        lm_head,
+        architecture.vocab_size,
+        architecture.hidden_size,
+        "lm_head",
+    )?;
+
+    let mut device_layers = Vec::with_capacity(layers.len());
+    for (weights, layer) in layers.into_iter().zip(&architecture.layers) {
+        device_layers.push(upload_layer(ctx, weights, layer.mixer)?);
+    }
+
+    Ok(Qwen35DeviceWeights {
+        embedding,
+        layers: device_layers,
+        final_norm,
+        lm_head,
+        mtp: upload_mtp(ctx, mtp)?,
+    })
+}
+
+/// Header-validate the exact checkpoint, then materialize and upload one
+/// language-model layer at a time. The SafeTensors payload remains mmap-backed
+/// until an individual tensor is requested, and visual tensors are never
+/// copied into anonymous host memory.
+pub fn load_qwen35_device_weights_from_path(
+    ctx: &CudaContext,
+    config: &Qwen35MoeConfig,
+    path: &Path,
+) -> Result<Qwen35DeviceWeights> {
+    let architecture = Qwen35MoeArchitecture::from_config(config)?;
+    let mut loader = Qwen35SafetensorsLoader::open(config, path)?;
+
+    let embedding = upload_unchanged(
+        ctx,
+        loader.take("model.language_model.embed_tokens.weight")?,
+    )?;
+    let final_norm = upload_unchanged(ctx, loader.take("model.language_model.norm.weight")?)?;
+    let lm_head = transpose_and_upload_bf16(
+        ctx,
+        loader.take("lm_head.weight")?,
+        architecture.vocab_size,
+        architecture.hidden_size,
+        "lm_head",
+    )?;
+
+    let mut layers = Vec::with_capacity(architecture.layers.len());
+    for layer in &architecture.layers {
+        let host_layer = load_qwen35_layer(&mut loader, layer, architecture.hidden_size)?;
+        layers.push(upload_layer(ctx, host_layer, layer.mixer)?);
+    }
+    let mtp = upload_mtp(
+        ctx,
+        load_qwen35_mtp(&mut loader, &architecture, architecture.hidden_size)?,
+    )?;
+    let _payload_bytes_copied = loader.finish()?;
+
+    Ok(Qwen35DeviceWeights {
+        embedding,
+        layers,
+        final_norm,
+        lm_head,
+        mtp,
+    })
+}
+
+fn upload_layer(
+    ctx: &CudaContext,
+    weights: Qwen35LayerWeights<Tensor>,
+    expected_mixer: MixerKind,
+) -> Result<DeviceLayerWeights> {
+    let Qwen35LayerWeights {
+        input_layernorm,
+        post_attention_layernorm,
+        mixer,
+        moe,
+    } = weights;
+    let mixer = match (mixer, expected_mixer) {
+        (MixerWeights::Gdn(weights), MixerKind::Gdn(_)) => {
+            DeviceMixerWeights::Gdn(upload_gdn(ctx, weights)?)
+        }
+        (MixerWeights::FullAttention(weights), MixerKind::FullAttention(_)) => {
+            DeviceMixerWeights::FullAttention(upload_attention(ctx, weights)?)
+        }
+        _ => {
+            return Err(invalid(
+                "Qwen3.5 device upload mixer does not match architecture",
+            ));
+        }
+    };
+    Ok(DeviceLayerWeights {
+        input_layernorm: upload_unchanged(ctx, input_layernorm)?,
+        post_attention_layernorm: upload_unchanged(ctx, post_attention_layernorm)?,
+        mixer,
+        moe: upload_nvfp4_moe(ctx, moe)?,
+    })
+}
+
+fn upload_mtp(ctx: &CudaContext, weights: Qwen35MtpWeights<Tensor>) -> Result<DeviceMtpWeights> {
+    let Qwen35MtpWeights {
+        pre_fc_norm_embedding,
+        pre_fc_norm_hidden,
+        fc,
+        norm,
+        layer,
+    } = weights;
+    let Qwen35MtpLayerWeights {
+        input_layernorm,
+        post_attention_layernorm,
+        attention,
+        moe,
+    } = layer;
+    Ok(DeviceMtpWeights {
+        pre_fc_norm_embedding: upload_unchanged(ctx, pre_fc_norm_embedding)?,
+        pre_fc_norm_hidden: upload_unchanged(ctx, pre_fc_norm_hidden)?,
+        fc: upload_dense(ctx, fc, "MTP fc")?,
+        norm: upload_unchanged(ctx, norm)?,
+        layer: DeviceMtpLayerWeights {
+            input_layernorm: upload_unchanged(ctx, input_layernorm)?,
+            post_attention_layernorm: upload_unchanged(ctx, post_attention_layernorm)?,
+            attention: upload_attention(ctx, attention)?,
+            moe: upload_dense_moe(ctx, moe)?,
+        },
+    })
+}
+
+fn upload_attention(
+    ctx: &CudaContext,
+    weights: AttentionWeights<Tensor>,
+) -> Result<DeviceAttentionWeights> {
+    Ok(DeviceAttentionWeights {
+        q_proj: upload_dense(ctx, weights.q_proj, "attention q_proj")?,
+        k_proj: upload_dense(ctx, weights.k_proj, "attention k_proj")?,
+        v_proj: upload_dense(ctx, weights.v_proj, "attention v_proj")?,
+        o_proj: upload_dense(ctx, weights.o_proj, "attention o_proj")?,
+        q_norm: upload_unchanged(ctx, weights.q_norm)?,
+        k_norm: upload_unchanged(ctx, weights.k_norm)?,
+        kv_cache_scales: weights.kv_cache_scales,
+    })
+}
+
+fn upload_gdn(ctx: &CudaContext, weights: GdnWeights<Tensor>) -> Result<DeviceGdnWeights> {
+    let qkv_width = weights.in_proj_qkv.output_features;
+    let conv_kernel = *weights
+        .conv1d
+        .shape()
+        .dims()
+        .get(2)
+        .ok_or_else(|| invalid("GDN conv1d checkpoint tensor must be rank 3"))?;
+    Ok(DeviceGdnWeights {
+        a_log: upload_unchanged(ctx, weights.a_log)?,
+        // Keep the public cuda-new contract `[channels, 1, kernel]`. The GDN
+        // adapter creates a byte-identical `[channels, kernel]` view only at
+        // the native causal-convolution boundary.
+        conv1d: {
+            validate_cpu_tensor(
+                &weights.conv1d,
+                DType::BF16,
+                &[qkv_width, 1, conv_kernel],
+                "GDN conv1d",
+            )?;
+            upload_unchanged(ctx, weights.conv1d)?
+        },
+        dt_bias: upload_unchanged(ctx, weights.dt_bias)?,
+        in_proj_a: upload_dense(ctx, weights.in_proj_a, "GDN in_proj_a")?,
+        in_proj_b: upload_dense(ctx, weights.in_proj_b, "GDN in_proj_b")?,
+        in_proj_qkv: upload_dense(ctx, weights.in_proj_qkv, "GDN in_proj_qkv")?,
+        in_proj_z: upload_dense(ctx, weights.in_proj_z, "GDN in_proj_z")?,
+        norm: upload_unchanged(ctx, weights.norm)?,
+        out_proj: upload_dense(ctx, weights.out_proj, "GDN out_proj")?,
+    })
+}
+
+fn upload_nvfp4_moe(
+    ctx: &CudaContext,
+    weights: RoutedMoeWeights<Tensor, Nvfp4LinearWeights<Tensor>>,
+) -> Result<DeviceNvfp4Moe> {
+    let RoutedMoeWeights {
+        router,
+        experts,
+        shared_expert,
+        shared_expert_gate,
+    } = weights;
+    if experts.is_empty() {
+        return Err(invalid("Qwen3.5 routed expert set is empty"));
+    }
+    let mut gate = Vec::with_capacity(experts.len());
+    let mut up = Vec::with_capacity(experts.len());
+    let mut down = Vec::with_capacity(experts.len());
+    for expert in experts {
+        gate.push(expert.gate_proj);
+        up.push(expert.up_proj);
+        down.push(expert.down_proj);
+    }
+    Ok(DeviceNvfp4Moe {
+        router: upload_dense(ctx, router, "MoE router")?,
+        expert_gate: upload_nvfp4_expert_projection(ctx, gate, "expert gate")?,
+        expert_up: upload_nvfp4_expert_projection(ctx, up, "expert up")?,
+        expert_down: upload_nvfp4_expert_projection(ctx, down, "expert down")?,
+        shared_gate: upload_nvfp4(ctx, shared_expert.gate_proj, "shared expert gate")?,
+        shared_up: upload_nvfp4(ctx, shared_expert.up_proj, "shared expert up")?,
+        shared_down: upload_nvfp4(ctx, shared_expert.down_proj, "shared expert down")?,
+        shared_expert_gate: upload_dense(ctx, shared_expert_gate, "shared expert gate scalar")?,
+    })
+}
+
+fn upload_dense_moe(
+    ctx: &CudaContext,
+    weights: RoutedMoeWeights<Tensor, DenseLinearWeights<Tensor>>,
+) -> Result<DeviceDenseMoe> {
+    let RoutedMoeWeights {
+        router,
+        experts,
+        shared_expert,
+        shared_expert_gate,
+    } = weights;
+    if experts.is_empty() {
+        return Err(invalid("Qwen3.5 MTP expert set is empty"));
+    }
+    let mut gate = Vec::with_capacity(experts.len());
+    let mut up = Vec::with_capacity(experts.len());
+    let mut down = Vec::with_capacity(experts.len());
+    for expert in experts {
+        gate.push(expert.gate_proj);
+        up.push(expert.up_proj);
+        down.push(expert.down_proj);
+    }
+    Ok(DeviceDenseMoe {
+        router: upload_dense(ctx, router, "MTP MoE router")?,
+        expert_gate: upload_dense_expert_projection(ctx, gate, "MTP expert gate")?,
+        expert_up: upload_dense_expert_projection(ctx, up, "MTP expert up")?,
+        expert_down: upload_dense_expert_projection(ctx, down, "MTP expert down")?,
+        shared_gate: upload_dense(ctx, shared_expert.gate_proj, "MTP shared gate")?,
+        shared_up: upload_dense(ctx, shared_expert.up_proj, "MTP shared up")?,
+        shared_down: upload_dense(ctx, shared_expert.down_proj, "MTP shared down")?,
+        shared_expert_gate: upload_dense(ctx, shared_expert_gate, "MTP shared expert gate")?,
+    })
+}
+
+fn upload_dense(
+    ctx: &CudaContext,
+    weights: DenseLinearWeights<Tensor>,
+    label: &str,
+) -> Result<DeviceDenseLinear> {
+    let weight = transpose_and_upload_bf16(
+        ctx,
+        weights.weight,
+        weights.output_features,
+        weights.input_features,
+        label,
+    )?;
+    Ok(DeviceDenseLinear {
+        weight,
+        input_features: weights.input_features,
+        output_features: weights.output_features,
+    })
+}
+
+fn upload_nvfp4(
+    ctx: &CudaContext,
+    weights: Nvfp4LinearWeights<Tensor>,
+    label: &str,
+) -> Result<DeviceNvfp4Linear> {
+    weights.validate()?;
+    validate_cpu_tensor(
+        &weights.packed_weight,
+        DType::E2M1Pair,
+        &[weights.output_features, weights.input_features / 2],
+        &format!("{label} packed weight"),
+    )?;
+    validate_cpu_tensor(
+        &weights.block_scales,
+        DType::F8E4M3,
+        &[
+            weights.output_features,
+            weights.input_features / NVFP4_BLOCK_SIZE,
+        ],
+        &format!("{label} block scales"),
+    )?;
+    Ok(DeviceNvfp4Linear {
+        packed_weight: upload_unchanged(ctx, weights.packed_weight)?,
+        block_scales: upload_unchanged(ctx, weights.block_scales)?,
+        input_scale: weights.input_scale,
+        weight_scale_2: upload_f32(ctx, &[weights.weight_scale_2])?,
+        input_features: weights.input_features,
+        output_features: weights.output_features,
+    })
+}
+
+fn upload_nvfp4_expert_projection(
+    ctx: &CudaContext,
+    weights: Vec<Nvfp4LinearWeights<Tensor>>,
+    label: &str,
+) -> Result<DeviceNvfp4ExpertProjection> {
+    let experts = weights.len();
+    let first = weights
+        .first()
+        .ok_or_else(|| invalid(format!("{label} has no experts")))?;
+    let input_features = first.input_features;
+    let output_features = first.output_features;
+    let mut packed = Vec::with_capacity(experts);
+    let mut scales = Vec::with_capacity(experts);
+    let mut input_scales = Vec::with_capacity(experts);
+    let mut weight_scales_2 = Vec::with_capacity(experts);
+    for weight in weights {
+        weight.validate()?;
+        if weight.input_features != input_features || weight.output_features != output_features {
+            return Err(invalid(format!(
+                "{label} expert projection geometries differ"
+            )));
+        }
+        packed.push(weight.packed_weight);
+        scales.push(weight.block_scales);
+        input_scales.push(weight.input_scale);
+        weight_scales_2.push(weight.weight_scale_2);
+    }
+    let packed_weight = stack_and_upload(
+        ctx,
+        packed,
+        DType::E2M1Pair,
+        &[output_features, input_features / 2],
+        &[experts, output_features, input_features / 2],
+        &format!("{label} packed weights"),
+    )?;
+    let block_scales = stack_and_upload(
+        ctx,
+        scales,
+        DType::F8E4M3,
+        &[output_features, input_features / NVFP4_BLOCK_SIZE],
+        &[experts, output_features, input_features / NVFP4_BLOCK_SIZE],
+        &format!("{label} block scales"),
+    )?;
+    Ok(DeviceNvfp4ExpertProjection {
+        packed_weight,
+        block_scales,
+        input_scales: upload_f32(ctx, &input_scales)?,
+        weight_scales_2: upload_f32(ctx, &weight_scales_2)?,
+        experts,
+        input_features,
+        output_features,
+    })
+}
+
+fn upload_dense_expert_projection(
+    ctx: &CudaContext,
+    weights: Vec<DenseLinearWeights<Tensor>>,
+    label: &str,
+) -> Result<DeviceDenseExpertProjection> {
+    let experts = weights.len();
+    let first = weights
+        .first()
+        .ok_or_else(|| invalid(format!("{label} has no experts")))?;
+    let input_features = first.input_features;
+    let output_features = first.output_features;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(
+            experts
+                .checked_mul(input_features)
+                .and_then(|value| value.checked_mul(output_features))
+                .and_then(|value| value.checked_mul(DType::BF16.size_in_bytes()))
+                .ok_or_else(|| invalid(format!("{label} byte size overflow")))?,
+        )
+        .map_err(|error| invalid(format!("allocate {label} staging: {error}")))?;
+    for weight in weights {
+        if weight.input_features != input_features || weight.output_features != output_features {
+            return Err(invalid(format!(
+                "{label} expert projection geometries differ"
+            )));
+        }
+        let transposed =
+            transpose_bf16_bytes(weight.weight, output_features, input_features, label)?;
+        bytes.extend_from_slice(&transposed);
+    }
+    let host = Tensor::from_raw(
+        Shape::new(vec![experts, input_features, output_features]),
+        DType::BF16,
+        Device::Cpu,
+        bytes,
+    )?;
+    Ok(DeviceDenseExpertProjection {
+        weight: transfers::to_cuda(&host, ctx.device_id())?,
+        experts,
+        input_features,
+        output_features,
+    })
+}
+
+fn transpose_and_upload_bf16(
+    ctx: &CudaContext,
+    tensor: Tensor,
+    rows: usize,
+    columns: usize,
+    label: &str,
+) -> Result<Tensor> {
+    let bytes = transpose_bf16_bytes(tensor, rows, columns, label)?;
+    let host = Tensor::from_raw(
+        Shape::new(vec![columns, rows]),
+        DType::BF16,
+        Device::Cpu,
+        bytes,
+    )?;
+    transfers::to_cuda(&host, ctx.device_id())
+}
+
+fn transpose_bf16_bytes(
+    tensor: Tensor,
+    rows: usize,
+    columns: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    validate_cpu_tensor(&tensor, DType::BF16, &[rows, columns], label)?;
+    let source = cpu_bytes(&tensor, label)?;
+    let element = DType::BF16.size_in_bytes();
+    let mut transposed = vec![0u8; source.len()];
+    for row in 0..rows {
+        for column in 0..columns {
+            let from = (row * columns + column) * element;
+            let to = (column * rows + row) * element;
+            transposed[to..to + element].copy_from_slice(&source[from..from + element]);
+        }
+    }
+    Ok(transposed)
+}
+
+fn stack_and_upload(
+    ctx: &CudaContext,
+    tensors: Vec<Tensor>,
+    dtype: DType,
+    each_shape: &[usize],
+    stacked_shape: &[usize],
+    label: &str,
+) -> Result<Tensor> {
+    let expected = stacked_shape
+        .iter()
+        .try_fold(dtype.size_in_bytes(), |bytes, dimension| {
+            bytes.checked_mul(*dimension)
+        })
+        .ok_or_else(|| invalid(format!("{label} byte size overflow")))?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(expected)
+        .map_err(|error| invalid(format!("allocate {label} staging: {error}")))?;
+    for tensor in tensors {
+        validate_cpu_tensor(&tensor, dtype, each_shape, label)?;
+        bytes.extend_from_slice(cpu_bytes(&tensor, label)?);
+    }
+    if bytes.len() != expected {
+        return Err(invalid(format!(
+            "{label} stacked byte size mismatch: expected {expected}, got {}",
+            bytes.len()
+        )));
+    }
+    let host = Tensor::from_raw(
+        Shape::new(stacked_shape.to_vec()),
+        dtype,
+        Device::Cpu,
+        bytes,
+    )?;
+    transfers::to_cuda(&host, ctx.device_id())
+}
+
+fn upload_f32(ctx: &CudaContext, values: &[f32]) -> Result<Tensor> {
+    let host = Tensor::from_f32(vec![values.len()], values)?;
+    transfers::to_cuda(&host, ctx.device_id())
+}
+
+fn upload_unchanged(ctx: &CudaContext, tensor: Tensor) -> Result<Tensor> {
+    if tensor.device() != Device::Cpu {
+        return Err(invalid("Qwen3.5 device upload expects CPU source tensors"));
+    }
+    transfers::to_cuda(&tensor, ctx.device_id())
+}
+
+fn validate_cpu_tensor(tensor: &Tensor, dtype: DType, shape: &[usize], label: &str) -> Result<()> {
+    if tensor.device() != Device::Cpu || tensor.dtype() != dtype || tensor.shape().dims() != shape {
+        return Err(invalid(format!(
+            "{label} expected CPU {dtype} {shape:?}, got {:?} {} {:?}",
+            tensor.device(),
+            tensor.dtype(),
+            tensor.shape().dims()
+        )));
+    }
+    Ok(())
+}
+
+fn cpu_bytes<'a>(tensor: &'a Tensor, label: &str) -> Result<&'a [u8]> {
+    tensor
+        .storage()
+        .as_cpu()
+        .ok_or_else(|| invalid(format!("{label} is not backed by CPU storage")))
+}
+
+fn invalid(message: impl Into<String>) -> Error {
+    Error::Other(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use half::bf16;
+
+    use super::*;
+
+    #[test]
+    fn dense_checkpoint_weight_is_physically_transposed_to_gemm_layout() {
+        let values = (0..6)
+            .map(|value| bf16::from_f32(value as f32))
+            .collect::<Vec<_>>();
+        let tensor = Tensor::from_bf16(vec![2, 3], &values).unwrap();
+        let bytes = transpose_bf16_bytes(tensor, 2, 3, "test").unwrap();
+        let tensor =
+            Tensor::from_raw(Shape::new(vec![3, 2]), DType::BF16, Device::Cpu, bytes).unwrap();
+        let actual = tensor
+            .as_bf16()
+            .unwrap()
+            .iter()
+            .map(|value| value.to_f32())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, vec![0.0, 3.0, 1.0, 4.0, 2.0, 5.0]);
+    }
+
+    #[test]
+    fn dense_transpose_rejects_shape_or_dtype_drift() {
+        let wrong_shape = Tensor::from_bf16(vec![3, 2], &[bf16::ZERO; 6]).unwrap();
+        assert!(transpose_bf16_bytes(wrong_shape, 2, 3, "shape").is_err());
+        let wrong_dtype = Tensor::from_f32(vec![2, 3], &[0.0; 6]).unwrap();
+        assert!(transpose_bf16_bytes(wrong_dtype, 2, 3, "dtype").is_err());
+    }
+
+    #[test]
+    fn gdn_conv_keeps_the_public_three_dimensional_contract() {
+        let values = (0..8)
+            .map(|value| bf16::from_f32(value as f32))
+            .collect::<Vec<_>>();
+        let source = Tensor::from_bf16(vec![2, 1, 4], &values).unwrap();
+        validate_cpu_tensor(&source, DType::BF16, &[2, 1, 4], "GDN conv").unwrap();
+        assert_eq!(source.shape().dims(), &[2, 1, 4]);
+        assert_eq!(source.as_bf16().unwrap(), values.as_slice());
+
+        assert!(validate_cpu_tensor(&source, DType::BF16, &[2, 4], "GDN conv").is_err());
+    }
+}

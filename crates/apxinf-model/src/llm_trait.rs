@@ -160,6 +160,34 @@ impl GenerationOutput {
     }
 }
 
+/// Read-only statistics for the most recently completed speculative request.
+///
+/// `None` from [`LlmTrait::speculative_generation_stats`] means that the last
+/// request did not use a speculative path (or that the model does not expose
+/// one).  Rows rolled back here are target rows that were computed during a
+/// verification window but were not committed to the visible sequence.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SpeculativeGenerationStats {
+    pub implementation: &'static str,
+    pub draft_steps: usize,
+    pub rounds: usize,
+    pub zero_accept_rounds: usize,
+    pub partial_accept_rounds: usize,
+    pub full_accept_rounds: usize,
+    pub proposed_tokens: usize,
+    pub verified_accepted_tokens: usize,
+    pub committed_accepted_tokens: usize,
+    pub correction_tokens: usize,
+    pub bonus_tokens: usize,
+    pub emitted_tokens: usize,
+    pub target_verified_rows: usize,
+    pub target_committed_rows: usize,
+    pub target_rolled_back_rows: usize,
+    pub proposed_by_depth: Vec<usize>,
+    pub matched_by_depth: Vec<usize>,
+    pub accepted_prefix_by_depth: Vec<usize>,
+}
+
 /// Common interface for all LLM implementations.
 pub trait LlmTrait {
     /// Load model weights and configure for the given device.
@@ -184,6 +212,13 @@ pub trait LlmTrait {
     /// [`TextPreparationState::RuntimeManaged`], which is not an explicit Ready.
     fn preparation_status(&self) -> TextPreparationStatus {
         TextPreparationStatus::default()
+    }
+
+    /// Snapshot diagnostics for the most recently completed speculative
+    /// request. Implementations must return real runtime counters or `None`;
+    /// callers must not infer acceptance from throughput or token count.
+    fn speculative_generation_stats(&self) -> Option<SpeculativeGenerationStats> {
+        None
     }
 
     /// Process a complete prompt and return its logits.

@@ -397,6 +397,10 @@ fn main() {
         "conv3d.cu",
         "recurrence.cu",
         "reduction.cu",
+        "attn_helpers/execution.cpp",
+        "moe.cu",
+        "qwen35_attention.cu",
+        "qwen35_mtp.cu",
     ]
     .map(|source| adapters.join(source))
     .to_vec();

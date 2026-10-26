@@ -1,4 +1,5 @@
 [workspace]
+resolver = "2"
 members = [
     "crates/apxinf-core",
     "crates/apxinf-cpu",
@@ -9,6 +10,7 @@ members = [
     "crates/apxinf-loader",
     "crates/apxinf-model",
     "crates/apxinf-musa",
+    "crates/apxinf-serving",
     "crates/apxinf-tokenizer",
     "crates/apxinf-py",
 ]
@@ -27,12 +29,13 @@ cuda = [
     "dep:apxinf-cuda-new",
     "apxinf-cuda-new/nvtx",
     "apxinf-model/cuda",
+    "apxinf-serving?/cuda",
 ]
 # Same runtime with NVTX compiled out entirely. Keep this separate from
 # `cuda`: enabling `cuda` would also enable apxinf-cuda-new's `nvtx` feature.
-cuda-no-nvtx = ["dep:apxinf-cuda-new", "apxinf-model/cuda"]
+cuda-no-nvtx = ["dep:apxinf-cuda-new", "apxinf-model/cuda", "apxinf-serving?/cuda"]
 # Native Apple Metal execution through an explicitly configured MLX C++ SDK.
-mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "apxinf-model/mlx"]
+mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "apxinf-model/mlx", "apxinf-serving?/mlx"]
 # Metal plus Core ML stages on the Apple Neural Engine (for example Clef on GPU+ANE).
 coreml = ["mlx", "apxinf-model/coreml"]
 # Deprecated alias of `cuda`, kept so existing build commands keep working.
@@ -41,7 +44,7 @@ coreml = ["mlx", "apxinf-model/coreml"]
 cuda-new = ["cuda", "apxinf-model/cuda-new"]
 # AMD ROCm/HIP inference. Independent of `cuda`: both may be enabled, and
 # a process can then hold a CUDA and a HIP backend at once.
-hip = ["dep:apxinf-hip", "apxinf-model/hip"]
+hip = ["dep:apxinf-hip", "apxinf-model/hip", "apxinf-serving?/hip"]
 # Moore Threads MUSA inference. `musa-mttx` adds the profiling markers, kept a
 # separate feature so a deployment that never profiles does not link them.
 musa = ["dep:apxinf-musa", "apxinf-model/musa"]
@@ -49,6 +52,8 @@ musa-mttx = ["musa", "apxinf-musa/mttx"]
 # Optional CPU GEMM acceleration. Requires an installed OpenBLAS library.
 # May be combined with GPU features; OpenBLAS only affects the CPU backend.
 openblas = ["apxinf-cpu/openblas"]
+# Optional OpenAI-compatible HTTP serving.
+server = ["dep:apxinf-serving"]
 
 [dependencies]
 apxinf-core = { path = "crates/apxinf-core" }
@@ -59,6 +64,7 @@ apxinf-hip = { path = "crates/apxinf-hip", optional = true }
 apxinf-musa = { path = "crates/apxinf-musa", optional = true, default-features = false }
 apxinf-loader = { path = "crates/apxinf-loader" }
 apxinf-model = { path = "crates/apxinf-model" }
+apxinf-serving = { path = "crates/apxinf-serving", optional = true }
 apxinf-tokenizer = { path = "crates/apxinf-tokenizer" }
 clap = { version = "=4.5.23", features = ["derive"] }
 serde_json = "1"

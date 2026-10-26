@@ -78,6 +78,64 @@ pub fn copy_cuda_to_cuda(
     }
 }
 
+/// Copy a contiguous CUDA matrix into a column range of another row-major
+/// CUDA matrix. Source and destination must share row count, dtype and device.
+///
+/// This is used by native MTP fusion to form
+/// `[normalized_embedding, normalized_target_hidden]` without staging either
+/// half on the host.
+pub fn copy_cuda_columns(
+    ctx: &crate::CudaContext,
+    source: &Tensor,
+    destination: &Tensor,
+    destination_column: usize,
+) -> Result<()> {
+    let source_dims = source.shape().dims();
+    let destination_dims = destination.shape().dims();
+    if source_dims.len() != 2
+        || destination_dims.len() != 2
+        || source_dims[0] != destination_dims[0]
+        || source.dtype() != destination.dtype()
+        || source.device() != destination.device()
+        || source.device() != Device::Cuda(ctx.device_id())
+        || destination_column
+            .checked_add(source_dims[1])
+            .is_none_or(|end| end > destination_dims[1])
+    {
+        return Err(Error::Other(
+            "CUDA column copy requires compatible row-major matrices".into(),
+        ));
+    }
+    let element = source.dtype().size_in_bytes();
+    let width = source_dims[1]
+        .checked_mul(element)
+        .ok_or_else(|| Error::Other("CUDA column-copy width overflow".into()))?;
+    let source_pitch = width;
+    let destination_pitch = destination_dims[1]
+        .checked_mul(element)
+        .ok_or_else(|| Error::Other("CUDA column-copy pitch overflow".into()))?;
+    let source = CudaBuffer::from_tensor(source).map_err(Error::Cuda)?;
+    let destination = CudaBuffer::from_tensor(destination).map_err(Error::Cuda)?;
+    unsafe {
+        ffi::check_cuda(ffi::cudaMemcpy2DAsync(
+            destination
+                .address()
+                .ptr()
+                .cast::<u8>()
+                .add(destination_column * element)
+                .cast(),
+            destination_pitch,
+            source.address().ptr(),
+            source_pitch,
+            width,
+            source_dims[0],
+            ffi::cudaMemcpyKind::cudaMemcpyDeviceToDevice,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)
+    }
+}
+
 /// Transfer a CUDA tensor back to CPU.
 pub fn to_cpu(tensor: &Tensor) -> Result<Tensor> {
     let handle = match tensor.storage() {

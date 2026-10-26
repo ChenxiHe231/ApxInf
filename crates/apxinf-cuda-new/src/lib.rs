@@ -39,6 +39,22 @@ pub use ops::{
     MultimodalRopeArgs, NormArgs, NormKind, NormNumerics, PointwiseActivation, PointwiseArgs,
     PointwiseSemantic, QkvCacheRopeArgs, QuantOut, QuantizationArgs, QuantizationSemantic,
     ResidualAddArgs, RopeArgs, RopeSemantic, SegmentedAttentionArgs, VisionPositionArgs,
+    Nvfp4ExpertProjection, PackedQkvAttentionArgs,
+    route_topk_reference, routed_moe_combine, routed_moe_combine_reference,
+    routed_moe_nvfp4_experts, routed_moe_route, RoutePlan, RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs,
+    RoutedMoeRouteArgs, RoutedMoeSemantic, SegmentedAttentionArgs, SharedExpertOutput,
+    decode_e4m3, encode_e4m3, qwen35_attention_fp8, qwen35_attention_reference,
+    Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput, Qwen35AttentionScratch,
+    Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales,
+    FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
+    QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_Q_HEADS,
+    QWEN35_ATTENTION_Q_PROJECTION_WIDTH, QWEN35_ATTENTION_RMS_EPSILON,
+    QWEN35_ATTENTION_ROTARY_DIM,
+    qwen35_mtp_moe, qwen35_mtp_moe_reference, Qwen35MtpMoeArgs, Qwen35MtpMoeScratch,
+    Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput,
+    Qwen35MtpReferenceWeights, QWEN35_MTP_DRAFT_STEPS, QWEN35_MTP_EXPERTS,
+    QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_LAYERS,
+    QWEN35_MTP_TOP_K, QWEN35_MTP_VOCAB_SIZE,
 };
 pub use phase::PreparedPhase;
 pub use stream::CudaStream;
