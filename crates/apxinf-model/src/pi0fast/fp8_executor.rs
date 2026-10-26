@@ -209,7 +209,7 @@ pub fn vision_layer_fp8(
     )?;
     let qkv = fp8_projection(ctx, &normalized, &weights.qkv, scales.qkv_input)?;
     let qkv =
-        attention::split_qkv_bias_bf16(ctx, &qkv, weights.qkv.bias.as_ref(), heads, head_dim)?;
+        attention::split_qkv_bias(ctx, &qkv, weights.qkv.bias.as_ref(), heads, head_dim)?;
     let attention = attention::mha_bf16(ctx, &qkv.q, &qkv.k, &qkv.v, patches_per_view)?
         .reshape(vec![input.shape().dims()[0], heads * head_dim])?;
     let projected = fp8_projection(ctx, &attention, &weights.output, scales.attention_output)?;

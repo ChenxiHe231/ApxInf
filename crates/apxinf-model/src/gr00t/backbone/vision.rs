@@ -862,7 +862,7 @@ fn split_vision_qkv(
 ) -> Result<(Tensor, Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        let split = ops::attention::split_qkv_bias_bf16(
+        let split = ops::attention::split_qkv_bias(
             cuda.context(),
             qkv,
             Some(bias),

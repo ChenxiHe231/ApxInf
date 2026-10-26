@@ -378,34 +378,20 @@ impl SmolVlaModel {
             self.config.layer_norm_eps,
         )?;
         let qkv = self.gemm(ctx, &normalized, &weights.qkv.weight)?;
-        let qkv = (if self.fp16_gemm {
-            ops::attention::split_qkv_bias_f16
-        } else {
-            ops::attention::split_qkv_bias_bf16
-        })(
+        let qkv = ops::attention::split_qkv_bias(
             ctx,
             &qkv,
             weights.qkv.bias.as_ref(),
             self.config.vision_heads,
             self.config.vision_width / self.config.vision_heads,
         )?;
-        let attention = if self.fp16_gemm {
-            ops::attention::vision_mha_f16(
-                ctx,
-                &qkv.q,
-                &qkv.k,
-                &qkv.v,
-                self.config.patches_per_view(),
-            )?
-        } else {
-            ops::attention::vision_mha_bf16(
-                ctx,
-                &qkv.q,
-                &qkv.k,
-                &qkv.v,
-                self.config.patches_per_view(),
-            )?
-        }
+        let attention = ops::attention::vision_mha(
+            ctx,
+            &qkv.q,
+            &qkv.k,
+            &qkv.v,
+            self.config.patches_per_view(),
+        )?
         .reshape(vec![input.shape().dims()[0], self.config.vision_width])?;
         let projected =
             self.gemm(ctx, &attention, &weights.attention_output.weight)?;
@@ -532,11 +518,7 @@ impl SmolVlaModel {
                 * (self.config.language_width / self.config.language_heads);
             keys.push(qkv.k.clone().reshape(vec![tokens, kv_width])?);
             values.push(qkv.v.clone().reshape(vec![tokens, kv_width])?);
-            let attention = (if self.fp16_gemm {
-                ops::attention::prefix_gqa_f16
-            } else {
-                ops::attention::prefix_gqa_bf16
-            })(
+            let attention = ops::attention::prefix_gqa(
                 ctx,
                 &qkv.q,
                 &qkv.k,
@@ -817,11 +799,7 @@ impl SmolVlaModel {
             )?
         };
         let prefix_tokens = key.shape().dims()[0];
-        let attention = (if self.fp16_gemm {
-            ops::attention::full_gqa_f16
-        } else {
-            ops::attention::full_gqa_bf16
-        })(
+        let attention = ops::attention::full_gqa(
             ctx,
             &query,
             &key,

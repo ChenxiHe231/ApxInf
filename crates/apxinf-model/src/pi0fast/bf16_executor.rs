@@ -110,7 +110,7 @@ pub fn vision_layer_bf16(
     )?;
     let qkv = gemm::bf16(ctx, &normalized, &weights.qkv.weight)?;
     let qkv =
-        attention::split_qkv_bias_bf16(ctx, &qkv, weights.qkv.bias.as_ref(), heads, head_dim)?;
+        attention::split_qkv_bias(ctx, &qkv, weights.qkv.bias.as_ref(), heads, head_dim)?;
     let attention = attention::mha_bf16(ctx, &qkv.q, &qkv.k, &qkv.v, patches_per_view)?
         .reshape(vec![input.shape().dims()[0], heads * head_dim])?;
     let projection = gemm::bf16(ctx, &attention, &weights.output.weight)?;

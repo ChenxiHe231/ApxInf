@@ -329,9 +329,25 @@ pub fn causal_gqa_bf16(
     dense_attention(ctx, q, k, v, key_tokens, kv_heads, true)
 }
 
-/// `split_qkv_bias_bf16`: split a `[tokens, 3*heads*dim]` packed projection
-/// into Q/K/V with an optional packed bias, no rotation (the vision layout).
-pub fn split_qkv_bias_bf16(
+/// Split a `[tokens, 3*heads*dim]` packed projection into Q/K/V and add an
+/// optional packed bias. The projection dtype selects the unchanged kernel.
+pub fn split_qkv_bias(
+    ctx: &CudaContext,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    heads: usize,
+    head_dim: usize,
+) -> Result<QkvTensors> {
+    match qkv.dtype() {
+        DType::BF16 => split_qkv_bias_bf16(ctx, qkv, bias, heads, head_dim),
+        DType::F16 => split_qkv_bias_f16(ctx, qkv, bias, heads, head_dim),
+        dtype => Err(Error::Other(format!(
+            "QKV split requires F16 or BF16 input, got {dtype}"
+        ))),
+    }
+}
+
+fn split_qkv_bias_bf16(
     ctx: &CudaContext,
     qkv: &Tensor,
     bias: Option<&Tensor>,
@@ -858,8 +874,25 @@ fn row_view(
         .map_err(Error::Cuda)
 }
 
-/// `full_gqa_bf16`: non-causal BF16 GQA for prefix-only cross attention.
-pub fn full_gqa_bf16(
+/// Non-causal GQA for prefix-only cross attention. The input dtype selects
+/// the unchanged BF16 or F16 implementation.
+pub fn full_gqa(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    key_tokens: usize,
+) -> Result<Tensor> {
+    match q.dtype() {
+        DType::BF16 => full_gqa_bf16(ctx, q, k, v, key_tokens),
+        DType::F16 => full_gqa_f16(ctx, q, k, v, key_tokens),
+        dtype => Err(Error::Other(format!(
+            "full GQA requires F16 or BF16 input, got {dtype}"
+        ))),
+    }
+}
+
+fn full_gqa_bf16(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -884,12 +917,28 @@ pub fn full_gqa_bf16(
     noncausal_gqa_bf16(ctx, q, k, v, key_tokens)
 }
 
-/// `prefix_gqa_bf16`: two-block non-causal BF16 GQA used by SmolVLA's prefix.
+/// Two-block non-causal GQA used by SmolVLA's prefix.
 ///
 /// The shared prefix (vision and language) attends only to itself, while the
 /// trailing state tokens attend to both blocks. This mirrors LeRobot's
 /// prefix-LM attention without materializing a full 2-D mask.
-pub fn prefix_gqa_bf16(
+pub fn prefix_gqa(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    shared_tokens: usize,
+) -> Result<Tensor> {
+    match q.dtype() {
+        DType::BF16 => prefix_gqa_bf16(ctx, q, k, v, shared_tokens),
+        DType::F16 => prefix_gqa_f16(ctx, q, k, v, shared_tokens),
+        dtype => Err(Error::Other(format!(
+            "prefix GQA requires F16 or BF16 input, got {dtype}"
+        ))),
+    }
+}
+
+fn prefix_gqa_bf16(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -922,10 +971,27 @@ pub fn prefix_gqa_bf16(
         .reshape(vec![key_tokens, q_shape[1], q_shape[2]])
 }
 
-/// `vision_mha_bf16`: non-causal BF16 vision MHA batched per camera view.
+/// Non-causal vision MHA batched per camera view. The input dtype selects the
+/// unchanged BF16 or F16 implementation.
 /// Routes through the dense per-batch MHA, the same composed route the legacy
 /// non-FA2 builds took.
-pub fn vision_mha_bf16(
+pub fn vision_mha(
+    ctx: &CudaContext,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    tokens_per_batch: usize,
+) -> Result<Tensor> {
+    match q.dtype() {
+        DType::BF16 => vision_mha_bf16(ctx, q, k, v, tokens_per_batch),
+        DType::F16 => vision_mha_f16(ctx, q, k, v, tokens_per_batch),
+        dtype => Err(Error::Other(format!(
+            "vision MHA requires F16 or BF16 input, got {dtype}"
+        ))),
+    }
+}
+
+fn vision_mha_bf16(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -951,7 +1017,7 @@ pub fn vision_mha_bf16(
 }
 
 /// `full_gqa_f16`: non-causal FP16 GQA using Xavier FP16 tensor-core GEMMs.
-pub fn full_gqa_f16(
+fn full_gqa_f16(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -1054,7 +1120,7 @@ pub fn suffix_causal_gqa_f16(
 }
 
 /// `prefix_gqa_f16`: the FP16 two-block prefix attention.
-pub fn prefix_gqa_f16(
+fn prefix_gqa_f16(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -1093,7 +1159,7 @@ pub fn prefix_gqa_f16(
 
 /// `vision_mha_f16`: non-causal FP16 vision MHA that keeps each camera view
 /// independent, composed from per-view cuBLAS GQA like the legacy helper.
-pub fn vision_mha_f16(
+fn vision_mha_f16(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -1138,11 +1204,7 @@ pub fn vision_mha_f16(
         .reshape(vec![shape[0], shape[1], shape[2]])
 }
 
-/// `split_qkv_bias_f16`: split a `[tokens, 3*heads*dim]` packed FP16 vision
-/// projection into Q/K/V with an optional packed bias, no rotation. The
-/// cuda-new RoPE operator's dtype-templated `split_qkv_bias` kernel is the
-/// verbatim legacy kernel.
-pub fn split_qkv_bias_f16(
+fn split_qkv_bias_f16(
     ctx: &CudaContext,
     qkv: &Tensor,
     bias: Option<&Tensor>,

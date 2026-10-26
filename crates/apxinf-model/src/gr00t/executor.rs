@@ -2314,7 +2314,7 @@ fn forward_attention<E: Gr00tPrecisionExecution>(
                 let output = if USE_STRIDED_FUSED_QKV_ATTENTION {
                     noncausal_strided_qkv_attention::<E>(backend, &qkv, heads, head_dim)?
                 } else {
-                    let qkv = ops::attention::split_qkv_bias_bf16(
+                    let qkv = ops::attention::split_qkv_bias(
                         backend.context(),
                         &qkv,
                         None,
