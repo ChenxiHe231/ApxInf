@@ -64,13 +64,6 @@ mod fixed_launchers {
     use crate::ffi::raw::cuda_runtime::{cudaError_t, cudaStream_t};
 
     unsafe extern "C" {
-        pub(crate) fn apxinf_quantization_quantize_bf16_e4m3_packed8(
-            input: *const c_void,
-            output: *mut c_void,
-            count: i64,
-            scale: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
         pub(crate) fn apxinf_quantization_concat_rows_quantize_bf16_e4m3(
             first: *const c_void,
             second: *const c_void,

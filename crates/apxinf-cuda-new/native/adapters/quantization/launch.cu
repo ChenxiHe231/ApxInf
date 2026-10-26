@@ -3,11 +3,16 @@
 
 #include <climits>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 #include <string>
+
+extern "C" cudaError_t apxinf_quantization_quantize_bf16_e4m3_packed8(
+    const void* input, void* output, int64_t count, float scale,
+    cudaStream_t stream);
 
 namespace {
 
@@ -300,7 +305,8 @@ void validate_bindings(const apxinf_quantization_spec_t& spec,
                               "Quantization scales");
 }
 
-cudaError_t launch(const apxinf_quantization_spec_t& spec,
+cudaError_t launch(const apxinf_runtime& runtime,
+                   const apxinf_quantization_spec_t& spec,
                    const apxinf_quantization_bindings_t& bindings) {
   auto stream = static_cast<cudaStream_t>(bindings.stream);
   const int rows = static_cast<int>(spec.rows);
@@ -314,9 +320,14 @@ cudaError_t launch(const apxinf_quantization_spec_t& spec,
                  ? launch_quantize_f16_e4m3(
                        bindings.input, bindings.output, input_count,
                        bindings.scale, stream)
-                 : launch_quantize_bf16_e4m3(
-                       bindings.input, bindings.output, input_count,
-                       bindings.scale, stream);
+                 : runtime.compute_major == 11 && runtime.compute_minor == 0 &&
+                           std::getenv("APXINF_GR00T_FP8_LEGACY_STATIC_QUANT") == nullptr
+                       ? apxinf_quantization_quantize_bf16_e4m3_packed8(
+                             bindings.input, bindings.output, input_count,
+                             bindings.scale, stream)
+                       : launch_quantize_bf16_e4m3(
+                             bindings.input, bindings.output, input_count,
+                             bindings.scale, stream);
     case APXINF_QUANTIZATION_SEMANTIC_ROWWISE_E4M3:
       return launch_quantize_rows_bf16_e4m3(
           bindings.input, bindings.output, bindings.scales, rows, input_cols,
@@ -355,6 +366,6 @@ extern "C" apxinf_status_t apxinf_quantization_launch(
     validate_spec(*spec);
     validate_bindings(*spec, *bindings);
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
-    apxinf::framework::check_cuda(launch(*spec, *bindings));
+    apxinf::framework::check_cuda(launch(*runtime, *spec, *bindings));
   });
 }

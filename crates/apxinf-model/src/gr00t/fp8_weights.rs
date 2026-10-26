@@ -282,18 +282,7 @@ pub(super) struct Gr00tFp8LinearWeights {
 
 impl Gr00tFp8LinearWeights {
     fn quantize_activation(&self, input: &Tensor, backend: &RuntimeBackend) -> Result<Tensor> {
-        if !thor_fp8_packed_static_quantization(
-            backend.context().caps().sm,
-            std::env::var_os("APXINF_GR00T_FP8_LEGACY_STATIC_QUANT").is_some(),
-        ) {
-            ops::quantization::quantize_fixed_scale(backend.context(), input, self.activation_scale)
-        } else {
-            ops::quantization::quantize_bf16_e4m3_packed8(
-                backend.context(),
-                input,
-                self.activation_scale,
-            )
-        }
+        ops::quantization::quantize_fixed_scale(backend.context(), input, self.activation_scale)
     }
 
     pub(super) fn from_host(
@@ -482,27 +471,13 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
     }
 }
 
-fn thor_fp8_packed_static_quantization(sm: u32, legacy_requested: bool) -> bool {
-    sm == 110 && !legacy_requested
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_identity, e4m3_weight_scale, thor_fp8_packed_static_quantization,
-        Gr00tFp8Calibration, LocalSha256, CALIBRATION_SCHEMA, E4M3_MAX,
+        checkpoint_identity, e4m3_weight_scale, Gr00tFp8Calibration, LocalSha256,
+        CALIBRATION_SCHEMA, E4M3_MAX,
     };
     use std::path::Path;
-
-    #[test]
-    fn packed_static_quantization_preserves_other_architectures_and_legacy_mode() {
-        assert!(thor_fp8_packed_static_quantization(110, false));
-        assert!(!thor_fp8_packed_static_quantization(110, true));
-        for sm in [0, 80, 87, 89, 90, 100, 103, 120] {
-            assert!(!thor_fp8_packed_static_quantization(sm, false));
-            assert!(!thor_fp8_packed_static_quantization(sm, true));
-        }
-    }
 
     #[test]
     fn sha256_matches_the_standard_vector() {

@@ -76,36 +76,6 @@ fn slice_columns_bf16(ctx: &CudaContext, input: &Tensor, cols: usize) -> Result<
     Ok(out)
 }
 
-/// `quantize_bf16_e4m3_packed8`: elementwise BF16->E4M3 with a static scale,
-/// using the wide 8-element path when alignment allows.
-pub fn quantize_bf16_e4m3_packed8(ctx: &CudaContext, input: &Tensor, scale: f32) -> Result<Tensor> {
-    use crate::ffi::abi::quantization as abi;
-    use crate::ffi::raw::cuda_runtime as raw;
-    if input.dtype() != DType::BF16 {
-        return Err(Error::DTypeMismatch {
-            expected: DType::BF16,
-            got: input.dtype(),
-        });
-    }
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err(Error::Other(format!("invalid FP8 scale {scale}")));
-    }
-    let output = ctx.allocate_output(input.shape().clone(), DType::F8E4M3)?;
-    let input_buffer = crate::CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
-    let output_buffer = crate::CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
-    unsafe {
-        raw::check_cuda(abi::apxinf_quantization_quantize_bf16_e4m3_packed8(
-            input_buffer.ptr(),
-            output_buffer.ptr(),
-            i64::try_from(input.numel()).map_err(|_| Error::Other("count exceeds i64".into()))?,
-            scale,
-            ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
-    }
-    Ok(output)
-}
-
 /// `concat_rows_quantize_bf16_e4m3`: stack two equal-width BF16 matrices by
 /// rows and quantize the whole result to E4M3 with a shared scale.
 pub fn concat_rows_quantize_bf16_e4m3(
