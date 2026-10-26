@@ -145,6 +145,7 @@ pub struct BaseMoeScratch {
     assignment_expert_ids: Tensor,
     assignment_token_ids: Tensor,
     assignment_slots: Tensor,
+    token_assignment_indices: Tensor,
     assignment_weights: Tensor,
     expert_offsets: Tensor,
     route_intermediate: Tensor,
@@ -190,6 +191,7 @@ impl BaseMoeScratch {
             assignment_expert_ids: zeros(ctx, vec![routes], DType::I32)?,
             assignment_token_ids: zeros(ctx, vec![routes], DType::I32)?,
             assignment_slots: zeros(ctx, vec![routes], DType::I32)?,
+            token_assignment_indices: zeros(ctx, vec![routes], DType::I32)?,
             assignment_weights: zeros(ctx, vec![routes], DType::F32)?,
             expert_offsets: zeros(ctx, vec![experts + 1], DType::I32)?,
             route_intermediate: zeros(ctx, vec![routes, intermediate], DType::BF16)?,
@@ -231,6 +233,7 @@ impl BaseMoeScratch {
                 assignment_expert_ids: &mut self.assignment_expert_ids,
                 assignment_token_ids: &mut self.assignment_token_ids,
                 assignment_slots: &mut self.assignment_slots,
+                token_assignment_indices: &mut self.token_assignment_indices,
                 assignment_weights: &mut self.assignment_weights,
                 expert_offsets: &mut self.expert_offsets,
             },
@@ -296,6 +299,7 @@ impl BaseMoeScratch {
                 assignment_output: &self.assignment_output,
                 assignment_token_ids: &self.assignment_token_ids,
                 assignment_weights: &self.assignment_weights,
+                token_assignment_indices: &self.token_assignment_indices,
                 shared_output: &self.shared_output,
                 shared_gate_logits: &shared_gate_logits,
                 output: &mut self.output,
@@ -469,11 +473,7 @@ impl GdnScratch {
         }
         // The Cake prefill kernel is Blackwell-only, matching `d3`'s gate.
         let cake = ctx.caps().sm >= 100;
-        let key_dims = vec![
-            tokens,
-            ops::QWEN35_GDN_KEY_HEADS,
-            ops::QWEN35_GDN_HEAD_DIM,
-        ];
+        let key_dims = vec![tokens, ops::QWEN35_GDN_KEY_HEADS, ops::QWEN35_GDN_HEAD_DIM];
         let value_dims = vec![
             tokens,
             ops::QWEN35_GDN_VALUE_HEADS,
@@ -494,9 +494,7 @@ impl GdnScratch {
             q16: cake
                 .then(|| zeros(ctx, key_dims.clone(), DType::F16))
                 .transpose()?,
-            k16: cake
-                .then(|| zeros(ctx, key_dims, DType::F16))
-                .transpose()?,
+            k16: cake.then(|| zeros(ctx, key_dims, DType::F16)).transpose()?,
             v16: cake
                 .then(|| zeros(ctx, value_dims.clone(), DType::F16))
                 .transpose()?,
@@ -506,9 +504,7 @@ impl GdnScratch {
             alpha: cake
                 .then(|| zeros(ctx, vec![tokens, ops::QWEN35_GDN_VALUE_HEADS], DType::F32))
                 .transpose()?,
-            cu_seqlens: cake
-                .then(|| zeros(ctx, vec![2], DType::I32))
-                .transpose()?,
+            cu_seqlens: cake.then(|| zeros(ctx, vec![2], DType::I32)).transpose()?,
             cake_workspace: cake
                 .then(|| zeros(ctx, vec![workspace_bytes.div_ceil(4)], DType::F32))
                 .transpose()?,
@@ -592,11 +588,7 @@ impl GdnScratch {
             vec![ops::QWEN35_GDN_QKV_WIDTH],
             DType::BF16,
         )?;
-        let z = view(
-            &self.z,
-            vec![ops::QWEN35_GDN_VALUE_WIDTH],
-            DType::BF16,
-        )?;
+        let z = view(&self.z, vec![ops::QWEN35_GDN_VALUE_WIDTH], DType::BF16)?;
         let a = view(&self.a, vec![ops::QWEN35_GDN_VALUE_HEADS], DType::BF16)?;
         let b = view(&self.b, vec![ops::QWEN35_GDN_VALUE_HEADS], DType::BF16)?;
         let convolved_qkv = view(

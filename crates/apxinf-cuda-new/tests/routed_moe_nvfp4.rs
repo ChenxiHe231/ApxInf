@@ -283,6 +283,7 @@ fn qwen35_decode_top8_nvfp4_experts_match_cpu_dequant_reference() {
     let mut assignment_expert_ids = zeros(&ctx, vec![routes], DType::I32);
     let mut assignment_token_ids = zeros(&ctx, vec![routes], DType::I32);
     let mut assignment_slots = zeros(&ctx, vec![routes], DType::I32);
+    let mut token_assignment_indices = zeros(&ctx, vec![routes], DType::I32);
     let mut assignment_weights = zeros(&ctx, vec![routes], DType::F32);
     let mut expert_offsets = zeros(&ctx, vec![EXPERTS + 1], DType::I32);
     ops::routed_moe_route(
@@ -295,6 +296,7 @@ fn qwen35_decode_top8_nvfp4_experts_match_cpu_dequant_reference() {
             assignment_expert_ids: &mut assignment_expert_ids,
             assignment_token_ids: &mut assignment_token_ids,
             assignment_slots: &mut assignment_slots,
+            token_assignment_indices: &mut token_assignment_indices,
             assignment_weights: &mut assignment_weights,
             expert_offsets: &mut expert_offsets,
         },
@@ -496,6 +498,7 @@ fn qwen35_decode_top8_nvfp4_experts_match_cpu_dequant_reference() {
             assignment_output: &assignment_output,
             assignment_token_ids: &assignment_token_ids,
             assignment_weights: &assignment_weights,
+            token_assignment_indices: &token_assignment_indices,
             shared_output: &shared_output,
             shared_gate_logits: &gate_logits,
             output: &mut combined,

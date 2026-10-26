@@ -27,6 +27,7 @@ pub(crate) struct RouteBindings {
     pub assignment_expert_ids: *mut i32,
     pub assignment_token_ids: *mut i32,
     pub assignment_slots: *mut i32,
+    pub token_assignment_indices: *mut i32,
     pub assignment_weights: *mut f32,
     pub expert_offsets: *mut i32,
     pub stream: CudaStream,
@@ -39,6 +40,7 @@ pub(crate) struct CombineSpec {
     pub dtype: u32,
     pub tokens: u32,
     pub routes: u32,
+    pub top_k: u32,
     pub hidden: u32,
 }
 
@@ -48,6 +50,7 @@ pub(crate) struct CombineBindings {
     pub assignment_output: *const c_void,
     pub assignment_token_ids: *const i32,
     pub assignment_weights: *const f32,
+    pub token_assignment_indices: *const i32,
     pub shared_output: *const c_void,
     pub shared_gate_logits: *const c_void,
     pub output: *mut c_void,

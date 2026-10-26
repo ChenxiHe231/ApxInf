@@ -20,6 +20,9 @@ pub struct RoutedMoeRouteArgs<'a> {
     pub assignment_token_ids: &'a mut Tensor,
     /// Expert-major assignment route slots `[tokens * top_k]`, I32.
     pub assignment_slots: &'a mut Tensor,
+    /// Token-major inverse map from `[token, route_slot]` to the
+    /// corresponding expert-major assignment row, I32 `[tokens * top_k]`.
+    pub token_assignment_indices: &'a mut Tensor,
     /// Expert-major assignment weights `[tokens * top_k]`, F32.
     pub assignment_weights: &'a mut Tensor,
     /// Prefix offsets into assignments `[experts + 1]`, I32.
@@ -31,6 +34,8 @@ pub struct RoutedMoeCombineArgs<'a> {
     pub assignment_output: &'a Tensor,
     pub assignment_token_ids: &'a Tensor,
     pub assignment_weights: &'a Tensor,
+    /// Token-major inverse map produced by [`routed_moe_route`].
+    pub token_assignment_indices: &'a Tensor,
     /// Shared-expert outputs `[tokens, hidden]`.
     pub shared_output: &'a Tensor,
     /// Pre-sigmoid shared gate logits `[tokens]`.
@@ -153,6 +158,8 @@ pub(crate) fn normalize_route(
     let assignment_token_ids =
         tensor_storage(ctx, args.assignment_token_ids, DType::I32, &[routes])?;
     let assignment_slots = tensor_storage(ctx, args.assignment_slots, DType::I32, &[routes])?;
+    let token_assignment_indices =
+        tensor_storage(ctx, args.token_assignment_indices, DType::I32, &[routes])?;
     let assignment_weights = tensor_storage(ctx, args.assignment_weights, DType::F32, &[routes])?;
     let expert_offsets = tensor_storage(
         ctx,
@@ -179,6 +186,7 @@ pub(crate) fn normalize_route(
         assignment_expert_ids: assignment_expert_ids.ptr().cast(),
         assignment_token_ids: assignment_token_ids.ptr().cast(),
         assignment_slots: assignment_slots.ptr().cast(),
+        token_assignment_indices: token_assignment_indices.ptr().cast(),
         assignment_weights: assignment_weights.ptr().cast(),
         expert_offsets: expert_offsets.ptr().cast(),
         stream: ctx.stream().handle(),
@@ -193,6 +201,7 @@ pub(crate) fn normalize_route(
             assignment_expert_ids,
             assignment_token_ids,
             assignment_slots,
+            token_assignment_indices,
             assignment_weights,
             expert_offsets,
         ],
@@ -218,6 +227,15 @@ pub(crate) fn normalize_combine(
     }
     let (routes, hidden) = (assignment_shape[0], assignment_shape[1]);
     let tokens = output_shape[0];
+    if routes % tokens != 0 {
+        return Err(invalid(
+            "routed MoE route count must be divisible by the token count",
+        ));
+    }
+    let top_k = routes / tokens;
+    if top_k == 0 || top_k > 8 {
+        return Err(invalid("routed MoE combine supports top_k in 1..=8"));
+    }
     let activation_dtype = args.assignment_output.dtype();
     let dtype_code = supported_float(activation_dtype)?;
 
@@ -230,6 +248,8 @@ pub(crate) fn normalize_combine(
     let assignment_token_ids =
         tensor_storage(ctx, args.assignment_token_ids, DType::I32, &[routes])?;
     let assignment_weights = tensor_storage(ctx, args.assignment_weights, DType::F32, &[routes])?;
+    let token_assignment_indices =
+        tensor_storage(ctx, args.token_assignment_indices, DType::I32, &[routes])?;
     let shared_output =
         tensor_storage(ctx, args.shared_output, activation_dtype, &[tokens, hidden])?;
     let shared_gate_logits =
@@ -243,6 +263,8 @@ pub(crate) fn normalize_combine(
             .map_err(|_| invalid("routed MoE token count exceeds the CUDA range"))?,
         routes: u32::try_from(routes)
             .map_err(|_| invalid("routed MoE route count exceeds the CUDA range"))?,
+        top_k: u32::try_from(top_k)
+            .map_err(|_| invalid("routed MoE top_k exceeds the CUDA range"))?,
         hidden: u32::try_from(hidden)
             .map_err(|_| invalid("routed MoE hidden width exceeds the CUDA range"))?,
     };
@@ -250,6 +272,7 @@ pub(crate) fn normalize_combine(
         assignment_output: assignment_output.ptr(),
         assignment_token_ids: assignment_token_ids.ptr().cast(),
         assignment_weights: assignment_weights.ptr().cast(),
+        token_assignment_indices: token_assignment_indices.ptr().cast(),
         shared_output: shared_output.ptr(),
         shared_gate_logits: shared_gate_logits.ptr(),
         output: output.ptr(),
@@ -262,6 +285,7 @@ pub(crate) fn normalize_combine(
             assignment_output,
             assignment_token_ids,
             assignment_weights,
+            token_assignment_indices,
             shared_output,
             shared_gate_logits,
             output,
