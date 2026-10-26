@@ -959,7 +959,12 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                     bias,
                 );
             }
-            ops::pointwise::bias_gelu_bf16(self.backend.context(), input, Some(bias))
+            ops::pointwise::bias_activation(
+                self.backend.context(),
+                input,
+                Some(bias),
+                ops::pointwise::PointwiseActivation::Gelu,
+            )
         };
         // BF16 explicitly opts into this exact-shape path. The legacy composed
         // path remains in the same ELF for controlled benchmark comparisons.
@@ -1613,7 +1618,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             1,
             self.config.action_horizon,
         )?;
-        ops::elementwise::euler_update_bf16(self.backend.context(), actions, &velocity, step.delta)
+        ops::elementwise::euler_update(self.backend.context(), actions, &velocity, step.delta)
     }
 }
 
@@ -2079,7 +2084,12 @@ fn linear_relu<L: DeviceLinearWeights>(
     weights: &L,
 ) -> Result<Tensor> {
     let output = weights.forward(input, backend)?;
-    ops::pointwise::bias_relu_bf16(backend.context(), &output, weights.bias())
+    ops::pointwise::bias_activation(
+        backend.context(),
+        &output,
+        weights.bias(),
+        ops::pointwise::PointwiseActivation::Relu,
+    )
 }
 
 fn linear_silu<L: DeviceLinearWeights>(
@@ -2088,7 +2098,12 @@ fn linear_silu<L: DeviceLinearWeights>(
     weights: &L,
 ) -> Result<Tensor> {
     let output = weights.forward(input, backend)?;
-    ops::pointwise::bias_silu_bf16(backend.context(), &output, weights.bias())
+    ops::pointwise::bias_activation(
+        backend.context(),
+        &output,
+        weights.bias(),
+        ops::pointwise::PointwiseActivation::Silu,
+    )
 }
 
 fn linear_gelu<L: DeviceLinearWeights>(
@@ -2100,7 +2115,12 @@ fn linear_gelu<L: DeviceLinearWeights>(
     if let Some(output) = weights.packed8_bias_gelu(&output, backend)? {
         return Ok(output);
     }
-    ops::pointwise::bias_gelu_bf16(backend.context(), &output, weights.bias())
+    ops::pointwise::bias_activation(
+        backend.context(),
+        &output,
+        weights.bias(),
+        ops::pointwise::PointwiseActivation::Gelu,
+    )
 }
 
 fn forward_feed_forward<E: Gr00tPrecisionExecution>(
@@ -2170,7 +2190,12 @@ fn forward_feed_forward_projection_with_quantized_input<E: Gr00tPrecisionExecuti
         let hidden = weights
             .input
             .forward_reusable_quantized(quantized, backend)?;
-        ops::pointwise::bias_gelu_bf16(backend.context(), &hidden, weights.input.bias())?
+        ops::pointwise::bias_activation(
+            backend.context(),
+            &hidden,
+            weights.input.bias(),
+            ops::pointwise::PointwiseActivation::Gelu,
+        )?
     } else {
         linear_gelu(backend, input, &weights.input)?
     };

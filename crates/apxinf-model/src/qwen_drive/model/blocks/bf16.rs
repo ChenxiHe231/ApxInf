@@ -2070,7 +2070,7 @@ pub(crate) mod expert {
             hidden = residual_norm.hidden;
             let x2 = residual_norm.normalized;
             let gu = gemm::bf16(ctx, &x2, &layer.gate_up_w)?;
-            let act = pointwise::swiglu_bf16_rounded(ctx, &gu)?;
+            let act = pointwise::swiglu(ctx, &gu, pointwise::SwiGluRounding::RoundedToInput)?;
             let down = gemm::bf16(ctx, &act, &layer.down_w)?;
 
             if let Some(next) = weights.layers.get(layer_index + 1) {

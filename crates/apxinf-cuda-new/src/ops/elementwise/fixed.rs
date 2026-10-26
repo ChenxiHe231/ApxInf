@@ -170,9 +170,22 @@ pub fn replace_rows_bf16(
     Ok(output)
 }
 
-/// `euler_update_bf16`: `output = state + velocity * dt`, the flow-matching
-/// integration step.
-pub fn euler_update_bf16(
+/// `output = state + velocity * dt`, preserving the existing launcher for
+/// the input dtype.
+pub fn euler_update(
+    ctx: &CudaContext,
+    state: &Tensor,
+    velocity: &Tensor,
+    dt: f32,
+) -> Result<Tensor> {
+    match state.dtype() {
+        DType::BF16 => euler_update_bf16(ctx, state, velocity, dt),
+        DType::F16 => euler_update_f16(ctx, state, velocity, dt),
+        _ => Err(invalid("Euler update requires BF16 or F16 tensors")),
+    }
+}
+
+fn euler_update_bf16(
     ctx: &CudaContext,
     state: &Tensor,
     velocity: &Tensor,
@@ -635,7 +648,7 @@ pub fn concat_columns_f16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tens
 }
 
 /// `euler_update_f16`: `output = state + velocity * dt` in FP16.
-pub fn euler_update_f16(
+fn euler_update_f16(
     ctx: &CudaContext,
     state: &Tensor,
     velocity: &Tensor,

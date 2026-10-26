@@ -216,11 +216,7 @@ impl SmolVlaModel {
             )?;
             if step == 0 {
             }
-            state = (if self.fp16_gemm {
-                ops::elementwise::euler_update_f16
-            } else {
-                ops::elementwise::euler_update_bf16
-            })(ctx, &state, &velocity, dt)?;
+            state = ops::elementwise::euler_update(ctx, &state, &velocity, dt)?;
         }
         expert_timer.stop(ctx)?;
         let output_timer = CudaEventTimer::new()?;
@@ -313,11 +309,7 @@ impl SmolVlaModel {
         let dt = -1.0 / self.config.num_flow_steps as f32;
         for embedding in time_embeddings {
             let velocity = self.denoise_step_with_embedding(&state, embedding, &prefix_states)?;
-            state = (if self.fp16_gemm {
-                ops::elementwise::euler_update_f16
-            } else {
-                ops::elementwise::euler_update_bf16
-            })(ctx, &state, &velocity, dt)?;
+            state = ops::elementwise::euler_update(ctx, &state, &velocity, dt)?;
         }
         (if self.fp16_gemm {
             ops::quantization::slice_columns_f16
@@ -479,14 +471,11 @@ impl SmolVlaModel {
             self.config.layer_norm_eps,
         )?;
         let activated = self.gemm(ctx, &normalized, &weights.fc1.weight)?;
-        let activated = (if self.fp16_gemm {
-            ops::pointwise::bias_gelu_f16
-        } else {
-            ops::pointwise::bias_gelu_bf16
-        })(
+        let activated = ops::pointwise::bias_activation(
             ctx,
             &activated,
             weights.fc1.bias.as_ref(),
+            ops::pointwise::PointwiseActivation::Gelu,
         )?;
         let projected = self.gemm(ctx, &activated, &weights.fc2.weight)?;
         if self.fp16_gemm {
@@ -669,11 +658,11 @@ impl SmolVlaModel {
         })(ctx, input, norm, self.config.rms_norm_eps)?;
         let activated =
             self.gemm(ctx, &normalized, &gate_up.weight)?;
-        let activated = (if self.fp16_gemm {
-            ops::pointwise::swiglu_f16
-        } else {
-            ops::pointwise::swiglu_bf16
-        })(ctx, &activated)?;
+        let activated = ops::pointwise::swiglu(
+            ctx,
+            &activated,
+            ops::pointwise::SwiGluRounding::FullPrecision,
+        )?;
         let projected = self.gemm(ctx, &activated, &down.weight)?;
         self.backend.add(&projected, input)
     }
@@ -720,7 +709,12 @@ impl SmolVlaModel {
             self.weights.action_time_in.bias.as_ref().unwrap(),
         )?;
         let fused = if self.fp16_gemm {
-            ops::pointwise::bias_silu_f16(ctx, &fused, None)?
+            ops::pointwise::bias_activation(
+                ctx,
+                &fused,
+                None,
+                ops::pointwise::PointwiseActivation::Silu,
+            )?
         } else {
             ops::pointwise::silu(ctx, &fused)?
         };

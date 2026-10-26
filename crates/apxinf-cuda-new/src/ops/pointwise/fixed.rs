@@ -18,16 +18,57 @@ pub fn gelu_tanh(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
     Ok(output)
 }
 
-/// `geglu_bf16`: `[rows, 2*cols]` gate/up projection to `[rows, cols]` GeGLU.
-pub fn geglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
+/// Whether SwiGLU rounds the SiLU intermediate before multiplying by `up`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwiGluRounding {
+    FullPrecision,
+    RoundedToInput,
+}
+
+/// `[rows, 2*cols]` gate/up projection to `[rows, cols]` GeGLU.
+pub fn geglu(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     let dims = gate_up.shape().dims();
     if dims.len() != 2 || dims[1] % 2 != 0 {
         return Err(Error::Other("GeGLU requires a [rows, 2*cols] input".into()));
     }
-    let mut output = ctx.allocate_output(Shape::new(vec![dims[0], dims[1] / 2]), DType::BF16)?;
+    let mut output =
+        ctx.allocate_output(Shape::new(vec![dims[0], dims[1] / 2]), gate_up.dtype())?;
     let args = ops::PointwiseArgs::new(ops::PointwiseSemantic::Geglu, gate_up, &mut output);
     ops::pointwise(ctx, args)?;
     Ok(output)
+}
+
+/// SwiGLU with its numerical rounding contract expressed explicitly.
+pub fn swiglu(ctx: &CudaContext, gate_up: &Tensor, rounding: SwiGluRounding) -> Result<Tensor> {
+    match (gate_up.dtype(), rounding) {
+        (DType::BF16, SwiGluRounding::FullPrecision) => swiglu_bf16(ctx, gate_up),
+        (DType::BF16, SwiGluRounding::RoundedToInput) => swiglu_bf16_rounded(ctx, gate_up),
+        (DType::F16, SwiGluRounding::FullPrecision) => swiglu_f16(ctx, gate_up),
+        (DType::F16, SwiGluRounding::RoundedToInput) => Err(Error::Other(
+            "rounded SwiGLU is not available for F16 input".into(),
+        )),
+        _ => Err(Error::Other("SwiGLU requires BF16 or F16 input".into())),
+    }
+}
+
+/// Broadcast an optional bias and apply the requested activation. Dtype is
+/// inferred from `input`; each branch retains its existing CUDA launcher.
+pub fn bias_activation(
+    ctx: &CudaContext,
+    input: &Tensor,
+    bias: Option<&Tensor>,
+    activation: ops::PointwiseActivation,
+) -> Result<Tensor> {
+    match (input.dtype(), activation) {
+        (DType::BF16, ops::PointwiseActivation::Gelu) => bias_gelu_bf16(ctx, input, bias),
+        (DType::BF16, ops::PointwiseActivation::Silu) => bias_silu_bf16(ctx, input, bias),
+        (DType::BF16, ops::PointwiseActivation::Relu) => bias_relu_bf16(ctx, input, bias),
+        (DType::F16, ops::PointwiseActivation::Gelu) => bias_gelu_f16(ctx, input, bias),
+        (DType::F16, ops::PointwiseActivation::Silu) => bias_silu_f16(ctx, input, bias),
+        _ => Err(Error::Other(
+            "bias activation does not support this dtype/activation pair".into(),
+        )),
+    }
 }
 
 /// `swiglu_bf16`: `[rows, 2*cols]` gate/up projection to `[rows, cols]` SwiGLU.
@@ -36,7 +77,7 @@ pub fn geglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
 /// `ops::pointwise::swiglu` is the rounded variant (bf16(silu) first) that the
 /// qwen_drive checkpoint path needs; routing this name there would shift
 /// every result by up to 1 ULP.
-pub fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
+fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     use crate::ffi::abi::activation as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
@@ -67,7 +108,7 @@ pub fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
 
 /// `bias_gelu_bf16`: broadcast bias then tanh-GELU. A missing bias is a plain
 /// GELU, matching the legacy contract.
-pub fn bias_gelu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
+fn bias_gelu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
     let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
     let mut args =
         ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
@@ -79,7 +120,7 @@ pub fn bias_gelu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>)
 
 /// `bias_silu_bf16`: broadcast bias then SiLU. A missing bias is a plain SiLU,
 /// matching the legacy `bias_activation(.., activation = 2)` contract.
-pub fn bias_silu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
+fn bias_silu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
     let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
     let mut args =
         ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
@@ -92,7 +133,7 @@ pub fn bias_silu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>)
 /// `bias_relu_bf16`: broadcast bias then ReLU (`fmaxf(value, 0.0f)` after the
 /// bias add, matching the legacy `bias_relu_bf16_kernel`). A missing bias is a
 /// plain ReLU.
-pub fn bias_relu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
+fn bias_relu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
     let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
     let mut args =
         ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
@@ -325,7 +366,7 @@ pub fn swiglu_quantize_rows_bf16_e4m3(
 
 /// `swiglu_bf16_rounded`: SwiGLU whose SiLU intermediate rounds to BF16
 /// before the multiply — matching an unfused activation-then-multiply.
-pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
+fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     use crate::ffi::abi::activation as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
@@ -360,9 +401,9 @@ pub fn swiglu_bf16_rounded(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor
 // `family-specific FP16` launchers (native/adapters/activation/fixed_f16.cu).
 
 /// `swiglu_f16`: FP16 SwiGLU over packed `[rows, 2*inner]` gate/up halves.
-pub fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
-    use crate::ops::validation::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
+fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     use crate::ffi::abi::activation as abi;
+    use crate::ops::validation::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
     let (rows, twice_inner) = matrix_shape(gate_up, "SwiGLU")?;
     if gate_up.dtype() != DType::F16 || twice_inner % 2 != 0 {
         return Err(Error::Other(
@@ -389,11 +430,11 @@ pub fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
 }
 
 /// `bias_gelu_f16`: optional-bias tanh-GELU over an FP16 matrix.
-pub fn bias_gelu_f16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
+fn bias_gelu_f16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
+    use crate::ffi::abi::activation as abi;
     use crate::ops::validation::{
         check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
     };
-    use crate::ffi::abi::activation as abi;
     let (rows, cols) = matrix_shape(input, "bias GELU")?;
     if input.dtype() != DType::F16
         || value.is_some_and(|bias| bias.dtype() != DType::F16 || bias.shape().dims() != [cols])
@@ -422,11 +463,11 @@ pub fn bias_gelu_f16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) 
 }
 
 /// `bias_silu_f16`: optional-bias SiLU over an FP16 matrix.
-pub fn bias_silu_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+fn bias_silu_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+    use crate::ffi::abi::activation as abi;
     use crate::ops::validation::{
         check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
     };
-    use crate::ffi::abi::activation as abi;
     let (rows, cols) = matrix_shape(input, "bias SiLU")?;
     if input.dtype() != DType::F16
         || bias.is_some_and(|x| x.dtype() != DType::F16 || x.shape().dims() != [cols])
@@ -468,8 +509,8 @@ pub fn silu_into(
     output: &crate::CudaBuffer,
     count: usize,
 ) -> Result<()> {
-    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
     use crate::ffi::abi::activation as abi;
+    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
     let bytes = checked_bytes(dtype, &[count], "decode SiLU")?;
     require_buffers(
         ctx,
@@ -507,8 +548,8 @@ pub fn silu_mul_bf16_into(
     output: &crate::CudaBuffer,
     intermediate: usize,
 ) -> Result<()> {
-    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
     use crate::ffi::abi::activation as abi;
+    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
     require_buffers(
         ctx,
         "decode SiLU multiply",

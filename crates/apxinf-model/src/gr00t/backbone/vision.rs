@@ -685,7 +685,12 @@ fn merge_deepstack(
 fn apply_bias_gelu(b: &dyn Backend, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return ops::pointwise::bias_gelu_bf16(cuda.context(), input, Some(bias));
+        return ops::pointwise::bias_activation(
+            cuda.context(),
+            input,
+            Some(bias),
+            ops::pointwise::PointwiseActivation::Gelu,
+        );
     }
 
     let biased = add_bias(b, input, bias)?;

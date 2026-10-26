@@ -206,7 +206,11 @@ fn residual_mlp(
                 Some(bias) => ops::elementwise::bias_bf16(context, &gate_up, Some(bias))?,
                 None => gate_up,
             };
-            let activated = ops::pointwise::swiglu_bf16(context, &gate_up)?;
+            let activated = ops::pointwise::swiglu(
+                context,
+                &gate_up,
+                ops::pointwise::SwiGluRounding::FullPrecision,
+            )?;
             let down = ops::gemm::bf16(context, &activated, down)?;
             ops::norm::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
         }
@@ -259,7 +263,11 @@ fn residual_mlp(
                 Some(bias) => ops::elementwise::bias_bf16(context, &gate_up, Some(bias))?,
                 None => gate_up,
             };
-            let activated = ops::pointwise::swiglu_bf16(context, &gate_up)?;
+            let activated = ops::pointwise::swiglu(
+                context,
+                &gate_up,
+                ops::pointwise::SwiGluRounding::FullPrecision,
+            )?;
             let down = ops::gemm::bf16(context, &activated, down)?;
             ops::norm::bias_residual_bf16(context, &down, down_bias, &fused.hidden)
         }
@@ -786,8 +794,12 @@ fn vision_merger<W: VisionTowerWeights>(
         ops::norm::rms_bf16(context, input, weights.merger_norm(), config.rms_norm_eps)?
             .reshape(vec![merged_tokens, merge_unit * config.hidden_size])?;
     let hidden = linear(context, &normalized, weights.merger_hidden())?;
-    let hidden =
-        ops::pointwise::bias_gelu_bf16(context, &hidden, Some(weights.merger_hidden_bias()))?;
+    let hidden = ops::pointwise::bias_activation(
+        context,
+        &hidden,
+        Some(weights.merger_hidden_bias()),
+        ops::pointwise::PointwiseActivation::Gelu,
+    )?;
     let output = linear(context, &hidden, weights.merger_output())?;
     let output =
         ops::elementwise::bias_bf16(context, &output, Some(weights.merger_output_bias()))?;
@@ -841,5 +853,5 @@ pub fn solver_update(
     velocity: &Tensor,
     dt: f32,
 ) -> Result<Tensor> {
-    ops::elementwise::euler_update_bf16(context, state, velocity, dt)
+    ops::elementwise::euler_update(context, state, velocity, dt)
 }

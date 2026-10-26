@@ -124,7 +124,12 @@ pub fn vision_layer_bf16(
         layer_norm_eps,
     )?;
     let activation = gemm::bf16(ctx, &fused.normalized, &weights.fc1.weight)?;
-    let activation = pointwise::bias_gelu_bf16(ctx, &activation, weights.fc1.bias.as_ref())?;
+    let activation = pointwise::bias_activation(
+        ctx,
+        &activation,
+        weights.fc1.bias.as_ref(),
+        pointwise::PointwiseActivation::Gelu,
+    )?;
     let projection = gemm::bf16(ctx, &activation, &weights.fc2.weight)?;
     norm::bias_residual_bf16(ctx, &projection, weights.fc2.bias.as_ref(), &fused.hidden)
 }
@@ -176,7 +181,7 @@ fn projection(ctx: &Context, input: &Tensor, weight: &Tensor) -> Result<Tensor> 
 /// This is `language_layer_cached_bf16` with the same norms, the same RoPE,
 /// the same fused residual paths and the same `gelu(gate) * up` epilogue, but
 /// every projection goes through [`projection`]. Keeping the GeGLU as a matmul
-/// followed by `pointwise::geglu_bf16` instead of the fused epilogue costs a
+/// followed by `pointwise::geglu` instead of the fused epilogue costs a
 /// few tens of kilobytes of traffic at one token, against a hundred megabytes
 /// of weights.
 #[allow(clippy::too_many_arguments)]
@@ -219,7 +224,7 @@ pub fn language_layer_cached_decode_bf16(
         rms_eps,
     )?;
     let gate_up = projection(ctx, &fused.normalized, &weights.gate_up.weight)?;
-    let activated = pointwise::geglu_bf16(ctx, &gate_up)?;
+    let activated = pointwise::geglu(ctx, &gate_up)?;
     let projected = projection(ctx, &activated, &weights.down.weight)?;
     norm::bias_residual_bf16(ctx, &projected, weights.down.bias.as_ref(), &fused.hidden)
 }
