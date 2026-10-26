@@ -38,7 +38,7 @@ pub use attention::{
 pub use attn_ops::{
     apply_output_gate, head_rms_norm, partial_rope, rotary_dim, split_query_and_gate,
 };
-pub use cache::{concat_rows, reserve_prefix};
+pub use cache::{concat_rows, copy_tensor, reserve_prefix};
 pub use gather::{gather, GatherArgs, GatherSemantic, PatchGeometry as GatherPatchGeometry};
 pub use gdn::{
     gdn_causal_conv_forward, gdn_causal_conv_step, gdn_chunk_scan, gdn_chunk_scan_interleaved,
@@ -54,7 +54,7 @@ pub use gemm::{
     GemmBiasResidualArgs, GemmGegluArgs, GemmPolicy, GemmQuantization, ScaleLayout, WeightVersion,
 };
 pub use mlp::{add_into, fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu};
-pub use model::{argmax, embedding_gather};
+pub use model::{argmax, embedding_gather, vision_position, VisionPositionArgs};
 pub use moe::{
     combine_reference as routed_moe_combine_reference, edge_nvfp4_interleave_fc1, edge_nvfp4_moe,
     edge_nvfp4_moe_available, edge_nvfp4_moe_workspace_size, edge_nvfp4_rescale_e4m3,
