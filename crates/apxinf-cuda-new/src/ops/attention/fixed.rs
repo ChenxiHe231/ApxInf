@@ -773,29 +773,6 @@ pub fn noncausal_strided_qkv(
     noncausal_gqa_bf16(ctx, &q, &k, &v, tokens)?.reshape(vec![tokens, hidden])
 }
 
-/// `noncausal_hdim96_bm64`: fixed-shape sm87/sm110 FA2 candidate. Not
-/// vendored; callers fall back to `noncausal`.
-pub fn noncausal_hdim96_bm64(
-    _ctx: &CudaContext,
-    _q: &Tensor,
-    _k: &Tensor,
-    _v: &Tensor,
-    _n_heads: usize,
-    _head_dim: usize,
-) -> Result<Option<Tensor>> {
-    Ok(None)
-}
-
-/// `noncausal_strided_qkv_hdim96_bm64`: fixed-shape companion. Not vendored.
-pub fn noncausal_strided_qkv_hdim96_bm64(
-    _ctx: &CudaContext,
-    _qkv: &Tensor,
-    _n_heads: usize,
-    _head_dim: usize,
-) -> Result<Option<Tensor>> {
-    Ok(None)
-}
-
 /// `causal_gqa_prefill_bf16`: causal GQA prefill. Routes through cuda-new's
 /// tuned causal attention operator; the FA2 fixed-shape fast path is not
 /// vendored, so this always takes the generic route.
@@ -828,37 +805,6 @@ pub fn causal_gqa_prefill_bf16(
     }
     let key_tokens = k_shape[0];
     Ok(Some(causal_gqa_bf16(ctx, q, k, v, key_tokens)?))
-}
-
-/// `segmented_noncausal_contiguous_output_bf16`: fixed-shape FA2 segmented
-/// candidate. Not vendored; callers fall back to their per-segment path.
-#[allow(clippy::too_many_arguments)]
-pub fn segmented_noncausal_contiguous_output_bf16(
-    _ctx: &CudaContext,
-    _q: &Tensor,
-    _k: &Tensor,
-    _v: &Tensor,
-    _segment_lengths: &[usize],
-    _n_heads: usize,
-    _head_dim: usize,
-) -> Result<Option<Tensor>> {
-    Ok(None)
-}
-
-/// `try_noncausal_batched_equal`: equal-length batched FA2 candidate. Not
-/// vendored; callers fall back to `noncausal`.
-#[allow(clippy::too_many_arguments)]
-pub fn try_noncausal_batched_equal(
-    _ctx: &CudaContext,
-    _q: &Tensor,
-    _k: &Tensor,
-    _v: &Tensor,
-    _batches: usize,
-    _sequence_len: usize,
-    _n_heads: usize,
-    _head_dim: usize,
-) -> Result<Option<Tensor>> {
-    Ok(None)
 }
 
 // ── smolvla attention surface ───────────────────────────────────────────────

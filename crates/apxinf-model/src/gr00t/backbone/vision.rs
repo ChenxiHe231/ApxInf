@@ -980,7 +980,7 @@ fn segmented_vision_sdpa(
     output_name: &str,
     segmented_attention: Option<&VisionSegmentedAttention<'_>>,
     concat_quant: Option<&VisionConcatQuant<'_>>,
-    allow_batched_segmented_attention: bool,
+    _allow_batched_segmented_attention: bool,
 ) -> Result<Tensor> {
     if segment_lengths.is_empty() {
         return Err(Error::Other(
@@ -1031,26 +1031,6 @@ fn segmented_vision_sdpa(
                 {
                     return Ok(output);
                 }
-            }
-        }
-        if allow_batched_segmented_attention
-            && cuda.context().caps().sm == 87
-            && segment_lengths == [256, 256]
-            && n_heads == 16
-            && head_dim == 64
-            && std::env::var_os("APXINF_GR00T_LEGACY_VISION_BATCHED_ATTENTION").is_none()
-        {
-            if let Some(output) = ops::attention::try_noncausal_batched_equal(
-                cuda.context(),
-                q,
-                k,
-                v,
-                2,
-                256,
-                n_heads,
-                head_dim,
-            )? {
-                return Ok(output);
             }
         }
         let q = q.reshape(vec![total_rows, row_width])?;

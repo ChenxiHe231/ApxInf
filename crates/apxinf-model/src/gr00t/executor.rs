@@ -68,10 +68,8 @@ pub(super) trait Gr00tPrecisionExecution: Sized + 'static {
 
     const NAME: &'static str;
     const SUPPORTS_CALIBRATION: bool;
-    const USE_HDIM96_BM64_ATTENTION: bool = false;
     const USE_FUSED_QK_RMS_MROPE: bool = false;
     const QK_RMS_MROPE_LEGACY_ENV: Option<&'static str> = None;
-    const USE_DIRECT_BF16_VISION_SEGMENT_OUTPUT: bool = false;
     const USE_PRECOMPUTED_BF16_VISION_ROPE: bool = false;
     const USE_FUSED_BF16_VISION_MLP_RESIDUAL_NORM: bool = false;
     const USE_BIAS_RESIDUAL_ADAPTIVE_LAYER_NORM: bool = false;
@@ -959,32 +957,9 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
         };
         // BF16 explicitly opts into this exact-shape path. The legacy composed
         // path remains in the same ELF for controlled benchmark comparisons.
-        let use_direct_bf16_vision_segment_output = E::USE_DIRECT_BF16_VISION_SEGMENT_OUTPUT
-            && matches!(self.backend.context().caps().sm, 87 | 110)
-            && std::env::var_os("APXINF_GR00T_BF16_LEGACY_VISION_SEGMENT_OUTPUT").is_none();
         let use_fused_bf16_vision_mlp_residual_norm = E::USE_FUSED_BF16_VISION_MLP_RESIDUAL_NORM
             && self.backend.context().caps().sm == 110
             && std::env::var_os("APXINF_GR00T_BF16_LEGACY_VISION_MLP_RESIDUAL_NORM").is_none();
-        let vision_segmented_attention =
-            |q: &Tensor,
-             k: &Tensor,
-             v: &Tensor,
-             segment_lengths: &[usize],
-             n_heads: usize,
-             head_dim: usize| {
-                if use_direct_bf16_vision_segment_output {
-                    return ops::attention::segmented_noncausal_contiguous_output_bf16(
-                        self.backend.context(),
-                        q,
-                        k,
-                        v,
-                        segment_lengths,
-                        n_heads,
-                        head_dim,
-                    );
-                }
-                Ok(None)
-            };
         let use_fused_vision_concat_quant = USE_FUSED_FP8_VISION_CONCAT_QUANT
             && use_thor_fp8_fusions
             && std::env::var_os("APXINF_GR00T_FP8_LEGACY_VISION_CONCAT_QUANT").is_none();
@@ -1087,7 +1062,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             &vision_matmul,
             Some(&vision_norm_matmul),
             Some(&vision_bias_gelu),
-            Some(&vision_segmented_attention),
+            None,
             Some(&vision_concat_quant),
             if use_thor_fp8_fusions {
                 Some(&vision_residual_norm_matmul)
@@ -2274,21 +2249,6 @@ fn noncausal_attention<E: Gr00tPrecisionExecution>(
     heads: usize,
     head_dim: usize,
 ) -> Result<Tensor> {
-    if E::USE_HDIM96_BM64_ATTENTION
-        && E::OPTIMIZED_SMS.contains(&backend.context().caps().sm)
-        && std::env::var_os("APXINF_GR00T_LEGACY_FA2_BM64").is_none()
-    {
-        if let Some(output) = ops::attention::noncausal_hdim96_bm64(
-            backend.context(),
-            query,
-            key,
-            value,
-            heads,
-            head_dim,
-        )? {
-            return Ok(output);
-        }
-    }
     ops::attention::noncausal(backend.context(), query, key, value, heads, head_dim)
 }
 
@@ -2298,19 +2258,6 @@ fn noncausal_strided_qkv_attention<E: Gr00tPrecisionExecution>(
     heads: usize,
     head_dim: usize,
 ) -> Result<Tensor> {
-    if E::USE_HDIM96_BM64_ATTENTION
-        && E::OPTIMIZED_SMS.contains(&backend.context().caps().sm)
-        && std::env::var_os("APXINF_GR00T_LEGACY_FA2_BM64").is_none()
-    {
-        if let Some(output) = ops::attention::noncausal_strided_qkv_hdim96_bm64(
-            backend.context(),
-            qkv,
-            heads,
-            head_dim,
-        )? {
-            return Ok(output);
-        }
-    }
     ops::attention::noncausal_strided_qkv(backend.context(), qkv, heads, head_dim)
 }
 
