@@ -391,7 +391,7 @@ fn decode_forward_capturable(
             let gu_wv = weight_view(gate_up_w, device_id)?;
             ops::gemm::write(ctx, dtype, 1, 2 * inter, hidden, 1.0, &fn_view, &gu_wv, 0.0, &ws.gate_up)
                 ?;
-            ops::pointwise::silu_mul_bf16_into(ctx, &ws.gate_up, &ws.mlp_hidden, inter)?;
+            ops::pointwise::silu_mul_into(ctx, &ws.gate_up, &ws.mlp_hidden, inter)?;
         } else {
             // Fallback path: separate gate/up GEMMs + silu + mul. We don't
             // have a dedicated `ws.gate` in the Qwen3-VL workspace (packed is

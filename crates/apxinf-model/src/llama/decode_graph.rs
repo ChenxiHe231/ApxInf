@@ -419,7 +419,7 @@ fn decode_forward_capturable(
                 .view(inter * elem, inter * elem)
                 .map_err(Error::Cuda)?;
             if is_bf16 {
-                ops::pointwise::silu_mul_bf16_into(ctx, &ws.gate_up, &ws.mlp_hidden, inter)?;
+                ops::pointwise::silu_mul_into(ctx, &ws.gate_up, &ws.mlp_hidden, inter)?;
             } else {
                 ops::pointwise::silu_into(ctx, dtype, &ws.gate_up, &ws.gate_silu, inter)?;
                 ops::elementwise::mul_into(

@@ -939,7 +939,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                 let output_name = format!("{prefix}.fc2");
                 if let Some(linear) = self.backbone_linears.get(&output_name) {
                     if let Some(scale) = linear.activation_scale() {
-                        return ops::pointwise::bias_gelu_quant_bf16_e4m3(
+                        return ops::pointwise::bias_gelu_quantized(
                             self.backend.context(),
                             input,
                             bias,
@@ -2851,7 +2851,7 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
         .get(&down_name)
         .filter(|down| down.activation_scale().is_some())
     {
-        let gated = ops::pointwise::silu_mul_quant_bf16_e4m3(
+        let gated = ops::pointwise::silu_mul_quantized(
             backend.context(),
             &gate,
             &up,
@@ -2871,7 +2871,7 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
             output
         } else {
             let gated = if USE_FUSED_BF16_SILU_MUL {
-                ops::pointwise::silu_mul_bf16(backend.context(), &gate, &up)?
+                ops::pointwise::silu_mul(backend.context(), &gate, &up)?
             } else {
                 let gate = backend.silu(&gate)?;
                 backend.mul(&gate, &up)?

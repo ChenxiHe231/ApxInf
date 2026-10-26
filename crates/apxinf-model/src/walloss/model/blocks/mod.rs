@@ -167,7 +167,7 @@ fn dynamic_swiglu(
     logical_inner: usize,
     output_cols: usize,
 ) -> Result<ops::quantization::DynamicFp8Tensor> {
-    ops::pointwise::swiglu_quantize_rows_bf16_e4m3(
+    ops::pointwise::swiglu_quantize_rows(
         context,
         gate_up,
         gate_up_bias,

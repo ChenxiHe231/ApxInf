@@ -143,10 +143,10 @@ fn bias_relu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> 
     Ok(output)
 }
 
-/// `silu_mul_bf16`: fused BF16 `BF16(SiLU(gate)) * up` over separate,
+/// Fused `BF16(SiLU(gate)) * up` over separate,
 /// equally-shaped inputs. Mirrors the legacy `silu_mul_separate_bf16` path,
 /// whose SiLU intermediate rounds to BF16 before the multiply.
-pub fn silu_mul_bf16(ctx: &CudaContext, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+pub fn silu_mul(ctx: &CudaContext, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     use crate::ffi::abi::activation as abi;
     use crate::ffi::raw::cuda_runtime as raw;
     use crate::CudaBuffer;
@@ -177,9 +177,9 @@ pub fn silu_mul_bf16(ctx: &CudaContext, gate: &Tensor, up: &Tensor) -> Result<Te
     Ok(output)
 }
 
-/// `silu_mul_quant_bf16_e4m3`: fused `BF16(BF16(SiLU(gate)) * up) -> calibrated
+/// Fused `BF16(BF16(SiLU(gate)) * up) -> calibrated
 /// E4M3` over separate, equally-shaped inputs.
-pub fn silu_mul_quant_bf16_e4m3(
+pub fn silu_mul_quantized(
     ctx: &CudaContext,
     gate: &Tensor,
     up: &Tensor,
@@ -216,9 +216,9 @@ pub fn silu_mul_quant_bf16_e4m3(
     Ok(output)
 }
 
-/// `bias_gelu_quant_bf16_e4m3`: fused `BF16(bias + tanh-GELU(input)) ->
+/// Fused `BF16(bias + tanh-GELU(input)) ->
 /// calibrated E4M3` using packed-4 IO.
-pub fn bias_gelu_quant_bf16_e4m3(
+pub fn bias_gelu_quantized(
     ctx: &CudaContext,
     input: &Tensor,
     bias: &Tensor,
@@ -267,9 +267,9 @@ pub fn bias_gelu_quant_bf16_e4m3(
     Ok(output)
 }
 
-/// `swiglu_quantize_rows_bf16_e4m3`: SwiGLU over a packed gate/up projection
+/// SwiGLU over a packed gate/up projection
 /// followed by rowwise E4M3 quantization, zero-padded to `output_cols`.
-pub fn swiglu_quantize_rows_bf16_e4m3(
+pub fn swiglu_quantize_rows(
     ctx: &CudaContext,
     gate_up: &Tensor,
     bias: Option<&Tensor>,
@@ -498,7 +498,7 @@ pub fn silu_into(
 }
 
 /// Fused BF16 SiLU(gate) * up into caller-owned decode storage.
-pub fn silu_mul_bf16_into(
+pub fn silu_mul_into(
     ctx: &CudaContext,
     gate_up: &crate::CudaBuffer,
     output: &crate::CudaBuffer,

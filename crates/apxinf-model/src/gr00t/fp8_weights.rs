@@ -384,7 +384,7 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         bias: &Tensor,
         backend: &RuntimeBackend,
     ) -> Result<Option<Self::ReusableInput>> {
-        Ok(Some(ops::pointwise::bias_gelu_quant_bf16_e4m3(
+        Ok(Some(ops::pointwise::bias_gelu_quantized(
             backend.context(),
             input,
             bias,
