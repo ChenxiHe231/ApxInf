@@ -60,10 +60,10 @@ pub use gemm::{
 };
 pub use norm::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,
-    bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, head_rms_norm,
-    layer_norm, rms_norm, rms_norm_weight_offset, AdaGateResidualArgs, AdaGateResidualRmsNormArgs,
-    AdaptiveRmsNormArgs, BiasResidualArgs, BiasResidualLayerNormArgs, BiasResidualRmsNormArgs,
-    BiasThenResidualArgs, LayerNormArgs, RmsNormArgs,
+    bias_residual_adaptive_layer_norm, bias_residual_layer_norm, bias_residual_rms_norm,
+    head_rms_norm, layer_norm, rms_norm, rms_norm_weight_offset, AdaGateResidualArgs,
+    AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, BiasOrder, BiasResidualAdaptiveLayerNormArgs,
+    BiasResidualArgs, BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, LayerNormArgs, RmsNormArgs,
 };
 pub use pointwise::{
     add_into, pointwise, swiglu_into, PointwiseActivation, PointwiseArgs, PointwiseSemantic,

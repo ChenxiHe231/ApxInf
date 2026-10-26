@@ -26,16 +26,17 @@ pub use graph::{capture, CapturedGraph};
 pub use kv_cache::CudaKvCache;
 pub use ops::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, attention, bias_residual,
-    bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, concat_rows, decode_rope,
-    gather, kv_cache_attention, layer_norm, multimodal_rope, packed_qkv_attention, pointwise,
-    quantization, reserve_prefix, rms_norm, rope, segmented_attention, split_qkv_axial_rope,
-    vision_position,
+    bias_residual_adaptive_layer_norm, bias_residual_layer_norm, bias_residual_rms_norm,
+    concat_rows, decode_rope, gather, kv_cache_attention, layer_norm, multimodal_rope,
+    packed_qkv_attention, pointwise, quantization, reserve_prefix, rms_norm, rope,
+    segmented_attention, split_qkv_axial_rope, vision_position,
     AdaGateResidualArgs, AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, AttentionArgs,
-    AttentionMask, AttentionPolicy, AxialRopeArgs, BiasResidualArgs, BiasResidualLayerNormArgs,
-    BiasResidualRmsNormArgs, BiasThenResidualArgs, DecodeRopeArgs, ExecutionSession, GatherArgs,
-    GatherPatchGeometry, GatherSemantic, GraphWorkspace, KvCacheAttentionArgs, KvCacheDecodeMeta,
-    LayerNormArgs, MultimodalRopeArgs, PackedQkvAttentionArgs, PointwiseActivation, PointwiseArgs,
-    PointwiseSemantic, QuantizationArgs, QuantizationSemantic, RmsNormArgs, RopeArgs, RopeSemantic,
+    AttentionMask, AttentionPolicy, AxialRopeArgs, BiasOrder, BiasResidualAdaptiveLayerNormArgs,
+    BiasResidualArgs, BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, DecodeRopeArgs,
+    ExecutionSession, GatherArgs, GatherPatchGeometry, GatherSemantic, GraphWorkspace,
+    KvCacheAttentionArgs, KvCacheDecodeMeta, LayerNormArgs, MultimodalRopeArgs,
+    PackedQkvAttentionArgs, PointwiseActivation, PointwiseArgs, PointwiseSemantic,
+    QuantizationArgs, QuantizationSemantic, RmsNormArgs, RopeArgs, RopeSemantic,
     SegmentedAttentionArgs, VisionPositionArgs,
 };
 pub use phase::PreparedPhase;

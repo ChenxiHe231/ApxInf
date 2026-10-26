@@ -13,12 +13,9 @@ pub(crate) enum Semantic {
     BiasResidual,
     BiasResidualRms,
     BiasResidualLayer,
+    BiasResidualAdaptiveLayer,
     AdaGateResidual,
     AdaGateResidualRms,
-    /// Adds the optional bias, rounds that intermediate to BF16, then adds the
-    /// residual and rounds again. This is deliberately distinct from
-    /// [`Self::BiasResidual`], which rounds only the final sum.
-    BiasThenResidual,
 }
 
 impl Semantic {
@@ -32,7 +29,7 @@ impl Semantic {
             Self::BiasResidualLayer => 5,
             Self::AdaGateResidual => 6,
             Self::AdaGateResidualRms => 7,
-            Self::BiasThenResidual => 8,
+            Self::BiasResidualAdaptiveLayer => 8,
         }
     }
 
@@ -43,7 +40,7 @@ impl Semantic {
     fn writes_normalized(self) -> bool {
         !matches!(
             self,
-            Self::BiasResidual | Self::AdaGateResidual | Self::BiasThenResidual
+            Self::BiasResidual | Self::AdaGateResidual
         )
     }
 
@@ -63,7 +60,10 @@ impl Semantic {
     }
 
     fn reads_norm_style(self) -> bool {
-        matches!(self, Self::AdaptiveRms | Self::AdaGateResidualRms)
+        matches!(
+            self,
+            Self::AdaptiveRms | Self::AdaGateResidualRms | Self::BiasResidualAdaptiveLayer
+        )
     }
 
     fn reads_gate_style(self) -> bool {
@@ -76,8 +76,27 @@ impl Semantic {
             Self::BiasResidual
                 | Self::BiasResidualRms
                 | Self::BiasResidualLayer
-                | Self::BiasThenResidual
+                | Self::BiasResidualAdaptiveLayer
         )
+    }
+}
+
+/// Rounding order for the optional bias and residual combination.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum BiasOrder {
+    /// Accumulate input, bias, and residual before rounding to the output dtype.
+    #[default]
+    SingleRound,
+    /// Round input plus bias to BF16 before adding the residual and rounding again.
+    BiasThenResidual,
+}
+
+impl BiasOrder {
+    fn code(self) -> u32 {
+        match self {
+            Self::SingleRound => 0,
+            Self::BiasThenResidual => 1,
+        }
     }
 }
 
@@ -87,6 +106,7 @@ impl Semantic {
 /// `[3 * cols]` whose third segment is the gate; they are not interchangeable.
 pub(crate) struct RawArgs<'a> {
     pub(crate) semantic: Semantic,
+    pub(crate) bias_order: BiasOrder,
     pub(crate) input: &'a Tensor,
     pub(crate) bias: Option<&'a Tensor>,
     pub(crate) residual: Option<&'a Tensor>,
@@ -174,9 +194,26 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
     let cols_abi = i32::try_from(cols)
         .map_err(|_| invalid("Norm column count exceeds the CUDA kernel range"))?;
     let dtype = args.input.dtype();
-    if semantic == Semantic::BiasThenResidual && dtype != DType::BF16 {
+    if args.bias_order == BiasOrder::BiasThenResidual && dtype != DType::BF16 {
         return Err(invalid(
-            "BiasThenResidual is a BF16-only semantic because its intermediate rounding is part of the contract",
+            "BiasThenResidual order is BF16-only because its intermediate rounding is part of the contract",
+        ));
+    }
+    if semantic == Semantic::BiasResidualAdaptiveLayer && dtype != DType::BF16 {
+        return Err(invalid(
+            "BiasResidualAdaptiveLayer currently requires BF16 input and output",
+        ));
+    }
+    if args.bias_order == BiasOrder::BiasThenResidual
+        && !matches!(
+            semantic,
+            Semantic::BiasResidual
+                | Semantic::BiasResidualLayer
+                | Semantic::BiasResidualAdaptiveLayer
+        )
+    {
+        return Err(invalid(
+            "BiasThenResidual order requires a residual-combine semantic",
         ));
     }
     let count = rows
@@ -338,6 +375,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
         dtype: dtype_value,
         output_dtype: output_dtype_code(output_dtype)?,
         has_bias: u32::from(!bias.is_null()),
+        bias_order: args.bias_order.code(),
         input_alignment,
         weight_alignment,
         bias_alignment: bias_alignment.min(norm_bias_alignment),

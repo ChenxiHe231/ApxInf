@@ -25,11 +25,11 @@
  *   ADA_GATE_RESIDUAL      input, residual, gate_style       -> hidden
  *   ADA_GATE_RESIDUAL_RMS  input, residual, gate_style,
  *                          norm_style                        -> hidden, normalized
- *   BIAS_THEN_RESIDUAL     input, bias, residual             -> hidden
+ *   BIAS_RESIDUAL_ADAPTIVE_LAYER
+ *                          input, bias, residual, norm_style -> hidden, normalized
  *
- * BIAS_THEN_RESIDUAL is BF16-only.  Unlike BIAS_RESIDUAL, it rounds
- * input+bias to BF16 before adding residual, preserving the legacy two-step
- * numerical contract in a single launch.
+ * The bias_order field selects whether input+bias is rounded to BF16 before
+ * adding residual. The two-step order is BF16-only.
  *
  * The two adaptive-conditioning vectors are distinct and are not
  * interchangeable:
@@ -51,10 +51,15 @@ typedef enum {
   APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_LAYER = 5,
   APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL = 6,
   APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL_RMS = 7,
-  APXINF_NORM_SEMANTIC_BIAS_THEN_RESIDUAL = 8,
+  APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_ADAPTIVE_LAYER = 8,
 } apxinf_norm_semantic_t;
 
-#define APXINF_NORM_SPEC_VERSION 1u
+typedef enum {
+  APXINF_NORM_BIAS_ORDER_SINGLE_ROUND = 0,
+  APXINF_NORM_BIAS_ORDER_THEN_RESIDUAL = 1,
+} apxinf_norm_bias_order_t;
+
+#define APXINF_NORM_SPEC_VERSION 2u
 
 typedef struct {
   uint32_t version;
@@ -65,6 +70,7 @@ typedef struct {
   uint32_t output_dtype;
   /* A null bias is a different kernel path, so it belongs to the identity. */
   uint32_t has_bias;
+  uint32_t bias_order;
   /* Largest guaranteed power-of-two byte alignment, capped at 256. */
   uint32_t input_alignment;
   uint32_t weight_alignment;

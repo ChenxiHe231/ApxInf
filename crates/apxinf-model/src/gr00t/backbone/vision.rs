@@ -501,7 +501,6 @@ fn forward_impl(
                 &blk.norm2_w,
                 &blk.norm2_b,
                 eps,
-                use_cached_residual_layer_norm,
             )
             .map_err(|error| {
                 Error::Other(format!("vision block {i} residual/norm failed: {error}"))
@@ -538,7 +537,6 @@ fn forward_impl(
                 &next.norm1_w,
                 &next.norm1_b,
                 eps,
-                use_cached_residual_layer_norm,
             )
             .map_err(|error| {
                 Error::Other(format!(
@@ -753,31 +751,18 @@ fn apply_bias_residual_layer_norm(
     norm_weight: &Tensor,
     norm_bias: &Tensor,
     eps: f32,
-    use_cached_1024: bool,
 ) -> Result<(Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        let fused = if use_cached_1024 {
-            ops::norm::bias_residual_layer_bf16_cached_1024(
-                cuda.context(),
-                projection,
-                Some(projection_bias),
-                residual,
-                norm_weight,
-                norm_bias,
-                eps,
-            )?
-        } else {
-            crate::cuda_ops::norm::bias_residual_layer_norm(
-                cuda.context(),
-                projection,
-                Some(projection_bias),
-                residual,
-                norm_weight,
-                norm_bias,
-                eps,
-            )?
-        };
+        let fused = crate::cuda_ops::norm::bias_residual_layer_norm(
+            cuda.context(),
+            projection,
+            Some(projection_bias),
+            residual,
+            norm_weight,
+            norm_bias,
+            eps,
+        )?;
         return Ok((fused.hidden, fused.normalized));
     }
 

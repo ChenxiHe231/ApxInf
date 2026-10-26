@@ -4,7 +4,7 @@ pub(crate) use super::types::CudaStream;
 use super::types::Runtime;
 use crate::ffi::raw::cuda_runtime::{cudaError_t, cudaStream_t};
 
-pub(crate) const SPEC_VERSION: u32 = 1;
+pub(crate) const SPEC_VERSION: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -14,6 +14,7 @@ pub(crate) struct Spec {
     pub dtype: u32,
     pub output_dtype: u32,
     pub has_bias: u32,
+    pub bias_order: u32,
     pub input_alignment: u32,
     pub weight_alignment: u32,
     pub bias_alignment: u32,
@@ -241,44 +242,6 @@ mod fixed_launchers {
             cols: i32,
             eps: f32,
             scale: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_norm_bias_residual_layer_norm_bf16_cached_1024(
-            projection: *const c_void,
-            projection_bias: *const c_void,
-            residual: *const c_void,
-            norm_weight: *const c_void,
-            norm_bias: *const c_void,
-            hidden: *mut c_void,
-            normalized: *mut c_void,
-            rows: i32,
-            cols: i32,
-            eps: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_norm_bias_then_residual_layer_norm_bf16_cached_1536(
-            projection: *const c_void,
-            projection_bias: *const c_void,
-            residual: *const c_void,
-            norm_weight: *const c_void,
-            norm_bias: *const c_void,
-            hidden: *mut c_void,
-            normalized: *mut c_void,
-            rows: i32,
-            cols: i32,
-            eps: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_norm_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
-            projection: *const c_void,
-            projection_bias: *const c_void,
-            residual: *const c_void,
-            modulation: *const c_void,
-            hidden: *mut c_void,
-            normalized: *mut c_void,
-            rows: i32,
-            cols: i32,
-            eps: f32,
             stream: cudaStream_t,
         ) -> cudaError_t;
         pub(crate) fn apxinf_norm_bias_residual_layer_norm_quant_bf16_e4m3(

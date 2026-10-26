@@ -56,10 +56,10 @@ impl DeviceLinearWeights for Gr00tBf16LinearWeights {
         {
             return Ok(None);
         }
-        let fused = ops::norm::bias_then_residual_adaptive_layer_bf16_cached_1536(
+        let fused = crate::cuda_ops::norm::bias_then_residual_adaptive_layer_norm(
             backend.context(),
             projection,
-            &self.weights.bias,
+            Some(&self.weights.bias),
             residual,
             modulation,
             eps,
@@ -85,10 +85,10 @@ impl DeviceLinearWeights for Gr00tBf16LinearWeights {
         {
             return Ok(None);
         }
-        let fused = ops::norm::bias_then_residual_layer_bf16_cached_1536(
+        let fused = crate::cuda_ops::norm::bias_then_residual_layer_norm(
             backend.context(),
             projection,
-            &self.weights.bias,
+            Some(&self.weights.bias),
             residual,
             norm_weight,
             norm_bias,

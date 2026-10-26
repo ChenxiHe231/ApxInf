@@ -9,12 +9,14 @@ mod weight_offset;
 
 pub use fixed::*;
 pub use head::head_rms_norm;
+pub use contracts::BiasOrder;
 pub use norm::{
     ada_gate_residual, ada_gate_residual_rms_norm, adaptive_rms_norm, bias_residual,
-    bias_residual_layer_norm, bias_residual_rms_norm, bias_then_residual, layer_norm, rms_norm,
+    bias_residual_adaptive_layer_norm, bias_residual_layer_norm, bias_residual_rms_norm,
+    layer_norm, rms_norm,
     AdaGateResidualArgs, AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, BiasResidualArgs,
-    BiasResidualLayerNormArgs, BiasResidualRmsNormArgs, BiasThenResidualArgs, LayerNormArgs,
-    RmsNormArgs,
+    BiasResidualAdaptiveLayerNormArgs, BiasResidualLayerNormArgs, BiasResidualRmsNormArgs,
+    LayerNormArgs, RmsNormArgs,
 };
 pub use planning::{
     adaln_gate_residual, adaln_rms_norm, add_rms_norm_plus1, gated_rms_silu, rms_norm_plus1,

@@ -50,9 +50,10 @@ pub(crate) fn bias_then_residual(
 ) -> Result<Tensor> {
     let mut hidden =
         ctx.allocate_output(Shape::new(projection.shape().dims().to_vec()), DType::BF16)?;
-    ops::bias_then_residual(
+    ops::bias_residual(
         ctx,
-        ops::BiasThenResidualArgs::new(projection, bias, residual, &mut hidden),
+        ops::BiasResidualArgs::new(projection, bias, residual, &mut hidden)
+            .with_bias_order(ops::norm::BiasOrder::BiasThenResidual),
     )?;
     Ok(hidden)
 }
@@ -108,6 +109,63 @@ pub(crate) fn bias_residual_layer_norm(
             &mut normalized,
             eps,
         ),
+    )?;
+    Ok(ops::norm::ResidualNormTensors { hidden, normalized })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bias_then_residual_layer_norm(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    projection_bias: Option<&Tensor>,
+    residual: &Tensor,
+    norm_weight: &Tensor,
+    norm_bias: &Tensor,
+    eps: f32,
+) -> Result<ops::norm::ResidualNormTensors> {
+    let shape = Shape::new(projection.shape().dims().to_vec());
+    let mut hidden = ctx.allocate_output(shape.clone(), DType::BF16)?;
+    let mut normalized = ctx.allocate_output(shape, DType::BF16)?;
+    ops::bias_residual_layer_norm(
+        ctx,
+        ops::BiasResidualLayerNormArgs::new(
+            projection,
+            projection_bias,
+            residual,
+            norm_weight,
+            norm_bias,
+            &mut hidden,
+            &mut normalized,
+            eps,
+        )
+        .with_bias_order(ops::norm::BiasOrder::BiasThenResidual),
+    )?;
+    Ok(ops::norm::ResidualNormTensors { hidden, normalized })
+}
+
+pub(crate) fn bias_then_residual_adaptive_layer_norm(
+    ctx: &CudaContext,
+    projection: &Tensor,
+    projection_bias: Option<&Tensor>,
+    residual: &Tensor,
+    modulation: &Tensor,
+    eps: f32,
+) -> Result<ops::norm::ResidualNormTensors> {
+    let shape = Shape::new(projection.shape().dims().to_vec());
+    let mut hidden = ctx.allocate_output(shape.clone(), DType::BF16)?;
+    let mut normalized = ctx.allocate_output(shape, DType::BF16)?;
+    ops::bias_residual_adaptive_layer_norm(
+        ctx,
+        ops::BiasResidualAdaptiveLayerNormArgs::new(
+            projection,
+            projection_bias,
+            residual,
+            modulation,
+            &mut hidden,
+            &mut normalized,
+            eps,
+        )
+        .with_bias_order(ops::norm::BiasOrder::BiasThenResidual),
     )?;
     Ok(ops::norm::ResidualNormTensors { hidden, normalized })
 }

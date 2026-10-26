@@ -1,6 +1,6 @@
 use apxinf_core::{Result, Tensor};
 
-use super::contracts::{normalize, RawArgs, Semantic};
+use super::contracts::{normalize, BiasOrder, RawArgs, Semantic};
 use super::launch;
 use crate::CudaContext;
 
@@ -94,6 +94,7 @@ pub struct BiasResidualArgs<'a> {
     pub bias: Option<&'a Tensor>,
     pub residual: &'a Tensor,
     pub hidden: &'a mut Tensor,
+    pub bias_order: BiasOrder,
 }
 
 impl<'a> BiasResidualArgs<'a> {
@@ -108,7 +109,13 @@ impl<'a> BiasResidualArgs<'a> {
             bias,
             residual,
             hidden,
+            bias_order: BiasOrder::SingleRound,
         }
+    }
+
+    pub fn with_bias_order(mut self, bias_order: BiasOrder) -> Self {
+        self.bias_order = bias_order;
+        self
     }
 }
 
@@ -159,6 +166,7 @@ pub struct BiasResidualLayerNormArgs<'a> {
     pub eps: f32,
     /// Static dequantization scale when `normalized` is E4M3.
     pub output_scale: f32,
+    pub bias_order: BiasOrder,
 }
 
 impl<'a> BiasResidualLayerNormArgs<'a> {
@@ -183,7 +191,55 @@ impl<'a> BiasResidualLayerNormArgs<'a> {
             normalized,
             eps,
             output_scale: 1.0,
+            bias_order: BiasOrder::SingleRound,
         }
+    }
+
+    pub fn with_bias_order(mut self, bias_order: BiasOrder) -> Self {
+        self.bias_order = bias_order;
+        self
+    }
+}
+
+/// Bias/residual combine followed by adaptive LayerNorm. `norm_style` packs
+/// `[scale; shift]` as a `[2 * cols]` vector.
+pub struct BiasResidualAdaptiveLayerNormArgs<'a> {
+    pub input: &'a Tensor,
+    pub bias: Option<&'a Tensor>,
+    pub residual: &'a Tensor,
+    pub norm_style: &'a Tensor,
+    pub hidden: &'a mut Tensor,
+    pub normalized: &'a mut Tensor,
+    pub eps: f32,
+    pub bias_order: BiasOrder,
+}
+
+impl<'a> BiasResidualAdaptiveLayerNormArgs<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        input: &'a Tensor,
+        bias: Option<&'a Tensor>,
+        residual: &'a Tensor,
+        norm_style: &'a Tensor,
+        hidden: &'a mut Tensor,
+        normalized: &'a mut Tensor,
+        eps: f32,
+    ) -> Self {
+        Self {
+            input,
+            bias,
+            residual,
+            norm_style,
+            hidden,
+            normalized,
+            eps,
+            bias_order: BiasOrder::SingleRound,
+        }
+    }
+
+    pub fn with_bias_order(mut self, bias_order: BiasOrder) -> Self {
+        self.bias_order = bias_order;
+        self
     }
 }
 
@@ -247,30 +303,6 @@ impl<'a> AdaGateResidualRmsNormArgs<'a> {
     }
 }
 
-/// BF16-only two-rounding bias-then-residual contract.
-pub struct BiasThenResidualArgs<'a> {
-    pub input: &'a Tensor,
-    pub bias: Option<&'a Tensor>,
-    pub residual: &'a Tensor,
-    pub hidden: &'a mut Tensor,
-}
-
-impl<'a> BiasThenResidualArgs<'a> {
-    pub fn new(
-        input: &'a Tensor,
-        bias: Option<&'a Tensor>,
-        residual: &'a Tensor,
-        hidden: &'a mut Tensor,
-    ) -> Self {
-        Self {
-            input,
-            bias,
-            residual,
-            hidden,
-        }
-    }
-}
-
 fn execute(ctx: &CudaContext, args: RawArgs<'_>) -> Result<()> {
     launch::execute(ctx, normalize(ctx, args)?)
 }
@@ -280,6 +312,7 @@ pub fn rms_norm(ctx: &CudaContext, args: RmsNormArgs<'_>) -> Result<()> {
         ctx,
         RawArgs {
             semantic: Semantic::Rms,
+            bias_order: BiasOrder::SingleRound,
             input: args.input,
             bias: None,
             residual: None,
@@ -300,6 +333,7 @@ pub fn layer_norm(ctx: &CudaContext, args: LayerNormArgs<'_>) -> Result<()> {
         ctx,
         RawArgs {
             semantic: Semantic::Layer,
+            bias_order: BiasOrder::SingleRound,
             input: args.input,
             bias: None,
             residual: None,
@@ -320,6 +354,7 @@ pub fn adaptive_rms_norm(ctx: &CudaContext, args: AdaptiveRmsNormArgs<'_>) -> Re
         ctx,
         RawArgs {
             semantic: Semantic::AdaptiveRms,
+            bias_order: BiasOrder::SingleRound,
             input: args.input,
             bias: None,
             residual: None,
@@ -340,6 +375,7 @@ pub fn bias_residual(ctx: &CudaContext, args: BiasResidualArgs<'_>) -> Result<()
         ctx,
         RawArgs {
             semantic: Semantic::BiasResidual,
+            bias_order: args.bias_order,
             input: args.input,
             bias: args.bias,
             residual: Some(args.residual),
@@ -360,6 +396,7 @@ pub fn bias_residual_rms_norm(ctx: &CudaContext, args: BiasResidualRmsNormArgs<'
         ctx,
         RawArgs {
             semantic: Semantic::BiasResidualRms,
+            bias_order: BiasOrder::SingleRound,
             input: args.input,
             bias: args.bias,
             residual: Some(args.residual),
@@ -383,6 +420,7 @@ pub fn bias_residual_layer_norm(
         ctx,
         RawArgs {
             semantic: Semantic::BiasResidualLayer,
+            bias_order: args.bias_order,
             input: args.input,
             bias: args.bias,
             residual: Some(args.residual),
@@ -403,6 +441,7 @@ pub fn ada_gate_residual(ctx: &CudaContext, args: AdaGateResidualArgs<'_>) -> Re
         ctx,
         RawArgs {
             semantic: Semantic::AdaGateResidual,
+            bias_order: BiasOrder::SingleRound,
             input: args.input,
             bias: None,
             residual: Some(args.residual),
@@ -426,6 +465,7 @@ pub fn ada_gate_residual_rms_norm(
         ctx,
         RawArgs {
             semantic: Semantic::AdaGateResidualRms,
+            bias_order: BiasOrder::SingleRound,
             input: args.input,
             bias: None,
             residual: Some(args.residual),
@@ -441,21 +481,25 @@ pub fn ada_gate_residual_rms_norm(
     )
 }
 
-pub fn bias_then_residual(ctx: &CudaContext, args: BiasThenResidualArgs<'_>) -> Result<()> {
+pub fn bias_residual_adaptive_layer_norm(
+    ctx: &CudaContext,
+    args: BiasResidualAdaptiveLayerNormArgs<'_>,
+) -> Result<()> {
     execute(
         ctx,
         RawArgs {
-            semantic: Semantic::BiasThenResidual,
+            semantic: Semantic::BiasResidualAdaptiveLayer,
+            bias_order: args.bias_order,
             input: args.input,
             bias: args.bias,
             residual: Some(args.residual),
             weight: None,
             norm_bias: None,
-            norm_style: None,
+            norm_style: Some(args.norm_style),
             gate_style: None,
             hidden: Some(args.hidden),
-            normalized: None,
-            eps: 1e-6,
+            normalized: Some(args.normalized),
+            eps: args.eps,
             output_scale: 1.0,
         },
     )
