@@ -7,7 +7,7 @@ use crate::ops::gemm::contracts::{invalid, tensor_storage};
 use crate::CudaContext;
 
 /// Quantize BF16 to E4M3 against a single per-tensor scale.
-pub fn quantize_fp8_per_tensor(
+pub fn quantize_per_tensor(
     ctx: &CudaContext,
     input: &Tensor,
     output: &Tensor,

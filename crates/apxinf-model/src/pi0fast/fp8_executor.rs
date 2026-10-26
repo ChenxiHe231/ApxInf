@@ -166,7 +166,7 @@ pub fn language_layer_fp8(
             value: qkv.v.reshape(vec![tokens, config.head_dim])?,
         });
     }
-    let attention = attention::mqa_bf16(ctx, &qkv.q, &qkv.k, &qkv.v, tokens)?
+    let attention = attention::mqa(ctx, &qkv.q, &qkv.k, &qkv.v, tokens)?
         .reshape(vec![tokens, config.num_heads * config.head_dim])?;
     let projected = fp8_projection(ctx, &attention, &weights.output, scales.attention_output)?;
     let fused = norm::bias_residual_rms_bf16(
@@ -210,7 +210,7 @@ pub fn vision_layer_fp8(
     let qkv = fp8_projection(ctx, &normalized, &weights.qkv, scales.qkv_input)?;
     let qkv =
         attention::split_qkv_bias(ctx, &qkv, weights.qkv.bias.as_ref(), heads, head_dim)?;
-    let attention = attention::mha_bf16(ctx, &qkv.q, &qkv.k, &qkv.v, patches_per_view)?
+    let attention = attention::mha(ctx, &qkv.q, &qkv.k, &qkv.v, patches_per_view)?
         .reshape(vec![input.shape().dims()[0], heads * head_dim])?;
     let projected = fp8_projection(ctx, &attention, &weights.output, scales.attention_output)?;
     let fused = norm::bias_residual_layer_bf16(
@@ -250,7 +250,7 @@ pub fn language_layer_cached_decode_fp8(
     let tokens = input.shape().dims()[0];
     let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = fp8_projection(ctx, &normalized, &weights.qkv, scales.qkv_input)?;
-    let q = rope::apply_q_write_kv_bf16(
+    let q = rope::apply_q_write_kv(
         ctx,
         &qkv,
         weights.qkv.bias.as_ref(),
@@ -263,7 +263,7 @@ pub fn language_layer_cached_decode_fp8(
         value_cache,
         position_offset,
     )?;
-    let attention = attention::mqa_bf16(ctx, &q, key_cache, value_cache, position_offset + tokens)?
+    let attention = attention::mqa(ctx, &q, key_cache, value_cache, position_offset + tokens)?
         .reshape(vec![tokens, config.num_heads * config.head_dim])?;
     let projected = fp8_projection(ctx, &attention, &weights.output, scales.attention_output)?;
     let fused = norm::bias_residual_rms_bf16(

@@ -276,7 +276,7 @@ fn decode_forward_capturable(
 
         // ── mRoPE on Q and K ──
         // sections is [T, H, W] but the kernel takes sec_h, sec_w (T is implicit).
-        ops::rope::apply_mrope_bf16_into(
+        ops::rope::apply_mrope_into(
             ctx,
             &ws.q_normed,
             &ws.q_rope,
@@ -287,7 +287,7 @@ fn decode_forward_capturable(
             cfg.mrope_section[1],
             cfg.mrope_section[2],
         )?;
-        ops::rope::apply_mrope_bf16_into(
+        ops::rope::apply_mrope_into(
             ctx,
             &ws.k_normed,
             &ws.k_rope,
@@ -350,7 +350,7 @@ fn decode_forward_capturable(
         )?;
 
         // ── Flash Attention decode ──
-        ops::attention::flash_bf16_into(
+        ops::attention::flash_into(
             ctx,
             &ws.q_rope,
             cache.k_buffer(i),

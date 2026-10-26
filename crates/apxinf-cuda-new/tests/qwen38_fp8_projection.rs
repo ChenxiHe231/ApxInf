@@ -135,7 +135,7 @@ fn per_tensor_fp8_projection_needs_no_new_contract() {
     let activation = upload(&ctx, &activation_bytes, vec![m, k], DType::BF16);
 
     let quantized = zeros(&ctx, vec![m, k], DType::F8E4M3);
-    ops::quantize_fp8_per_tensor(&ctx, &activation, &quantized, input_scale).unwrap();
+    ops::quantize_per_tensor(&ctx, &activation, &quantized, input_scale).unwrap();
 
     // The whole point: unit-scale FP8 with both per-tensor scales in alpha.
     let mut out = zeros(&ctx, vec![m, n], DType::BF16);

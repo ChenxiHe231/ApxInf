@@ -535,7 +535,7 @@ fn language_layer<W: TransformerWeights>(
         config.rms_norm_eps,
         weights.qkv(),
     )?;
-    let qkv = ops::attention::split_gqa_qkv_mrope_cache_bf16(
+    let qkv = ops::attention::split_gqa_qkv_mrope_cache(
         context,
         &qkv,
         Some(weights.qkv_bias()),
@@ -548,7 +548,7 @@ fn language_layer<W: TransformerWeights>(
         cache_tokens,
         None,
     )?;
-    let attention = ops::attention::causal_gqa_bf16(context, &qkv.q, &qkv.k, &qkv.v, tokens)?
+    let attention = ops::attention::causal_gqa(context, &qkv.q, &qkv.k, &qkv.v, tokens)?
         .reshape(vec![tokens, config.num_attention_heads * config.head_dim])?;
     let hidden = residual_mlp(
         context,
@@ -590,7 +590,7 @@ fn action_layer<W: TransformerWeights>(
         config.rms_norm_eps,
         weights.qkv(),
     )?;
-    let qkv = ops::attention::split_gqa_qkv_mrope_cache_bf16(
+    let qkv = ops::attention::split_gqa_qkv_mrope_cache(
         context,
         &qkv,
         Some(weights.qkv_bias()),
@@ -604,7 +604,7 @@ fn action_layer<W: TransformerWeights>(
         Some((prefix_key, prefix_value, prefix_tokens)),
     )?;
     let attention =
-        ops::attention::causal_gqa_bf16(context, &qkv.q, &qkv.k, &qkv.v, cache_tokens)?
+        ops::attention::causal_gqa(context, &qkv.q, &qkv.k, &qkv.v, cache_tokens)?
             .reshape(vec![
                 action_tokens,
                 config.num_attention_heads * config.head_dim,
@@ -694,7 +694,7 @@ fn vision_layer<W: VisionBlockWeights>(
         config.rms_norm_eps,
         weights.qkv(),
     )?;
-    let qkv = ops::attention::split_vision_qkv_rope_bf16(
+    let qkv = ops::attention::split_vision_qkv_rope(
         context,
         &qkv,
         Some(weights.qkv_bias()),
@@ -703,7 +703,7 @@ fn vision_layer<W: VisionBlockWeights>(
         head_dim,
         config.rope_theta,
     )?;
-    let attention = ops::attention::segmented_mha_bf16(
+    let attention = ops::attention::segmented_mha(
         context,
         &qkv.q,
         &qkv.k,

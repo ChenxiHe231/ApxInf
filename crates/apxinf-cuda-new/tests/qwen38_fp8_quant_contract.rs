@@ -80,7 +80,7 @@ fn fp8_finite_bf16_domain_matches_independent_rne_oracle() {
                 std::env::set_var("APXINF_QWEN38_VECTOR_ELEMENTWISE", vector);
                 std::env::set_var("APXINF_FP8_NATIVE_PAIR", pair);
                 let output = upload(&ctx, &vec![0x7f; count], count, DType::F8E4M3);
-                ops::quantize_fp8_per_tensor(&ctx, &input, &output, scale).unwrap();
+                ops::quantize_per_tensor(&ctx, &input, &output, scale).unwrap();
                 ctx.synchronize().unwrap();
                 let mut actual = vec![0; count];
                 CudaBuffer::from_tensor(&output)

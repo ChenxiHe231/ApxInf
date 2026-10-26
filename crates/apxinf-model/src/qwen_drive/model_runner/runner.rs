@@ -72,7 +72,7 @@ impl QwenDriveModelRunner {
                     }
                 }
                 let rgb = resize.as_ref().map(|plan| plan.final_rgb()).unwrap_or(&raw);
-                if let Err(error) = ops::preprocess::rgb_u8_to_temporal2_merge2_rect_bf16(
+                if let Err(error) = ops::preprocess::rgb_u8_to_temporal2_merge2_rect(
                     ctx,
                     rgb,
                     &output,

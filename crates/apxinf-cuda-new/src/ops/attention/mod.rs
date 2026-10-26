@@ -16,7 +16,7 @@ pub use kv_cache_attention::{
     KvCacheDecodeMeta,
 };
 pub use planning::{
-    expert_qkv_prepare, expert_sigmoid_gate_mul, full_attn_prepare, gqa_bf16, sigmoid_gate_mul,
+    expert_qkv_prepare, expert_sigmoid_gate_mul, full_attn_prepare, gqa, sigmoid_gate_mul,
 };
 pub use segmented_attention::{segmented_attention, SegmentedAttentionArgs};
 

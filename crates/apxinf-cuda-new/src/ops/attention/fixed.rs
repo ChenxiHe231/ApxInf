@@ -5,8 +5,8 @@
 //! adapters reshape at the boundary — reshape on a contiguous tensor is a
 //! metadata change, not a copy.
 //!
-//! Causality follows the legacy helper it replaces: `mqa_bf16` and `mha_bf16`
-//! are non-causal over the valid keys; `causal_gqa_bf16` is causal with the
+//! Causality follows the legacy helper it replaces: `mqa` and `mha`
+//! are non-causal over the valid keys; `causal_gqa` is causal with the
 //! query block at the end of the key range.
 
 use apxinf_core::{DType, Device, Error, KvCache, Result, Shape, Tensor};
@@ -276,9 +276,9 @@ fn dense_attention(
     out.reshape(vec![query_tokens, query_heads, head_dim])
 }
 
-/// `mqa_bf16`: multi-query attention — one shared K/V head, non-causal over
+/// `mqa`: multi-query attention — one shared K/V head, non-causal over
 /// the leading `key_tokens` rows of flat `[*, head_dim]` K/V storage.
-pub fn mqa_bf16(
+pub fn mqa(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -289,9 +289,9 @@ pub fn mqa_bf16(
     dense_attention(ctx, q, k, v, key_tokens, 1, false)
 }
 
-/// `mha_bf16`: dense multi-head attention over equal-shaped Q/K/V, non-causal,
+/// `mha`: dense multi-head attention over equal-shaped Q/K/V, non-causal,
 /// batched by `tokens_per_batch`.
-pub fn mha_bf16(
+pub fn mha(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -315,9 +315,9 @@ pub fn mha_bf16(
     out.reshape(vec![tokens, heads, head_dim])
 }
 
-/// `causal_gqa_bf16`: grouped-query causal attention with the query block at
+/// `causal_gqa`: grouped-query causal attention with the query block at
 /// the end of `key_tokens` keys.
-pub fn causal_gqa_bf16(
+pub fn causal_gqa(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -385,13 +385,13 @@ fn split_qkv_bias_bf16(
     Ok(QkvTensors { q, k, v })
 }
 
-/// `split_gqa_qkv_mrope_cache_bf16`: split a packed GQA projection, apply
+/// `split_gqa_qkv_mrope_cache`: split a packed GQA projection, apply
 /// mRoPE to Q/K (three position ids per token), and write K/V at
 /// `cache_tokens`-long caches. With `caches` the write lands at the given
 /// offset in the supplied tensors; without, fresh caches are allocated and
 /// the tokens land at offset zero.
 #[allow(clippy::too_many_arguments)]
-pub fn split_gqa_qkv_mrope_cache_bf16(
+pub fn split_gqa_qkv_mrope_cache(
     ctx: &CudaContext,
     qkv: &Tensor,
     bias: Option<&Tensor>,
@@ -486,10 +486,10 @@ pub fn split_gqa_qkv_mrope_cache_bf16(
     Ok(QkvTensors { q, k, v })
 }
 
-/// `split_vision_qkv_rope_bf16`: split a packed vision projection and apply
+/// `split_vision_qkv_rope`: split a packed vision projection and apply
 /// 2D RoPE to Q/K (two position ids per token). The biased value rounds to
 /// BF16 before rotation, matching the legacy kernel.
-pub fn split_vision_qkv_rope_bf16(
+pub fn split_vision_qkv_rope(
     ctx: &CudaContext,
     qkv: &Tensor,
     bias: Option<&Tensor>,
@@ -555,11 +555,11 @@ pub fn split_vision_qkv_rope_bf16(
     Ok(QkvTensors { q, k, v })
 }
 
-/// `segmented_mha_bf16`: dense non-causal MHA confined to segments delimited
+/// `segmented_mha`: dense non-causal MHA confined to segments delimited
 /// by `offsets` (`segments + 1` u32 entries, mirrored on the host for
 /// validation).
 #[allow(clippy::too_many_arguments)]
-pub fn segmented_mha_bf16(
+pub fn segmented_mha(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -685,10 +685,10 @@ pub fn segmented_mha_bf16(
     Ok(output)
 }
 
-/// `noncausal_gqa_bf16`: grouped-query attention over the leading
+/// `noncausal_gqa`: grouped-query attention over the leading
 /// `key_tokens` keys with no causal mask (the joint vision/text form used by
 /// qwen_drive's full-attention layers).
-pub fn noncausal_gqa_bf16(
+pub fn noncausal_gqa(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -736,7 +736,7 @@ pub fn noncausal(
         .checked_mul(head_dim)
         .ok_or_else(|| Error::Other("noncausal_sdpa: hidden size overflow".into()))?;
     let tokens = q_dims[0];
-    noncausal_gqa_bf16(ctx, q, k, v, key_tokens)?.reshape(vec![tokens, hidden])
+    noncausal_gqa(ctx, q, k, v, key_tokens)?.reshape(vec![tokens, hidden])
 }
 
 /// `noncausal_strided_qkv`: non-causal attention over a rank-2 packed
@@ -786,13 +786,13 @@ pub fn noncausal_strided_qkv(
         ))
         .map_err(Error::Cuda)?;
     }
-    noncausal_gqa_bf16(ctx, &q, &k, &v, tokens)?.reshape(vec![tokens, hidden])
+    noncausal_gqa(ctx, &q, &k, &v, tokens)?.reshape(vec![tokens, hidden])
 }
 
-/// `causal_gqa_prefill_bf16`: causal GQA prefill. Routes through cuda-new's
+/// `causal_gqa_prefill`: causal GQA prefill. Routes through cuda-new's
 /// tuned causal attention operator; the FA2 fixed-shape fast path is not
 /// vendored, so this always takes the generic route.
-pub fn causal_gqa_prefill_bf16(
+pub fn causal_gqa_prefill(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -820,13 +820,13 @@ pub fn causal_gqa_prefill_bf16(
         ));
     }
     let key_tokens = k_shape[0];
-    Ok(Some(causal_gqa_bf16(ctx, q, k, v, key_tokens)?))
+    Ok(Some(causal_gqa(ctx, q, k, v, key_tokens)?))
 }
 
 // ── smolvla attention surface ───────────────────────────────────────────────
 //
 // BF16 entries reuse the tuned cuda-new dense-attention operator — the same
-// route `mqa_bf16`/`mha_bf16`/`causal_gqa_bf16` take — with the legacy
+// route `mqa`/`mha`/`causal_gqa` take — with the legacy
 // composition (row views over the shared prefix, per-view MHA) kept intact.
 // FP16 entries are the cuBLAS-composed Xavier kernels, ported verbatim into
 // native/adapters/attention/fixed_f16.cu.
@@ -914,7 +914,7 @@ fn full_gqa_bf16(
     {
         return Err(Error::Other("non-causal BF16 GQA shape mismatch".into()));
     }
-    noncausal_gqa_bf16(ctx, q, k, v, key_tokens)
+    noncausal_gqa(ctx, q, k, v, key_tokens)
 }
 
 /// Two-block non-causal GQA used by SmolVLA's prefix.
@@ -1013,7 +1013,7 @@ fn vision_mha_bf16(
             "static inference BF16 vision MHA shape mismatch".into(),
         ));
     }
-    mha_bf16(ctx, q, k, v, tokens_per_batch)
+    mha(ctx, q, k, v, tokens_per_batch)
 }
 
 /// `full_gqa_f16`: non-causal FP16 GQA using Xavier FP16 tensor-core GEMMs.
@@ -1065,9 +1065,9 @@ fn full_gqa_f16(
     ))
 }
 
-/// `suffix_causal_gqa_f16`: FP16 GQA for a causal suffix following a fully
+/// `suffix_causal_gqa`: FP16 GQA for a causal suffix following a fully
 /// visible prefix. Query row `i` attends to all `key_offset + i + 1` keys.
-pub fn suffix_causal_gqa_f16(
+pub fn suffix_causal_gqa(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -1339,7 +1339,7 @@ pub fn sdpa(
             .into_tensor(Shape::new(vec![seq_len, n_kv_heads, head_dim]), DType::BF16);
         let value = gather(cache.v_buffer(layer_idx))?
             .into_tensor(Shape::new(vec![seq_len, n_kv_heads, head_dim]), DType::BF16);
-        return causal_gqa_bf16(ctx, query, &key, &value, seq_len)?
+        return causal_gqa(ctx, query, &key, &value, seq_len)?
             .reshape(vec![seq_len, n_heads * head_dim]);
     }
 
@@ -1394,7 +1394,7 @@ pub fn sdpa(
 // ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
 
 /// F32 attention softmax into caller-owned storage using a device position.
-pub fn softmax_f32_into(
+pub fn softmax_into(
     ctx: &CudaContext,
     scores: &CudaBuffer,
     output: &CudaBuffer,
@@ -1426,7 +1426,7 @@ pub fn softmax_f32_into(
 /// Decode-time BF16 flash attention into caller-owned storage. KV caches are
 /// head-major `[kv_heads, max_seq_len, head_dim]`.
 #[allow(clippy::too_many_arguments)]
-pub fn flash_bf16_into(
+pub fn flash_into(
     ctx: &CudaContext,
     query: &CudaBuffer,
     key_cache: &CudaBuffer,

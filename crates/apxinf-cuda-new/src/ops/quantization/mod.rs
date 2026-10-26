@@ -8,5 +8,5 @@ mod quantization;
 pub use casts::cast;
 pub use contracts::{QuantizationArgs, QuantizationSemantic};
 pub use fixed::*;
-pub use per_tensor::quantize_fp8_per_tensor;
+pub use per_tensor::quantize_per_tensor;
 pub use quantization::quantization;

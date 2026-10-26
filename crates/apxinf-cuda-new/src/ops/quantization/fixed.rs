@@ -78,7 +78,7 @@ fn slice_columns_bf16(ctx: &CudaContext, input: &Tensor, cols: usize) -> Result<
 
 /// `concat_rows_quantize_bf16_e4m3`: stack two equal-width BF16 matrices by
 /// rows and quantize the whole result to E4M3 with a shared scale.
-pub fn concat_rows_quantize_bf16_e4m3(
+pub fn concat_rows_quantize_fixed_scale(
     ctx: &CudaContext,
     first: &Tensor,
     second: &Tensor,

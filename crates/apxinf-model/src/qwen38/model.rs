@@ -130,7 +130,7 @@ fn fp8_projection(
     quantized: &Tensor,
     output: &mut Tensor,
 ) {
-    ops::quantize_fp8_per_tensor(ctx, source, quantized, weight.input_scale).unwrap();
+    ops::quantize_per_tensor(ctx, source, quantized, weight.input_scale).unwrap();
     ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha).unwrap();
 }
 
@@ -202,7 +202,7 @@ fn quantize_shared_fp8_activation(
 
     let source_rows = prefix(source, vec![rows, k], DType::BF16);
     let quantized_rows = prefix(quantized, vec![rows, k], DType::F8E4M3);
-    ops::quantize_fp8_per_tensor(ctx, &source_rows, &quantized_rows, first.input_scale).unwrap();
+    ops::quantize_per_tensor(ctx, &source_rows, &quantized_rows, first.input_scale).unwrap();
 }
 
 /// One projection over an activation `quantize_shared_fp8_activation` already

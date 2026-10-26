@@ -127,7 +127,7 @@ fn temporal_merged_dimensions(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn rgb_u8_to_normalized_temporal_merged_patches_bf16(
+pub fn rgb_u8_to_normalized_temporal_merged_patches(
     ctx: &CudaContext,
     images: &CudaBuffer,
     patches: &Tensor,
@@ -240,7 +240,7 @@ pub struct RgbRectFrame {
 /// temporal-2 / spatial-merge-2 patch stream used by compatible vision towers.
 /// `lut` contains 256 BF16 bit patterns; its construction belongs to the model.
 /// The safe boundary checks every byte/row range before launching any frame.
-pub fn rgb_u8_to_temporal2_merge2_rect_bf16(
+pub fn rgb_u8_to_temporal2_merge2_rect(
     ctx: &CudaContext,
     rgb: &CudaBuffer,
     patches: &Tensor,

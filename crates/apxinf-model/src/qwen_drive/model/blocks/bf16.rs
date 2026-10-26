@@ -1898,7 +1898,7 @@ pub(crate) mod expert {
         let times = &prepared.times;
         let decay = ((10000.0f64).ln() / ((ec.time_embed_dim / 2).max(2) - 1) as f64) as f32;
         let time_embeddings =
-            embedding::sinusoidal_bf16(ctx, &times, ec.time_embed_dim, ec.time_embed_scale, decay)?;
+            embedding::sinusoidal(ctx, &times, ec.time_embed_dim, ec.time_embed_scale, decay)?;
         let batched_modulation = prepare_batched_modulation(
             ctx,
             weights,
@@ -2044,7 +2044,7 @@ pub(crate) mod expert {
                 (Some(k), Some(v)) => {
                     super::noncausal_kv_gqa_l3(ctx, &q_out, k, v, input.scene_len + length)?
                 }
-                _ => attention::gqa_bf16(
+                _ => attention::gqa(
                     ctx,
                     &q_out,
                     &joint.key,
@@ -2271,7 +2271,7 @@ impl DirectInputs {
                     .as_ref()
                     .map(|resize| resize.final_rgb())
                     .unwrap_or(&rgb.bytes);
-                ops::preprocess::rgb_u8_to_temporal2_merge2_rect_bf16(
+                ops::preprocess::rgb_u8_to_temporal2_merge2_rect(
                     ctx,
                     rgb_buffer,
                     &self.pixels,

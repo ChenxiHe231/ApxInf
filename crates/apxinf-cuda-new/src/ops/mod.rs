@@ -71,7 +71,7 @@ pub use pointwise::{
 };
 pub use preprocess::{vision_position, VisionPositionArgs};
 pub use quantization::{
-    quantization, quantize_fp8_per_tensor, QuantizationArgs, QuantizationSemantic,
+    quantization, quantize_per_tensor, QuantizationArgs, QuantizationSemantic,
 };
 pub use rope::apply_vision_2d as rope_apply_vision_2d;
 pub use rope::{

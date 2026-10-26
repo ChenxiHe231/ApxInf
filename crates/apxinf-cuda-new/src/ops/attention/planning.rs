@@ -191,7 +191,7 @@ pub fn expert_sigmoid_gate_mul(ctx: &CudaContext, attn: &Tensor, gate: &Tensor) 
 }
 
 /// Non-causal grouped-query BF16 attention.
-pub fn gqa_bf16(
+pub fn gqa(
     ctx: &CudaContext,
     q: &Tensor,
     k: &Tensor,
@@ -223,5 +223,5 @@ pub fn gqa_bf16(
     }
     // cuda-new routes this through the tuned KV-cache attention operator;
     // the legacy FA2 dispatch is a candidate inside that operator now.
-    super::noncausal_gqa_bf16(ctx, q, k, v, key_tokens)
+    super::noncausal_gqa(ctx, q, k, v, key_tokens)
 }

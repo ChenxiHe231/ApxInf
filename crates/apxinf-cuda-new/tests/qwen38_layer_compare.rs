@@ -504,7 +504,7 @@ fn fp8_projection(
     quantized: &Tensor,
     output: &mut Tensor,
 ) {
-    ops::quantize_fp8_per_tensor(ctx, source, quantized, weight.input_scale).unwrap();
+    ops::quantize_per_tensor(ctx, source, quantized, weight.input_scale).unwrap();
     ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha).unwrap();
 }
 

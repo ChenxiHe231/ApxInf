@@ -46,10 +46,10 @@ pub fn lookup(
     Ok(output)
 }
 
-/// `add_position_f32_bf16`: F32 projection + learned position embedding
+/// F32 projection + learned position embedding
 /// (+ optional bias), rounded once to BF16 — the vision patch-embedding
 /// epilogue.
-pub fn add_position_f32_bf16(
+pub fn add_position_projected(
     ctx: &CudaContext,
     projection: &Tensor,
     bias: Option<&Tensor>,
@@ -99,8 +99,8 @@ pub fn add_position_f32_bf16(
     Ok(output)
 }
 
-/// `sinusoidal_bf16`: sin/cos positional features from F32 positions.
-pub fn sinusoidal_bf16(
+/// Sin/cos positional features from F32 positions, written as BF16.
+pub fn sinusoidal(
     ctx: &CudaContext,
     positions: &Tensor,
     dim: usize,

@@ -967,7 +967,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             if use_fused_vision_concat_quant {
                 if let Some(linear) = self.backbone_linears.get(name) {
                     if let Some(scale) = linear.activation_scale() {
-                        return ops::quantization::concat_rows_quantize_bf16_e4m3(
+                        return ops::quantization::concat_rows_quantize_fixed_scale(
                             self.backend.context(),
                             first,
                             second,
@@ -2758,7 +2758,7 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
         (query, key)
     };
     let attention =
-        ops::attention::causal_gqa_prefill_bf16(backend.context(), &query, &key, &value)?
+        ops::attention::causal_gqa_prefill(backend.context(), &query, &key, &value)?
             .ok_or_else(|| {
                 Error::Other(
                     "GR00T Qwen prefill requires the in-tree BF16 causal GQA attention backend"

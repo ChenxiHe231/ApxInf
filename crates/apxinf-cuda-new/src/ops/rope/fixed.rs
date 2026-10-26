@@ -85,10 +85,10 @@ pub fn split_qkv_apply(
     )
 }
 
-/// `apply_q_write_kv_bf16`: split and rotate, appending K/V into caller-owned
+/// Split and rotate, appending K/V into caller-owned
 /// caches at `output_offset`, returning only the rotated Q.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_q_write_kv_bf16(
+pub fn apply_q_write_kv(
     ctx: &CudaContext,
     qkv: &Tensor,
     bias: Option<&Tensor>,
@@ -615,10 +615,10 @@ pub fn apply_batched(
     }
 }
 
-/// `apply_half_split_f16`: the half-split RoPE convention used by SmolVLA
+/// The half-split RoPE convention used by SmolVLA
 /// FP16 cross-attention. Ported verbatim from the legacy wrapper over the
 /// `apxinf_rope_half_split_f16` launcher.
-pub fn apply_half_split_f16(
+pub fn apply_half_split(
     ctx: &CudaContext,
     input: &Tensor,
     n_heads: usize,
@@ -727,7 +727,7 @@ pub fn apply_into(
 /// Apply multimodal RoPE into caller-owned BF16 storage. `positions` is a
 /// `[3]` u32 device buffer of per-token (t, h, w) axes.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_mrope_bf16_into(
+pub fn apply_mrope_into(
     ctx: &CudaContext,
     input: &crate::CudaBuffer,
     output: &crate::CudaBuffer,
@@ -774,7 +774,7 @@ pub fn apply_mrope_bf16_into(
 /// `[kv_heads, max_seq_len, head_dim]` KV cache at the device-resident
 /// position.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_k_write_cache_bf16(
+pub fn apply_k_write_cache(
     ctx: &CudaContext,
     input: &crate::CudaBuffer,
     cache: &crate::CudaBuffer,

@@ -196,7 +196,7 @@ impl WallossModel {
         let image_processor = self.image_processor.as_ref().ok_or_else(|| {
             Error::Other("walloss RGB input requires checkpoint preprocessor_config.json".into())
         })?;
-        ops::preprocess::rgb_u8_to_normalized_temporal_merged_patches_bf16(
+        ops::preprocess::rgb_u8_to_normalized_temporal_merged_patches(
             self.backend.context(),
             raw_images,
             patches,
@@ -403,7 +403,7 @@ mod tests {
     const MERGE: usize = 2;
 
     fn preprocess(backend: &RuntimeBackend, input: &DeviceBuffer, output: &Tensor) {
-        ops::preprocess::rgb_u8_to_normalized_temporal_merged_patches_bf16(
+        ops::preprocess::rgb_u8_to_normalized_temporal_merged_patches(
             backend.context(),
             input,
             output,

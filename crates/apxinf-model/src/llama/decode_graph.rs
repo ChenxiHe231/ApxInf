@@ -285,7 +285,7 @@ fn decode_forward_capturable(
             position,
         )?;
         if is_bf16 {
-            ops::rope::apply_k_write_cache_bf16(
+            ops::rope::apply_k_write_cache(
                 ctx,
                 &k_view,
                 cache.k_buffer(i),
@@ -330,7 +330,7 @@ fn decode_forward_capturable(
 
         // Attention. bf16: flash attention decode (1 kernel). fp32: 17-kernel fallback.
         if is_bf16 {
-            ops::attention::flash_bf16_into(
+            ops::attention::flash_into(
                 ctx,
                 &ws.q_rope,
                 cache.k_buffer(i),
@@ -356,7 +356,7 @@ fn decode_forward_capturable(
                     gqa_ratio, bucket_kv_len, head_dim, scale,
                     &q_group, head_dim as i32, &k_block, head_dim as i32, 0.0, &scores_block, bucket_kv_len as i32)?;
             }
-            ops::attention::softmax_f32_into(
+            ops::attention::softmax_into(
                 ctx,
                 &ws.scores,
                 &ws.attn_weights,

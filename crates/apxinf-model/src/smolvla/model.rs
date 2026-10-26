@@ -716,7 +716,7 @@ impl SmolVlaModel {
         ])?;
         let key_tokens = key.shape().dims()[0];
         let attention = if self.fp16_gemm {
-            ops::attention::suffix_causal_gqa_f16(
+            ops::attention::suffix_causal_gqa(
                 ctx,
                 &qkv.q,
                 &key,
@@ -725,7 +725,7 @@ impl SmolVlaModel {
                 key_tokens - input_tokens,
             )?
         } else {
-            ops::attention::causal_gqa_bf16(
+            ops::attention::causal_gqa(
                 ctx,
                 &qkv.q,
                 &key,
@@ -761,7 +761,7 @@ impl SmolVlaModel {
             64,
         ])?;
         let query = if self.fp16_gemm {
-            ops::rope::apply_half_split_f16(
+            ops::rope::apply_half_split(
                 ctx,
                 &query,
                 self.config.language_heads,
