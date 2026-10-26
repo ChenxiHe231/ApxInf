@@ -149,6 +149,14 @@ struct ModeResult {
     summary: Value,
 }
 
+/// Record how many measured repeats diverged from the first. Non-zero is
+/// expected on the NVFP4 MoE path and is reported, not treated as failure.
+fn note_divergence(summary: &mut Value, divergent_repeats: usize) {
+    if let Some(map) = summary.as_object_mut() {
+        map.insert("divergent_repeats".to_string(), Value::from(divergent_repeats));
+    }
+}
+
 fn exact_prompt(prompt_tokens: usize) -> Vec<u32> {
     let mut state = 0x35A3_BF04_4096_0001u64;
     let mut tokens = Vec::with_capacity(prompt_tokens);
@@ -180,7 +188,9 @@ fn run_mode(
     mode: Mode,
     warmups: usize,
     repeats: usize,
+    allow_repeat_divergence: bool,
 ) -> Result<ModeResult, Box<dyn std::error::Error>> {
+    let mut divergent_repeats = 0usize;
     let options = mode.options(max_new_tokens);
     let mut measured_ttft_ms = Vec::with_capacity(repeats);
     let mut measured_prefill_tps = Vec::with_capacity(repeats);
@@ -208,15 +218,35 @@ fn run_mode(
                     .zip(&token_ids)
                     .position(|(left, right)| left != right)
                     .unwrap_or(expected.len().min(token_ids.len()));
-                return Err(format!(
+                let detail = format!(
                     "{} output changed across repeats at token {mismatch}: expected={:?}, actual={:?}, expected_digest={:016x}, actual_digest={:016x}",
                     mode.name(),
                     expected.get(mismatch),
                     token_ids.get(mismatch),
                     token_digest(expected),
                     token_digest(&token_ids),
-                )
-                .into());
+                );
+                // The NVFP4 MoE combines experts with a relaxed bf16 atomic
+                // add, so the per-token sum over experts depends on CTA
+                // arrival order and is not bit-reproducible. That is a
+                // property of the vendored CuTe DSL kernel, not of this
+                // engine: the TensorRT Edge-LLM build of the same model
+                // returns four different completions for four identical
+                // greedy requests. Asserting bit-equality across repeats
+                // therefore asserts something the kernel never promised, and
+                // it makes the benchmark unrunnable on its own default path.
+                //
+                // `--allow-repeat-divergence` downgrades it to a counted
+                // observation so throughput can be measured the same way the
+                // reference engine is measured. The `bf16` MoE activation is
+                // a genuinely deterministic path and should still be run
+                // without this flag as the correctness gate.
+                if allow_repeat_divergence {
+                    divergent_repeats += 1;
+                    eprintln!("[qwen35-bench] WARNING {detail}");
+                } else {
+                    return Err(detail.into());
+                }
             }
         } else {
             canonical_tokens = Some(token_ids.clone());
@@ -271,7 +301,7 @@ fn run_mode(
         }
     }
 
-    let summary = json!({
+    let mut summary = json!({
         "schema": "apxinf.qwen35.benchmark.summary.v1",
         "mode": mode.name(),
         "prompt_tokens": prompt.len(),
@@ -295,6 +325,7 @@ fn run_mode(
             Mode::Scalar => Value::Null,
         },
     });
+    note_divergence(&mut summary, divergent_repeats);
     Ok(ModeResult {
         canonical_tokens: canonical_tokens.expect("at least one iteration"),
         summary,
@@ -345,6 +376,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let max_new_tokens = arg_value(&args, "--max-new", DEFAULT_OUTPUT_TOKENS);
     let warmups = arg_value(&args, "--warmups", DEFAULT_WARMUPS);
     let repeats = arg_value(&args, "--repeats", DEFAULT_REPEATS);
+    // The NVFP4 MoE expert combine is not bit-reproducible; see run_mode.
+    let allow_repeat_divergence =
+        args.iter().any(|arg| arg == "--allow-repeat-divergence");
     let benchmark_mode = BenchmarkMode::parse(&args)?;
     let moe_activation = precision_arg::<Qwen35MoeActivation>(&args, "--qwen35-moe-activation")?;
     let kv_cache = precision_arg::<Qwen35KvCacheDType>(&args, "--qwen35-kv-cache")?;
@@ -393,6 +427,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Scalar,
                 warmups,
                 repeats,
+                allow_repeat_divergence,
             )?;
             println!("{}", scalar.summary);
         }
@@ -404,6 +439,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Mtp,
                 warmups,
                 repeats,
+                allow_repeat_divergence,
             )?;
             println!("{}", mtp.summary);
         }
@@ -415,6 +451,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Scalar,
                 warmups,
                 repeats,
+                allow_repeat_divergence,
             )?;
             let mtp = run_mode(
                 &mut model,
@@ -423,6 +460,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Mode::Mtp,
                 warmups,
                 repeats,
+                allow_repeat_divergence,
             )?;
             if scalar.canonical_tokens != mtp.canonical_tokens {
                 let mismatch = scalar
