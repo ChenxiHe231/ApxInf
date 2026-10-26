@@ -49,8 +49,25 @@ pub fn quantize_rows(
     Ok(DynamicFp8Tensor { values, scales })
 }
 
-/// `slice_columns_bf16`: keep the leading `cols` columns of a BF16 matrix.
-pub fn slice_columns_bf16(ctx: &CudaContext, input: &Tensor, cols: usize) -> Result<Tensor> {
+/// Keep the leading `output_cols` columns of a matrix.
+///
+/// The input dtype selects the original BF16 kernel or FP16 strided-copy
+/// implementation; their numerical and launch behavior remain unchanged.
+pub fn slice_columns(
+    ctx: &CudaContext,
+    input: &Tensor,
+    output_cols: usize,
+) -> Result<Tensor> {
+    match input.dtype() {
+        DType::BF16 => slice_columns_bf16(ctx, input, output_cols),
+        DType::F16 => slice_columns_f16(ctx, input, output_cols),
+        dtype => Err(Error::Other(format!(
+            "column slice expects F16 or BF16 input, got {dtype}"
+        ))),
+    }
+}
+
+fn slice_columns_bf16(ctx: &CudaContext, input: &Tensor, cols: usize) -> Result<Tensor> {
     let rows = input.shape().dims().first().copied().unwrap_or(0);
     let mut out = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::BF16)?;
     let args =
@@ -143,7 +160,7 @@ pub fn concat_rows_quantize_bf16_e4m3(
 /// `slice_columns_f16`: keep the leading `output_cols` columns of an FP16
 /// matrix. Ported from the legacy wrapper, which uses a strided 2D device
 /// copy rather than a kernel.
-pub fn slice_columns_f16(ctx: &CudaContext, input: &Tensor, output_cols: usize) -> Result<Tensor> {
+fn slice_columns_f16(ctx: &CudaContext, input: &Tensor, output_cols: usize) -> Result<Tensor> {
     use crate::ops::validation::make_gpu_tensor;
     if input.dtype() != DType::F16 {
         return Err(Error::DTypeMismatch {

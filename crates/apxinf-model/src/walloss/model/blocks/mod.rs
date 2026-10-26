@@ -109,7 +109,7 @@ fn dynamic_linear_prequantized(
     if keep_padded_output || output.shape().dims()[1] == weight.output_features {
         Ok(output)
     } else {
-        ops::quantization::slice_columns_bf16(context, &output, weight.output_features)
+        ops::quantization::slice_columns(context, &output, weight.output_features)
     }
 }
 

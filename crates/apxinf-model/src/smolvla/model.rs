@@ -217,11 +217,8 @@ impl SmolVlaModel {
         expert_timer.stop(ctx)?;
         let output_timer = CudaEventTimer::new()?;
         output_timer.start(ctx)?;
-        let output = (if self.fp16_gemm {
-            ops::quantization::slice_columns_f16
-        } else {
-            ops::quantization::slice_columns_bf16
-        })(ctx, &state, self.config.action_dim)?;
+        let output =
+            ops::quantization::slice_columns(ctx, &state, self.config.action_dim)?;
         output_timer.stop(ctx)?;
 
         self.backend.synchronize()?;
@@ -303,11 +300,7 @@ impl SmolVlaModel {
             let velocity = self.denoise_step_with_embedding(&state, embedding, &prefix_states)?;
             state = ops::elementwise::euler_update(ctx, &state, &velocity, dt)?;
         }
-        (if self.fp16_gemm {
-            ops::quantization::slice_columns_f16
-        } else {
-            ops::quantization::slice_columns_bf16
-        })(ctx, &state, self.config.action_dim)
+        ops::quantization::slice_columns(ctx, &state, self.config.action_dim)
     }
 
     fn embed_prefix(
