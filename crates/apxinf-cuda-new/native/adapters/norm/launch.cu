@@ -7,6 +7,13 @@
 #include <cstdint>
 #include <cuda_fp8.h>
 
+extern "C" cudaError_t apxinf_norm_rms_norm_f16(
+    const void* input, const void* weight, void* output, int rows, int cols,
+    float eps, cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_layer_norm_f16(
+    const void* input, const void* weight, const void* bias, void* output,
+    int rows, int cols, float eps, cudaStream_t stream);
+
 namespace {
 
 using apxinf::framework::Failure;
@@ -205,6 +212,28 @@ cudaError_t launch_quantized_f16(const apxinf_norm_spec_t& spec,
 
 template <class T>
 cudaError_t launch(const apxinf_norm_spec_t& spec,
+                   const apxinf_norm_bindings_t& bindings);
+
+cudaError_t launch_fixed_f16(const apxinf_norm_spec_t& spec,
+                             const apxinf_norm_bindings_t& bindings) {
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+  const int rows = static_cast<int>(spec.rows);
+  const int cols = static_cast<int>(spec.cols);
+  if (spec.semantic == APXINF_NORM_SEMANTIC_RMS) {
+    return apxinf_norm_rms_norm_f16(
+        bindings.input, bindings.weight, bindings.normalized, rows, cols,
+        bindings.eps, stream);
+  }
+  if (spec.semantic == APXINF_NORM_SEMANTIC_LAYER) {
+    return apxinf_norm_layer_norm_f16(
+        bindings.input, bindings.weight, bindings.norm_bias,
+        bindings.normalized, rows, cols, bindings.eps, stream);
+  }
+  return launch<__half>(spec, bindings);
+}
+
+template <class T>
+cudaError_t launch(const apxinf_norm_spec_t& spec,
                    const apxinf_norm_bindings_t& bindings) {
   const auto* input = static_cast<const T*>(bindings.input);
   const auto* bias = static_cast<const T*>(bindings.bias);
@@ -286,6 +315,6 @@ extern "C" apxinf_status_t apxinf_norm_launch(
             ? launch_quantized_f16(*spec, *bindings)
             : (spec->dtype == APXINF_DTYPE_BF16
                    ? launch<__nv_bfloat16>(*spec, *bindings)
-                   : launch<__half>(*spec, *bindings)));
+                   : launch_fixed_f16(*spec, *bindings)));
   });
 }

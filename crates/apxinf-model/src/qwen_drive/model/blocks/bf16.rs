@@ -973,7 +973,7 @@ pub(super) mod vision {
     use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
     use crate::qwen_drive::backend::{nvtx, ops, transfers, Context, DeviceBuffer};
-    use ops::{elementwise, gemm, norm, pointwise};
+    use ops::{elementwise, gemm, pointwise};
 
     use crate::qwen_drive::config::QwenDriveConfig;
     use crate::qwen_drive::weights::bf16::VisionDeviceWeights;
@@ -1094,7 +1094,7 @@ pub(super) mod vision {
 
             let normed = match normalized.take() {
                 Some(value) => value,
-                None => norm::layer(ctx, &x, &block.norm1_w, &block.norm1_b, eps)?,
+                None => crate::cuda_ops::norm::layer(ctx, &x, &block.norm1_w, &block.norm1_b, eps)?,
             };
             if block_idx == 0 {
                 super::dump_attention_probe(ctx, 102, &[("block0_norm1", &normed)])?;
@@ -1217,7 +1217,7 @@ pub(super) mod vision {
         // Merger: LayerNorm(1024) -> merge 4 rows -> fc1 -> exact erf GELU -> fc2.
         let normed = match normalized {
             Some(value) => value,
-            None => norm::layer(ctx, &x, &weights.merger_norm_w, &weights.merger_norm_b, eps)?,
+            None => crate::cuda_ops::norm::layer(ctx, &x, &weights.merger_norm_w, &weights.merger_norm_b, eps)?,
         };
         super::dump_attention_probe(ctx, 111, &[("merger_normed", &normed)])?;
         // Merging rows is a reshape and nothing else: the merger takes `merge*merge`
@@ -2094,7 +2094,7 @@ pub(crate) mod expert {
             }
         }
 
-        let final_normed = norm::rms(ctx, &hidden, &weights.final_norm, eps)?;
+        let final_normed = crate::cuda_ops::norm::rms(ctx, &hidden, &weights.final_norm, eps)?;
 
         let endpoint =
             gemm::bf16_bias(ctx, &final_normed, &weights.out_proj_w, &weights.out_proj_b)?;

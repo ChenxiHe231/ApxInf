@@ -1,6 +1,32 @@
 use apxinf_core::{DType, Result, Shape, Tensor};
 use apxinf_cuda_new::{ops, CudaContext};
 
+pub(crate) fn rms(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    let mut output = ctx.allocate_output(input.shape().clone(), input.dtype())?;
+    ops::rms_norm(ctx, ops::RmsNormArgs::new(input, weight, &mut output, eps))?;
+    Ok(output)
+}
+
+pub(crate) fn layer(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    let mut output = ctx.allocate_output(input.shape().clone(), input.dtype())?;
+    ops::layer_norm(
+        ctx,
+        ops::LayerNormArgs::new(input, weight, bias, &mut output, eps),
+    )?;
+    Ok(output)
+}
+
 pub(crate) fn bias_residual(
     ctx: &CudaContext,
     projection: &Tensor,

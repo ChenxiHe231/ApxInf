@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use super::backend::{ops, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
 use apxinf_core::{Error, Result, Tensor};
-use ops::{cache, elementwise, embedding, norm, sampling, ExecutionSession};
+use ops::{cache, elementwise, embedding, sampling, ExecutionSession};
 
 use super::bf16_executor::vision_patch_embed_f32_bf16;
 use super::fp8_executor::fp8_projection;
@@ -180,7 +180,7 @@ impl Pi0FastFp8Runtime {
                 config.layer_norm_eps,
             )?;
         }
-        let hidden = norm::layer(
+        let hidden = crate::cuda_ops::norm::layer(
             self.ctx(),
             &hidden,
             &weights.vision_post_norm.weight,
@@ -334,7 +334,7 @@ impl Pi0FastFp8Runtime {
     }
 
     fn lm_head(&self, hidden: &Tensor) -> Result<Tensor> {
-        let normalized = norm::rms(
+        let normalized = crate::cuda_ops::norm::rms(
             self.ctx(),
             hidden,
             &self.weights.language_final_norm_scale,

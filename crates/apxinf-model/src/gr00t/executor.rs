@@ -2019,7 +2019,7 @@ fn linear<L: DeviceLinearWeights>(
 }
 
 fn rms_norm(backend: &RuntimeBackend, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    ops::norm::rms(backend.context(), input, weight, eps)
+    crate::cuda_ops::norm::rms(backend.context(), input, weight, eps)
 }
 
 fn layer_norm(
@@ -2029,7 +2029,7 @@ fn layer_norm(
     bias: &Tensor,
     eps: f32,
 ) -> Result<Tensor> {
-    ops::norm::layer(backend.context(), input, weight, bias, eps)
+    crate::cuda_ops::norm::layer(backend.context(), input, weight, bias, eps)
 }
 
 fn linear_quantized<L: DeviceLinearWeights>(

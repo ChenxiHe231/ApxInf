@@ -13,7 +13,7 @@
 
 use super::backend::{ops, Context};
 use apxinf_core::{Result, Tensor};
-use ops::{attention, gemm, norm, pointwise, quantization, rope};
+use ops::{attention, gemm, pointwise, quantization, rope};
 
 use super::{
     Fp8DeviceLanguageLayer, Fp8DeviceVisionBlock, Pi0FastLanguageConfig,
@@ -146,7 +146,7 @@ pub fn language_layer_fp8(
     rms_eps: f32,
     rope_theta: f32,
 ) -> Result<Fp8LanguageLayerOutput> {
-    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = crate::cuda_ops::norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = fp8_projection(ctx, &normalized, &weights.qkv, scales.qkv_input)?;
     let qkv = rope::split_qkv_apply(
         ctx,
@@ -200,7 +200,7 @@ pub fn vision_layer_fp8(
     head_dim: usize,
     layer_norm_eps: f32,
 ) -> Result<Tensor> {
-    let normalized = norm::layer(
+    let normalized = crate::cuda_ops::norm::layer(
         ctx,
         input,
         &weights.norm1.weight,
@@ -248,7 +248,7 @@ pub fn language_layer_cached_decode_fp8(
     rope_theta: f32,
 ) -> Result<Tensor> {
     let tokens = input.shape().dims()[0];
-    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = crate::cuda_ops::norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = fp8_projection(ctx, &normalized, &weights.qkv, scales.qkv_input)?;
     let q = rope::apply_q_write_kv(
         ctx,

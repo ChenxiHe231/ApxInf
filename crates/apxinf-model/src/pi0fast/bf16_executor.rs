@@ -2,7 +2,7 @@
 
 use super::backend::{ops, Context};
 use apxinf_core::{Result, Tensor};
-use ops::{attention, embedding, gemm, norm, pointwise, rope};
+use ops::{attention, embedding, gemm, pointwise, rope};
 
 use super::{
     Bf16DeviceLanguageLayer, Bf16DeviceVisionBlock, Pi0FastLanguageConfig,
@@ -26,7 +26,7 @@ pub fn language_layer_bf16(
     rms_eps: f32,
     rope_theta: f32,
 ) -> Result<Bf16LanguageLayerOutput> {
-    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = crate::cuda_ops::norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = gemm::bf16(ctx, &normalized, &weights.qkv.weight)?;
     let qkv = rope::split_qkv_apply(
         ctx,
@@ -101,7 +101,7 @@ pub fn vision_layer_bf16(
     head_dim: usize,
     layer_norm_eps: f32,
 ) -> Result<Tensor> {
-    let normalized = norm::layer(
+    let normalized = crate::cuda_ops::norm::layer(
         ctx,
         input,
         &weights.norm1.weight,
@@ -197,7 +197,7 @@ pub fn language_layer_cached_decode_bf16(
     rope_theta: f32,
 ) -> Result<Tensor> {
     let tokens = input.shape().dims()[0];
-    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = crate::cuda_ops::norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = projection(ctx, &normalized, &weights.qkv.weight)?;
     let q = rope::apply_q_write_kv(
         ctx,
@@ -248,7 +248,7 @@ pub fn language_layer_cached_bf16(
     rope_theta: f32,
 ) -> Result<Tensor> {
     let tokens = input.shape().dims()[0];
-    let normalized = norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
+    let normalized = crate::cuda_ops::norm::rms(ctx, input, &weights.input_norm_scale, rms_eps)?;
     let qkv = gemm::bf16(ctx, &normalized, &weights.qkv.weight)?;
     let q = rope::apply_q_write_kv(
         ctx,

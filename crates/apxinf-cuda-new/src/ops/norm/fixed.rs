@@ -1,59 +1,8 @@
 //! Allocating and caller-owned normalization operators.
 
-use apxinf_core::{DType, Error, Result, Shape, Tensor};
+use apxinf_core::{DType, Result, Shape, Tensor};
 
-use crate::{ops, CudaContext};
-
-/// `rms_bf16`: RMS-normalize a `[rows, cols]` BF16 activation with a plain
-/// `[cols]` scale.
-///
-/// Routes to `ops::norm::rms_norm` (the plain `x/rms * weight` contract the
-/// legacy plain RMS wrapper implements). The `ops::norm::rms_norm_weight_offset`
-/// operator is a different, Gemma/Qwen3.5-convention norm that applies
-/// `(1 + weight)` and must not be used here.
-pub fn rms(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    match input.dtype() {
-        DType::BF16 => rms_bf16(ctx, input, weight, eps),
-        DType::F16 => rms_f16(ctx, input, weight, eps),
-        _ => Err(Error::Other("RMSNorm requires BF16 or F16 input".into())),
-    }
-}
-
-fn rms_bf16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    ops::rms_norm(ctx, ops::RmsNormArgs::new(input, weight, &mut output, eps))?;
-    Ok(output)
-}
-
-/// `layer_bf16`: LayerNorm with weight and bias.
-pub fn layer(
-    ctx: &CudaContext,
-    input: &Tensor,
-    weight: &Tensor,
-    bias: &Tensor,
-    eps: f32,
-) -> Result<Tensor> {
-    match input.dtype() {
-        DType::BF16 => layer_bf16(ctx, input, weight, bias, eps),
-        DType::F16 => layer_f16(ctx, input, weight, bias, eps),
-        _ => Err(Error::Other("LayerNorm requires BF16 or F16 input".into())),
-    }
-}
-
-fn layer_bf16(
-    ctx: &CudaContext,
-    input: &Tensor,
-    weight: &Tensor,
-    bias: &Tensor,
-    eps: f32,
-) -> Result<Tensor> {
-    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    ops::layer_norm(
-        ctx,
-        ops::LayerNormArgs::new(input, weight, bias, &mut output, eps),
-    )?;
-    Ok(output)
-}
+use crate::CudaContext;
 
 /// `rms_quantize_rows_bf16_e4m3`: RMS-normalize then rowwise-quantize to
 /// E4M3, zero-padding to `output_cols`. Returns values plus per-row scales.
@@ -303,87 +252,6 @@ pub fn layer_quant_bf16_e4m3(
         ))?;
     }
     Ok(output)
-}
-
-// ── smolvla FP16 surface ────────────────────────────────────────────────────
-//
-// Ported verbatim from the legacy FP16 normalization wrappers over the
-// `family-specific FP16` launchers (native/adapters/norm/fixed_f16.cu).
-
-/// `rms_f16`: RMS-normalize a `[rows, cols]` FP16 activation with a plain
-/// `[cols]` scale (the Xavier FP16 path).
-fn rms_f16(ctx: &CudaContext, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    use crate::ffi::abi::norm as abi;
-    use crate::ops::validation::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
-    let (rows, cols) = matrix_shape(input, "RMSNorm")?;
-    if input.dtype() != DType::F16
-        || weight.dtype() != DType::F16
-        || weight.shape().dims() != [cols]
-    {
-        return Err(Error::Other(
-            "static inference FP16 RMSNorm shape mismatch".into(),
-        ));
-    }
-    let output = f16_output(ctx, rows, cols)?;
-    unsafe {
-        crate::ops::validation::check_cuda(abi::apxinf_norm_rms_norm_f16(
-            gpu_ptr(input)?,
-            gpu_ptr(weight)?,
-            output.ptr(),
-            rows as i32,
-            cols as i32,
-            eps,
-            ctx.stream().handle(),
-        ))?;
-    }
-    Ok(make_gpu_tensor(
-        Shape::new(vec![rows, cols]),
-        DType::F16,
-        ctx.device_id(),
-        output,
-    ))
-}
-
-/// `layer_f16`: LayerNorm with FP16 weight and bias.
-fn layer_f16(
-    ctx: &CudaContext,
-    input: &Tensor,
-    weight: &Tensor,
-    bias: &Tensor,
-    eps: f32,
-) -> Result<Tensor> {
-    use crate::ffi::abi::norm as abi;
-    use crate::ops::validation::{f16_output, gpu_ptr, make_gpu_tensor, matrix_shape};
-    let (rows, cols) = matrix_shape(input, "LayerNorm")?;
-    if [input, weight, bias]
-        .into_iter()
-        .any(|tensor| tensor.dtype() != DType::F16)
-        || weight.shape().dims() != [cols]
-        || bias.shape().dims() != [cols]
-    {
-        return Err(Error::Other(
-            "static inference FP16 LayerNorm shape mismatch".into(),
-        ));
-    }
-    let output = f16_output(ctx, rows, cols)?;
-    unsafe {
-        crate::ops::validation::check_cuda(abi::apxinf_norm_layer_norm_f16(
-            gpu_ptr(input)?,
-            gpu_ptr(weight)?,
-            gpu_ptr(bias)?,
-            output.ptr(),
-            rows as i32,
-            cols as i32,
-            eps,
-            ctx.stream().handle(),
-        ))?;
-    }
-    Ok(make_gpu_tensor(
-        Shape::new(vec![rows, cols]),
-        DType::F16,
-        ctx.device_id(),
-        output,
-    ))
 }
 
 // ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───

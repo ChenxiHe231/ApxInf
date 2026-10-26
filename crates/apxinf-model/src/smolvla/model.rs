@@ -336,7 +336,7 @@ impl SmolVlaModel {
         for layer in &self.weights.vision_layers {
             hidden = self.vision_layer(ctx, layer, &hidden)?;
         }
-        let hidden = ops::norm::layer(
+        let hidden = crate::cuda_ops::norm::layer(
             ctx,
             &hidden,
             &self.weights.vision_post_norm.weight,
@@ -362,7 +362,7 @@ impl SmolVlaModel {
         weights: &super::weights::VisionLayer,
         input: &Tensor,
     ) -> Result<Tensor> {
-        let normalized = ops::norm::layer(
+        let normalized = crate::cuda_ops::norm::layer(
             ctx,
             input,
             &weights.norm1.weight,
@@ -402,7 +402,7 @@ impl SmolVlaModel {
                 input,
             )?
         };
-        let normalized = ops::norm::layer(
+        let normalized = crate::cuda_ops::norm::layer(
             ctx,
             &hidden,
             &weights.norm2.weight,
@@ -488,7 +488,7 @@ impl SmolVlaModel {
         let mut keys = Vec::with_capacity(self.config.language_depth);
         let mut values = Vec::with_capacity(self.config.language_depth);
         for layer in &self.weights.text_layers {
-            let normalized = ops::norm::rms(
+            let normalized = crate::cuda_ops::norm::rms(
                 ctx,
                 &hidden,
                 &layer.input_norm,
@@ -529,7 +529,7 @@ impl SmolVlaModel {
             }
             hidden = mlp_output;
         }
-        let hidden = ops::norm::rms(
+        let hidden = crate::cuda_ops::norm::rms(
             ctx,
             &hidden,
             &self.weights.text_norm,
@@ -574,7 +574,7 @@ impl SmolVlaModel {
         gate_up: &super::weights::Linear,
         down: &super::weights::Linear,
     ) -> Result<Tensor> {
-        let normalized = ops::norm::rms(ctx, input, norm, self.config.rms_norm_eps)?;
+        let normalized = crate::cuda_ops::norm::rms(ctx, input, norm, self.config.rms_norm_eps)?;
         let activated =
             self.gemm(ctx, &normalized, &gate_up.weight)?;
         let activated = ops::pointwise::swiglu(
@@ -654,7 +654,7 @@ impl SmolVlaModel {
                 }
             };
         }
-        let hidden = ops::norm::rms(
+        let hidden = crate::cuda_ops::norm::rms(
             ctx,
             &hidden,
             &self.weights.expert_norm,
@@ -673,7 +673,7 @@ impl SmolVlaModel {
         prefix_key: &Tensor,
         prefix_value: &Tensor,
     ) -> Result<Tensor> {
-        let normalized = ops::norm::rms(
+        let normalized = crate::cuda_ops::norm::rms(
             ctx,
             input,
             &weights.input_norm,
@@ -748,7 +748,7 @@ impl SmolVlaModel {
         key: &Tensor,
         value: &Tensor,
     ) -> Result<Tensor> {
-        let normalized = ops::norm::rms(
+        let normalized = crate::cuda_ops::norm::rms(
             ctx,
             input,
             &weights.input_norm,

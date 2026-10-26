@@ -322,25 +322,6 @@ mod fixed_launchers {
             scale: f32,
             stream: cudaStream_t,
         ) -> cudaError_t;
-        pub(crate) fn apxinf_norm_rms_norm_f16(
-            input: *const c_void,
-            weight: *const c_void,
-            output: *mut c_void,
-            rows: i32,
-            cols: i32,
-            eps: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_norm_layer_norm_f16(
-            input: *const c_void,
-            weight: *const c_void,
-            bias: *const c_void,
-            output: *mut c_void,
-            rows: i32,
-            cols: i32,
-            eps: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
     }
 }
 pub(crate) use fixed_launchers::*;

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use super::backend::{ops, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
 use apxinf_core::{Error, Result, Tensor};
-use ops::{cache, elementwise, embedding, gemm, norm, sampling, ExecutionSession};
+use ops::{cache, elementwise, embedding, gemm, sampling, ExecutionSession};
 
 use super::calibration::Pi0FastCalibrationObserver;
 use super::{
@@ -204,7 +204,7 @@ impl Pi0FastBf16Runtime {
                 config.layer_norm_eps,
             )?;
         }
-        let hidden = norm::layer(
+        let hidden = crate::cuda_ops::norm::layer(
             self.ctx(),
             &hidden,
             &weights.vision_post_norm.weight,
@@ -386,7 +386,7 @@ impl Pi0FastBf16Runtime {
     }
 
     fn lm_head(&self, hidden: &Tensor) -> Result<Tensor> {
-        let normalized = norm::rms(
+        let normalized = crate::cuda_ops::norm::rms(
             self.ctx(),
             hidden,
             &self.weights.language_final_norm_scale,
