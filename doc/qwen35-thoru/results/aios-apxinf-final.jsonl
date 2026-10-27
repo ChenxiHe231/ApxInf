@@ -1,0 +1,3 @@
+{"engine": "apxinf", "tag": "headline", "prompt_tokens": 4096, "max_new": 256, "ttft_ms": 856.269342, "prefill_tok_s": 4783.541578673034, "decode_tok_s": 50.45034413630925, "divergent_repeats": 3}
+{"engine": "apxinf", "tag": "decodeC", "prompt_tokens": 32768, "max_new": 512, "ttft_ms": 9130.155406, "prefill_tok_s": 3588.9860076714667, "decode_tok_s": 31.512902216395933, "divergent_repeats": 1}
+{"engine": "apxinf", "tag": "decodeC", "prompt_tokens": 49152, "max_new": 512, "ttft_ms": 16200.407358, "prefill_tok_s": 3033.9977825142787, "decode_tok_s": 26.132446892287373, "divergent_repeats": 1}

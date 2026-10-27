@@ -20,3 +20,10 @@ target-p92i/
 
 /configs/tuning/**/*.recipe
 /configs/tuning/**/*.recipe.*.tmp
+
+# Benchmark and diagnostic output. Results that are meant to be kept live in
+# doc/qwen35-thoru/results/; everything else here is scratch from a single run.
+*.err
+*.log
+*.out
+/*.jsonl
