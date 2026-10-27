@@ -32,6 +32,11 @@ Qwen3.8-27B-NVFP4 is a text LLM behind `LlmTrait` with the same
 `weights`/`model`/`model_runner` owners as single files.
 [CLI inference, benchmarking and limits](qwen38-nvfp4.md) cover Jetson Thor.
 
+Qwen3.5-35B-A3B-NVFP4 has a dedicated
+[Thor-U build, benchmark and serving guide](qwen35-thoru/README.md), including
+the standardized 4,096-token prompt plus 256-token output protocol and all
+MoE-activation/KV-cache precision combinations.
+
 ## Agent workflows
 
 - [model-port-workflow](../skills/model-port-workflow/SKILL.md): a complete new-family port, including module ownership, registration, public integration and GPU evidence.
