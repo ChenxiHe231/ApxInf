@@ -31,6 +31,9 @@ cuda = ["dep:apxinf-cuda", "apxinf-cuda/nvtx", "apxinf-model/cuda", "apxinf-serv
 # Same as `cuda` but with NVTX compiled out entirely (no-op stubs). Use
 # when the target has no NVTX library installed at all.
 cuda-no-nvtx = ["dep:apxinf-cuda", "apxinf-model/cuda"]
+# Qwen3.5-35B-A3B-only CUDA build. This deliberately excludes the legacy
+# `apxinf-cuda` crate; use `cuda` when other CUDA model families are needed.
+qwen35-cuda = ["apxinf-model/qwen35-cuda"]
 # Deprecated alias of `cuda`, kept so existing build commands keep working.
 # `cuda` already links both CUDA runtimes and enables every CUDA model family,
 # Qwen3.8 included — see crates/apxinf-model/Cargo.toml.

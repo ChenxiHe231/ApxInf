@@ -21,9 +21,13 @@ sha2 = { version = "0.10", optional = true }
 [features]
 default = []
 mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "dep:sha2"]
-# Full NVIDIA CUDA inference: links both the legacy (`apxinf-cuda`) and the
-# current (`apxinf-cuda-new`) runtimes and enables every CUDA model family.
-cuda = ["dep:apxinf-cuda", "dep:apxinf-cuda-new"]
+# Qwen3.5-35B-A3B owns its CUDA execution and sampling in `apxinf-cuda-new`.
+# Keep this feature separate so building that model never compiles or links the
+# legacy `apxinf-cuda` runtime.
+qwen35-cuda = ["dep:apxinf-cuda-new"]
+# Full NVIDIA CUDA inference: links both the legacy (`apxinf-cuda`) runtime and
+# the current runtime, and enables every CUDA model family.
+cuda = ["dep:apxinf-cuda", "qwen35-cuda"]
 # Deprecated alias of `cuda`, kept so existing build commands keep working.
 # It no longer gates anything: `cuda` already pulls in `apxinf-cuda-new`, and
 # the model code that used to hide behind this flag now follows `cuda`.
@@ -77,7 +81,7 @@ required-features = ["cuda"]
 
 [[example]]
 name = "qwen35_mtp_bench"
-required-features = ["cuda"]
+required-features = ["qwen35-cuda"]
 
 [[example]]
 name = "d3_smoke"

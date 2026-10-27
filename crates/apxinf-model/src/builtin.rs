@@ -36,9 +36,9 @@ pub fn register_builtin_models() {
     // Exact public Qwen3.5 MoE identity. Keep the legacy `qwen3_5` aliases
     // above bound to Qwen38: the two checkpoint families have different
     // layer, quantization and cache contracts.
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "qwen35-cuda")]
     registry::register("qwen3_5_moe", load_qwen35_moe);
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "qwen35-cuda")]
     registry::register("qwen3_5_moe_text", load_qwen35_moe);
 
     #[cfg(feature = "cuda")]
@@ -144,7 +144,7 @@ fn load_qwen38(
 /// Exact `txn545/Qwen3.5-35B-A3B-NVFP4` loader. Unlike the legacy Qwen38
 /// loader, this validates the nested Hugging Face config and complete
 /// text+MTP tensor manifest before allocating a session.
-#[cfg(feature = "cuda")]
+#[cfg(feature = "qwen35-cuda")]
 fn load_qwen35_moe(
     path: &Path,
     device: Device,

@@ -17,6 +17,85 @@ use cuda_arch::{
     ArchSource,
 };
 
+fn stable_source_key(source: &Path, native: &Path) -> u64 {
+    // FNV-1a is deterministic across Rust releases and hosts. Source paths are
+    // relative to the crate's native tree, so Cargo OUT_DIR changes do not
+    // alter the key.
+    let path = source.strip_prefix(native).unwrap_or(source);
+    path.to_string_lossy()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
+fn migrate_sibling_object_cache(
+    out: &Path,
+    object: &Path,
+    deps: &Path,
+    stamp: &Path,
+    cmdline: &str,
+) -> bool {
+    let Some(build_root) = out.parent().and_then(Path::parent) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(build_root) else {
+        return false;
+    };
+    let Some(object_name) = object.file_name() else {
+        return false;
+    };
+    let Some(deps_name) = deps.file_name() else {
+        return false;
+    };
+    let Some(stamp_name) = stamp.file_name() else {
+        return false;
+    };
+    let current_out = out.to_string_lossy();
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("apxinf-cuda-new-")
+        {
+            continue;
+        }
+        let candidate_out = entry.path().join("out");
+        if candidate_out == out {
+            continue;
+        }
+        let candidate_object = candidate_out.join(object_name);
+        let candidate_deps = candidate_out.join(deps_name);
+        let candidate_stamp = candidate_out.join(stamp_name);
+        let candidate_out_text = candidate_out.to_string_lossy();
+        let candidate_cmdline = cmdline.replace(current_out.as_ref(), candidate_out_text.as_ref());
+        if !nvcc_build::object_is_current(
+            &candidate_object,
+            &candidate_deps,
+            &candidate_stamp,
+            &candidate_cmdline,
+        ) {
+            continue;
+        }
+        std::fs::copy(&candidate_object, object).unwrap_or_else(|error| {
+            panic!(
+                "migrate {} to {}: {error}",
+                candidate_object.display(),
+                object.display()
+            )
+        });
+        let dependency_rule = std::fs::read_to_string(&candidate_deps)
+            .unwrap_or_else(|error| panic!("read {}: {error}", candidate_deps.display()))
+            .replace(candidate_out_text.as_ref(), current_out.as_ref());
+        std::fs::write(deps, dependency_rule)
+            .unwrap_or_else(|error| panic!("write {}: {error}", deps.display()));
+        std::fs::write(stamp, cmdline)
+            .unwrap_or_else(|error| panic!("write {}: {error}", stamp.display()));
+        return true;
+    }
+    false
+}
+
 fn write_arch_header(out: &Path, selection: &ArchSelection) -> PathBuf {
     let path = out.join("apxinf_cuda_arches.h");
     let mut header = String::from(
@@ -586,10 +665,9 @@ fn main() {
     {
         let (source, is_cutlass, is_sm110, is_cutlass_sm87, is_cutlass_sm89, is_fa2, is_fa2_e4m3) =
             source;
-        let object = out.join(format!(
-            "gemm-{index}-{}.o",
-            source.file_stem().unwrap().to_string_lossy()
-        ));
+        let stem = source.file_stem().unwrap().to_string_lossy().to_string();
+        let source_key = stable_source_key(&source, &native);
+        let object = out.join(format!("gemm-{source_key:016x}-{stem}.o"));
         let mut command = Command::new(&bundled_nvcc);
         command
             .arg("-c")
@@ -775,11 +853,53 @@ fn main() {
         // Skip the compile when a previous run produced a current object: the
         // recorded command line is identical and every dependency is older.
         // The misses join the worker pool after the loop.
-        let stem = source.file_stem().unwrap().to_string_lossy().to_string();
-        let deps = out.join(format!("gemm-{index}-{stem}.d"));
-        let stamp = out.join(format!("gemm-{index}-{stem}.cmdline"));
+        let deps = out.join(format!("gemm-{source_key:016x}-{stem}.d"));
+        let stamp = out.join(format!("gemm-{source_key:016x}-{stem}.cmdline"));
         let cmdline = nvcc_build::describe_command(&command);
         if nvcc_build::object_is_current(&object, &deps, &stamp, &cmdline) {
+            objects.push(object);
+            continue;
+        }
+        // Migrate a current object produced by the old list-index cache. This
+        // makes the naming fix cheap on existing worktrees while ensuring that
+        // future insertions or reorderings do not invalidate unrelated units.
+        let legacy_object = out.join(format!("gemm-{index}-{stem}.o"));
+        let legacy_deps = out.join(format!("gemm-{index}-{stem}.d"));
+        let legacy_stamp = out.join(format!("gemm-{index}-{stem}.cmdline"));
+        let legacy_cmdline = cmdline.replace(
+            object.to_string_lossy().as_ref(),
+            legacy_object.to_string_lossy().as_ref(),
+        );
+        if nvcc_build::object_is_current(
+            &legacy_object,
+            &legacy_deps,
+            &legacy_stamp,
+            &legacy_cmdline,
+        ) {
+            std::fs::copy(&legacy_object, &object).unwrap_or_else(|error| {
+                panic!(
+                    "migrate {} to {}: {error}",
+                    legacy_object.display(),
+                    object.display()
+                )
+            });
+            std::fs::copy(&legacy_deps, &deps).unwrap_or_else(|error| {
+                panic!(
+                    "migrate {} to {}: {error}",
+                    legacy_deps.display(),
+                    deps.display()
+                )
+            });
+            std::fs::write(&stamp, &cmdline)
+                .unwrap_or_else(|error| panic!("write {}: {error}", stamp.display()));
+            objects.push(object);
+            continue;
+        }
+        // Cargo assigns a different OUT_DIR to package checks, examples and
+        // integration tests even when their native compiler inputs are the
+        // same. Reuse a verified sibling object instead of paying the full
+        // NVCC cost once per Cargo unit fingerprint.
+        if migrate_sibling_object_cache(&out, &object, &deps, &stamp, &cmdline) {
             objects.push(object);
             continue;
         }
