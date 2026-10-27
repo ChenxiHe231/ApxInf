@@ -10,7 +10,7 @@
 //! vision attention is a single non-causal forward over the full patch
 //! sequence.
 
-use apxinf_core::{Backend, Error, Result, Tensor};
+use apxinf_core::{Backend, Error, Result, Shape, Tensor};
 
 #[cfg(feature = "cuda")]
 use super::super::backend::{ops, CudaBackend, DeviceBuffer};
@@ -58,7 +58,14 @@ fn fused_vision_mlp_residual_norm_shape_supported(
 fn add_bias(b: &dyn Backend, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return ops::elementwise::bias(cuda.context(), input, Some(bias));
+        let mut output = cuda
+            .context()
+            .allocate_output(input.shape().clone(), input.dtype())?;
+        let mut args =
+            ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
+        args.bias = Some(bias);
+        ops::pointwise(cuda.context(), args)?;
+        return Ok(output);
     }
     b.add_bias(input, bias)
 }
@@ -72,7 +79,14 @@ fn layer_norm(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return crate::cuda_ops::norm::layer(cuda.context(), input, weight, bias, eps);
+        let output = cuda
+            .context()
+            .allocate_output(input.shape().clone(), input.dtype())?;
+        ops::norm::norm(
+            cuda.context(),
+            ops::NormArgs::layer(input, weight, bias, &output, eps),
+        )?;
+        return Ok(output);
     }
     b.layer_norm(input, weight, bias, eps)
 }
@@ -88,7 +102,23 @@ fn vision_attention(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return ops::attention::noncausal(cuda.context(), query, key, value, n_heads, head_dim);
+        let expected = [sequence_len, n_heads, head_dim];
+        if query.shape().dims() != expected
+            || key.shape() != query.shape()
+            || value.shape() != query.shape()
+        {
+            return Err(Error::Other("GR00T vision attention shape mismatch".into()));
+        }
+        let query = query.reshape(vec![1, sequence_len, n_heads, head_dim])?;
+        let key = key.reshape(vec![1, sequence_len, n_heads, head_dim])?;
+        let value = value.reshape(vec![1, sequence_len, n_heads, head_dim])?;
+        let mut output = cuda
+            .context()
+            .allocate_output(query.shape().clone(), query.dtype())?;
+        let mut args = ops::AttentionArgs::new(&query, &key, &value, &mut output);
+        args.numerics = ops::AttentionNumerics::Flexible;
+        ops::attention(cuda.context(), args)?;
+        return output.reshape(vec![sequence_len, n_heads * head_dim]);
     }
     b.vision_sdpa(query, key, value, sequence_len, n_heads, head_dim)
 }
@@ -169,7 +199,6 @@ pub(crate) fn forward_with_prepared_positions_and_matmul(
     bias_residual: Option<&VisionBiasResidual<'_>>,
     allow_cached_residual_layer_norm: bool,
     allow_batched_segmented_attention: bool,
-    prefer_precomputed_qkv_vec2: bool,
 ) -> Result<VisionOutput> {
     forward_impl(
         cfg,
@@ -190,7 +219,6 @@ pub(crate) fn forward_with_prepared_positions_and_matmul(
         bias_residual,
         allow_cached_residual_layer_norm,
         allow_batched_segmented_attention,
-        prefer_precomputed_qkv_vec2,
     )
 }
 
@@ -213,13 +241,11 @@ fn forward_impl(
     bias_residual: Option<&VisionBiasResidual<'_>>,
     allow_cached_residual_layer_norm: bool,
     allow_batched_segmented_attention: bool,
-    prefer_precomputed_qkv_vec2: bool,
 ) -> Result<VisionOutput> {
     #[cfg(not(feature = "cuda"))]
     let _ = (
         allow_gr00t_fused_qkv_rope,
         allow_batched_segmented_attention,
-        prefer_precomputed_qkv_vec2,
     );
     let _vision_range = crate::profiling::trace::range("vision_encoder");
     let vc = &cfg.vision;
@@ -372,7 +398,7 @@ fn forward_impl(
                         let cuda = b.as_any().downcast_ref::<CudaBackend>().ok_or_else(|| {
                             Error::Other("Qwen3-VL CUDA position/backend mismatch".into())
                         })?;
-                        let split = match rotation_table {
+                        let rotation = match rotation_table {
                             Some(rotation_table)
                                 if cuda.context().caps().sm != 87
                                     || std::env::var_os(
@@ -380,44 +406,39 @@ fn forward_impl(
                                     )
                                     .is_none() =>
                             {
-                                if prefer_precomputed_qkv_vec2
-                                    && n_patches == 512
-                                    && n_heads == 16
-                                    && head_dim == 64
-                                {
-                                    ops::rope::split_qkv_bias_apply_vision_2d_precomputed_vec2(
-                                        cuda.context(),
-                                        &qkv,
-                                        &blk.qkv_b,
-                                        n_heads,
-                                        head_dim,
-                                        rotation_table,
-                                    )
-                                } else {
-                                    ops::rope::split_qkv_bias_apply_vision_2d_precomputed(
-                                        cuda.context(),
-                                        &qkv,
-                                        &blk.qkv_b,
-                                        n_heads,
-                                        head_dim,
-                                        rotation_table,
-                                    )
-                                }
+                                ops::rope::VisionRotation::Table(rotation_table)
                             }
-                            _ => ops::rope::split_qkv_bias_apply_vision_2d(
-                                cuda.context(),
-                                &qkv,
-                                &blk.qkv_b,
-                                n_heads,
+                            _ => ops::rope::VisionRotation::Positions {
+                                ids: positions,
+                                theta: 10000.0,
+                            },
+                        };
+                        let output_shape = Shape::new(vec![n_patches, n_heads, head_dim]);
+                        let mut query = cuda
+                            .context()
+                            .allocate_output(output_shape.clone(), qkv.dtype())?;
+                        let mut key = cuda
+                            .context()
+                            .allocate_output(output_shape.clone(), qkv.dtype())?;
+                        let mut value =
+                            cuda.context().allocate_output(output_shape, qkv.dtype())?;
+                        ops::rope::split_qkv_vision(
+                            cuda.context(),
+                            ops::rope::VisionQkvRopeArgs {
+                                qkv: &qkv,
+                                bias: &blk.qkv_b,
+                                q: &mut query,
+                                k: &mut key,
+                                v: &mut value,
+                                heads: n_heads,
                                 head_dim,
-                                10000.0,
-                                positions,
-                            ),
-                        }
+                                rotation,
+                            },
+                        )
                         .map_err(|error| {
                             Error::Other(format!("vision block {i} fused QKV/RoPE failed: {error}"))
                         })?;
-                        Some((split.q, split.k, split.v))
+                        Some((query, key, value))
                     } else {
                         None
                     }
@@ -683,12 +704,15 @@ fn merge_deepstack(
 fn apply_bias_gelu(b: &dyn Backend, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return ops::pointwise::bias_activation(
-            cuda.context(),
-            input,
-            Some(bias),
-            ops::pointwise::PointwiseActivation::Gelu,
-        );
+        let mut output = cuda
+            .context()
+            .allocate_output(input.shape().clone(), input.dtype())?;
+        let mut args =
+            ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
+        args.bias = Some(bias);
+        args.activation = ops::PointwiseActivation::Gelu;
+        ops::pointwise(cuda.context(), args)?;
+        return Ok(output);
     }
 
     let biased = add_bias(b, input, bias)?;
@@ -716,12 +740,21 @@ fn apply_bias_residual(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        return crate::cuda_ops::norm::bias_residual(
+        let hidden = cuda
+            .context()
+            .allocate_output(projection.shape().clone(), projection.dtype())?;
+        ops::residual_add(
             cuda.context(),
-            projection,
-            Some(bias),
-            residual,
-        );
+            ops::ResidualAddArgs {
+                input: projection,
+                bias: Some(bias),
+                residual,
+                gate: None,
+                hidden: &hidden,
+                bias_order: ops::BiasOrder::SingleRound,
+            },
+        )?;
+        return Ok(hidden);
     }
 
     let projection = add_bias(b, projection, bias)?;
@@ -754,16 +787,34 @@ fn apply_bias_residual_layer_norm(
 ) -> Result<(Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        let fused = crate::cuda_ops::norm::bias_residual_layer_norm(
+        let hidden = cuda
+            .context()
+            .allocate_output(projection.shape().clone(), projection.dtype())?;
+        let normalized = cuda
+            .context()
+            .allocate_output(projection.shape().clone(), projection.dtype())?;
+        ops::fused_add_norm(
             cuda.context(),
-            projection,
-            Some(projection_bias),
-            residual,
-            norm_weight,
-            norm_bias,
-            eps,
+            ops::FusedAddNormArgs {
+                input: projection,
+                bias: Some(projection_bias),
+                residual,
+                gate: None,
+                hidden: &hidden,
+                normalized: Some(&normalized),
+                kind: ops::NormKind::Layer,
+                affine: ops::Affine::Weight {
+                    weight: norm_weight,
+                    bias: Some(norm_bias),
+                    offset: false,
+                },
+                quantized: None,
+                numerics: ops::NormNumerics::Flexible,
+                bias_order: ops::BiasOrder::SingleRound,
+                eps,
+            },
         )?;
-        return Ok((fused.hidden, fused.normalized));
+        return Ok((hidden, normalized));
     }
 
     let projection = add_bias(b, projection, projection_bias)?;
@@ -847,14 +898,28 @@ fn split_vision_qkv(
 ) -> Result<(Tensor, Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
     if let Some(cuda) = b.as_any().downcast_ref::<CudaBackend>() {
-        let split = ops::attention::split_qkv_bias(
+        let shape = Shape::new(vec![n_patches, n_heads, head_dim]);
+        let mut query = cuda.context().allocate_output(shape.clone(), qkv.dtype())?;
+        let mut key = cuda.context().allocate_output(shape.clone(), qkv.dtype())?;
+        let mut value = cuda.context().allocate_output(shape, qkv.dtype())?;
+        ops::rope(
             cuda.context(),
-            qkv,
-            Some(bias),
-            n_heads,
-            head_dim,
+            ops::RopeArgs {
+                semantic: ops::RopeSemantic::SplitQkvBias,
+                qkv,
+                bias: Some(bias),
+                q: &mut query,
+                k: &mut key,
+                v: &mut value,
+                q_heads: n_heads,
+                kv_heads: n_heads,
+                head_dim,
+                theta: 0.0,
+                position_offset: 0,
+                kv_output_offset: 0,
+            },
         )?;
-        return Ok((split.q, split.k, split.v));
+        return Ok((query, key, value));
     }
 
     let width = n_heads

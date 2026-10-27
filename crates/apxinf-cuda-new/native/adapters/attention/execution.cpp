@@ -30,13 +30,15 @@ void validate_spec(const Spec& spec) {
   const bool native_output = spec.output_dtype == spec.dtype;
   const bool static_e4m3_output =
       spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+      spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
       spec.dtype == APXINF_DTYPE_F16 &&
       spec.output_dtype == APXINF_DTYPE_E4M3;
-  if (spec.version != 4 ||
-      spec.semantic > APXINF_ATTENTION_SEMANTIC_PACKED_QKV ||
+  if (spec.version != 6 ||
+      spec.semantic > APXINF_ATTENTION_SEMANTIC_SEGMENTED ||
       (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
       (!native_output && !static_e4m3_output) ||
       spec.mask > APXINF_ATTENTION_MASK_CAUSAL || spec.batch <= 0 ||
+      spec.qkv_layout > APXINF_ATTENTION_QKV_LAYOUT_PACKED_TOKEN ||
       spec.query_tokens <= 0 || spec.key_tokens <= 0 ||
       spec.key_capacity < spec.key_tokens ||
       spec.query_heads <= 0 || spec.kv_heads <= 0 || spec.head_dim <= 0 ||
@@ -46,7 +48,8 @@ void validate_spec(const Spec& spec) {
       spec.query_heads > INT32_MAX || spec.kv_heads > INT32_MAX ||
       spec.head_dim > INT32_MAX || spec.query_start > INT32_MAX ||
       spec.segments > INT32_MAX || spec.max_segment_tokens > INT32_MAX ||
-      spec.scale_is_default > 1 || spec.dynamic_decode > 1) {
+      spec.scale_is_default > 1 || spec.dynamic_decode > 1 ||
+      spec.numerics > APXINF_ATTENTION_NUMERICS_STABLE) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Attention Spec");
   }
   if (spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
@@ -61,16 +64,22 @@ void validate_spec(const Spec& spec) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "invalid dense Attention semantic fields");
   }
-  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_PACKED_QKV &&
+  if (spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_PACKED_TOKEN &&
+      (spec.semantic != APXINF_ATTENTION_SEMANTIC_DENSE ||
       (spec.key_tokens != spec.query_tokens ||
-       spec.key_capacity != spec.query_tokens ||
-       spec.query_heads != spec.kv_heads ||
-       spec.mask != APXINF_ATTENTION_MASK_NONE || spec.query_start != 0 ||
-       spec.segments != 0 || spec.max_segment_tokens != 0 ||
-       spec.offsets_hash != 0 || spec.offsets_alignment != 0 ||
-       spec.output_dtype != spec.dtype)) {
+        spec.key_capacity != spec.query_tokens ||
+        spec.query_heads != spec.kv_heads ||
+        spec.mask != APXINF_ATTENTION_MASK_NONE || spec.query_start != 0 ||
+        spec.segments != 0 || spec.max_segment_tokens != 0 ||
+        spec.offsets_hash != 0 || spec.offsets_alignment != 0 ||
+        spec.output_dtype != spec.dtype))) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "invalid packed-QKV Attention semantic fields");
+                  "invalid packed-QKV Attention layout fields");
+  }
+  if (spec.semantic != APXINF_ATTENTION_SEMANTIC_DENSE &&
+      spec.qkv_layout != APXINF_ATTENTION_QKV_LAYOUT_SEPARATE) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "non-dense Attention requires separate Q/K/V layout");
   }
   if (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
       ((spec.dynamic_decode != 0 &&

@@ -12,14 +12,9 @@
 #include <limits>
 
 namespace {
-#include "../custom/gdn_policy.h"
-#include "../custom/math.cuh"
-#include "../custom/reduction.cuh"
-#include "../custom/pillow_bicubic_u8.cuh"
-#include "../custom/linear_attention.cuh"
-#include "../custom/gdn_raw_inverse_f1.cuh"
-#include "../custom/gdn_chunk_state_wmma.cuh"
-#include "../custom/gdn_chunk_gemm_tri.cuh"
+#include "adaln_bf16.cuh"
+#include "gated_rms_bf16.cuh"
+#include "rms_plus1_bf16.cuh"
 __global__ void adaln_gate_residual_rms_bf16_kernel(
     const __nv_bfloat16* proj, const __nv_bfloat16* residual,
     const __nv_bfloat16* gate, const __nv_bfloat16* weight,

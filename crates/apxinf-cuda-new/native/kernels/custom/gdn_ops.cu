@@ -472,18 +472,6 @@ __global__ void gated_norm_quantize_kernel(
         __bfloat162float(rounded) * inverse_scale, __NV_SATFINITE, __NV_E4M3);
   }
 }
-
-
-// Widen FP16 back to BF16. The FlashInfer scan emits FP16; everything
-// downstream of it in this model is BF16.
-__global__ void widen_f16_to_bf16_kernel(const __half* __restrict__ input,
-                                         __nv_bfloat16* __restrict__ output,
-                                         long long count) {
-  const long long index = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= count) return;
-  output[index] = __float2bfloat16(__half2float(input[index]));
-}
-
 // Prepare a chunk of the GDN projection for the FlashInfer prefill kernel.
 //
 // That kernel wants what ours does not: q, k and v split into separate
@@ -770,17 +758,6 @@ __global__ void gdn_prepare_prefill_warp_kernel(
 }
 
 }  // namespace
-
-int gdn_widen_f16_to_bf16(const void* input, void* output, long long count,
-                          cudaStream_t stream) {
-  if (count <= 0) return -1;
-  const int threads = 256;
-  const long long blocks = (count + threads - 1) / threads;
-  widen_f16_to_bf16_kernel<<<(int)blocks, threads, 0, stream>>>(
-      static_cast<const __half*>(input),
-      static_cast<__nv_bfloat16*>(output), count);
-  return cudaGetLastError() == cudaSuccess ? 0 : -2;
-}
 
 int gdn_conv_prepare(const void* input, const void* weight,
                                void* window, void* q_out, void* k_out,

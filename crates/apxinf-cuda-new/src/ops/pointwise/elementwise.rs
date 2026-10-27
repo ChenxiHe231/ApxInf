@@ -1,10 +1,11 @@
 //! Fixed pointwise operations with one implementation each.
 
-use apxinf_core::{DType, Result, Tensor};
+use apxinf_core::{Result, Tensor};
 
-use crate::ffi::abi::{pointwise as abi, status};
-use crate::ops::gemm::contracts::{invalid, tensor_storage};
+use crate::ops::gemm::contracts::invalid;
 use crate::CudaContext;
+
+use super::{pointwise, PointwiseArgs, PointwiseSemantic};
 
 /// `y[r,c] = silu(fused[r,c]) * fused[r,width+c]`.
 pub fn swiglu_into(ctx: &CudaContext, fused: &Tensor, output: &Tensor) -> Result<()> {
@@ -18,15 +19,9 @@ pub fn swiglu_into(ctx: &CudaContext, fused: &Tensor, output: &Tensor) -> Result
             "SwiGLU input must be [rows, 2*width] for an output of [rows, width]",
         ));
     }
-    let fused_buffer = tensor_storage(ctx, fused, DType::BF16, &fused_dims)?;
-    let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
-    unsafe {
-        status::check(abi::apxinf_pointwise_swiglu(
-            fused_buffer.ptr(),
-            output_buffer.ptr(),
-            output_dims[0] as i64,
-            output_dims[1] as i64,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut output = output.clone();
+    pointwise(
+        ctx,
+        PointwiseArgs::new(PointwiseSemantic::Swiglu, fused, &mut output),
+    )
 }

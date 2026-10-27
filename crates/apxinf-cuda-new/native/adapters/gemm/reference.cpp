@@ -153,7 +153,7 @@ void validate_candidates(const Spec& spec,
   const size_t count = static_cast<size_t>(
       spec.m * ((spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ||
                  spec.semantic ==
-                     APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256)
+                     APXINF_GEMM_SEMANTIC_GEMM_SWIGLU)
                     ? spec.n / 2
                     : spec.n));
   if (expected == nullptr || expected_len != count) {

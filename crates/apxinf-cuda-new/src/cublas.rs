@@ -128,7 +128,9 @@ impl CublasHandle {
                     ))
                 }
             }
-            DType::F8E4M3 => Err("use ops::gemm::fp8_bf16 for FP8 operands".into()),
+            DType::F8E4M3 => Err(
+                "use ops::gemm::gemm with GemmQuantization::Fp8UnitScale for FP8 operands".into(),
+            ),
             DType::I8 | DType::I32 => {
                 Err("use gemm_int8_i32 for quantized integer operands".into())
             }
@@ -228,7 +230,9 @@ impl CublasHandle {
                     ))
                 }
             }
-            DType::F8E4M3 => Err("use ops::gemm::fp8_bf16 for FP8 operands".into()),
+            DType::F8E4M3 => Err(
+                "use ops::gemm::gemm with GemmQuantization::Fp8UnitScale for FP8 operands".into(),
+            ),
             DType::I8 | DType::I32 => {
                 Err("use gemm_int8_i32 for quantized integer operands".into())
             }
@@ -340,7 +344,9 @@ impl CublasHandle {
                     ))
                 }
             }
-            DType::F8E4M3 => Err("use ops::gemm::fp8_bf16 for FP8 operands".into()),
+            DType::F8E4M3 => Err(
+                "use ops::gemm::gemm with GemmQuantization::Fp8UnitScale for FP8 operands".into(),
+            ),
             DType::I8 | DType::I32 => {
                 Err("use gemm_int8_i32 for quantized integer operands".into())
             }

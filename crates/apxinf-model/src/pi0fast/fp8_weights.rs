@@ -4,10 +4,10 @@
 //! as E4M3; biases stay BF16 and are applied by the consumer, exactly as in the
 //! BF16 path.
 //!
-//! The dispatch that consumes these matrices is `gemm::fp8_bf16`, whose output is
-//! **BF16**. That choice is what keeps the change small: norms, RoPE, attention,
-//! the KV cache, the argmax and the tied embedding lookup all keep operating on
-//! BF16 and are reused verbatim from the BF16 module.
+//! The formal GEMM contract consumes these matrices with `Fp8UnitScale` and a
+//! **BF16** output. Norms, RoPE, attention, the KV cache, the argmax and the tied
+//! embedding lookup therefore keep operating on BF16 and are reused verbatim
+//! from the BF16 module.
 
 use apxinf_core::{Backend, Error, Result, Tensor};
 
@@ -32,16 +32,6 @@ pub struct Fp8LinearWeights {
 }
 
 impl Fp8LinearWeights {
-    #[cfg(feature = "cuda")]
-    pub fn as_kernel_view(&self) -> ops::gemm::Fp8WeightView<'_> {
-        ops::gemm::Fp8WeightView {
-            values_e4m3: &self.weight,
-            scale: self.weight_scale,
-            dual_geglu_interleaved: false,
-            dual_geglu_auto_interleaved: None,
-        }
-    }
-
     pub fn from_host(linear: &LinearWeights, backend: &dyn Backend) -> Result<Self> {
         Self::from_host_parts(&[linear], backend)
     }

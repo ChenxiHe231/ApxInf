@@ -21,7 +21,7 @@ pub(super) fn try_causal_conv_gdn_prefill_bf16(
     conv_weight: &Tensor,
     new_conv_state: &Tensor,
     a_log: &Tensor,
-    dt_bias: &Tensor,
+    rounded_dt_bias: Option<&Tensor>,
     final_state: &CudaBuffer,
     geometry: [usize; 4],
 ) -> Result<Option<Tensor>> {
@@ -31,11 +31,13 @@ pub(super) fn try_causal_conv_gdn_prefill_bf16(
         || geometry != [16, 32, 128, 128]
         || zba.shape().dims() != [3387, 12352]
         || conv_weight.shape().dims() != [8192, 4]
+        || rounded_dt_bias.is_none()
     {
         return Ok(None);
     }
     #[cfg(apxinf_segmented_attention_sm110)]
     {
+        let dt_bias = rounded_dt_bias.expect("candidate support checked above");
         if new_conv_state.shape().dims() != [8192, 4]
             || a_log.shape().dims() != [32]
             || a_log.dtype() != DType::F32
@@ -123,7 +125,7 @@ pub(super) fn try_causal_conv_gdn_prefill_bf16(
             .map_err(Error::Cuda);
     }
     #[cfg(not(apxinf_segmented_attention_sm110))]
-    let _ = (new_conv_state, a_log, dt_bias, final_state);
+    let _ = (new_conv_state, a_log, rounded_dt_bias, final_state);
     #[cfg(not(apxinf_segmented_attention_sm110))]
     Ok(None)
 }

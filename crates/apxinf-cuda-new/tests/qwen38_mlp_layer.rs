@@ -159,9 +159,19 @@ impl Projection {
 }
 
 fn relayout(ctx: &CudaContext, checkpoint_scales: &Tensor, rows: usize, k: usize) -> Tensor {
-    let bytes = ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap();
+    let bytes = ops::block_scale_buffer_bytes(rows, k, BLOCK).unwrap();
     let destination = device_zeros(ctx, vec![bytes], DType::F8E4M3);
-    ops::nvfp4_pack_block_scales(ctx, checkpoint_scales, &destination, rows, k, BLOCK).unwrap();
+    ops::pack_block_scales(
+        ctx,
+        ops::PackBlockScalesArgs {
+            source: checkpoint_scales,
+            output: &destination,
+            rows,
+            k,
+            block_size: BLOCK,
+        },
+    )
+    .unwrap();
     destination
 }
 
@@ -184,7 +194,7 @@ impl Scratch {
             quantized: device_zeros(ctx, vec![tokens, HIDDEN / 2], DType::E2M1Pair),
             quantized_scales: device_zeros(
                 ctx,
-                vec![ops::nvfp4_scale_buffer_bytes(tokens, HIDDEN, BLOCK).unwrap()],
+                vec![ops::block_scale_buffer_bytes(tokens, HIDDEN, BLOCK).unwrap()],
                 DType::F8E4M3,
             ),
             fused: device_zeros(ctx, vec![tokens, 2 * INTERMEDIATE], DType::BF16),
@@ -192,7 +202,7 @@ impl Scratch {
             activated_quantized: device_zeros(ctx, vec![tokens, INTERMEDIATE / 2], DType::E2M1Pair),
             activated_scales: device_zeros(
                 ctx,
-                vec![ops::nvfp4_scale_buffer_bytes(tokens, INTERMEDIATE, BLOCK).unwrap()],
+                vec![ops::block_scale_buffer_bytes(tokens, INTERMEDIATE, BLOCK).unwrap()],
                 DType::F8E4M3,
             ),
             projected: device_zeros(ctx, vec![tokens, HIDDEN], DType::BF16),
@@ -217,32 +227,40 @@ fn mlp_block(
     fused: bool,
 ) -> apxinf_core::Result<()> {
     if fused {
-        ops::nvfp4_quantize_rms_norm(
+        ops::block_quantize(
             ctx,
-            residual,
-            norm_weight,
-            &scratch.quantized,
-            &scratch.quantized_scales,
-            1e-6,
-            gate_up.input_scale,
-            BLOCK,
-            ops::ScaleLayout::GemmAtom,
+            ops::BlockQuantizationArgs::rms_norm(
+                residual,
+                norm_weight,
+                &scratch.quantized,
+                &scratch.quantized_scales,
+                1e-6,
+                gate_up.input_scale,
+                BLOCK,
+                ops::ScaleLayout::GemmAtom,
+            ),
         )?;
     } else {
-        ops::norm::rms_norm_weight_offset(ctx, residual, norm_weight, &scratch.normalized, 1e-6)?;
-        ops::nvfp4_quantize_activation(
+        ops::norm::norm(
             ctx,
-            &scratch.normalized,
-            &scratch.quantized,
-            &scratch.quantized_scales,
-            gate_up.input_scale,
-            BLOCK,
-            ops::ScaleLayout::GemmAtom,
+            ops::NormArgs::rms(residual, norm_weight, &scratch.normalized, 1e-6)
+                .with_weight_offset(),
+        )?;
+        ops::block_quantize(
+            ctx,
+            ops::BlockQuantizationArgs::activation(
+                &scratch.normalized,
+                &scratch.quantized,
+                &scratch.quantized_scales,
+                gate_up.input_scale,
+                BLOCK,
+                ops::ScaleLayout::GemmAtom,
+            ),
         )?;
     }
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.quantized,
             &scratch.quantized_scales,
             &gate_up.weight,
@@ -254,30 +272,34 @@ fn mlp_block(
     )?;
 
     if fused {
-        ops::nvfp4_quantize_swiglu(
+        ops::block_quantize(
             ctx,
-            &scratch.fused,
-            &scratch.activated_quantized,
-            &scratch.activated_scales,
-            down.input_scale,
-            BLOCK,
-            ops::ScaleLayout::GemmAtom,
+            ops::BlockQuantizationArgs::swiglu(
+                &scratch.fused,
+                &scratch.activated_quantized,
+                &scratch.activated_scales,
+                down.input_scale,
+                BLOCK,
+                ops::ScaleLayout::GemmAtom,
+            ),
         )?;
     } else {
         ops::swiglu_into(ctx, &scratch.fused, &scratch.activated)?;
-        ops::nvfp4_quantize_activation(
+        ops::block_quantize(
             ctx,
-            &scratch.activated,
-            &scratch.activated_quantized,
-            &scratch.activated_scales,
-            down.input_scale,
-            BLOCK,
-            ops::ScaleLayout::GemmAtom,
+            ops::BlockQuantizationArgs::activation(
+                &scratch.activated,
+                &scratch.activated_quantized,
+                &scratch.activated_scales,
+                down.input_scale,
+                BLOCK,
+                ops::ScaleLayout::GemmAtom,
+            ),
         )?;
     }
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.activated_quantized,
             &scratch.activated_scales,
             &down.weight,

@@ -10,6 +10,7 @@ use apxinf_core::{DType, Result, Tensor};
 
 use crate::ffi::abi::{elementwise as abi, status};
 use crate::ops::gemm::contracts::{invalid, tensor_storage};
+use crate::ops::validation::check_cuda;
 use crate::CudaContext;
 
 /// Which elementwise activation a call applies. Matches the native encoding
@@ -67,68 +68,128 @@ pub fn activation(
     }
 }
 
-/// `output[i] = a[i] * b[i]`, elementwise BF16.
+/// `output[i] = a[i] * b[i]`, with dtype inferred from the tensors.
 pub fn mul(ctx: &CudaContext, a: &Tensor, b: &Tensor, output: &Tensor) -> Result<()> {
     let dims = a.shape().dims().to_vec();
-    if b.shape().dims() != dims.as_slice() || output.shape().dims() != dims.as_slice() {
-        return Err(invalid("mul requires three equally shaped tensors"));
+    let dtype = a.dtype();
+    if b.shape().dims() != dims.as_slice()
+        || output.shape().dims() != dims.as_slice()
+        || b.dtype() != dtype
+        || output.dtype() != dtype
+    {
+        return Err(invalid(
+            "mul requires three equally shaped tensors with one dtype",
+        ));
     }
     let count = element_count(a, "mul")?;
-    let a_buffer = tensor_storage(ctx, a, DType::BF16, &dims)?;
-    let b_buffer = tensor_storage(ctx, b, DType::BF16, &dims)?;
-    let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
-    unsafe {
-        status::check(abi::apxinf_elementwise_mul_bf16(
-            a_buffer.ptr(),
-            b_buffer.ptr(),
-            output_buffer.ptr(),
-            count,
-            ctx.stream().handle(),
-        ))
+    let a_buffer = tensor_storage(ctx, a, dtype, &dims)?;
+    let b_buffer = tensor_storage(ctx, b, dtype, &dims)?;
+    let output_buffer = tensor_storage(ctx, output, dtype, &dims)?;
+    match dtype {
+        DType::BF16 => unsafe {
+            status::check(abi::apxinf_elementwise_mul_bf16(
+                a_buffer.ptr(),
+                b_buffer.ptr(),
+                output_buffer.ptr(),
+                count,
+                ctx.stream().handle(),
+            ))
+        },
+        DType::F32 => unsafe {
+            check_cuda(abi::apxinf_elementwise_fixed_decode_mul_f32(
+                a_buffer.ptr(),
+                b_buffer.ptr(),
+                output_buffer.ptr(),
+                u32::try_from(count).map_err(|_| invalid("mul element count exceeds u32"))?,
+                ctx.stream().handle(),
+            ))
+        },
+        _ => Err(invalid("mul currently supports F32 and BF16")),
     }
 }
 
-/// `output[i] = a[i] + b[i]`, elementwise BF16.
+/// `output[i] = a[i] + b[i]`, with dtype inferred from the tensors.
 pub fn add(ctx: &CudaContext, a: &Tensor, b: &Tensor, output: &Tensor) -> Result<()> {
     let dims = a.shape().dims().to_vec();
-    if b.shape().dims() != dims.as_slice() || output.shape().dims() != dims.as_slice() {
-        return Err(invalid("add requires three equally shaped tensors"));
+    let dtype = a.dtype();
+    if b.shape().dims() != dims.as_slice()
+        || output.shape().dims() != dims.as_slice()
+        || b.dtype() != dtype
+        || output.dtype() != dtype
+    {
+        return Err(invalid(
+            "add requires three equally shaped tensors with one dtype",
+        ));
     }
     let count = element_count(a, "add")?;
-    let a_buffer = tensor_storage(ctx, a, DType::BF16, &dims)?;
-    let b_buffer = tensor_storage(ctx, b, DType::BF16, &dims)?;
-    let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
-    unsafe {
-        status::check(abi::apxinf_elementwise_add_bf16(
-            a_buffer.ptr(),
-            b_buffer.ptr(),
-            output_buffer.ptr(),
-            count,
-            ctx.stream().handle(),
-        ))
+    let a_buffer = tensor_storage(ctx, a, dtype, &dims)?;
+    let b_buffer = tensor_storage(ctx, b, dtype, &dims)?;
+    let output_buffer = tensor_storage(ctx, output, dtype, &dims)?;
+    match dtype {
+        DType::BF16 => unsafe {
+            status::check(abi::apxinf_elementwise_add_bf16(
+                a_buffer.ptr(),
+                b_buffer.ptr(),
+                output_buffer.ptr(),
+                count,
+                ctx.stream().handle(),
+            ))
+        },
+        DType::F16 => unsafe {
+            check_cuda(abi::apxinf_elementwise_add_f16(
+                a_buffer.ptr(),
+                b_buffer.ptr(),
+                output_buffer.ptr(),
+                u32::try_from(count).map_err(|_| invalid("add element count exceeds u32"))?,
+                ctx.stream().handle(),
+            ))
+        },
+        DType::F32 => unsafe {
+            check_cuda(abi::apxinf_elementwise_fixed_decode_add_f32(
+                a_buffer.ptr(),
+                b_buffer.ptr(),
+                output_buffer.ptr(),
+                u32::try_from(count).map_err(|_| invalid("add element count exceeds u32"))?,
+                ctx.stream().handle(),
+            ))
+        },
+        _ => Err(invalid("add currently supports F32, F16, and BF16")),
     }
 }
 
-/// `output[i] = input[i] * factor`, elementwise BF16.
+/// `output[i] = input[i] * factor`, with dtype inferred from the tensors.
 pub fn scale(ctx: &CudaContext, input: &Tensor, output: &Tensor, factor: f32) -> Result<()> {
     let dims = input.shape().dims().to_vec();
-    if output.shape().dims() != dims.as_slice() {
-        return Err(invalid("scale input/output shape mismatch"));
+    let dtype = input.dtype();
+    if output.shape().dims() != dims.as_slice() || output.dtype() != dtype {
+        return Err(invalid("scale input/output shape or dtype mismatch"));
     }
     if !factor.is_finite() {
         return Err(invalid("scale factor must be finite"));
     }
     let count = element_count(input, "scale")?;
-    let input_buffer = tensor_storage(ctx, input, DType::BF16, &dims)?;
-    let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
-    unsafe {
-        status::check(abi::apxinf_elementwise_scale_bf16(
-            input_buffer.ptr(),
-            output_buffer.ptr(),
-            count,
-            factor,
-            ctx.stream().handle(),
-        ))
+    let input_buffer = tensor_storage(ctx, input, dtype, &dims)?;
+    let output_buffer = tensor_storage(ctx, output, dtype, &dims)?;
+    match dtype {
+        DType::BF16 => unsafe {
+            status::check(abi::apxinf_elementwise_scale_bf16(
+                input_buffer.ptr(),
+                output_buffer.ptr(),
+                count,
+                factor,
+                ctx.stream().handle(),
+            ))
+        },
+        DType::F16 => unsafe {
+            check_cuda(abi::apxinf_elementwise_scale_f16(
+                input_buffer.ptr(),
+                output_buffer.ptr(),
+                u32::try_from(count).map_err(|_| invalid("scale element count exceeds u32"))?,
+                factor,
+                ctx.stream().handle(),
+            ))
+        },
+        _ => Err(invalid("scale currently supports F16 and BF16")),
     }
 }
 

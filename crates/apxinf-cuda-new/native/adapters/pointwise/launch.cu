@@ -1,6 +1,8 @@
 #include "../../include/apxinf_cuda/pointwise.h"
 #include "../../framework/runtime_internal.h"
+#include "../../kernels/custom/pointwise_ops.h"
 #include "../../kernels/custom/pointwise.cuh"
+#include "../../kernels/custom/quant_ops.h"
 #include "candidates.h"
 
 #include <climits>
@@ -28,7 +30,8 @@ bool reads_secondary(uint32_t semantic) {
 }
 
 bool may_have_bias(uint32_t semantic) {
-  return semantic == APXINF_POINTWISE_SEMANTIC_BIAS_ACTIVATION;
+  return semantic == APXINF_POINTWISE_SEMANTIC_BIAS_ACTIVATION ||
+         semantic == APXINF_POINTWISE_SEMANTIC_SWIGLU_ROWWISE_E4M3;
 }
 
 void validate_spec(const apxinf_pointwise_spec_t& spec) {
@@ -36,13 +39,20 @@ void validate_spec(const apxinf_pointwise_spec_t& spec) {
       spec.semantic == APXINF_POINTWISE_SEMANTIC_GEGLU &&
       spec.dtype == APXINF_DTYPE_F16 &&
       spec.output_dtype == APXINF_DTYPE_E4M3;
+  const bool quantized_swiglu =
+      spec.semantic == APXINF_POINTWISE_SEMANTIC_SWIGLU_ROWWISE_E4M3 &&
+      spec.dtype == APXINF_DTYPE_BF16 &&
+      spec.output_dtype == APXINF_DTYPE_E4M3;
   if (spec.version != APXINF_POINTWISE_SPEC_VERSION ||
-      spec.semantic > APXINF_POINTWISE_SEMANTIC_EULER_UPDATE ||
+      spec.semantic > APXINF_POINTWISE_SEMANTIC_SWIGLU_ROWWISE_E4M3 ||
       (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
-      (!quantized_geglu && spec.output_dtype != spec.dtype) ||
+      (!quantized_geglu && !quantized_swiglu &&
+       spec.output_dtype != spec.dtype) ||
       spec.activation > APXINF_POINTWISE_ACTIVATION_RELU ||
       spec.has_bias > 1 || spec.rows <= 0 || spec.cols <= 0 ||
+      spec.input_cols <= 0 || spec.logical_cols <= 0 ||
       spec.rows > INT32_MAX || spec.cols > INT32_MAX ||
+      spec.input_cols > INT32_MAX || spec.logical_cols > INT32_MAX ||
       spec.output_scale_is_unit > 1 ||
       !valid_alignment(spec.input_alignment) ||
       !valid_alignment(spec.secondary_alignment) ||
@@ -56,6 +66,22 @@ void validate_spec(const apxinf_pointwise_spec_t& spec) {
         spec.output_alignment < 2 || spec.rows * spec.cols > INT32_MAX))) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "invalid Pointwise quantized GeGLU contract");
+  }
+  if (spec.semantic == APXINF_POINTWISE_SEMANTIC_SWIGLU &&
+      (spec.dtype != APXINF_DTYPE_BF16 || spec.input_cols != 2 * spec.cols)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid Pointwise SwiGLU contract");
+  }
+  if (spec.semantic == APXINF_POINTWISE_SEMANTIC_ADD_INTO &&
+      (spec.dtype != APXINF_DTYPE_BF16 || spec.input_cols != spec.cols)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid Pointwise add-into contract");
+  }
+  if (spec.semantic == APXINF_POINTWISE_SEMANTIC_SWIGLU_ROWWISE_E4M3 &&
+      (!quantized_swiglu || spec.input_cols < 2 * spec.logical_cols ||
+       spec.cols < spec.logical_cols)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "invalid Pointwise rowwise SwiGLU contract");
   }
   if (spec.has_bias != 0 && !may_have_bias(spec.semantic)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
@@ -77,7 +103,9 @@ void validate_spec(const apxinf_pointwise_spec_t& spec) {
 void validate_bindings(const apxinf_pointwise_spec_t& spec,
                        const apxinf_pointwise_bindings_t& bindings) {
   if (bindings.input == nullptr || bindings.output == nullptr ||
-      (reads_secondary(spec.semantic) && bindings.secondary == nullptr)) {
+      (reads_secondary(spec.semantic) && bindings.secondary == nullptr) ||
+      ((spec.semantic == APXINF_POINTWISE_SEMANTIC_SWIGLU_ROWWISE_E4M3) !=
+       (bindings.scales != nullptr))) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "missing Pointwise binding for semantic");
   }
@@ -282,6 +310,42 @@ extern "C" apxinf_status_t apxinf_pointwise_launch(
     validate_spec(*spec);
     validate_bindings(*spec, *bindings);
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    if (spec->semantic == APXINF_POINTWISE_SEMANTIC_SWIGLU) {
+      const int result = apxinf::cuda_new::pointwise::swiglu(
+          bindings->input, bindings->output, static_cast<int>(spec->rows),
+          static_cast<int>(spec->cols),
+          static_cast<cudaStream_t>(bindings->stream));
+      if (result != 0) {
+        throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                      "Pointwise SwiGLU provider failed");
+      }
+      return;
+    }
+    if (spec->semantic == APXINF_POINTWISE_SEMANTIC_ADD_INTO) {
+      const int result = apxinf::cuda_new::pointwise::add_into(
+          bindings->input, bindings->output, spec->rows * spec->cols,
+          static_cast<cudaStream_t>(bindings->stream));
+      if (result != 0) {
+        throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                      "Pointwise add-into provider failed");
+      }
+      return;
+    }
+    if (spec->semantic == APXINF_POINTWISE_SEMANTIC_SWIGLU_ROWWISE_E4M3) {
+      const int result =
+          apxinf::cuda_new::quant_ops::swiglu_quantize_rows_bf16_e4m3(
+              bindings->input, bindings->bias, bindings->output,
+              bindings->scales, static_cast<int>(spec->rows),
+              static_cast<int>(spec->input_cols),
+              static_cast<int>(spec->logical_cols),
+              static_cast<int>(spec->cols),
+              static_cast<cudaStream_t>(bindings->stream));
+      if (result != 0) {
+        throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                      "Pointwise rowwise SwiGLU provider failed");
+      }
+      return;
+    }
     if (spec->semantic == APXINF_POINTWISE_SEMANTIC_GEGLU &&
         spec->dtype == APXINF_DTYPE_F16 &&
         spec->output_dtype == APXINF_DTYPE_E4M3) {

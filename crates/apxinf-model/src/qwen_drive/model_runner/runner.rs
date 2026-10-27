@@ -72,12 +72,23 @@ impl QwenDriveModelRunner {
                     }
                 }
                 let rgb = resize.as_ref().map(|plan| plan.final_rgb()).unwrap_or(&raw);
-                if let Err(error) = ops::preprocess::rgb_u8_to_temporal2_merge2_rect(
+                if let Err(error) = ops::preprocess::preprocess(
                     ctx,
-                    rgb,
-                    &output,
-                    &lut,
-                    &valid.rgb_frames(),
+                    ops::preprocess::PreprocessArgs {
+                        images: rgb,
+                        patches: &output,
+                        lookup_table: Some(&lut),
+                        spec: ops::preprocess::PreprocessSpec {
+                            layout: ops::preprocess::ImageLayout::Nhwc,
+                            geometry: ops::preprocess::PatchGeometry::RectangularFrames {
+                                frames: &valid.rgb_frames(),
+                                patch_size: 16,
+                                temporal_patch_size: 2,
+                                merge_size: 2,
+                            },
+                            normalization: ops::preprocess::PatchNormalization::LookupTable,
+                        },
+                    },
                 ) {
                     // Earlier frame launches may already be queued on the stream.
                     ctx.synchronize().map_err(Error::Cuda)?;
@@ -112,7 +123,11 @@ impl QwenDriveModelRunner {
                 backend
                     .create_normal_generator(noise.clone())?
                     .generate(rng)?;
-                ops::elementwise::scale(backend.context(), &noise, c.noise_init_std)?
+                let scaled = backend
+                    .context()
+                    .allocate_output(noise.shape().clone(), noise.dtype())?;
+                ops::elementwise::scale(backend.context(), &noise, &scaled, c.noise_init_std)?;
+                scaled
             }
         };
         let input = PlanningInput {

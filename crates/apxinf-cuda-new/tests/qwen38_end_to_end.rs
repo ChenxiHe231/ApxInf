@@ -89,6 +89,77 @@ fn zeros(ctx: &CudaContext, dims: Vec<usize>, dtype: DType) -> Tensor {
     buffer.as_tensor(Shape::new(dims), dtype).unwrap()
 }
 
+fn quantize_activation_blocks(
+    ctx: &CudaContext,
+    input: &Tensor,
+    output: &Tensor,
+    scales: &Tensor,
+    input_scale: f32,
+    block_size: u32,
+    scale_layout: ops::ScaleLayout,
+) -> apxinf_core::Result<()> {
+    ops::block_quantize(
+        ctx,
+        ops::BlockQuantizationArgs::activation(
+            input,
+            output,
+            scales,
+            input_scale,
+            block_size,
+            scale_layout,
+        ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quantize_rms_norm_blocks(
+    ctx: &CudaContext,
+    input: &Tensor,
+    weight: &Tensor,
+    output: &Tensor,
+    scales: &Tensor,
+    epsilon: f32,
+    input_scale: f32,
+    block_size: u32,
+    scale_layout: ops::ScaleLayout,
+) -> apxinf_core::Result<()> {
+    ops::block_quantize(
+        ctx,
+        ops::BlockQuantizationArgs::rms_norm(
+            input,
+            weight,
+            output,
+            scales,
+            epsilon,
+            input_scale,
+            block_size,
+            scale_layout,
+        ),
+    )
+}
+
+fn quantize_swiglu_blocks(
+    ctx: &CudaContext,
+    input: &Tensor,
+    output: &Tensor,
+    scales: &Tensor,
+    input_scale: f32,
+    block_size: u32,
+    scale_layout: ops::ScaleLayout,
+) -> apxinf_core::Result<()> {
+    ops::block_quantize(
+        ctx,
+        ops::BlockQuantizationArgs::swiglu(
+            input,
+            output,
+            scales,
+            input_scale,
+            block_size,
+            scale_layout,
+        ),
+    )
+}
+
 fn scalar(tensors: &HashMap<String, Tensor>, name: &str) -> f32 {
     tensors[name].to_f32_vec().unwrap()[0]
 }
@@ -103,9 +174,19 @@ struct Nvfp4Weight {
 }
 
 fn relayout(ctx: &CudaContext, source: &Tensor, rows: usize, k: usize) -> Tensor {
-    let bytes = ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap();
+    let bytes = ops::block_scale_buffer_bytes(rows, k, BLOCK).unwrap();
     let destination = zeros(ctx, vec![bytes], DType::F8E4M3);
-    ops::nvfp4_pack_block_scales(ctx, source, &destination, rows, k, BLOCK).unwrap();
+    ops::pack_block_scales(
+        ctx,
+        ops::PackBlockScalesArgs {
+            source,
+            output: &destination,
+            rows,
+            k,
+            block_size: BLOCK,
+        },
+    )
+    .unwrap();
     destination
 }
 
@@ -601,7 +682,7 @@ impl Scratch {
 
     fn new(ctx: &CudaContext) -> Scratch {
         let scale_bytes =
-            |rows: usize, k: usize| vec![ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
+            |rows: usize, k: usize| vec![ops::block_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
         Scratch {
             hidden: zeros(ctx, vec![1, HIDDEN], DType::BF16),
             normalized: zeros(ctx, vec![1, HIDDEN], DType::BF16),
@@ -673,7 +754,17 @@ fn fp8_projection(
     output: &mut Tensor,
 ) {
     ops::quantize_per_tensor(ctx, source, quantized, weight.input_scale).unwrap();
-    ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha).unwrap();
+    ops::gemv(
+        ctx,
+        ops::GemvArgs {
+            weight: &weight.weight,
+            activation: quantized,
+            output,
+            block_scales: None,
+            alpha: weight.alpha,
+        },
+    )
+    .unwrap();
 }
 
 fn reuse_fp8_enabled() -> bool {
@@ -688,7 +779,17 @@ fn fp8_projection_reuse_quantized(
     quantized: &Tensor,
     output: &mut Tensor,
 ) {
-    ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha).unwrap();
+    ops::gemv(
+        ctx,
+        ops::GemvArgs {
+            weight: &weight.weight,
+            activation: quantized,
+            output,
+            block_scales: None,
+            alpha: weight.alpha,
+        },
+    )
+    .unwrap();
 }
 
 /// Many-token FP8 projection: the same contract as `fp8_projection`, run as
@@ -788,7 +889,7 @@ fn nvfp4_mlp(
     norm_weight: &Tensor,
     scratch: &mut Scratch,
 ) {
-    ops::nvfp4_quantize_rms_norm(
+    quantize_rms_norm_blocks(
         ctx,
         &scratch.hidden,
         norm_weight,
@@ -802,7 +903,7 @@ fn nvfp4_mlp(
     .unwrap();
     nvfp4_decode_gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.nvfp4_activation,
             &scratch.nvfp4_scales,
             &gate_up.packed,
@@ -813,7 +914,7 @@ fn nvfp4_mlp(
         ),
     )
     .unwrap();
-    ops::nvfp4_quantize_swiglu(
+    quantize_swiglu_blocks(
         ctx,
         &scratch.mlp_fused,
         &scratch.mlp_activation,
@@ -825,7 +926,7 @@ fn nvfp4_mlp(
     .unwrap();
     nvfp4_decode_gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.mlp_activation,
             &scratch.mlp_scales,
             &down.packed,
@@ -845,12 +946,15 @@ fn gdn_decode_layer(
     scratch: &mut Scratch,
     state: &mut GdnState,
 ) {
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        &gdn.input_norm,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(
+            &scratch.hidden,
+            &gdn.input_norm,
+            &scratch.normalized,
+            EPSILON,
+        )
+        .with_weight_offset(),
     )
     .unwrap();
     fp8_projection(
@@ -892,12 +996,14 @@ fn gdn_decode_layer(
     };
     ops::gdn_decay_and_beta(
         ctx,
-        &gdn_a,
-        &gdn_b,
-        &gdn.a_log,
-        &gdn.dt_bias,
-        &scratch.gdn_decay,
-        &scratch.gdn_beta,
+        ops::GdnDecayAndBetaArgs {
+            a: &gdn_a,
+            b: &gdn_b,
+            a_log: &gdn.a_log,
+            dt_bias: &gdn.dt_bias,
+            decay: &scratch.gdn_decay,
+            beta: &scratch.gdn_beta,
+        },
     )
     .unwrap();
     ops::gdn_recurrent_step(
@@ -913,42 +1019,49 @@ fn gdn_decode_layer(
     )
     .unwrap();
     if scratch.fused_gdn_norm_quant {
-        ops::gdn_gated_norm_quantize(
+        ops::gdn_gated_norm(
             ctx,
-            &view(
-                &scratch.gdn_readout,
-                vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
-                DType::BF16,
-            ),
-            &view(
-                &scratch.gdn_z,
-                vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
-                DType::BF16,
-            ),
-            &gdn.norm_weight,
-            &view(
-                &scratch.gdn_gated,
-                vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
-                DType::BF16,
-            ),
-            &view(
-                &scratch.gdn_fp8,
-                vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
-                DType::F8E4M3,
-            ),
-            EPSILON,
-            gdn.out.input_scale,
+            ops::GdnGatedNormArgs {
+                input: &view(
+                    &scratch.gdn_readout,
+                    vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
+                    DType::BF16,
+                ),
+                gate: ops::GdnGate::Dense(&view(
+                    &scratch.gdn_z,
+                    vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
+                    DType::BF16,
+                )),
+                weight: &gdn.norm_weight,
+                output: &view(
+                    &scratch.gdn_gated,
+                    vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
+                    DType::BF16,
+                ),
+                quantized: Some(ops::GdnQuantizedOutput {
+                    tensor: &view(
+                        &scratch.gdn_fp8,
+                        vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
+                        DType::F8E4M3,
+                    ),
+                    input_scale: gdn.out.input_scale,
+                }),
+                epsilon: EPSILON,
+            },
         )
         .unwrap();
         fp8_projection_reuse_quantized(ctx, &gdn.out, &scratch.gdn_fp8, &mut scratch.projected);
     } else {
         ops::gdn_gated_norm(
             ctx,
-            &scratch.gdn_readout,
-            &gdn_z_heads(ctx, &scratch.gdn_z),
-            &gdn.norm_weight,
-            &scratch.gdn_gated,
-            EPSILON,
+            ops::GdnGatedNormArgs {
+                input: &scratch.gdn_readout,
+                gate: ops::GdnGate::Dense(&gdn_z_heads(ctx, &scratch.gdn_z)),
+                weight: &gdn.norm_weight,
+                output: &scratch.gdn_gated,
+                quantized: None,
+                epsilon: EPSILON,
+            },
         )
         .unwrap();
         let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
@@ -1288,12 +1401,15 @@ fn decode_step_inner(
                 let cache = &mut kv_caches[attention_index];
                 attention_index += 1;
 
-                ops::norm::rms_norm_weight_offset(
+                ops::norm::norm(
                     ctx,
-                    &scratch.hidden,
-                    &attention.input_norm,
-                    &scratch.normalized,
-                    EPSILON,
+                    ops::NormArgs::rms(
+                        &scratch.hidden,
+                        &attention.input_norm,
+                        &scratch.normalized,
+                        EPSILON,
+                    )
+                    .with_weight_offset(),
                 )
                 .unwrap();
                 fp8_projection(
@@ -1350,8 +1466,18 @@ fn decode_step_inner(
 
                 let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
                 let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
-                ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
-                ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+                ops::norm::norm(
+                    ctx,
+                    ops::NormArgs::rms(&query_heads, &attention.q_norm, &query_heads, EPSILON)
+                        .with_weight_offset(),
+                )
+                .unwrap();
+                ops::norm::norm(
+                    ctx,
+                    ops::NormArgs::rms(&key_heads, &attention.k_norm, &key_heads, EPSILON)
+                        .with_weight_offset(),
+                )
+                .unwrap();
 
                 let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
                 let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
@@ -1398,7 +1524,11 @@ fn decode_step_inner(
                 }
 
                 let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
-                ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+                ops::apply_output_gate(
+                    ctx,
+                    ops::OutputGateArgs::new(&scratch.attention_out, &gate_flat),
+                )
+                .unwrap();
                 fp8_projection(
                     ctx,
                     &attention.o,
@@ -1471,15 +1601,18 @@ fn decode_step_inner(
         );
     }
 
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        &model.final_norm,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(
+            &scratch.hidden,
+            &model.final_norm,
+            &scratch.normalized,
+            EPSILON,
+        )
+        .with_weight_offset(),
     )
     .unwrap();
-    ops::nvfp4_quantize_activation(
+    quantize_activation_blocks(
         ctx,
         &scratch.normalized,
         &scratch.nvfp4_activation,
@@ -1491,7 +1624,7 @@ fn decode_step_inner(
     .unwrap();
     nvfp4_decode_gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.nvfp4_activation,
             &scratch.nvfp4_scales,
             &model.lm_head.packed,
@@ -1502,7 +1635,11 @@ fn decode_step_inner(
         ),
     )
     .unwrap();
-    ops::argmax(ctx, &scratch.logits, &scratch.next_token).unwrap();
+    ops::argmax(
+        ctx,
+        ops::ArgmaxArgs::new(&scratch.logits, &scratch.next_token),
+    )
+    .unwrap();
 }
 
 /// Dump per-layer hidden states for a single-token decode (token id 100,
@@ -1648,12 +1785,15 @@ fn run_one_layer(
         Layer::Attention(attention) => {
             let cache = &mut kv_caches[*attention_index];
             *attention_index += 1;
-            ops::norm::rms_norm_weight_offset(
+            ops::norm::norm(
                 ctx,
-                &scratch.hidden,
-                &attention.input_norm,
-                &scratch.normalized,
-                EPSILON,
+                ops::NormArgs::rms(
+                    &scratch.hidden,
+                    &attention.input_norm,
+                    &scratch.normalized,
+                    EPSILON,
+                )
+                .with_weight_offset(),
             )
             .unwrap();
             fp8_projection(
@@ -1688,8 +1828,18 @@ fn run_one_layer(
             );
             let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
             let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
-            ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
-            ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+            ops::norm::norm(
+                ctx,
+                ops::NormArgs::rms(&query_heads, &attention.q_norm, &query_heads, EPSILON)
+                    .with_weight_offset(),
+            )
+            .unwrap();
+            ops::norm::norm(
+                ctx,
+                ops::NormArgs::rms(&key_heads, &attention.k_norm, &key_heads, EPSILON)
+                    .with_weight_offset(),
+            )
+            .unwrap();
             let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
             let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
             ops::partial_rope(ctx, &query_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
@@ -1713,7 +1863,11 @@ fn run_one_layer(
             args.policy.cache_dir = attention_cache_dir();
             ops::kv_cache_attention(ctx, args).unwrap();
             let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
-            ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+            ops::apply_output_gate(
+                ctx,
+                ops::OutputGateArgs::new(&scratch.attention_out, &gate_flat),
+            )
+            .unwrap();
             fp8_projection(
                 ctx,
                 &attention.o,
@@ -1737,12 +1891,15 @@ fn run_one_layer(
         Layer::Gdn(gdn) => {
             let state = &mut gdn_states[*gdn_index];
             *gdn_index += 1;
-            ops::norm::rms_norm_weight_offset(
+            ops::norm::norm(
                 ctx,
-                &scratch.hidden,
-                &gdn.input_norm,
-                &scratch.normalized,
-                EPSILON,
+                ops::NormArgs::rms(
+                    &scratch.hidden,
+                    &gdn.input_norm,
+                    &scratch.normalized,
+                    EPSILON,
+                )
+                .with_weight_offset(),
             )
             .unwrap();
             fp8_projection(
@@ -1784,12 +1941,14 @@ fn run_one_layer(
             bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
             ops::gdn_decay_and_beta(
                 ctx,
-                &scratch.gdn_a,
-                &scratch.gdn_b,
-                &gdn.a_log,
-                &gdn.dt_bias,
-                &scratch.gdn_decay,
-                &scratch.gdn_beta,
+                ops::GdnDecayAndBetaArgs {
+                    a: &scratch.gdn_a,
+                    b: &scratch.gdn_b,
+                    a_log: &gdn.a_log,
+                    dt_bias: &gdn.dt_bias,
+                    decay: &scratch.gdn_decay,
+                    beta: &scratch.gdn_beta,
+                },
             )
             .unwrap();
             ops::gdn_recurrent_step(
@@ -1806,11 +1965,14 @@ fn run_one_layer(
             .unwrap();
             ops::gdn_gated_norm(
                 ctx,
-                &scratch.gdn_readout,
-                &gdn_z_heads(ctx, &scratch.gdn_z),
-                &gdn.norm_weight,
-                &scratch.gdn_gated,
-                EPSILON,
+                ops::GdnGatedNormArgs {
+                    input: &scratch.gdn_readout,
+                    gate: ops::GdnGate::Dense(&gdn_z_heads(ctx, &scratch.gdn_z)),
+                    weight: &gdn.norm_weight,
+                    output: &scratch.gdn_gated,
+                    quantized: None,
+                    epsilon: EPSILON,
+                },
             )
             .unwrap();
             let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
@@ -2056,7 +2218,7 @@ impl PrefillScratch {
             "prefill capacity must be a multiple of {CHUNK}"
         );
         let scale_bytes =
-            |rows: usize, k: usize| vec![ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
+            |rows: usize, k: usize| vec![ops::block_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
         let t = capacity;
         let flashinfer = use_flashinfer_gdn();
         PrefillScratch {
@@ -2139,7 +2301,7 @@ fn nvfp4_mlp_rows(
         vec![rows, HIDDEN / 2],
         DType::E2M1Pair,
     );
-    ops::nvfp4_quantize_rms_norm(
+    quantize_rms_norm_blocks(
         ctx,
         &hidden_rows,
         norm_weight,
@@ -2169,7 +2331,7 @@ fn nvfp4_mlp_rows(
             );
         }
     }
-    let mut args = ops::GemmArgs::nvfp4(
+    let mut args = ops::GemmArgs::block_quantized(
         &activation,
         &scratch.nvfp4_scales,
         &gate_up.packed,
@@ -2187,7 +2349,7 @@ fn nvfp4_mlp_rows(
         DType::E2M1Pair,
     );
     verify_finite_bf16(ctx, "prefill MLP gate-up", &fused);
-    ops::nvfp4_quantize_swiglu(
+    quantize_swiglu_blocks(
         ctx,
         &fused,
         &mlp_activation,
@@ -2199,7 +2361,7 @@ fn nvfp4_mlp_rows(
     .unwrap();
 
     let mut mlp_out = prefix(&scratch.mlp_out, vec![rows, HIDDEN], DType::BF16);
-    let mut args = ops::GemmArgs::nvfp4(
+    let mut args = ops::GemmArgs::block_quantized(
         &mlp_activation,
         &scratch.mlp_scales,
         &down.packed,
@@ -2263,12 +2425,10 @@ fn prefill_step(
 
                 let hidden = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
                 let normalized = prefix(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
-                ops::norm::rms_norm_weight_offset(
+                ops::norm::norm(
                     ctx,
-                    &hidden,
-                    &attention.input_norm,
-                    &normalized,
-                    EPSILON,
+                    ops::NormArgs::rms(&hidden, &attention.input_norm, &normalized, EPSILON)
+                        .with_weight_offset(),
                 )
                 .unwrap();
 
@@ -2357,8 +2517,18 @@ fn prefill_step(
                 let query_heads =
                     prefix(&scratch.query, vec![tokens * HEADS, HEAD_DIM], DType::BF16);
                 let key_heads = cache_rows(&cache.keys, tokens, vec![tokens * KV_HEADS, HEAD_DIM]);
-                ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
-                ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+                ops::norm::norm(
+                    ctx,
+                    ops::NormArgs::rms(&query_heads, &attention.q_norm, &query_heads, EPSILON)
+                        .with_weight_offset(),
+                )
+                .unwrap();
+                ops::norm::norm(
+                    ctx,
+                    ops::NormArgs::rms(&key_heads, &attention.k_norm, &key_heads, EPSILON)
+                        .with_weight_offset(),
+                )
+                .unwrap();
 
                 let positions = prefix(&scratch.positions, vec![tokens], DType::I32);
                 // RoPE takes [tokens, heads, head_dim]; the batch axis the
@@ -2407,7 +2577,8 @@ fn prefill_step(
                     vec![tokens, HEADS * HEAD_DIM],
                     DType::BF16,
                 );
-                ops::apply_output_gate(ctx, &attention_out, &gate_flat).unwrap();
+                ops::apply_output_gate(ctx, ops::OutputGateArgs::new(&attention_out, &gate_flat))
+                    .unwrap();
                 fp8_projection_rows(
                     ctx,
                     &attention.o,
@@ -2457,12 +2628,10 @@ fn prefill_step(
 
                 let hidden = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
                 let normalized = prefix(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
-                ops::norm::rms_norm_weight_offset(
+                ops::norm::norm(
                     ctx,
-                    &hidden,
-                    &gdn.input_norm,
-                    &normalized,
-                    EPSILON,
+                    ops::NormArgs::rms(&hidden, &gdn.input_norm, &normalized, EPSILON)
+                        .with_weight_offset(),
                 )
                 .unwrap();
 
@@ -2558,16 +2727,16 @@ fn prefill_step(
                 let b_rows = prefix(&scratch.gdn_b, vec![tokens, GDN_V_HEADS], DType::BF16);
                 let decay_rows = prefix(&scratch.gdn_decay, vec![tokens, GDN_V_HEADS], DType::F32);
                 let beta_rows = prefix(&scratch.gdn_beta, vec![tokens, GDN_V_HEADS], DType::F32);
-                ops::gdn_decay_and_beta_seq(
+                ops::gdn_decay_and_beta(
                     ctx,
-                    &a_rows,
-                    &b_rows,
-                    &gdn.a_log,
-                    &gdn.dt_bias,
-                    &decay_rows,
-                    &beta_rows,
-                    tokens,
-                    GDN_V_HEADS,
+                    ops::GdnDecayAndBetaArgs {
+                        a: &a_rows,
+                        b: &b_rows,
+                        a_log: &gdn.a_log,
+                        dt_bias: &gdn.dt_bias,
+                        decay: &decay_rows,
+                        beta: &beta_rows,
+                    },
                 )
                 .unwrap();
                 stage("a/b+decay", &mut mark);
@@ -2740,8 +2909,7 @@ fn prefill_step(
                     let fuse_norm =
                         std::env::var("APXINF_GDN_FUSED_WIDEN_NORM").as_deref() == Ok("1");
                     if !fuse_norm || shadow_state.is_some() {
-                        ops::quantization::cast(ctx, &out_rows, &readout_bf)
-                        .unwrap();
+                        ops::quantization::cast(ctx, &out_rows, &readout_bf).unwrap();
                     }
                     if fuse_norm {
                         fused_readout = Some(out_rows);
@@ -2763,20 +2931,20 @@ fn prefill_step(
                         let beta =
                             prefix(&scratch.gdn_beta, vec![seq_padded, GDN_V_HEADS], DType::F32);
                         let q_width = GDN_K_HEADS * GDN_HEAD_DIM;
-                        ops::gdn_chunk_scan_interleaved(
+                        ops::gdn_chunk_scan(
                             ctx,
-                            &fused,
-                            &decay,
-                            &beta,
-                            &reference_output,
-                            &reference_state,
-                            seq_padded,
-                            QKV_WIDTH,
-                            [0, q_width, 2 * q_width],
-                            GDN_V_HEADS,
-                            GDN_K_HEADS,
-                            CHUNK,
-                            GDN_HEAD_DIM,
+                            ops::GdnChunkScanArgs {
+                                input: ops::GdnChunkScanInput::Interleaved {
+                                    fused: &fused,
+                                    offsets: [0, q_width, 2 * q_width],
+                                },
+                                gate_log: &decay,
+                                beta: &beta,
+                                output: &reference_output,
+                                state: &reference_state,
+                                key_heads: GDN_K_HEADS,
+                                chunk_size: CHUNK,
+                            },
                         )
                         .unwrap();
                         ctx.synchronize().unwrap();
@@ -2815,20 +2983,20 @@ fn prefill_step(
                         DType::BF16,
                     );
                     let q_width = GDN_K_HEADS * GDN_HEAD_DIM;
-                    ops::gdn_chunk_scan_interleaved(
+                    ops::gdn_chunk_scan(
                         ctx,
-                        &fused,
-                        &g_padded,
-                        &beta_padded,
-                        &readout,
-                        &state.recurrent,
-                        seq_padded,
-                        QKV_WIDTH,
-                        [0, q_width, 2 * q_width],
-                        GDN_V_HEADS,
-                        GDN_K_HEADS,
-                        CHUNK,
-                        GDN_HEAD_DIM,
+                        ops::GdnChunkScanArgs {
+                            input: ops::GdnChunkScanInput::Interleaved {
+                                fused: &fused,
+                                offsets: [0, q_width, 2 * q_width],
+                            },
+                            gate_log: &g_padded,
+                            beta: &beta_padded,
+                            output: &readout,
+                            state: &state.recurrent,
+                            key_heads: GDN_K_HEADS,
+                            chunk_size: CHUNK,
+                        },
                     )
                     .unwrap();
                     stage("scan(ours)", &mut mark);
@@ -2857,28 +3025,32 @@ fn prefill_step(
                         vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM],
                         DType::F8E4M3,
                     );
-                    ops::gdn_gated_norm_quantize(
+                    ops::gdn_gated_norm(
                         ctx,
-                        &readout_rows,
-                        &z_heads,
-                        &gdn.norm_weight,
-                        &gated,
-                        &quantized,
-                        EPSILON,
-                        gdn.out.input_scale,
+                        ops::GdnGatedNormArgs {
+                            input: &readout_rows,
+                            gate: ops::GdnGate::Dense(&z_heads),
+                            weight: &gdn.norm_weight,
+                            output: &gated,
+                            quantized: Some(ops::GdnQuantizedOutput {
+                                tensor: &quantized,
+                                input_scale: gdn.out.input_scale,
+                            }),
+                            epsilon: EPSILON,
+                        },
                     )
                     .unwrap();
                 } else {
-                    ops::gdn_gated_norm_seq(
+                    ops::gdn_gated_norm(
                         ctx,
-                        &readout_rows,
-                        &z_heads,
-                        &gdn.norm_weight,
-                        &gated,
-                        tokens,
-                        GDN_V_HEADS,
-                        GDN_HEAD_DIM,
-                        EPSILON,
+                        ops::GdnGatedNormArgs {
+                            input: &readout_rows,
+                            gate: ops::GdnGate::Dense(&z_heads),
+                            weight: &gdn.norm_weight,
+                            output: &gated,
+                            quantized: None,
+                            epsilon: EPSILON,
+                        },
                     )
                     .unwrap();
                 }
@@ -2984,9 +3156,13 @@ fn prefill_logits(
     tokens: usize,
 ) {
     let last = view_row(&prefill.hidden, tokens - 1, HIDDEN, DType::BF16);
-    ops::norm::rms_norm_weight_offset(ctx, &last, &model.final_norm, &decode.normalized, EPSILON)
-        .unwrap();
-    ops::nvfp4_quantize_activation(
+    ops::norm::norm(
+        ctx,
+        ops::NormArgs::rms(&last, &model.final_norm, &decode.normalized, EPSILON)
+            .with_weight_offset(),
+    )
+    .unwrap();
+    quantize_activation_blocks(
         ctx,
         &decode.normalized,
         &decode.nvfp4_activation,
@@ -2999,7 +3175,7 @@ fn prefill_logits(
     let mut logits = view(&decode.logits, vec![1, VOCAB], DType::BF16);
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &decode.nvfp4_activation,
             &decode.nvfp4_scales,
             &model.lm_head.packed,
@@ -3010,7 +3186,11 @@ fn prefill_logits(
         ),
     )
     .unwrap();
-    ops::argmax(ctx, &decode.logits, &decode.next_token).unwrap();
+    ops::argmax(
+        ctx,
+        ops::ArgmaxArgs::new(&decode.logits, &decode.next_token),
+    )
+    .unwrap();
 }
 
 /// A view of one row of a `[rows, width]` tensor.
@@ -3270,12 +3450,15 @@ fn full_model_decodes_and_is_timed() {
     let gemv_activation = view(&probe.fp8_activation, vec![HIDDEN], DType::F8E4M3);
     let gemv_out = view(&probe.gdn_qkv, vec![QKV_WIDTH], DType::BF16);
     let gemv_each = phase!("fp8 qkv via vectorized GEMV", 50, {
-        ops::fp8_gemv(
+        ops::gemv(
             &ctx,
-            &gemv_weight,
-            &gemv_activation,
-            &gemv_out,
-            gdn_layer.qkv.alpha,
+            ops::GemvArgs {
+                weight: &gemv_weight,
+                activation: &gemv_activation,
+                output: &gemv_out,
+                block_scales: None,
+                alpha: gdn_layer.qkv.alpha,
+            },
         )
         .unwrap();
     });
@@ -3322,13 +3505,13 @@ fn full_model_decodes_and_is_timed() {
     let head_activation = zeros(&ctx, vec![1, HIDDEN / 2], DType::E2M1Pair);
     let head_scales = zeros(
         &ctx,
-        vec![ops::nvfp4_scale_buffer_bytes(1, HIDDEN, BLOCK).unwrap()],
+        vec![ops::block_scale_buffer_bytes(1, HIDDEN, BLOCK).unwrap()],
         DType::F8E4M3,
     );
     let head_each = phase!("lm_head", 20, {
         ops::gemm(
             &ctx,
-            ops::GemmArgs::nvfp4(
+            ops::GemmArgs::block_quantized(
                 &head_activation,
                 &head_scales,
                 &model.lm_head.packed,
@@ -3367,7 +3550,7 @@ fn full_model_decodes_and_is_timed() {
 //      layers 1 and 2 sit between them in the real model and the reference
 //      never built them -- and feeding one into the other would let an early
 //      error hide where divergence actually starts.
-//   2. Fusion is off. `nvfp4_quantize_rms_norm` and `nvfp4_quantize_swiglu`
+//   2. Fusion is off. Fused RMSNorm/SwiGLU block quantization
 //      skip a BF16 rounding that the reference performs, which is a change of
 //      computational semantics and has to be measured on its own rather than
 //      assumed equivalent. This test establishes the unfused baseline.
@@ -3509,16 +3692,14 @@ fn unfused_mlp(
     dump: &mut RefDump,
     names: (&str, &str, &str, &str, &str),
 ) {
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        norm_weight,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(&scratch.hidden, norm_weight, &scratch.normalized, EPSILON)
+            .with_weight_offset(),
     )
     .unwrap();
     dump.push_bf16(ctx, names.0, &scratch.normalized, HIDDEN);
-    ops::nvfp4_quantize_activation(
+    quantize_activation_blocks(
         ctx,
         &scratch.normalized,
         &scratch.nvfp4_activation,
@@ -3530,7 +3711,7 @@ fn unfused_mlp(
     .unwrap();
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.nvfp4_activation,
             &scratch.nvfp4_scales,
             &gate_up.packed,
@@ -3548,7 +3729,7 @@ fn unfused_mlp(
 
     ops::swiglu_into(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
     dump.push_bf16(ctx, names.2, swiglu_out, INTERMEDIATE);
-    ops::nvfp4_quantize_activation(
+    quantize_activation_blocks(
         ctx,
         swiglu_out,
         &scratch.mlp_activation,
@@ -3560,7 +3741,7 @@ fn unfused_mlp(
     .unwrap();
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.mlp_activation,
             &scratch.mlp_scales,
             &down.packed,
@@ -3586,12 +3767,15 @@ fn gdn_reference_step(
     dump: &mut RefDump,
 ) {
     dump.push_bf16(ctx, "l0_00_hidden_in", &scratch.hidden, HIDDEN);
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        &gdn.input_norm,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(
+            &scratch.hidden,
+            &gdn.input_norm,
+            &scratch.normalized,
+            EPSILON,
+        )
+        .with_weight_offset(),
     )
     .unwrap();
     dump.push_bf16(ctx, "l0_01_input_layernorm", &scratch.normalized, HIDDEN);
@@ -3644,12 +3828,14 @@ fn gdn_reference_step(
 
     ops::gdn_decay_and_beta(
         ctx,
-        &scratch.gdn_a,
-        &scratch.gdn_b,
-        &gdn.a_log,
-        &gdn.dt_bias,
-        &scratch.gdn_decay,
-        &scratch.gdn_beta,
+        ops::GdnDecayAndBetaArgs {
+            a: &scratch.gdn_a,
+            b: &scratch.gdn_b,
+            a_log: &gdn.a_log,
+            dt_bias: &gdn.dt_bias,
+            decay: &scratch.gdn_decay,
+            beta: &scratch.gdn_beta,
+        },
     )
     .unwrap();
     // gdn_decay holds g, the log decay, which is what l0_10_g_log_decay is.
@@ -3685,11 +3871,14 @@ fn gdn_reference_step(
 
     ops::gdn_gated_norm(
         ctx,
-        &scratch.gdn_readout,
-        &gdn_z_heads(ctx, &scratch.gdn_z),
-        &gdn.norm_weight,
-        &scratch.gdn_gated,
-        EPSILON,
+        ops::GdnGatedNormArgs {
+            input: &scratch.gdn_readout,
+            gate: ops::GdnGate::Dense(&gdn_z_heads(ctx, &scratch.gdn_z)),
+            weight: &gdn.norm_weight,
+            output: &scratch.gdn_gated,
+            quantized: None,
+            epsilon: EPSILON,
+        },
     )
     .unwrap();
     dump.push_bf16(ctx, "l0_17_gated_rmsnorm", &scratch.gdn_gated, Z_WIDTH);
@@ -3737,12 +3926,15 @@ fn attention_reference_step(
     dump: &mut RefDump,
 ) {
     dump.push_bf16(ctx, "l3_00_hidden_in", &scratch.hidden, HIDDEN);
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        &attention.input_norm,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(
+            &scratch.hidden,
+            &attention.input_norm,
+            &scratch.normalized,
+            EPSILON,
+        )
+        .with_weight_offset(),
     )
     .unwrap();
     dump.push_bf16(ctx, "l3_01_input_layernorm", &scratch.normalized, HIDDEN);
@@ -3795,8 +3987,17 @@ fn attention_reference_step(
 
     let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
     let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
-    ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
-    ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+    ops::norm::norm(
+        ctx,
+        ops::NormArgs::rms(&query_heads, &attention.q_norm, &query_heads, EPSILON)
+            .with_weight_offset(),
+    )
+    .unwrap();
+    ops::norm::norm(
+        ctx,
+        ops::NormArgs::rms(&key_heads, &attention.k_norm, &key_heads, EPSILON).with_weight_offset(),
+    )
+    .unwrap();
     dump.push_bf16(ctx, "l3_06_q_norm", &scratch.query, HEADS * HEAD_DIM);
     dump.push_bf16(ctx, "l3_06_k_norm", &key_slot, KV_HEADS * HEAD_DIM);
     // v is never normalized; the reference records it here for alignment.
@@ -3832,7 +4033,11 @@ fn attention_reference_step(
     );
 
     let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
-    ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+    ops::apply_output_gate(
+        ctx,
+        ops::OutputGateArgs::new(&scratch.attention_out, &gate_flat),
+    )
+    .unwrap();
     dump.push_bf16(
         ctx,
         "l3_10_attn_gated",
@@ -3972,10 +4177,10 @@ fn compare_against_reference_tensors() {
 // *given* token at every position (teacher forcing -- NOT the port's own
 // argmax), and dumps the full FP32 logits vector at every position for
 // compare_teacher_forcing.py. Two modes:
-//   fused   -- the production path (nvfp4_quantize_rms_norm / _swiglu), and the
+//   fused   -- the production fused RMSNorm/SwiGLU block-quantization path, and the
 //              fused rms_norm+quantize lm_head as in decode_step.
-//   unfused -- rms_norm then nvfp4_quantize_activation, swiglu then
-//              nvfp4_quantize_activation, matching what the reference computes
+//   unfused -- rms_norm then activation block quantization, swiglu then
+//              activation block quantization, matching what the reference computes
 //              (a BF16 rounding between norm/activation and quantize).
 //
 // APXINF_TF_TOKENS   path to a "name id id id..." per-line token file
@@ -3993,15 +4198,13 @@ fn unfused_mlp_quiet(
     scratch: &mut Scratch,
     swiglu_out: &Tensor,
 ) {
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        norm_weight,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(&scratch.hidden, norm_weight, &scratch.normalized, EPSILON)
+            .with_weight_offset(),
     )
     .unwrap();
-    ops::nvfp4_quantize_activation(
+    quantize_activation_blocks(
         ctx,
         &scratch.normalized,
         &scratch.nvfp4_activation,
@@ -4013,7 +4216,7 @@ fn unfused_mlp_quiet(
     .unwrap();
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.nvfp4_activation,
             &scratch.nvfp4_scales,
             &gate_up.packed,
@@ -4025,7 +4228,7 @@ fn unfused_mlp_quiet(
     )
     .unwrap();
     ops::swiglu_into(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
-    ops::nvfp4_quantize_activation(
+    quantize_activation_blocks(
         ctx,
         swiglu_out,
         &scratch.mlp_activation,
@@ -4037,7 +4240,7 @@ fn unfused_mlp_quiet(
     .unwrap();
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.mlp_activation,
             &scratch.mlp_scales,
             &down.packed,
@@ -4072,12 +4275,15 @@ fn tf_run_layer(
         Layer::Attention(attention) => {
             let cache = &mut kv_caches[*attention_index];
             *attention_index += 1;
-            ops::norm::rms_norm_weight_offset(
+            ops::norm::norm(
                 ctx,
-                &scratch.hidden,
-                &attention.input_norm,
-                &scratch.normalized,
-                EPSILON,
+                ops::NormArgs::rms(
+                    &scratch.hidden,
+                    &attention.input_norm,
+                    &scratch.normalized,
+                    EPSILON,
+                )
+                .with_weight_offset(),
             )
             .unwrap();
             fp8_projection(
@@ -4112,8 +4318,18 @@ fn tf_run_layer(
             );
             let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
             let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
-            ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
-            ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+            ops::norm::norm(
+                ctx,
+                ops::NormArgs::rms(&query_heads, &attention.q_norm, &query_heads, EPSILON)
+                    .with_weight_offset(),
+            )
+            .unwrap();
+            ops::norm::norm(
+                ctx,
+                ops::NormArgs::rms(&key_heads, &attention.k_norm, &key_heads, EPSILON)
+                    .with_weight_offset(),
+            )
+            .unwrap();
             let query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
             let key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
             ops::partial_rope(ctx, &query_tokens, &scratch.positions, rotary, ROPE_THETA).unwrap();
@@ -4137,7 +4353,11 @@ fn tf_run_layer(
             args.policy.cache_dir = attention_cache_dir();
             ops::kv_cache_attention(ctx, args).unwrap();
             let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
-            ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+            ops::apply_output_gate(
+                ctx,
+                ops::OutputGateArgs::new(&scratch.attention_out, &gate_flat),
+            )
+            .unwrap();
             fp8_projection(
                 ctx,
                 &attention.o,
@@ -4168,12 +4388,15 @@ fn tf_run_layer(
         Layer::Gdn(gdn) => {
             let state = &mut gdn_states[*gdn_index];
             *gdn_index += 1;
-            ops::norm::rms_norm_weight_offset(
+            ops::norm::norm(
                 ctx,
-                &scratch.hidden,
-                &gdn.input_norm,
-                &scratch.normalized,
-                EPSILON,
+                ops::NormArgs::rms(
+                    &scratch.hidden,
+                    &gdn.input_norm,
+                    &scratch.normalized,
+                    EPSILON,
+                )
+                .with_weight_offset(),
             )
             .unwrap();
             fp8_projection(
@@ -4206,12 +4429,14 @@ fn tf_run_layer(
             bf16_matvec(ctx, &gdn.in_proj_b, &scratch.normalized, &scratch.gdn_b);
             ops::gdn_decay_and_beta(
                 ctx,
-                &scratch.gdn_a,
-                &scratch.gdn_b,
-                &gdn.a_log,
-                &gdn.dt_bias,
-                &scratch.gdn_decay,
-                &scratch.gdn_beta,
+                ops::GdnDecayAndBetaArgs {
+                    a: &scratch.gdn_a,
+                    b: &scratch.gdn_b,
+                    a_log: &gdn.a_log,
+                    dt_bias: &gdn.dt_bias,
+                    decay: &scratch.gdn_decay,
+                    beta: &scratch.gdn_beta,
+                },
             )
             .unwrap();
             ops::gdn_recurrent_step(
@@ -4228,11 +4453,14 @@ fn tf_run_layer(
             .unwrap();
             ops::gdn_gated_norm(
                 ctx,
-                &scratch.gdn_readout,
-                &gdn_z_heads(ctx, &scratch.gdn_z),
-                &gdn.norm_weight,
-                &scratch.gdn_gated,
-                EPSILON,
+                ops::GdnGatedNormArgs {
+                    input: &scratch.gdn_readout,
+                    gate: ops::GdnGate::Dense(&gdn_z_heads(ctx, &scratch.gdn_z)),
+                    weight: &gdn.norm_weight,
+                    output: &scratch.gdn_gated,
+                    quantized: None,
+                    epsilon: EPSILON,
+                },
             )
             .unwrap();
             let flat = flatten(ctx, &scratch.gdn_gated, Z_WIDTH);
@@ -4308,12 +4536,15 @@ fn tf_decode_step(
             taps[layer_index].extend(f);
         }
     }
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        &model.final_norm,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(
+            &scratch.hidden,
+            &model.final_norm,
+            &scratch.normalized,
+            EPSILON,
+        )
+        .with_weight_offset(),
     )
     .unwrap();
     // Fused vs unfused only differs in whether the normalized BF16 is
@@ -4322,7 +4553,7 @@ fn tf_decode_step(
     // materialized normalized tensor -- which is exactly the unfused lm_head.
     // For the fused mode we reproduce decode_step's fused quantize instead.
     if unfused {
-        ops::nvfp4_quantize_activation(
+        quantize_activation_blocks(
             ctx,
             &scratch.normalized,
             &scratch.nvfp4_activation,
@@ -4333,7 +4564,7 @@ fn tf_decode_step(
         )
         .unwrap();
     } else {
-        ops::nvfp4_quantize_rms_norm(
+        quantize_rms_norm_blocks(
             ctx,
             &scratch.hidden,
             &model.final_norm,
@@ -4348,7 +4579,7 @@ fn tf_decode_step(
     }
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.nvfp4_activation,
             &scratch.nvfp4_scales,
             &model.lm_head.packed,
@@ -4359,7 +4590,11 @@ fn tf_decode_step(
         ),
     )
     .unwrap();
-    ops::argmax(ctx, &scratch.logits, &scratch.next_token).unwrap();
+    ops::argmax(
+        ctx,
+        ops::ArgmaxArgs::new(&scratch.logits, &scratch.next_token),
+    )
+    .unwrap();
 }
 
 fn tf_read_tokens(path: &str) -> Vec<(String, Vec<i32>)> {

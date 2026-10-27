@@ -5,7 +5,7 @@ use apxinf_core::{DType, Result, Tensor};
 use super::contracts::{
     alignment, dtype_code, invalid, range, required_bytes, tensor_storage, Normalized, Semantic,
 };
-use super::{execution, AttentionMask, AttentionPolicy};
+use super::{execution, AttentionMask, AttentionNumerics, AttentionPolicy};
 use crate::ffi::abi::{attention as abi, status};
 use crate::{CudaBuffer, CudaContext, HostMappedBuffer};
 
@@ -84,6 +84,7 @@ pub struct KvCacheAttentionArgs<'a> {
     pub query_start: usize,
     pub mask: AttentionMask,
     pub scale: f32,
+    pub numerics: AttentionNumerics,
     pub policy: AttentionPolicy,
 }
 
@@ -108,6 +109,7 @@ impl<'a> KvCacheAttentionArgs<'a> {
             query_start: valid_key_tokens.saturating_sub(query_tokens),
             mask: AttentionMask::Causal,
             scale: 1.0 / (head_dim as f32).sqrt(),
+            numerics: AttentionNumerics::Flexible,
             policy: AttentionPolicy::default(),
         }
     }
@@ -278,6 +280,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: KvCacheAttentionArgs<'_>) -> Re
             dtype: dtype_code(dtype)?,
             output_dtype: dtype_code(dtype)?,
             mask: args.mask as u32,
+            qkv_layout: abi::QKV_LAYOUT_SEPARATE,
             q_alignment: alignment(bindings.query),
             k_alignment: alignment(bindings.key),
             v_alignment: alignment(bindings.value),
@@ -304,6 +307,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: KvCacheAttentionArgs<'_>) -> Re
             offsets_hash: 0,
             scale_is_default: u32::from(args.scale == default_scale),
             dynamic_decode: u32::from(dynamic_decode),
+            numerics: args.numerics as u32,
         },
         policy: args.policy,
         bindings,

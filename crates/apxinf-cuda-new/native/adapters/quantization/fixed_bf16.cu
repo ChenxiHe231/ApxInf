@@ -1,29 +1,4 @@
 #include "../../kernels/quantization/fixed_bf16.cuh"
-#include "../../kernels/quantization/casts.cuh"
-
-extern "C" cudaError_t apxinf_quantization_cast_f32_bf16(
-    const void* input, void* output, int64_t count, cudaStream_t stream) {
-  if (input == nullptr || output == nullptr || count <= 0)
-    return cudaErrorInvalidValue;
-  int blocks = static_cast<int>((count + 255) / 256);
-  blocks = blocks > 4096 ? 4096 : blocks;
-  cast_f32_bf16_kernel<<<blocks, 256, 0, stream>>>(
-      static_cast<const float*>(input),
-      static_cast<__nv_bfloat16*>(output), count);
-  return cudaGetLastError();
-}
-
-extern "C" cudaError_t apxinf_quantization_cast_bf16_f32(
-    const void* input, void* output, int64_t count, cudaStream_t stream) {
-  if (input == nullptr || output == nullptr || count <= 0)
-    return cudaErrorInvalidValue;
-  int blocks = static_cast<int>((count + 255) / 256);
-  blocks = blocks > 4096 ? 4096 : blocks;
-  cast_bf16_f32_kernel<<<blocks, 256, 0, stream>>>(
-      static_cast<const __nv_bfloat16*>(input),
-      static_cast<float*>(output), count);
-  return cudaGetLastError();
-}
 
 extern "C" cudaError_t apxinf_quantization_quantize_bf16_e4m3_packed8(
     const void* input, void* output, int64_t count, float scale,
@@ -142,40 +117,6 @@ extern "C" cudaError_t apxinf_quantization_bias_gelu_quantize_rows_bf16_int8(
         static_cast<const __nv_bfloat16*>(bias), static_cast<int8_t*>(output),
         static_cast<float*>(scales), rows, cols);
   }
-  return cudaGetLastError();
-}
-
-extern "C" cudaError_t apxinf_quantization_adaptive_layer_norm_quantize_rows_bf16_int8(
-    const void* input, const void* modulation, void* output, void* quantized,
-    void* scales, int rows, int cols, float eps, cudaStream_t stream) {
-  if (input == nullptr || modulation == nullptr || output == nullptr ||
-      quantized == nullptr || scales == nullptr || rows <= 0 || cols <= 0 ||
-      !(eps > 0.0f))
-    return cudaErrorInvalidValue;
-  adaptive_layer_norm_quantize_rows_bf16_int8_kernel<<<
-      rows, kBlockSize, 0, stream>>>(
-      static_cast<const __nv_bfloat16*>(input),
-      static_cast<const __nv_bfloat16*>(modulation),
-      static_cast<__nv_bfloat16*>(output), static_cast<int8_t*>(quantized),
-      static_cast<float*>(scales), rows, cols, eps);
-  return cudaGetLastError();
-}
-
-extern "C" cudaError_t apxinf_quantization_layer_norm_quantize_rows_bf16_int8(
-    const void* input, const void* weight, const void* bias, void* output,
-    void* quantized, void* scales, int rows, int cols, float eps,
-    cudaStream_t stream) {
-  if (input == nullptr || weight == nullptr || bias == nullptr ||
-      output == nullptr || quantized == nullptr || scales == nullptr ||
-      rows <= 0 || cols <= 0 || !(eps > 0.0f))
-    return cudaErrorInvalidValue;
-  layer_norm_quantize_rows_bf16_int8_kernel<<<rows, kBlockSize, 0,
-                                                    stream>>>(
-      static_cast<const __nv_bfloat16*>(input),
-      static_cast<const __nv_bfloat16*>(weight),
-      static_cast<const __nv_bfloat16*>(bias),
-      static_cast<__nv_bfloat16*>(output), static_cast<int8_t*>(quantized),
-      static_cast<float*>(scales), rows, cols, eps);
   return cudaGetLastError();
 }
 

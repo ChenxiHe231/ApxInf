@@ -3,7 +3,7 @@ use std::ffi::c_void;
 pub(crate) use super::types::CudaStream;
 use super::types::Runtime;
 
-pub(crate) const SPEC_VERSION: u32 = 1;
+pub(crate) const SPEC_VERSION: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -14,6 +14,7 @@ pub(crate) struct Spec {
     pub output_dtype: u32,
     pub scale_dtype: u32,
     pub input_alignment: u32,
+    pub secondary_alignment: u32,
     pub output_alignment: u32,
     pub scales_alignment: u32,
     pub rows: i64,
@@ -25,6 +26,7 @@ pub(crate) struct Spec {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Bindings {
     pub input: *const c_void,
+    pub secondary: *const c_void,
     pub output: *mut c_void,
     pub scales: *mut f32,
     pub stream: CudaStream,
@@ -32,18 +34,6 @@ pub(crate) struct Bindings {
 }
 
 unsafe extern "C" {
-    pub(crate) fn apxinf_quantization_cast_f32_bf16(
-        input: *const c_void,
-        output: *mut c_void,
-        count: i64,
-        stream: CudaStream,
-    ) -> i32;
-    pub(crate) fn apxinf_quantization_cast_bf16_f32(
-        input: *const c_void,
-        output: *mut c_void,
-        count: i64,
-        stream: CudaStream,
-    ) -> i32;
     pub(crate) fn apxinf_quantization_fp8_per_tensor(
         input: *const c_void,
         output: *mut c_void,
@@ -108,29 +98,7 @@ mod fixed_launchers {
             cols: i32,
             stream: cudaStream_t,
         ) -> cudaError_t;
-        pub(crate) fn apxinf_quantization_adaptive_layer_norm_quantize_rows_bf16_int8(
-            input: *const c_void,
-            modulation: *const c_void,
-            output: *mut c_void,
-            quantized: *mut c_void,
-            scales: *mut c_void,
-            rows: i32,
-            cols: i32,
-            eps: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_quantization_layer_norm_quantize_rows_bf16_int8(
-            input: *const c_void,
-            weight: *const c_void,
-            bias: *const c_void,
-            output: *mut c_void,
-            quantized: *mut c_void,
-            scales: *mut c_void,
-            rows: i32,
-            cols: i32,
-            eps: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
+        #[cfg(test)]
         pub(crate) fn apxinf_quantization_silu_mul_quantize_rows_bf16_int8(
             gate: *const c_void,
             up: *const c_void,
@@ -140,6 +108,7 @@ mod fixed_launchers {
             cols: i32,
             stream: cudaStream_t,
         ) -> cudaError_t;
+        #[cfg(test)]
         pub(crate) fn apxinf_quantization_silu_mul_quantize_rows_bf16_int8_packed4(
             gate: *const c_void,
             up: *const c_void,

@@ -3,7 +3,7 @@ use std::ffi::c_void;
 pub(crate) use super::types::CudaStream;
 use super::types::Runtime;
 
-pub(crate) const SPEC_VERSION: u32 = 1;
+pub(crate) const SPEC_VERSION: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -20,6 +20,8 @@ pub(crate) struct Spec {
     pub output_alignment: u32,
     pub rows: i64,
     pub cols: i64,
+    pub input_cols: i64,
+    pub logical_cols: i64,
     /// Structural predicate only: the scale value lives in [`Bindings`].
     pub output_scale_is_unit: u32,
 }
@@ -31,37 +33,13 @@ pub(crate) struct Bindings {
     pub secondary: *const c_void,
     pub bias: *const c_void,
     pub output: *mut c_void,
+    pub scales: *mut c_void,
     pub stream: CudaStream,
     pub dt: f32,
     pub output_scale: f32,
 }
 
 unsafe extern "C" {
-    pub(crate) fn apxinf_pointwise_swiglu(
-        fused_gate_up: *const c_void,
-        output: *mut c_void,
-        rows: i64,
-        width: i64,
-        stream: CudaStream,
-    ) -> i32;
-    pub(crate) fn apxinf_pointwise_add_into(
-        addend: *const c_void,
-        accumulator: *mut c_void,
-        count: i64,
-        stream: CudaStream,
-    ) -> i32;
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn apxinf_pointwise_swiglu_rows_bf16_e4m3(
-        gate_up: *const c_void,
-        bias: *const c_void,
-        output: *mut c_void,
-        scales: *mut c_void,
-        rows: i32,
-        input_cols: i32,
-        inner: i32,
-        output_cols: i32,
-        stream: CudaStream,
-    ) -> i32;
     pub(crate) fn apxinf_pointwise_launch(
         runtime: Runtime,
         spec: *const Spec,

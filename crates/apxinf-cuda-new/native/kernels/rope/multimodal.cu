@@ -1,25 +1,16 @@
 // Copyright 2026 ApxInf contributors.
 //
-// VLA attention primitives ported bit-identically from the legacy walloss
-// kernels (crates/apxinf-cuda/kernels/custom/fused.cuh and attention.cuh):
-// the fused QKV split + mRoPE with cache write, the fused vision QKV split
-// + 2D RoPE, and the segmented dense MHA. Arithmetic order, rounding points
-// and tie-breaks are preserved exactly.
+// Multimodal RoPE kernels moved without mathematical changes from the legacy
+// fused QKV implementations. Arithmetic order and rounding points are preserved.
 
-#include "multimodal_attention_ops.h"
+#include "multimodal.cuh"
 
 #include <cuda_bf16.h>
 
-namespace apxinf::cuda_new::multimodal_attention_ops {
+namespace apxinf::rope::multimodal {
 namespace {
 
 constexpr int kThreads = 256;
-
-__device__ __forceinline__ float warp_sum(float value) {
-  for (int offset = 16; offset > 0; offset >>= 1)
-    value += __shfl_down_sync(0xffffffff, value, offset);
-  return value;
-}
 
 // Axis a rotary pair draws its position from: pairs are striped modulo 3
 // across temporal/height/width, bounded by the section widths.
@@ -158,67 +149,6 @@ __global__ void vision_qkv_rope_kernel(
   }
 }
 
-// One block per (query, head, segment). F32 scores in shared memory; the
-// softmax runs serially on thread 0 so the summation order is fixed.
-__global__ void segmented_mha_bf16_kernel(
-    const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v,
-    const uint32_t* offsets, __nv_bfloat16* output, int heads, int head_dim) {
-  extern __shared__ float shared[];
-  const int segment = blockIdx.z;
-  const int begin = static_cast<int>(offsets[segment]);
-  const int end = static_cast<int>(offsets[segment + 1]);
-  const int tokens = end - begin;
-  const int query = blockIdx.x;
-  if (query >= tokens) return;
-  float* scores = shared;
-  float* warp_sums = scores + tokens;
-  const int head = blockIdx.y;
-  const int global_query = begin + query;
-  const int tid = threadIdx.x;
-  const int lane = tid & 31;
-  const int warp = tid >> 5;
-  const int warps = blockDim.x >> 5;
-  const __nv_bfloat16* query_ptr = q + (global_query * heads + head) * head_dim;
-  const float scale = rsqrtf(static_cast<float>(head_dim));
-  for (int token = 0; token < tokens; ++token) {
-    const __nv_bfloat16* key = k + ((begin + token) * heads + head) * head_dim;
-    float dot = tid < head_dim
-        ? __bfloat162float(query_ptr[tid]) * __bfloat162float(key[tid])
-        : 0.0f;
-    dot = warp_sum(dot);
-    if (lane == 0) warp_sums[warp] = dot;
-    __syncthreads();
-    if (warp == 0) {
-      float total = lane < warps ? warp_sums[lane] : 0.0f;
-      total = warp_sum(total);
-      if (lane == 0) scores[token] = total * scale;
-    }
-    __syncthreads();
-  }
-  if (tid == 0) {
-    float maximum = -3.402823466e+38F;
-    for (int token = 0; token < tokens; ++token)
-      maximum = fmaxf(maximum, scores[token]);
-    float denominator = 0.0f;
-    for (int token = 0; token < tokens; ++token) {
-      scores[token] = expf(scores[token] - maximum);
-      denominator += scores[token];
-    }
-    for (int token = 0; token < tokens; ++token)
-      scores[token] /= denominator;
-  }
-  __syncthreads();
-  if (tid < head_dim) {
-    float accumulator = 0.0f;
-    for (int token = 0; token < tokens; ++token) {
-      accumulator += scores[token] *
-          __bfloat162float(v[((begin + token) * heads + head) * head_dim + tid]);
-    }
-    output[(global_query * heads + head) * head_dim + tid] =
-        __float2bfloat16(accumulator);
-  }
-}
-
 }  // namespace
 
 int gqa_qkv_mrope_cache_bf16(const void* qkv, const void* bias,
@@ -265,24 +195,4 @@ int vision_qkv_rope_bf16(const void* qkv, const void* bias,
   return static_cast<int>(cudaGetLastError());
 }
 
-int segmented_mha_bf16(const void* q, const void* k, const void* v,
-                       const void* offsets, void* output, int segments,
-                       int max_tokens, int heads, int head_dim,
-                       cudaStream_t stream) {
-  if (q == nullptr || k == nullptr || v == nullptr || offsets == nullptr ||
-      output == nullptr || segments <= 0 || max_tokens <= 0 || heads <= 0 ||
-      head_dim <= 0 || head_dim > kThreads) {
-    return static_cast<int>(cudaErrorInvalidValue);
-  }
-  dim3 grid(max_tokens, heads, segments);
-  const size_t shared = static_cast<size_t>(max_tokens + 8) * sizeof(float);
-  segmented_mha_bf16_kernel<<<grid, kThreads, shared, stream>>>(
-      static_cast<const __nv_bfloat16*>(q),
-      static_cast<const __nv_bfloat16*>(k),
-      static_cast<const __nv_bfloat16*>(v),
-      static_cast<const uint32_t*>(offsets),
-      static_cast<__nv_bfloat16*>(output), heads, head_dim);
-  return static_cast<int>(cudaGetLastError());
-}
-
-}  // namespace apxinf::cuda_new::multimodal_attention_ops
+}  // namespace apxinf::rope::multimodal

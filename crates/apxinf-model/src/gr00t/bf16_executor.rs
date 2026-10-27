@@ -30,8 +30,6 @@ impl Gr00tPrecisionExecution for Gr00tBf16Execution {
     const USE_CACHED_VISION_RESIDUAL_LAYER_NORM: bool = true;
     const USE_VISION_POINTWISE_PACK: bool = true;
     const USE_BATCHED_VISION_ATTENTION: bool = true;
-    const VISION_POINTWISE_LEGACY_ENV: Option<&'static str> =
-        Some("APXINF_GR00T_BF16_LEGACY_VISION_POINTWISE_PACK");
     const QK_RMS_MROPE_LEGACY_ENV: Option<&'static str> =
         Some("APXINF_GR00T_BF16_LEGACY_QK_RMS_MROPE");
     const USE_PRECOMPUTED_BF16_VISION_ROPE: bool = true;
@@ -92,8 +90,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bf16_explicitly_opts_into_hdim96_bm64_attention() {
-    }
+    fn bf16_explicitly_opts_into_hdim96_bm64_attention() {}
 
     #[test]
     fn bf16_explicitly_opts_into_qk_rms_mrope_fusion() {
@@ -101,8 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn bf16_explicitly_opts_into_direct_vision_segment_output() {
-    }
+    fn bf16_explicitly_opts_into_direct_vision_segment_output() {}
 
     #[test]
     fn bf16_explicitly_opts_into_precomputed_vision_rope() {
@@ -115,8 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn bf16_explicitly_opts_into_packed8_bias_activation() {
-    }
+    fn bf16_explicitly_opts_into_packed8_bias_activation() {}
 
     #[test]
     fn bf16_explicitly_opts_into_bias_residual_adaptive_layer_norm() {

@@ -19,14 +19,48 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use super::backend::{ops, Context, DeviceBuffer as CudaBuffer, RuntimeBackend};
-use apxinf_core::{Error, Result, Tensor};
-use ops::{cache, elementwise, embedding, gemm, sampling, ExecutionSession};
+use apxinf_core::{DType, Error, Result, Shape, Tensor};
+use ops::{cache, elementwise, sampling, ExecutionSession};
 
 use super::calibration::Pi0FastCalibrationObserver;
 use super::{
     language_layer_bf16, language_layer_cached_decode_bf16, vision_layer_bf16,
     vision_patch_embed_f32_bf16, Pi0FastConfig, StaticBf16Pi0FastWeights,
 };
+
+fn add_optional_bias(ctx: &Context, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+    let Some(bias) = bias else {
+        return Ok(input.clone());
+    };
+    let mut output = ctx.allocate_output(input.shape().clone(), input.dtype())?;
+    let mut args =
+        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
+    args.bias = Some(bias);
+    args.activation = ops::PointwiseActivation::None;
+    ops::pointwise(ctx, args)?;
+    Ok(output)
+}
+
+fn embedding_lookup(
+    ctx: &Context,
+    table: &Tensor,
+    ids: &CudaBuffer,
+    tokens: usize,
+) -> Result<Tensor> {
+    let dims = table.shape().dims();
+    if dims.len() != 2 {
+        return Err(Error::Other(
+            "PI0-FAST embedding table must be rank 2".into(),
+        ));
+    }
+    let mut output = ctx.allocate_output(Shape::new(vec![tokens, dims[1]]), table.dtype())?;
+    let mut args = ops::GatherArgs::new(ops::GatherSemantic::EmbeddingLookup, table, &mut output);
+    args.ids = Some(ids);
+    args.vocab_size = dims[0];
+    args.embedding_scale = ops::EmbeddingScale::None;
+    ops::gather(ctx, args)?;
+    Ok(output)
+}
 
 /// Conservative arena reservation for one `infer` traversal.
 ///
@@ -108,7 +142,7 @@ pub struct Pi0FastBf16Runtime {
     weights: Arc<StaticBf16Pi0FastWeights>,
     /// Maps the pruned LM-head columns back to global token ids; see
     /// [`super::action_head_remap`].
-    lm_head_remap: CudaBuffer,
+    lm_head_remap: Tensor,
     /// Persistent arena for the per-call intermediates. Without it every
     /// intermediate is a raw `cudaMalloc`/`cudaFree` pair.
     arena: Mutex<Option<ExecutionSession>>,
@@ -158,7 +192,10 @@ impl Pi0FastBf16Runtime {
             .as_ref()
             .is_none_or(|workspace| workspace.capacity() < capacity)
         {
-            *arena = Some(ExecutionSession::with_capacity(capacity, self.ctx().device_id())?);
+            *arena = Some(ExecutionSession::with_capacity(
+                capacity,
+                self.ctx().device_id(),
+            )?);
         }
         ops::prepare_with_session(arena.as_ref().expect("arena is populated above"), operation)
     }
@@ -204,15 +241,25 @@ impl Pi0FastBf16Runtime {
                 config.layer_norm_eps,
             )?;
         }
-        let hidden = crate::cuda_ops::norm::layer(
+        let normalized = self
+            .ctx()
+            .allocate_output(hidden.shape().clone(), hidden.dtype())?;
+        ops::norm::norm(
             self.ctx(),
-            &hidden,
-            &weights.vision_post_norm.weight,
-            &weights.vision_post_norm.bias,
-            config.layer_norm_eps,
+            ops::NormArgs::layer(
+                &hidden,
+                &weights.vision_post_norm.weight,
+                &weights.vision_post_norm.bias,
+                &normalized,
+                config.layer_norm_eps,
+            ),
         )?;
-        let projected = gemm::bf16(self.ctx(), &hidden, &weights.multimodal_projector.weight)?;
-        elementwise::bias(
+        let projected = super::bf16_executor::plain_gemm(
+            self.ctx(),
+            &normalized,
+            &weights.multimodal_projector.weight,
+        )?;
+        add_optional_bias(
             self.ctx(),
             &projected,
             weights.multimodal_projector.bias.as_ref(),
@@ -252,7 +299,7 @@ impl Pi0FastBf16Runtime {
             &self.config,
             &self.weights,
         )?);
-        let _guard = ops::gemm::install_bf16_observer(observer.clone())?;
+        let _guard = ops::gemm::install_gemm_observer(observer.clone())?;
         let _ = self.infer(patches, token_ids, token_count, stop_token)?;
         self.backend.synchronize()?;
         observer.records()
@@ -300,7 +347,13 @@ impl Pi0FastBf16Runtime {
             let slot = tokens
                 .view(step * step_bytes, step_bytes)
                 .map_err(Error::Cuda)?;
-            sampling::argmax_remapped_into(self.ctx(), &logits, &self.lm_head_remap, &slot)?;
+            let slot_tensor = slot
+                .as_tensor(Shape::new(vec![1]), DType::I32)
+                .map_err(Error::Cuda)?;
+            sampling::argmax(
+                self.ctx(),
+                sampling::ArgmaxArgs::new(&logits, &slot_tensor).with_remap(&self.lm_head_remap),
+            )?;
             if let Some(stop) = stop_token {
                 // cuda-new launches argmax on its non-default context stream,
                 // while CudaBuffer::copy_to_host uses a synchronous default-
@@ -386,11 +439,17 @@ impl Pi0FastBf16Runtime {
     }
 
     fn lm_head(&self, hidden: &Tensor) -> Result<Tensor> {
-        let normalized = crate::cuda_ops::norm::rms(
+        let normalized = self
+            .ctx()
+            .allocate_output(hidden.shape().clone(), hidden.dtype())?;
+        ops::norm::norm(
             self.ctx(),
-            hidden,
-            &self.weights.language_final_norm_scale,
-            self.config.rms_norm_eps,
+            ops::NormArgs::rms(
+                hidden,
+                &self.weights.language_final_norm_scale,
+                &normalized,
+                self.config.rms_norm_eps,
+            ),
         )?;
         super::bf16_executor::decode_projection(
             self.ctx(),
@@ -407,8 +466,11 @@ impl Pi0FastBf16Runtime {
     /// action token, and the autoregressive feedback loop all share this path.
     fn embed_tokens(&self, ids: &CudaBuffer, token_count: usize) -> Result<Tensor> {
         let width = self.config.language.width;
-        let tensor =
-            embedding::lookup(self.ctx(), &self.weights.token_embedding, ids, token_count)?;
-        elementwise::scale(self.ctx(), &tensor, (width as f32).sqrt())
+        let tensor = embedding_lookup(self.ctx(), &self.weights.token_embedding, ids, token_count)?;
+        let output = self
+            .ctx()
+            .allocate_output(tensor.shape().clone(), tensor.dtype())?;
+        elementwise::scale(self.ctx(), &tensor, &output, (width as f32).sqrt())?;
+        Ok(output)
     }
 }

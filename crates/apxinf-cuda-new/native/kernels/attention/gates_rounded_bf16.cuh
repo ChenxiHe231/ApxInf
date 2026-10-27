@@ -1,6 +1,6 @@
 #pragma once
 
-__device__ __forceinline__ float attention_planning_sigmoid(float x) {
+__device__ __forceinline__ float attention_rounded_sigmoid(float x) {
   return 1.0f / (1.0f + expf(-x));
 }
 
@@ -16,7 +16,7 @@ __global__ void sigmoid_gate_mul_bf16_kernel(
     const float gate = __bfloat162float(
         fused[gate_row + head * 2 * head_dim + head_dim + d]);
     const float s = __bfloat162float(
-        __float2bfloat16(attention_planning_sigmoid(gate)));
+        __float2bfloat16(attention_rounded_sigmoid(gate)));
     attn[base + idx] =
         __float2bfloat16(__bfloat162float(attn[base + idx]) * s);
   }
@@ -29,7 +29,7 @@ __global__ void expert_sigmoid_gate_mul_bf16_kernel(
   for (; index < count; index += stride) {
     const float g = __bfloat162float(gate[index]);
     const float s =
-        __bfloat162float(__float2bfloat16(attention_planning_sigmoid(g)));
+        __bfloat162float(__float2bfloat16(attention_rounded_sigmoid(g)));
     attn[index] = __float2bfloat16(__bfloat162float(attn[index]) * s);
   }
 }
@@ -53,7 +53,7 @@ __global__ void sigmoid_gate_mul_bf16_vec8_kernel(
   for (int j = 0; j < 8; ++j) {
     const float g = __bfloat162float(gate.v[j]);
     const float sg =
-        __bfloat162float(__float2bfloat16(attention_planning_sigmoid(g)));
+        __bfloat162float(__float2bfloat16(attention_rounded_sigmoid(g)));
     x.v[j] = __float2bfloat16(__bfloat162float(x.v[j]) * sg);
   }
   *reinterpret_cast<SigmoidGatePack8*>(

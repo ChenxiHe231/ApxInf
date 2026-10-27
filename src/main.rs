@@ -1003,7 +1003,7 @@ fn run_test() {
 #[cfg(feature = "cuda")]
 fn cuda_test() {
     use apxinf_core::Tensor;
-    use apxinf_cuda_new::{transfers, CudaContext};
+    use apxinf_cuda_new::{ops, transfers, CudaContext};
     use half::bf16;
 
     let ctx = match CudaContext::new(0) {
@@ -1015,20 +1015,28 @@ fn cuda_test() {
     };
     println!("[CUDA] Device: {}", ctx.device_id());
 
-    // BF16 matmul smoke through the cuda-new kernel surface.
-    let to_bf16 = |values: &[f32]| values.iter().map(|v| bf16::from_f32(*v)).collect::<Vec<_>>();
+    // BF16 matmul smoke through the cuda-new L3 surface.
+    let to_bf16 = |values: &[f32]| {
+        values
+            .iter()
+            .map(|v| bf16::from_f32(*v))
+            .collect::<Vec<_>>()
+    };
     let a = Tensor::from_bf16(vec![2, 3], &to_bf16(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0])).unwrap();
     let b = Tensor::from_bf16(vec![3, 2], &to_bf16(&[7.0, 8.0, 9.0, 10.0, 11.0, 12.0])).unwrap();
     let a_gpu = transfers::to_cuda(&a, 0).unwrap();
     let b_gpu = transfers::to_cuda(&b, 0).unwrap();
-    let c_gpu = apxinf_cuda_new::kernels::gemm::matmul(&ctx, &a_gpu, &b_gpu).unwrap();
+    let c_gpu = ops::gemm::matmul(&ctx, &a_gpu, &b_gpu).unwrap();
     let c_cpu = transfers::to_cpu(&c_gpu).unwrap();
     println!("[CUDA] matmul (bf16): {:?}", c_cpu.as_f32().unwrap());
 
     // SiLU
     let x = Tensor::from_bf16(vec![1, 4], &to_bf16(&[1.0, -1.0, 0.0, 2.0])).unwrap();
     let x_gpu = transfers::to_cuda(&x, 0).unwrap();
-    let silu_gpu = apxinf_cuda_new::kernels::activation::silu(&ctx, &x_gpu).unwrap();
+    let silu_gpu = ctx
+        .allocate_output(x_gpu.shape().clone(), x_gpu.dtype())
+        .unwrap();
+    ops::elementwise_activation(&ctx, &x_gpu, &silu_gpu, ops::ElementwiseActivation::Silu).unwrap();
     let silu_cpu = transfers::to_cpu(&silu_gpu).unwrap();
     println!("[CUDA] silu: {:?}", silu_cpu.as_f32().unwrap());
 
@@ -1037,7 +1045,10 @@ fn cuda_test() {
     let b2 = Tensor::from_bf16(vec![1, 4], &to_bf16(&[5.0, 6.0, 7.0, 8.0])).unwrap();
     let a2_gpu = transfers::to_cuda(&a2, 0).unwrap();
     let b2_gpu = transfers::to_cuda(&b2, 0).unwrap();
-    let add_gpu = apxinf_cuda_new::kernels::elementwise::add(&ctx, &a2_gpu, &b2_gpu).unwrap();
+    let add_gpu = ctx
+        .allocate_output(a2_gpu.shape().clone(), a2_gpu.dtype())
+        .unwrap();
+    ops::elementwise::add(&ctx, &a2_gpu, &b2_gpu, &add_gpu).unwrap();
     let add_cpu = transfers::to_cpu(&add_gpu).unwrap();
     println!("[CUDA] add: {:?}", add_cpu.as_f32().unwrap());
 
@@ -1046,8 +1057,14 @@ fn cuda_test() {
     let weight = Tensor::from_bf16(vec![4], &to_bf16(&[1.0, 1.0, 1.0, 1.0])).unwrap();
     let input_gpu = transfers::to_cuda(&input, 0).unwrap();
     let weight_gpu = transfers::to_cuda(&weight, 0).unwrap();
-    let norm_gpu =
-        apxinf_cuda_new::kernels::norm::rms_bf16(&ctx, &input_gpu, &weight_gpu, 1e-5).unwrap();
+    let mut norm_gpu = ctx
+        .allocate_output(input_gpu.shape().clone(), input_gpu.dtype())
+        .unwrap();
+    ops::rms_norm(
+        &ctx,
+        ops::RmsNormArgs::new(&input_gpu, &weight_gpu, &mut norm_gpu, 1e-5),
+    )
+    .unwrap();
     let norm_cpu = transfers::to_cpu(&norm_gpu).unwrap();
     println!("[CUDA] rms_norm: {:?}", norm_cpu.as_f32().unwrap());
 

@@ -345,10 +345,7 @@ fn main() {
         "attention/providers/custom.cu",
         "elementwise/ops.cpp",
         "cache/ops.cpp",
-        "norm/rowwise_quant.cpp",
-        "pointwise/rowwise_quant.cpp",
         "pointwise/fixed_bf16.cu",
-        "attention/multimodal.cpp",
         "activation/fixed_bf16.cu",
         "activation/fixed_decode.cu",
         "activation/fixed_f16.cu",
@@ -360,10 +357,9 @@ fn main() {
         "elementwise/fixed_bf16.cu",
         "elementwise/fixed_decode.cu",
         "elementwise/fixed_f16.cu",
-        "attention/planning_bf16.cu",
+        "attention/gates_rounded_bf16.cu",
         "embedding/fixed_bf16.cu",
         "embedding/fixed_decode.cu",
-        "gemm/fixed_w8a8_bias_gelu.cu",
         "gemm/gemv.cpp",
         "gdn/fixed.cu",
         "norm/fixed_bf16.cu",
@@ -371,7 +367,6 @@ fn main() {
         "norm/fixed_f16.cu",
         "norm/fixed_gated_bf16.cu",
         "norm/fused_bf16.cu",
-        "norm/direct.cpp",
         "preprocess/fixed_bf16.cu",
         "preprocess/fixed_f16.cu",
         "preprocess/planning_bf16.cu",
@@ -380,10 +375,10 @@ fn main() {
         "rope/fixed_bf16.cu",
         "rope/fixed_decode.cu",
         "rope/fixed_f16.cu",
+        "rope/qkv_bf16.cu",
         "rope/partial.cpp",
         "preprocess/ops.cpp",
         "gdn/execution.cpp",
-        "pointwise/elementwise.cpp",
         "sampling/argmax.cpp",
         "sampling/suppress_bf16.cu",
         "sampling/launch.cu",
@@ -402,7 +397,7 @@ fn main() {
     generic_sources.push(native.join("kernels/custom/elementwise_ops.cu"));
     generic_sources.push(native.join("kernels/custom/cache_ops.cu"));
     generic_sources.push(native.join("kernels/custom/quant_ops.cu"));
-    generic_sources.push(native.join("kernels/custom/multimodal_attention_ops.cu"));
+    generic_sources.push(native.join("kernels/rope/multimodal.cu"));
     generic_sources.push(native.join("kernels/custom/preprocess_ops.cu"));
     generic_sources.push(native.join("kernels/custom/gdn_ops.cu"));
     generic_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_tma.cpp"));
@@ -532,17 +527,21 @@ fn main() {
     }
     let patched_fa2_root =
         (!fa2_e4m3_sources.is_empty()).then(|| stage_patched_fa2(&native, &fa2_root, &out));
+    let missing_sources = generic_sources
+        .iter()
+        .chain(&cutlass_sources)
+        .chain(&sm110_sources)
+        .chain(&cutlass_sm87_sources)
+        .chain(&cutlass_sm89_sources)
+        .chain(&fa2_sources)
+        .chain(&fa2_e4m3_sources)
+        .filter(|path| !path.is_file())
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
     assert!(
-        generic_sources
-            .iter()
-            .chain(&cutlass_sources)
-            .chain(&sm110_sources)
-            .chain(&cutlass_sm87_sources)
-            .chain(&cutlass_sm89_sources)
-            .chain(&fa2_sources)
-            .chain(&fa2_e4m3_sources)
-            .all(|path| path.is_file()),
-        "native build source is missing"
+        missing_sources.is_empty(),
+        "native build sources are missing:\n{}",
+        missing_sources.join("\n")
     );
 
     let cuda_includes = [

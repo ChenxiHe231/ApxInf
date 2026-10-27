@@ -96,6 +96,20 @@ void prepare_custom(Execution& execution);
 cudaError_t launch_custom(Execution& execution);
 void destroy_custom(Execution& execution) noexcept;
 
+cudaError_t launch_output_gate_projection(void* data, const void* projection,
+                                          int rows, int heads, int head_dim,
+                                          int64_t source_row_width,
+                                          cudaStream_t stream);
+cudaError_t launch_output_gate_tensor_rounded(void* data, const void* gate,
+                                              int64_t elements,
+                                              cudaStream_t stream);
+
+size_t cublas_f16_resource_requirements(const Spec& spec,
+                                        int configuration);
+void prepare_cublas_f16(Execution& execution);
+cudaError_t launch_cublas_f16(Execution& execution);
+void destroy_cublas_f16(Execution& execution) noexcept;
+
 #if defined(APXINF_ATTENTION_FA2)
 size_t fa2_resource_requirements(const Spec& spec, int configuration);
 void prepare_fa2(Execution& execution);
@@ -106,6 +120,11 @@ size_t fa2_splitkv_resource_requirements(const Spec& spec,
 void prepare_fa2_splitkv(Execution& execution);
 cudaError_t launch_fa2_splitkv(Execution& execution);
 void destroy_fa2_splitkv(Execution& execution) noexcept;
+size_t fa2_segmented_resource_requirements(const Spec& spec,
+                                           int configuration);
+void prepare_fa2_segmented(Execution& execution);
+cudaError_t launch_fa2_segmented(Execution& execution);
+void destroy_fa2_segmented(Execution& execution) noexcept;
 #endif
 
 #if defined(APXINF_ATTENTION_CUTLASS)

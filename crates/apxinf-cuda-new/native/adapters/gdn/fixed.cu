@@ -21,7 +21,7 @@ namespace {
 #include "../../kernels/custom/math.cuh"
 #include "../../kernels/custom/reduction.cuh"
 #include "../../kernels/custom/pillow_bicubic_u8.cuh"
-#include "../../kernels/custom/linear_attention.cuh"
+#include "../../kernels/gdn/fixed_bf16.cuh"
 #include "../../kernels/custom/gdn_raw_inverse_f1.cuh"
 #include "../../kernels/custom/gdn_chunk_state_wmma.cuh"
 #include "../../kernels/custom/gdn_chunk_gemm_tri.cuh"

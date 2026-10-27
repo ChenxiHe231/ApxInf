@@ -1,6 +1,9 @@
 #include "../../include/apxinf_cuda/norm.h"
 #include "../../framework/runtime_internal.h"
 #include "../../kernels/custom/norm.cuh"
+#include "../../kernels/custom/norm_head.h"
+#include "../../kernels/custom/norm_weight_offset.h"
+#include "../../kernels/custom/quant_ops.h"
 
 #include <climits>
 #include <cmath>
@@ -38,6 +41,45 @@ apxinf_norm_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
 extern "C" cudaError_t apxinf_norm_adaptive_layer_norm_bf16(
     const void* input, const void* modulation, void* output, uint32_t rows,
     uint32_t cols, float eps, cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_adaptive_layer_norm_quant_bf16_e4m3(
+    const void* input, const void* modulation, void* output, void* quantized,
+    uint32_t rows, uint32_t cols, float eps, float scale,
+    cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_rms_norm_quant_bf16_e4m3(
+    const void* input, const void* weight, void* output, int rows, int cols,
+    float eps, float scale, cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_layer_norm_quant_bf16_e4m3(
+    const void* input, const void* weight, const void* bias, void* output,
+    int rows, int cols, float eps, float scale, cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_bias_residual_layer_norm_quant_bf16_e4m3(
+    const void* projection, const void* projection_bias,
+    const void* residual, const void* norm_weight, const void* norm_bias,
+    void* hidden, void* normalized, int rows, int cols, float eps,
+    float scale, cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_fixed_decode_rms_norm_f32(
+    const void* input, const void* weight, void* output, uint32_t cols,
+    uint32_t rows, float eps, void* stream);
+extern "C" cudaError_t apxinf_norm_fixed_decode_rms_norm_bf16(
+    const void* input, const void* weight, void* output, uint32_t cols,
+    uint32_t rows, float eps, void* stream);
+extern "C" cudaError_t apxinf_norm_fixed_decode_rms_norm_add_bf16(
+    void* x_inout, const void* delta, const void* weight, void* output,
+    uint32_t cols, uint32_t rows, float eps, void* stream);
+extern "C" cudaError_t
+apxinf_norm_adaptive_layer_norm_quantize_rows_bf16_int8(
+    const void* input, const void* modulation, void* output, void* quantized,
+    void* scales, int rows, int cols, float eps, cudaStream_t stream);
+extern "C" cudaError_t
+apxinf_norm_layer_norm_quantize_rows_bf16_int8(
+    const void* input, const void* weight, const void* bias, void* output,
+    void* quantized, void* scales, int rows, int cols, float eps,
+    cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_rms_norm_plus1_bf16(
+    const void* input, const void* weight, void* output, int rows, int cols,
+    float eps, cudaStream_t stream);
+extern "C" cudaError_t apxinf_norm_add_rms_norm_plus1_bf16(
+    const void* a, const void* b, const void* weight, void* sum_out,
+    void* output, int rows, int cols, float eps, cudaStream_t stream);
 
 namespace {
 
@@ -52,60 +94,187 @@ bool valid_alignment(uint32_t alignment) {
          (alignment & (alignment - 1)) == 0;
 }
 
-bool writes_hidden(uint32_t semantic) {
-  return semantic != APXINF_NORM_SEMANTIC_RMS &&
-         semantic != APXINF_NORM_SEMANTIC_LAYER &&
-         semantic != APXINF_NORM_SEMANTIC_ADAPTIVE_RMS;
+bool writes_hidden(const apxinf_norm_spec_t& spec) {
+  return spec.operation != APXINF_NORM_OPERATION_NORM;
 }
 
-bool writes_normalized(uint32_t semantic) {
-  return semantic != APXINF_NORM_SEMANTIC_BIAS_RESIDUAL &&
-         semantic != APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL;
+bool writes_normalized(const apxinf_norm_spec_t& spec) {
+  return spec.operation != APXINF_NORM_OPERATION_RESIDUAL_ADD;
 }
 
-bool reads_residual(uint32_t semantic) { return writes_hidden(semantic); }
-
-bool reads_weight(uint32_t semantic) {
-  return semantic == APXINF_NORM_SEMANTIC_RMS ||
-         semantic == APXINF_NORM_SEMANTIC_LAYER ||
-         semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_RMS ||
-         semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_LAYER;
+bool reads_residual(const apxinf_norm_spec_t& spec) {
+  return writes_hidden(spec);
 }
 
-bool reads_norm_bias(uint32_t semantic) {
-  return semantic == APXINF_NORM_SEMANTIC_LAYER ||
-         semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_LAYER;
+bool reads_weight(const apxinf_norm_spec_t& spec) {
+  return spec.affine == APXINF_NORM_AFFINE_WEIGHT;
 }
 
-bool reads_norm_style(uint32_t semantic) {
-  return semantic == APXINF_NORM_SEMANTIC_ADAPTIVE_RMS ||
-         semantic == APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL_RMS ||
-         semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_ADAPTIVE_LAYER;
+bool reads_norm_bias(const apxinf_norm_spec_t& spec) {
+  return spec.statistic == APXINF_NORM_STATISTIC_LAYER &&
+         spec.affine == APXINF_NORM_AFFINE_WEIGHT;
 }
 
-bool reads_gate_style(uint32_t semantic) {
-  return semantic == APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL ||
-         semantic == APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL_RMS;
+bool reads_norm_style(const apxinf_norm_spec_t& spec) {
+  return writes_normalized(spec) &&
+         spec.affine == APXINF_NORM_AFFINE_ADAPTIVE;
 }
 
-bool may_have_bias(uint32_t semantic) {
-  return semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL ||
-         semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_RMS ||
-         semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_LAYER ||
-         semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_ADAPTIVE_LAYER;
+bool reads_gate_style(const apxinf_norm_spec_t& spec) {
+  return spec.gate == APXINF_NORM_GATE_STYLE;
+}
+
+bool may_have_bias(const apxinf_norm_spec_t& spec) {
+  return writes_hidden(spec) && spec.gate == APXINF_NORM_GATE_NONE;
+}
+
+bool is_contract(const apxinf_norm_spec_t& spec, uint32_t operation,
+                 uint32_t statistic, uint32_t affine, uint32_t gate) {
+  return spec.operation == operation && spec.statistic == statistic &&
+         spec.affine == affine && spec.gate == gate;
+}
+
+bool valid_contract(const apxinf_norm_spec_t& spec) {
+  return
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE) ||
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_LAYER, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE) ||
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_ADAPTIVE,
+                  APXINF_NORM_GATE_NONE) ||
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_LAYER, APXINF_NORM_AFFINE_ADAPTIVE,
+                  APXINF_NORM_GATE_NONE) ||
+      is_contract(spec, APXINF_NORM_OPERATION_RESIDUAL_ADD,
+                  APXINF_NORM_STATISTIC_NONE, APXINF_NORM_AFFINE_NONE,
+                  APXINF_NORM_GATE_NONE) ||
+      is_contract(spec, APXINF_NORM_OPERATION_RESIDUAL_ADD,
+                  APXINF_NORM_STATISTIC_NONE, APXINF_NORM_AFFINE_NONE,
+                  APXINF_NORM_GATE_STYLE) ||
+      is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE) ||
+      is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_LAYER, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE) ||
+      is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_ADAPTIVE,
+                  APXINF_NORM_GATE_STYLE) ||
+      is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_ADAPTIVE, APXINF_NORM_GATE_NONE);
 }
 
 void validate_spec(const apxinf_norm_spec_t& spec) {
-  const bool quantized_output =
-      spec.dtype == APXINF_DTYPE_F16 &&
+  const bool stable_decode_plain =
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE);
+  const bool stable_decode_residual =
+      is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE) &&
+      spec.dtype == APXINF_DTYPE_BF16 && spec.has_bias == 0;
+  const bool stable_decode =
+      spec.numerics == APXINF_NORM_NUMERICS_STABLE_DECODE;
+  const bool stable_planning =
+      spec.numerics == APXINF_NORM_NUMERICS_STABLE_PLANNING;
+  const bool weight_offset_plain =
+      spec.weight_offset != 0 && spec.dtype == APXINF_DTYPE_BF16 &&
+      spec.quantization == APXINF_NORM_QUANTIZATION_NONE &&
+      spec.has_bias == 0 &&
+      spec.bias_order == APXINF_NORM_BIAS_ORDER_SINGLE_ROUND &&
+      (spec.numerics == APXINF_NORM_NUMERICS_FLEXIBLE || stable_planning) &&
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE);
+  const bool weight_offset_fused =
+      spec.weight_offset != 0 && spec.dtype == APXINF_DTYPE_BF16 &&
+      spec.quantization == APXINF_NORM_QUANTIZATION_NONE &&
+      spec.has_bias == 0 &&
+      spec.bias_order == APXINF_NORM_BIAS_ORDER_SINGLE_ROUND &&
+      stable_planning &&
+      is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE);
+  const bool static_bf16_contract =
+      spec.dtype == APXINF_DTYPE_BF16 &&
+      (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                   APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                   APXINF_NORM_GATE_NONE) ||
+       is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                   APXINF_NORM_STATISTIC_LAYER,
+                   APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE) ||
+       is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                   APXINF_NORM_STATISTIC_LAYER,
+                   APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE) ||
+       is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                   APXINF_NORM_STATISTIC_LAYER,
+                   APXINF_NORM_AFFINE_ADAPTIVE, APXINF_NORM_GATE_NONE));
+  const bool dual_output_contract =
+      spec.dtype == APXINF_DTYPE_BF16 &&
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_ADAPTIVE, APXINF_NORM_GATE_NONE);
+  const bool static_e4m3 =
+      spec.quantization == APXINF_NORM_QUANTIZATION_STATIC_E4M3 &&
+      (spec.dtype == APXINF_DTYPE_F16 || static_bf16_contract) &&
+      spec.output_dtype == APXINF_DTYPE_E4M3 && writes_normalized(spec) &&
+      spec.quantized_cols == spec.cols &&
+      (spec.has_native_output == 0 || dual_output_contract);
+  const bool rowwise_e4m3 =
+      spec.quantization == APXINF_NORM_QUANTIZATION_ROWWISE_E4M3 &&
+      spec.dtype == APXINF_DTYPE_BF16 &&
       spec.output_dtype == APXINF_DTYPE_E4M3 &&
-      writes_normalized(spec.semantic);
+      spec.has_native_output == 0 && spec.output_scale_is_unit != 0 &&
+      spec.quantized_cols >= spec.cols &&
+      (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                   APXINF_NORM_STATISTIC_RMS,
+                   APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE) ||
+       is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                   APXINF_NORM_STATISTIC_RMS,
+                   APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE));
+  const bool rowwise_i8 =
+      spec.quantization == APXINF_NORM_QUANTIZATION_ROWWISE_I8 &&
+      spec.dtype == APXINF_DTYPE_BF16 &&
+      spec.output_dtype == APXINF_DTYPE_I8 &&
+      spec.has_native_output != 0 && spec.output_scale_is_unit != 0 &&
+      spec.quantized_cols == spec.cols &&
+      (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                   APXINF_NORM_STATISTIC_LAYER,
+                   APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE) ||
+       is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                   APXINF_NORM_STATISTIC_LAYER,
+                   APXINF_NORM_AFFINE_ADAPTIVE, APXINF_NORM_GATE_NONE));
+  const bool unquantized =
+      spec.quantization == APXINF_NORM_QUANTIZATION_NONE &&
+      spec.output_dtype == spec.dtype && spec.quantized_cols == 0 &&
+      spec.output_scale_is_unit != 0 &&
+      spec.has_native_output == static_cast<uint32_t>(writes_normalized(spec));
   if (spec.version != APXINF_NORM_SPEC_VERSION ||
-      spec.semantic > APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_ADAPTIVE_LAYER ||
-      (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
-      (spec.output_dtype != spec.dtype && !quantized_output) ||
+      !valid_contract(spec) ||
+      spec.quantization > APXINF_NORM_QUANTIZATION_ROWWISE_I8 ||
+      spec.numerics > APXINF_NORM_NUMERICS_STABLE_PLANNING ||
+      spec.weight_offset > 1 ||
+      (spec.weight_offset != 0 &&
+       !weight_offset_plain && !weight_offset_fused) ||
+      (spec.weight_offset == 0 && stable_planning) ||
+      (stable_decode &&
+       (!stable_decode_plain && !stable_decode_residual ||
+        spec.quantization != APXINF_NORM_QUANTIZATION_NONE)) ||
+      (spec.dtype == APXINF_DTYPE_F32 &&
+       (!stable_decode || !stable_decode_plain ||
+        spec.quantization != APXINF_NORM_QUANTIZATION_NONE)) ||
+      (spec.dtype != APXINF_DTYPE_F32 && spec.dtype != APXINF_DTYPE_F16 &&
+       spec.dtype != APXINF_DTYPE_BF16) ||
+      (!unquantized && !static_e4m3 && !rowwise_e4m3 && !rowwise_i8) ||
+      spec.has_native_output > 1 ||
       spec.rows <= 0 || spec.cols <= 0 ||
-      spec.rows > INT32_MAX || spec.cols > INT32_MAX || spec.has_bias > 1 ||
+      spec.rows > INT32_MAX || spec.cols > INT32_MAX ||
+      spec.quantized_cols > INT32_MAX || spec.has_bias > 1 ||
       spec.bias_order > APXINF_NORM_BIAS_ORDER_THEN_RESIDUAL ||
       spec.output_scale_is_unit > 1 ||
       !valid_alignment(spec.input_alignment) ||
@@ -114,7 +283,9 @@ void validate_spec(const apxinf_norm_spec_t& spec) {
       !valid_alignment(spec.residual_alignment) ||
       !valid_alignment(spec.style_alignment) ||
       !valid_alignment(spec.hidden_alignment) ||
-      !valid_alignment(spec.normalized_alignment)) {
+      !valid_alignment(spec.normalized_alignment) ||
+      !valid_alignment(spec.quantized_alignment) ||
+      !valid_alignment(spec.quantized_scales_alignment)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Norm Spec");
   }
   if (spec.bias_order == APXINF_NORM_BIAS_ORDER_THEN_RESIDUAL &&
@@ -122,43 +293,56 @@ void validate_spec(const apxinf_norm_spec_t& spec) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "BiasThenResidual order requires BF16 input and output");
   }
-  if (spec.semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_ADAPTIVE_LAYER &&
+  if (spec.statistic == APXINF_NORM_STATISTIC_LAYER &&
+      spec.affine == APXINF_NORM_AFFINE_ADAPTIVE &&
       spec.dtype != APXINF_DTYPE_BF16) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "BiasResidualAdaptiveLayer requires BF16 input and output");
+                  "adaptive LayerNorm requires BF16 input and output");
   }
   if (spec.bias_order == APXINF_NORM_BIAS_ORDER_THEN_RESIDUAL &&
-      spec.semantic != APXINF_NORM_SEMANTIC_BIAS_RESIDUAL &&
-      spec.semantic != APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_LAYER &&
-      spec.semantic != APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_ADAPTIVE_LAYER) {
+      (spec.operation == APXINF_NORM_OPERATION_NORM ||
+       spec.gate != APXINF_NORM_GATE_NONE ||
+       spec.statistic == APXINF_NORM_STATISTIC_RMS)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "BiasThenResidual order requires residual combine");
+                  "BiasThenResidual requires ungated residual add or fused LayerNorm");
   }
-  if (spec.has_bias != 0 && !may_have_bias(spec.semantic)) {
+  if (spec.has_bias != 0 && !may_have_bias(spec)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "Norm semantic does not take a bias");
+                  "Norm contract does not take a bias");
   }
 }
 
 void validate_bindings(const apxinf_norm_spec_t& spec,
                        const apxinf_norm_bindings_t& bindings) {
-  const uint32_t semantic = spec.semantic;
+  const bool quantized =
+      spec.quantization != APXINF_NORM_QUANTIZATION_NONE;
+  const bool rowwise =
+      spec.quantization == APXINF_NORM_QUANTIZATION_ROWWISE_E4M3 ||
+      spec.quantization == APXINF_NORM_QUANTIZATION_ROWWISE_I8;
   const bool missing =
       bindings.input == nullptr ||
-      (writes_hidden(semantic) && bindings.hidden == nullptr) ||
-      (writes_normalized(semantic) && bindings.normalized == nullptr) ||
-      (reads_residual(semantic) && bindings.residual == nullptr) ||
-      (reads_weight(semantic) && bindings.weight == nullptr) ||
-      (reads_norm_bias(semantic) && bindings.norm_bias == nullptr) ||
-      (reads_norm_style(semantic) && bindings.norm_style == nullptr) ||
-      (reads_gate_style(semantic) && bindings.gate_style == nullptr);
+      (writes_hidden(spec) && bindings.hidden == nullptr) ||
+      ((spec.has_native_output != 0) != (bindings.normalized != nullptr)) ||
+      (quantized != (bindings.quantized != nullptr)) ||
+      (rowwise != (bindings.quantized_scales != nullptr)) ||
+      (reads_residual(spec) && bindings.residual == nullptr) ||
+      (reads_weight(spec) && bindings.weight == nullptr) ||
+      (reads_norm_bias(spec) && bindings.norm_bias == nullptr) ||
+      (reads_norm_style(spec) && bindings.norm_style == nullptr) ||
+      (reads_gate_style(spec) && bindings.gate_style == nullptr);
   if (missing) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "missing Norm binding for semantic");
+                  "missing Norm binding for contract");
   }
   if ((spec.has_bias != 0) != (bindings.bias != nullptr)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Norm bias binding disagrees with Spec.has_bias");
+  }
+  if (spec.numerics == APXINF_NORM_NUMERICS_STABLE_DECODE &&
+      spec.operation == APXINF_NORM_OPERATION_FUSED_ADD_NORM &&
+      bindings.hidden != bindings.residual) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "stable decode residual RMSNorm must update residual in place");
   }
   const bool scale_matches_spec =
       (bindings.output_scale == 1.0f) ==
@@ -192,60 +376,152 @@ cudaError_t launch_quantized_f16(const apxinf_norm_spec_t& spec,
   const auto* norm_style = static_cast<const half*>(bindings.norm_style);
   const auto* gate_style = static_cast<const half*>(bindings.gate_style);
   auto* hidden = static_cast<half*>(bindings.hidden);
-  auto* normalized = static_cast<__nv_fp8_e4m3*>(bindings.normalized);
+  auto* normalized = static_cast<__nv_fp8_e4m3*>(bindings.quantized);
   const int rows = static_cast<int>(spec.rows);
   const int cols = static_cast<int>(spec.cols);
   const float inverse_scale = 1.0f / bindings.output_scale;
   auto stream = static_cast<cudaStream_t>(bindings.stream);
 
-  switch (spec.semantic) {
-    case APXINF_NORM_SEMANTIC_RMS:
-      kernels::rms_norm_quant_f16_e4m3<<<rows, kThreads, 0, stream>>>(
-          input, weight, normalized, rows, cols, bindings.eps, inverse_scale);
-      break;
-    case APXINF_NORM_SEMANTIC_LAYER:
-      kernels::layer_norm_quant_f16_e4m3<<<rows, kThreads, 0, stream>>>(
-          input, weight, norm_bias, normalized, rows, cols, bindings.eps,
-          inverse_scale);
-      break;
-    case APXINF_NORM_SEMANTIC_ADAPTIVE_RMS:
-      kernels::ada_rms_norm_quant_f16_e4m3<<<rows, kThreads, 0, stream>>>(
-          input, norm_style, normalized, rows, cols, bindings.eps,
-          inverse_scale);
-      break;
-    case APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_RMS:
-      kernels::bias_residual_rms_norm_quant_f16_e4m3
+  if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE)) {
+    kernels::rms_norm_quant_f16_e4m3<<<rows, kThreads, 0, stream>>>(
+        input, weight, normalized, rows, cols, bindings.eps, inverse_scale);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                         APXINF_NORM_STATISTIC_LAYER,
+                         APXINF_NORM_AFFINE_WEIGHT,
+                         APXINF_NORM_GATE_NONE)) {
+    kernels::layer_norm_quant_f16_e4m3<<<rows, kThreads, 0, stream>>>(
+        input, weight, norm_bias, normalized, rows, cols, bindings.eps,
+        inverse_scale);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                         APXINF_NORM_STATISTIC_RMS,
+                         APXINF_NORM_AFFINE_ADAPTIVE,
+                         APXINF_NORM_GATE_NONE)) {
+    kernels::ada_rms_norm_quant_f16_e4m3<<<rows, kThreads, 0, stream>>>(
+        input, norm_style, normalized, rows, cols, bindings.eps,
+        inverse_scale);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                         APXINF_NORM_STATISTIC_RMS,
+                         APXINF_NORM_AFFINE_WEIGHT,
+                         APXINF_NORM_GATE_NONE)) {
+    kernels::bias_residual_rms_norm_quant_f16_e4m3
+        <<<rows, kThreads, 0, stream>>>(
+            input, bias, residual, weight, hidden, normalized, rows, cols,
+            bindings.eps, inverse_scale);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                         APXINF_NORM_STATISTIC_LAYER,
+                         APXINF_NORM_AFFINE_WEIGHT,
+                         APXINF_NORM_GATE_NONE)) {
+    kernels::bias_residual_layer_norm_quant_f16_e4m3
+        <<<rows, kThreads, 0, stream>>>(
+            input, bias, residual, weight, norm_bias, hidden, normalized, rows,
+            cols, bindings.eps, inverse_scale);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                         APXINF_NORM_STATISTIC_RMS,
+                         APXINF_NORM_AFFINE_ADAPTIVE,
+                         APXINF_NORM_GATE_STYLE)) {
+    // The 10x1024 specialization performs uint2 loads on norm_style and a
+    // uint32 store on normalized; gate on the actual pointer alignment.
+    if (rows == 10 && cols == 1024 &&
+        reinterpret_cast<uintptr_t>(norm_style) % 8 == 0 &&
+        reinterpret_cast<uintptr_t>(normalized) % 4 == 0) {
+      kernels::ada_gate_residual_rms_norm_quant_f16_e4m3_10x1024
           <<<rows, kThreads, 0, stream>>>(
-              input, bias, residual, weight, hidden, normalized, rows, cols,
+              input, residual, gate_style, norm_style, hidden, normalized,
               bindings.eps, inverse_scale);
-      break;
-    case APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_LAYER:
-      kernels::bias_residual_layer_norm_quant_f16_e4m3
+    } else {
+      kernels::ada_gate_residual_rms_norm_quant_f16_e4m3
           <<<rows, kThreads, 0, stream>>>(
-              input, bias, residual, weight, norm_bias, hidden, normalized,
+              input, residual, gate_style, norm_style, hidden, normalized,
               rows, cols, bindings.eps, inverse_scale);
-      break;
-    case APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL_RMS:
-      // The 10x1024 specialization performs uint2 loads on norm_style and a
-      // uint32 store on normalized; gate on the actual pointer alignment.
-      if (rows == 10 && cols == 1024 &&
-          reinterpret_cast<uintptr_t>(norm_style) % 8 == 0 &&
-          reinterpret_cast<uintptr_t>(normalized) % 4 == 0) {
-        kernels::ada_gate_residual_rms_norm_quant_f16_e4m3_10x1024
-            <<<rows, kThreads, 0, stream>>>(
-                input, residual, gate_style, norm_style, hidden, normalized,
-                bindings.eps, inverse_scale);
-      } else {
-        kernels::ada_gate_residual_rms_norm_quant_f16_e4m3
-            <<<rows, kThreads, 0, stream>>>(
-                input, residual, gate_style, norm_style, hidden, normalized,
-                rows, cols, bindings.eps, inverse_scale);
-      }
-      break;
-    default:
-      return cudaErrorInvalidValue;
+    }
+  } else {
+    return cudaErrorInvalidValue;
   }
   return cudaGetLastError();
+}
+
+cudaError_t launch_quantized_bf16(const apxinf_norm_spec_t& spec,
+                                  const apxinf_norm_bindings_t& bindings) {
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+  const int rows = static_cast<int>(spec.rows);
+  const int cols = static_cast<int>(spec.cols);
+  const int quantized_cols = static_cast<int>(spec.quantized_cols);
+  if (spec.quantization == APXINF_NORM_QUANTIZATION_ROWWISE_E4M3 &&
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE)) {
+    return static_cast<cudaError_t>(
+        apxinf::cuda_new::quant_ops::rms_norm_quantize_rows_bf16_e4m3(
+            bindings.input, bindings.weight, bindings.quantized,
+            bindings.quantized_scales, rows, cols, quantized_cols,
+            bindings.eps, stream));
+  }
+  if (spec.quantization == APXINF_NORM_QUANTIZATION_ROWWISE_E4M3 &&
+      is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE)) {
+    return static_cast<cudaError_t>(apxinf::cuda_new::quant_ops::
+        bias_residual_rms_norm_quantize_rows_bf16_e4m3(
+            bindings.input, bindings.bias, bindings.residual, bindings.weight,
+            bindings.hidden, bindings.quantized, bindings.quantized_scales,
+            rows, cols, quantized_cols, bindings.eps, stream));
+  }
+  if (spec.quantization == APXINF_NORM_QUANTIZATION_ROWWISE_I8 &&
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_ADAPTIVE, APXINF_NORM_GATE_NONE)) {
+    return apxinf_norm_adaptive_layer_norm_quantize_rows_bf16_int8(
+        bindings.input, bindings.norm_style, bindings.normalized,
+        bindings.quantized, bindings.quantized_scales, rows, cols,
+        bindings.eps, stream);
+  }
+  if (spec.quantization == APXINF_NORM_QUANTIZATION_ROWWISE_I8 &&
+      is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE)) {
+    return apxinf_norm_layer_norm_quantize_rows_bf16_int8(
+        bindings.input, bindings.weight, bindings.norm_bias,
+        bindings.normalized, bindings.quantized,
+        bindings.quantized_scales, rows, cols, bindings.eps, stream);
+  }
+  if (spec.quantization != APXINF_NORM_QUANTIZATION_STATIC_E4M3) {
+    return cudaErrorInvalidValue;
+  }
+  if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE)) {
+    return apxinf_norm_rms_norm_quant_bf16_e4m3(
+        bindings.input, bindings.weight, bindings.quantized, rows, cols,
+        bindings.eps, bindings.output_scale, stream);
+  }
+  if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE)) {
+    return apxinf_norm_layer_norm_quant_bf16_e4m3(
+        bindings.input, bindings.weight, bindings.norm_bias,
+        bindings.quantized, rows, cols, bindings.eps,
+        bindings.output_scale, stream);
+  }
+  if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE)) {
+    return apxinf_norm_bias_residual_layer_norm_quant_bf16_e4m3(
+        bindings.input, bindings.bias, bindings.residual, bindings.weight,
+        bindings.norm_bias, bindings.hidden, bindings.quantized, rows, cols,
+        bindings.eps, bindings.output_scale, stream);
+  }
+  if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_ADAPTIVE, APXINF_NORM_GATE_NONE)) {
+    return apxinf_norm_adaptive_layer_norm_quant_bf16_e4m3(
+        bindings.input, bindings.norm_style, bindings.normalized,
+        bindings.quantized, static_cast<uint32_t>(rows),
+        static_cast<uint32_t>(cols), bindings.eps, bindings.output_scale,
+        stream);
+  }
+  return cudaErrorInvalidValue;
 }
 
 template <class T>
@@ -257,17 +533,82 @@ cudaError_t launch_fixed_f16(const apxinf_norm_spec_t& spec,
   auto stream = static_cast<cudaStream_t>(bindings.stream);
   const int rows = static_cast<int>(spec.rows);
   const int cols = static_cast<int>(spec.cols);
-  if (spec.semantic == APXINF_NORM_SEMANTIC_RMS) {
+  if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS,
+                  APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE)) {
     return apxinf_norm_rms_norm_f16(
         bindings.input, bindings.weight, bindings.normalized, rows, cols,
         bindings.eps, stream);
   }
-  if (spec.semantic == APXINF_NORM_SEMANTIC_LAYER) {
+  if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE)) {
     return apxinf_norm_layer_norm_f16(
         bindings.input, bindings.weight, bindings.norm_bias,
         bindings.normalized, rows, cols, bindings.eps, stream);
   }
   return launch<__half>(spec, bindings);
+}
+
+cudaError_t launch_stable_decode(const apxinf_norm_spec_t& spec,
+                                 const apxinf_norm_bindings_t& bindings) {
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+  const auto rows = static_cast<uint32_t>(spec.rows);
+  const auto cols = static_cast<uint32_t>(spec.cols);
+  if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE)) {
+    if (spec.dtype == APXINF_DTYPE_F32) {
+      return apxinf_norm_fixed_decode_rms_norm_f32(
+          bindings.input, bindings.weight, bindings.normalized, cols, rows,
+          bindings.eps, stream);
+    }
+    if (spec.dtype == APXINF_DTYPE_BF16) {
+      return apxinf_norm_fixed_decode_rms_norm_bf16(
+          bindings.input, bindings.weight, bindings.normalized, cols, rows,
+          bindings.eps, stream);
+    }
+  }
+  if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_RMS, APXINF_NORM_AFFINE_WEIGHT,
+                  APXINF_NORM_GATE_NONE) &&
+      spec.dtype == APXINF_DTYPE_BF16 && bindings.bias == nullptr &&
+      bindings.hidden == bindings.residual) {
+    return apxinf_norm_fixed_decode_rms_norm_add_bf16(
+        bindings.hidden, bindings.input, bindings.weight,
+        bindings.normalized, cols, rows, bindings.eps, stream);
+  }
+  return cudaErrorInvalidValue;
+}
+
+cudaError_t launch_weight_offset(const apxinf_norm_spec_t& spec,
+                                 const apxinf_norm_bindings_t& bindings) {
+  auto stream = static_cast<cudaStream_t>(bindings.stream);
+  const int rows = static_cast<int>(spec.rows);
+  const int cols = static_cast<int>(spec.cols);
+  if (spec.operation == APXINF_NORM_OPERATION_NORM) {
+    if (spec.numerics == APXINF_NORM_NUMERICS_STABLE_PLANNING) {
+      return apxinf_norm_rms_norm_plus1_bf16(
+          bindings.input, bindings.weight, bindings.normalized, rows, cols,
+          bindings.eps, stream);
+    }
+    const int status = bindings.input == bindings.normalized
+                           ? apxinf::cuda_new::norm::head_rms_norm(
+                                 bindings.normalized, bindings.weight, rows,
+                                 cols, bindings.eps, stream)
+                           : apxinf::cuda_new::norm::rms_norm_weight_offset(
+                                 bindings.input, bindings.weight,
+                                 bindings.normalized, rows, cols, bindings.eps,
+                                 stream);
+    return status == 0 ? cudaSuccess : cudaErrorUnknown;
+  }
+  if (spec.operation == APXINF_NORM_OPERATION_FUSED_ADD_NORM &&
+      spec.numerics == APXINF_NORM_NUMERICS_STABLE_PLANNING) {
+    return apxinf_norm_add_rms_norm_plus1_bf16(
+        bindings.input, bindings.residual, bindings.weight, bindings.hidden,
+        bindings.normalized, rows, cols, bindings.eps, stream);
+  }
+  return cudaErrorInvalidValue;
 }
 
 cudaError_t launch_fixed_bf16(const apxinf_runtime& runtime,
@@ -283,7 +624,19 @@ cudaError_t launch_fixed_bf16(const apxinf_runtime& runtime,
       spec.bias_alignment >= 8 && spec.residual_alignment >= 8 &&
       spec.hidden_alignment >= 8;
 
-  if (spec.semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL) {
+  if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_ADAPTIVE,
+                  APXINF_NORM_GATE_NONE)) {
+    return apxinf_norm_adaptive_layer_norm_bf16(
+        bindings.input, bindings.norm_style, bindings.normalized,
+        static_cast<uint32_t>(rows), static_cast<uint32_t>(cols),
+        bindings.eps, stream);
+  }
+
+  if (is_contract(spec, APXINF_NORM_OPERATION_RESIDUAL_ADD,
+                  APXINF_NORM_STATISTIC_NONE, APXINF_NORM_AFFINE_NONE,
+                  APXINF_NORM_GATE_NONE)) {
     if (bias_then_residual && packed4) {
       return apxinf_norm_bias_then_residual_bf16_packed4(
           bindings.input, bindings.bias, bindings.residual, bindings.hidden,
@@ -302,7 +655,9 @@ cudaError_t launch_fixed_bf16(const apxinf_runtime& runtime,
     return launch<__nv_bfloat16>(spec, bindings);
   }
 
-  if (spec.semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_LAYER) {
+  if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE)) {
     if (!bias_then_residual && sm == 87 && rows == 512 && cols == 1024) {
       return apxinf_norm_bias_residual_layer_norm_bf16_cached_1024(
           bindings.input, bindings.bias, bindings.residual, bindings.weight,
@@ -332,7 +687,10 @@ cudaError_t launch_fixed_bf16(const apxinf_runtime& runtime,
     return cudaGetLastError();
   }
 
-  if (spec.semantic == APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_ADAPTIVE_LAYER) {
+  if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                  APXINF_NORM_STATISTIC_LAYER,
+                  APXINF_NORM_AFFINE_ADAPTIVE,
+                  APXINF_NORM_GATE_NONE)) {
     if (bias_then_residual && (sm == 87 || sm == 110) && rows == 41 &&
         cols == 1536 && bindings.bias != nullptr) {
       return apxinf_norm_bias_then_residual_adaptive_layer_norm_bf16_cached_1536(
@@ -381,48 +739,60 @@ cudaError_t launch(const apxinf_norm_spec_t& spec,
   const int64_t count = spec.rows * spec.cols;
   auto stream = static_cast<cudaStream_t>(bindings.stream);
 
-  switch (spec.semantic) {
-    case APXINF_NORM_SEMANTIC_RMS:
-      kernels::rms_norm<T><<<rows, kThreads, 0, stream>>>(
-          input, weight, normalized, rows, cols, bindings.eps);
-      break;
-    case APXINF_NORM_SEMANTIC_LAYER:
-      kernels::layer_norm<T><<<rows, kThreads, 0, stream>>>(
-          input, weight, norm_bias, normalized, rows, cols, bindings.eps);
-      break;
-    case APXINF_NORM_SEMANTIC_ADAPTIVE_RMS:
-      kernels::ada_rms_norm<T><<<rows, kThreads, 0, stream>>>(
-          input, norm_style, normalized, rows, cols, bindings.eps);
-      break;
-    case APXINF_NORM_SEMANTIC_BIAS_RESIDUAL:
-      kernels::bias_residual<T>
-          <<<elementwise_blocks(count), kThreads, 0, stream>>>(
-              input, bias, residual, hidden, count, cols);
-      break;
-    case APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_RMS:
-      kernels::bias_residual_rms_norm<T><<<rows, kThreads, 0, stream>>>(
-          input, bias, residual, weight, hidden, normalized, rows, cols,
-          bindings.eps);
-      break;
-    case APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_LAYER:
-      kernels::bias_residual_layer_norm<T><<<rows, kThreads, 0, stream>>>(
-          input, bias, residual, weight, norm_bias, hidden, normalized, rows,
-          cols, bindings.eps);
-      break;
-    case APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL:
-      kernels::ada_gate_residual<T>
-          <<<elementwise_blocks(count), kThreads, 0, stream>>>(
-              input, residual, gate_style, hidden, count, cols);
-      break;
-    case APXINF_NORM_SEMANTIC_ADA_GATE_RESIDUAL_RMS:
-      kernels::ada_gate_residual_rms_norm<T><<<rows, kThreads, 0, stream>>>(
-          input, residual, gate_style, norm_style, hidden, normalized, rows,
-          cols, bindings.eps);
-      break;
-    case APXINF_NORM_SEMANTIC_BIAS_RESIDUAL_ADAPTIVE_LAYER:
-      return cudaErrorInvalidValue;
-    default:
-      return cudaErrorInvalidValue;
+  if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                  APXINF_NORM_STATISTIC_RMS,
+                  APXINF_NORM_AFFINE_WEIGHT, APXINF_NORM_GATE_NONE)) {
+    kernels::rms_norm<T><<<rows, kThreads, 0, stream>>>(
+        input, weight, normalized, rows, cols, bindings.eps);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                         APXINF_NORM_STATISTIC_LAYER,
+                         APXINF_NORM_AFFINE_WEIGHT,
+                         APXINF_NORM_GATE_NONE)) {
+    kernels::layer_norm<T><<<rows, kThreads, 0, stream>>>(
+        input, weight, norm_bias, normalized, rows, cols, bindings.eps);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_NORM,
+                         APXINF_NORM_STATISTIC_RMS,
+                         APXINF_NORM_AFFINE_ADAPTIVE,
+                         APXINF_NORM_GATE_NONE)) {
+    kernels::ada_rms_norm<T><<<rows, kThreads, 0, stream>>>(
+        input, norm_style, normalized, rows, cols, bindings.eps);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_RESIDUAL_ADD,
+                         APXINF_NORM_STATISTIC_NONE,
+                         APXINF_NORM_AFFINE_NONE,
+                         APXINF_NORM_GATE_NONE)) {
+    kernels::bias_residual<T>
+        <<<elementwise_blocks(count), kThreads, 0, stream>>>(
+            input, bias, residual, hidden, count, cols);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                         APXINF_NORM_STATISTIC_RMS,
+                         APXINF_NORM_AFFINE_WEIGHT,
+                         APXINF_NORM_GATE_NONE)) {
+    kernels::bias_residual_rms_norm<T><<<rows, kThreads, 0, stream>>>(
+        input, bias, residual, weight, hidden, normalized, rows, cols,
+        bindings.eps);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                         APXINF_NORM_STATISTIC_LAYER,
+                         APXINF_NORM_AFFINE_WEIGHT,
+                         APXINF_NORM_GATE_NONE)) {
+    kernels::bias_residual_layer_norm<T><<<rows, kThreads, 0, stream>>>(
+        input, bias, residual, weight, norm_bias, hidden, normalized, rows,
+        cols, bindings.eps);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_RESIDUAL_ADD,
+                         APXINF_NORM_STATISTIC_NONE,
+                         APXINF_NORM_AFFINE_NONE,
+                         APXINF_NORM_GATE_STYLE)) {
+    kernels::ada_gate_residual<T>
+        <<<elementwise_blocks(count), kThreads, 0, stream>>>(
+            input, residual, gate_style, hidden, count, cols);
+  } else if (is_contract(spec, APXINF_NORM_OPERATION_FUSED_ADD_NORM,
+                         APXINF_NORM_STATISTIC_RMS,
+                         APXINF_NORM_AFFINE_ADAPTIVE,
+                         APXINF_NORM_GATE_STYLE)) {
+    kernels::ada_gate_residual_rms_norm<T><<<rows, kThreads, 0, stream>>>(
+        input, residual, gate_style, norm_style, hidden, normalized, rows,
+        cols, bindings.eps);
+  } else {
+    return cudaErrorInvalidValue;
   }
   return cudaGetLastError();
 }
@@ -440,10 +810,16 @@ extern "C" apxinf_status_t apxinf_norm_launch(
     validate_bindings(*spec, *bindings);
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
     apxinf::framework::check_cuda(
-        spec->output_dtype == APXINF_DTYPE_E4M3
-            ? launch_quantized_f16(*spec, *bindings)
-            : (spec->dtype == APXINF_DTYPE_BF16
-                   ? launch_fixed_bf16(*runtime, *spec, *bindings)
-                   : launch_fixed_f16(*spec, *bindings)));
+        spec->weight_offset != 0
+            ? launch_weight_offset(*spec, *bindings)
+            : spec->quantization != APXINF_NORM_QUANTIZATION_NONE
+            ? (spec->dtype == APXINF_DTYPE_BF16
+                   ? launch_quantized_bf16(*spec, *bindings)
+                   : launch_quantized_f16(*spec, *bindings))
+            : (spec->numerics == APXINF_NORM_NUMERICS_STABLE_DECODE
+                   ? launch_stable_decode(*spec, *bindings)
+                   : (spec->dtype == APXINF_DTYPE_BF16
+                          ? launch_fixed_bf16(*runtime, *spec, *bindings)
+                          : launch_fixed_f16(*spec, *bindings))));
   });
 }

@@ -101,8 +101,8 @@ Jetson AGX Thor, locked clocks (1575 MHz GPC):
 
 - Quantizer contract suites: `qwen38_fp8_quant_contract`,
   `qwen38_nvfp4_quant_contract` (`apxinf-cuda-new`).
-- The 2048-token end-to-end benchmark exercises `ops::nvfp4_gemm_swiglu` in
-  every layer, checks deterministic generated tokens, and compares the token
+- The 2048-token end-to-end benchmark exercises `ops::gemm_swiglu` with the
+  block-quantized binding in every layer, checks deterministic generated tokens, and compares the token
   hash with the accepted reference run. Other prompt lengths exercise the
   generic fallback.
 

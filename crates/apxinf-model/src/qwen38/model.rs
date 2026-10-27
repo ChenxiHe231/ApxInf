@@ -65,7 +65,7 @@ impl Scratch {
 
     pub(crate) fn new(ctx: &CudaContext) -> Scratch {
         let scale_bytes =
-            |rows: usize, k: usize| vec![ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
+            |rows: usize, k: usize| vec![ops::block_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
         Scratch {
             hidden: zeros(ctx, vec![1, HIDDEN], DType::BF16),
             normalized: zeros(ctx, vec![1, HIDDEN], DType::BF16),
@@ -131,7 +131,17 @@ fn fp8_projection(
     output: &mut Tensor,
 ) {
     ops::quantize_per_tensor(ctx, source, quantized, weight.input_scale).unwrap();
-    ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha).unwrap();
+    ops::gemv(
+        ctx,
+        ops::GemvArgs {
+            weight: &weight.weight,
+            activation: quantized,
+            output,
+            block_scales: None,
+            alpha: weight.alpha,
+        },
+    )
+    .unwrap();
 }
 
 fn reuse_fp8_enabled() -> bool {
@@ -146,7 +156,17 @@ fn fp8_projection_reuse_quantized(
     quantized: &Tensor,
     output: &mut Tensor,
 ) {
-    ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha).unwrap();
+    ops::gemv(
+        ctx,
+        ops::GemvArgs {
+            weight: &weight.weight,
+            activation: quantized,
+            output,
+            block_scales: None,
+            alpha: weight.alpha,
+        },
+    )
+    .unwrap();
 }
 
 /// Many-token FP8 projection: the same contract as `fp8_projection`, run as
@@ -246,21 +266,23 @@ pub(crate) fn nvfp4_mlp(
     norm_weight: &Tensor,
     scratch: &mut Scratch,
 ) {
-    ops::nvfp4_quantize_rms_norm(
+    ops::block_quantize(
         ctx,
-        &scratch.hidden,
-        norm_weight,
-        &scratch.nvfp4_activation,
-        &scratch.nvfp4_scales,
-        EPSILON,
-        gate_up.input_scale,
-        BLOCK,
-        ops::ScaleLayout::GemmAtom,
+        ops::BlockQuantizationArgs::rms_norm(
+            &scratch.hidden,
+            norm_weight,
+            &scratch.nvfp4_activation,
+            &scratch.nvfp4_scales,
+            EPSILON,
+            gate_up.input_scale,
+            BLOCK,
+            ops::ScaleLayout::GemmAtom,
+        ),
     )
     .unwrap();
     nvfp4_decode_gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.nvfp4_activation,
             &scratch.nvfp4_scales,
             &gate_up.packed,
@@ -271,19 +293,21 @@ pub(crate) fn nvfp4_mlp(
         ),
     )
     .unwrap();
-    ops::nvfp4_quantize_swiglu(
+    ops::block_quantize(
         ctx,
-        &scratch.mlp_fused,
-        &scratch.mlp_activation,
-        &scratch.mlp_scales,
-        down.input_scale,
-        BLOCK,
-        ops::ScaleLayout::GemmAtom,
+        ops::BlockQuantizationArgs::swiglu(
+            &scratch.mlp_fused,
+            &scratch.mlp_activation,
+            &scratch.mlp_scales,
+            down.input_scale,
+            BLOCK,
+            ops::ScaleLayout::GemmAtom,
+        ),
     )
     .unwrap();
     nvfp4_decode_gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.mlp_activation,
             &scratch.mlp_scales,
             &down.packed,
@@ -303,12 +327,15 @@ pub(crate) fn gdn_decode_layer(
     scratch: &mut Scratch,
     state: &mut GdnState,
 ) {
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        &gdn.input_norm,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(
+            &scratch.hidden,
+            &gdn.input_norm,
+            &scratch.normalized,
+            EPSILON,
+        )
+        .with_weight_offset(),
     )
     .unwrap();
     fp8_projection(
@@ -341,12 +368,14 @@ pub(crate) fn gdn_decode_layer(
     let (gdn_a, gdn_b) = split_gdn_ab(&scratch.gdn_ab);
     ops::gdn_decay_and_beta(
         ctx,
-        &gdn_a,
-        &gdn_b,
-        &gdn.a_log,
-        &gdn.dt_bias,
-        &scratch.gdn_decay,
-        &scratch.gdn_beta,
+        ops::GdnDecayAndBetaArgs {
+            a: &gdn_a,
+            b: &gdn_b,
+            a_log: &gdn.a_log,
+            dt_bias: &gdn.dt_bias,
+            decay: &scratch.gdn_decay,
+            beta: &scratch.gdn_beta,
+        },
     )
     .unwrap();
     ops::gdn_recurrent_step(
@@ -361,31 +390,35 @@ pub(crate) fn gdn_decode_layer(
         GDN_K_HEADS,
     )
     .unwrap();
-    ops::gdn_gated_norm_quantize(
+    ops::gdn_gated_norm(
         ctx,
-        &view(
-            &scratch.gdn_readout,
-            vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
-            DType::BF16,
-        ),
-        &view(
-            &scratch.gdn_z,
-            vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
-            DType::BF16,
-        ),
-        &gdn.norm_weight,
-        &view(
-            &scratch.gdn_gated,
-            vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
-            DType::BF16,
-        ),
-        &view(
-            &scratch.gdn_fp8,
-            vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
-            DType::F8E4M3,
-        ),
-        EPSILON,
-        gdn.out.input_scale,
+        ops::GdnGatedNormArgs {
+            input: &view(
+                &scratch.gdn_readout,
+                vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
+                DType::BF16,
+            ),
+            gate: ops::GdnGate::Dense(&view(
+                &scratch.gdn_z,
+                vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
+                DType::BF16,
+            )),
+            weight: &gdn.norm_weight,
+            output: &view(
+                &scratch.gdn_gated,
+                vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
+                DType::BF16,
+            ),
+            quantized: Some(ops::GdnQuantizedOutput {
+                tensor: &view(
+                    &scratch.gdn_fp8,
+                    vec![1, GDN_V_HEADS, GDN_HEAD_DIM],
+                    DType::F8E4M3,
+                ),
+                input_scale: gdn.out.input_scale,
+            }),
+            epsilon: EPSILON,
+        },
     )
     .unwrap();
     fp8_projection_reuse_quantized(ctx, &gdn.out, &scratch.gdn_fp8, &mut scratch.projected);
@@ -536,12 +569,15 @@ pub(crate) fn decode_step_inner(
                 let cache = &mut kv_caches[attention_index];
                 attention_index += 1;
 
-                ops::norm::rms_norm_weight_offset(
+                ops::norm::norm(
                     ctx,
-                    &scratch.hidden,
-                    &attention.input_norm,
-                    &scratch.normalized,
-                    EPSILON,
+                    ops::NormArgs::rms(
+                        &scratch.hidden,
+                        &attention.input_norm,
+                        &scratch.normalized,
+                        EPSILON,
+                    )
+                    .with_weight_offset(),
                 )
                 .unwrap();
                 fp8_projection(
@@ -598,8 +634,18 @@ pub(crate) fn decode_step_inner(
 
                 let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
                 let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
-                ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
-                ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+                ops::norm::norm(
+                    ctx,
+                    ops::NormArgs::rms(&query_heads, &attention.q_norm, &query_heads, EPSILON)
+                        .with_weight_offset(),
+                )
+                .unwrap();
+                ops::norm::norm(
+                    ctx,
+                    ops::NormArgs::rms(&key_heads, &attention.k_norm, &key_heads, EPSILON)
+                        .with_weight_offset(),
+                )
+                .unwrap();
 
                 let mut query_tokens = view(&scratch.query, vec![1, HEADS, HEAD_DIM], DType::BF16);
                 let mut key_tokens = cache_slot(&cache.keys, position, vec![1, KV_HEADS, HEAD_DIM]);
@@ -664,7 +710,11 @@ pub(crate) fn decode_step_inner(
                 }
 
                 let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
-                ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+                ops::apply_output_gate(
+                    ctx,
+                    ops::OutputGateArgs::new(&scratch.attention_out, &gate_flat),
+                )
+                .unwrap();
                 fp8_projection(
                     ctx,
                     &attention.o,
@@ -722,27 +772,32 @@ pub(crate) fn decode_step_inner(
         );
     }
 
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        &model.final_norm,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(
+            &scratch.hidden,
+            &model.final_norm,
+            &scratch.normalized,
+            EPSILON,
+        )
+        .with_weight_offset(),
     )
     .unwrap();
-    ops::nvfp4_quantize_activation(
+    ops::block_quantize(
         ctx,
-        &scratch.normalized,
-        &scratch.nvfp4_activation,
-        &scratch.nvfp4_scales,
-        model.lm_head.input_scale,
-        BLOCK,
-        ops::ScaleLayout::GemmAtom,
+        ops::BlockQuantizationArgs::activation(
+            &scratch.normalized,
+            &scratch.nvfp4_activation,
+            &scratch.nvfp4_scales,
+            model.lm_head.input_scale,
+            BLOCK,
+            ops::ScaleLayout::GemmAtom,
+        ),
     )
     .unwrap();
     nvfp4_decode_gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.nvfp4_activation,
             &scratch.nvfp4_scales,
             &model.lm_head.packed,
@@ -753,7 +808,11 @@ pub(crate) fn decode_step_inner(
         ),
     )
     .unwrap();
-    ops::argmax(ctx, &scratch.logits, &scratch.next_token).unwrap();
+    ops::argmax(
+        ctx,
+        ops::ArgmaxArgs::new(&scratch.logits, &scratch.next_token),
+    )
+    .unwrap();
 }
 
 /// Dump per-layer hidden states for a single-token decode (token id 100,
@@ -872,7 +931,7 @@ impl PrefillScratch {
             "prefill capacity must be a multiple of {CHUNK}"
         );
         let scale_bytes =
-            |rows: usize, k: usize| vec![ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
+            |rows: usize, k: usize| vec![ops::block_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
         let t = capacity;
         // Prefill always runs the vendored FlashInfer chunked scan; the
         // reference scan remains available in the kernel harness for
@@ -958,16 +1017,18 @@ fn nvfp4_mlp_rows(
         vec![rows, HIDDEN / 2],
         DType::E2M1Pair,
     );
-    ops::nvfp4_quantize_rms_norm(
+    ops::block_quantize(
         ctx,
-        &hidden_rows,
-        norm_weight,
-        &activation,
-        &scratch.nvfp4_scales,
-        EPSILON,
-        gate_up.input_scale,
-        BLOCK,
-        ops::ScaleLayout::GemmAtom,
+        ops::BlockQuantizationArgs::rms_norm(
+            &hidden_rows,
+            norm_weight,
+            &activation,
+            &scratch.nvfp4_scales,
+            EPSILON,
+            gate_up.input_scale,
+            BLOCK,
+            ops::ScaleLayout::GemmAtom,
+        ),
     )
     .unwrap();
 
@@ -990,17 +1051,19 @@ fn nvfp4_mlp_rows(
     );
     if fused_fc1 {
         let weight = gate_up.fused_fc1.as_ref().unwrap();
-        ops::nvfp4_gemm_swiglu(
+        ops::gemm_swiglu(
             ctx,
-            &activation,
-            &scratch.nvfp4_scales,
-            &weight.packed,
-            &weight.scales,
-            &mlp_activation,
-            &scratch.mlp_scales,
-            &weight.alpha,
-            &weight.input_global_scale,
-            &weight.down_inverse_global_scale,
+            ops::GemmSwiGluArgs::block_quantized(
+                &activation,
+                &scratch.nvfp4_scales,
+                &weight.packed,
+                &weight.scales,
+                &mlp_activation,
+                &scratch.mlp_scales,
+                &weight.alpha,
+                &weight.input_global_scale,
+                &weight.down_inverse_global_scale,
+            ),
         )
         .unwrap();
     } else {
@@ -1009,7 +1072,7 @@ fn nvfp4_mlp_rows(
             vec![rows, 2 * INTERMEDIATE],
             DType::BF16,
         );
-        let mut args = ops::GemmArgs::nvfp4(
+        let mut args = ops::GemmArgs::block_quantized(
             &activation,
             &scratch.nvfp4_scales,
             &gate_up.packed,
@@ -1021,20 +1084,22 @@ fn nvfp4_mlp_rows(
         args.policy.cache_dir = gemm_cache_dir();
         ops::gemm(ctx, args).unwrap();
         verify_finite_bf16(ctx, "prefill MLP gate-up", &fused);
-        ops::nvfp4_quantize_swiglu(
+        ops::block_quantize(
             ctx,
-            &fused,
-            &mlp_activation,
-            &scratch.mlp_scales,
-            down.input_scale,
-            BLOCK,
-            ops::ScaleLayout::GemmAtom,
+            ops::BlockQuantizationArgs::swiglu(
+                &fused,
+                &mlp_activation,
+                &scratch.mlp_scales,
+                down.input_scale,
+                BLOCK,
+                ops::ScaleLayout::GemmAtom,
+            ),
         )
         .unwrap();
     }
 
     let mut mlp_out = prefix(&scratch.mlp_out, vec![rows, HIDDEN], DType::BF16);
-    let mut args = ops::GemmArgs::nvfp4(
+    let mut args = ops::GemmArgs::block_quantized(
         &mlp_activation,
         &scratch.mlp_scales,
         &down.packed,
@@ -1101,12 +1166,10 @@ pub(crate) fn prefill_step(
 
                 let hidden = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
                 let normalized = prefix(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
-                ops::norm::rms_norm_weight_offset(
+                ops::norm::norm(
                     ctx,
-                    &hidden,
-                    &attention.input_norm,
-                    &normalized,
-                    EPSILON,
+                    ops::NormArgs::rms(&hidden, &attention.input_norm, &normalized, EPSILON)
+                        .with_weight_offset(),
                 )
                 .unwrap();
 
@@ -1195,8 +1258,18 @@ pub(crate) fn prefill_step(
                 let query_heads =
                     prefix(&scratch.query, vec![tokens * HEADS, HEAD_DIM], DType::BF16);
                 let key_heads = cache_rows(&cache.keys, tokens, vec![tokens * KV_HEADS, HEAD_DIM]);
-                ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
-                ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+                ops::norm::norm(
+                    ctx,
+                    ops::NormArgs::rms(&query_heads, &attention.q_norm, &query_heads, EPSILON)
+                        .with_weight_offset(),
+                )
+                .unwrap();
+                ops::norm::norm(
+                    ctx,
+                    ops::NormArgs::rms(&key_heads, &attention.k_norm, &key_heads, EPSILON)
+                        .with_weight_offset(),
+                )
+                .unwrap();
 
                 let positions = prefix(&scratch.positions, vec![tokens, 3], DType::I32);
                 // RoPE takes [tokens, heads, head_dim]; the batch axis the
@@ -1266,7 +1339,8 @@ pub(crate) fn prefill_step(
                     vec![tokens, HEADS * HEAD_DIM],
                     DType::BF16,
                 );
-                ops::apply_output_gate(ctx, &attention_out, &gate_flat).unwrap();
+                ops::apply_output_gate(ctx, ops::OutputGateArgs::new(&attention_out, &gate_flat))
+                    .unwrap();
                 fp8_projection_rows(
                     ctx,
                     &attention.o,
@@ -1316,12 +1390,10 @@ pub(crate) fn prefill_step(
 
                 let hidden = prefix(&scratch.hidden, vec![tokens, HIDDEN], DType::BF16);
                 let normalized = prefix(&scratch.normalized, vec![tokens, HIDDEN], DType::BF16);
-                ops::norm::rms_norm_weight_offset(
+                ops::norm::norm(
                     ctx,
-                    &hidden,
-                    &gdn.input_norm,
-                    &normalized,
-                    EPSILON,
+                    ops::NormArgs::rms(&hidden, &gdn.input_norm, &normalized, EPSILON)
+                        .with_weight_offset(),
                 )
                 .unwrap();
 
@@ -1418,16 +1490,16 @@ pub(crate) fn prefill_step(
                 let b_rows = prefix(&scratch.gdn_b, vec![tokens, GDN_V_HEADS], DType::BF16);
                 let decay_rows = prefix(&scratch.gdn_decay, vec![tokens, GDN_V_HEADS], DType::F32);
                 let beta_rows = prefix(&scratch.gdn_beta, vec![tokens, GDN_V_HEADS], DType::F32);
-                ops::gdn_decay_and_beta_seq(
+                ops::gdn_decay_and_beta(
                     ctx,
-                    &a_rows,
-                    &b_rows,
-                    &gdn.a_log,
-                    &gdn.dt_bias,
-                    &decay_rows,
-                    &beta_rows,
-                    tokens,
-                    GDN_V_HEADS,
+                    ops::GdnDecayAndBetaArgs {
+                        a: &a_rows,
+                        b: &b_rows,
+                        a_log: &gdn.a_log,
+                        dt_bias: &gdn.dt_bias,
+                        decay: &decay_rows,
+                        beta: &beta_rows,
+                    },
                 )
                 .unwrap();
                 stage("a/b+decay", &mut mark);
@@ -1602,8 +1674,7 @@ pub(crate) fn prefill_step(
                     // BF16 copy it compares against.
                     let fuse_norm = true;
                     if !fuse_norm || shadow_state.is_some() {
-                        ops::quantization::cast(ctx, &out_rows, &readout_bf)
-                        .unwrap();
+                        ops::quantization::cast(ctx, &out_rows, &readout_bf).unwrap();
                     }
                     if fuse_norm {
                         fused_readout = Some(out_rows);
@@ -1625,20 +1696,20 @@ pub(crate) fn prefill_step(
                         let beta =
                             prefix(&scratch.gdn_beta, vec![seq_padded, GDN_V_HEADS], DType::F32);
                         let q_width = GDN_K_HEADS * GDN_HEAD_DIM;
-                        ops::gdn_chunk_scan_interleaved(
+                        ops::gdn_chunk_scan(
                             ctx,
-                            &fused,
-                            &decay,
-                            &beta,
-                            &reference_output,
-                            &reference_state,
-                            seq_padded,
-                            QKV_WIDTH,
-                            [0, q_width, 2 * q_width],
-                            GDN_V_HEADS,
-                            GDN_K_HEADS,
-                            CHUNK,
-                            GDN_HEAD_DIM,
+                            ops::GdnChunkScanArgs {
+                                input: ops::GdnChunkScanInput::Interleaved {
+                                    fused: &fused,
+                                    offsets: [0, q_width, 2 * q_width],
+                                },
+                                gate_log: &decay,
+                                beta: &beta,
+                                output: &reference_output,
+                                state: &reference_state,
+                                key_heads: GDN_K_HEADS,
+                                chunk_size: CHUNK,
+                            },
                         )
                         .unwrap();
                         ctx.synchronize().unwrap();
@@ -1677,20 +1748,20 @@ pub(crate) fn prefill_step(
                         DType::BF16,
                     );
                     let q_width = GDN_K_HEADS * GDN_HEAD_DIM;
-                    ops::gdn_chunk_scan_interleaved(
+                    ops::gdn_chunk_scan(
                         ctx,
-                        &fused,
-                        &g_padded,
-                        &beta_padded,
-                        &readout,
-                        &state.recurrent,
-                        seq_padded,
-                        QKV_WIDTH,
-                        [0, q_width, 2 * q_width],
-                        GDN_V_HEADS,
-                        GDN_K_HEADS,
-                        CHUNK,
-                        GDN_HEAD_DIM,
+                        ops::GdnChunkScanArgs {
+                            input: ops::GdnChunkScanInput::Interleaved {
+                                fused: &fused,
+                                offsets: [0, q_width, 2 * q_width],
+                            },
+                            gate_log: &g_padded,
+                            beta: &beta_padded,
+                            output: &readout,
+                            state: &state.recurrent,
+                            key_heads: GDN_K_HEADS,
+                            chunk_size: CHUNK,
+                        },
                     )
                     .unwrap();
                     stage("scan(ours)", &mut mark);
@@ -1718,15 +1789,19 @@ pub(crate) fn prefill_step(
                     vec![tokens, GDN_V_HEADS, GDN_HEAD_DIM],
                     DType::F8E4M3,
                 );
-                ops::gdn_gated_norm_quantize(
+                ops::gdn_gated_norm(
                     ctx,
-                    &readout_rows,
-                    &z_heads,
-                    &gdn.norm_weight,
-                    &gated,
-                    &quantized,
-                    EPSILON,
-                    gdn.out.input_scale,
+                    ops::GdnGatedNormArgs {
+                        input: &readout_rows,
+                        gate: ops::GdnGate::Dense(&z_heads),
+                        weight: &gdn.norm_weight,
+                        output: &gated,
+                        quantized: Some(ops::GdnQuantizedOutput {
+                            tensor: &quantized,
+                            input_scale: gdn.out.input_scale,
+                        }),
+                        epsilon: EPSILON,
+                    },
                 )
                 .unwrap();
 
@@ -1797,22 +1872,28 @@ pub(crate) fn prefill_logits(
     tokens: usize,
 ) {
     let last = view_row(&prefill.hidden, tokens - 1, HIDDEN, DType::BF16);
-    ops::norm::rms_norm_weight_offset(ctx, &last, &model.final_norm, &decode.normalized, EPSILON)
-        .unwrap();
-    ops::nvfp4_quantize_activation(
+    ops::norm::norm(
         ctx,
-        &decode.normalized,
-        &decode.nvfp4_activation,
-        &decode.nvfp4_scales,
-        model.lm_head.input_scale,
-        BLOCK,
-        ops::ScaleLayout::GemmAtom,
+        ops::NormArgs::rms(&last, &model.final_norm, &decode.normalized, EPSILON)
+            .with_weight_offset(),
+    )
+    .unwrap();
+    ops::block_quantize(
+        ctx,
+        ops::BlockQuantizationArgs::activation(
+            &decode.normalized,
+            &decode.nvfp4_activation,
+            &decode.nvfp4_scales,
+            model.lm_head.input_scale,
+            BLOCK,
+            ops::ScaleLayout::GemmAtom,
+        ),
     )
     .unwrap();
     let mut logits = view(&decode.logits, vec![1, VOCAB], DType::BF16);
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &decode.nvfp4_activation,
             &decode.nvfp4_scales,
             &model.lm_head.packed,
@@ -1823,7 +1904,11 @@ pub(crate) fn prefill_logits(
         ),
     )
     .unwrap();
-    ops::argmax(ctx, &decode.logits, &decode.next_token).unwrap();
+    ops::argmax(
+        ctx,
+        ops::ArgmaxArgs::new(&decode.logits, &decode.next_token),
+    )
+    .unwrap();
 }
 
 /// A view of one row of a `[rows, width]` tensor.

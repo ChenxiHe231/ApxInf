@@ -13,6 +13,13 @@
 extern "C" cudaError_t apxinf_quantization_quantize_bf16_e4m3_packed8(
     const void* input, void* output, int64_t count, float scale,
     cudaStream_t stream);
+extern "C" cudaError_t apxinf_quantization_silu_mul_quantize_rows_bf16_int8(
+    const void* gate, const void* up, void* output, void* scales, int rows,
+    int cols, cudaStream_t stream);
+extern "C" cudaError_t
+apxinf_quantization_silu_mul_quantize_rows_bf16_int8_packed4(
+    const void* gate, const void* up, void* output, void* scales, int rows,
+    int cols, cudaStream_t stream);
 
 namespace {
 
@@ -167,7 +174,12 @@ bool valid_alignment(uint32_t alignment) {
 
 bool has_row_scales(uint32_t semantic) {
   return semantic == APXINF_QUANTIZATION_SEMANTIC_ROWWISE_E4M3 ||
-         semantic == APXINF_QUANTIZATION_SEMANTIC_ROWWISE_I8;
+         semantic == APXINF_QUANTIZATION_SEMANTIC_ROWWISE_I8 ||
+         semantic == APXINF_QUANTIZATION_SEMANTIC_SILU_MUL_ROWWISE_I8;
+}
+
+bool reads_secondary(uint32_t semantic) {
+  return semantic == APXINF_QUANTIZATION_SEMANTIC_SILU_MUL_ROWWISE_I8;
 }
 
 uint32_t dtype_bytes(uint32_t dtype) {
@@ -196,18 +208,21 @@ void validate_recorded_alignment(const void* pointer, uint32_t alignment,
 
 void validate_spec(const apxinf_quantization_spec_t& spec) {
   if (spec.version != APXINF_QUANTIZATION_SPEC_VERSION ||
-      spec.semantic > APXINF_QUANTIZATION_SEMANTIC_CAST_F32_BF16 ||
+      spec.semantic > APXINF_QUANTIZATION_SEMANTIC_SILU_MUL_ROWWISE_I8 ||
       spec.scale_dtype != APXINF_DTYPE_F32 || spec.rows <= 0 ||
       spec.input_cols <= 0 || spec.output_cols <= 0 ||
       spec.rows > INT32_MAX || spec.input_cols > INT32_MAX ||
       spec.output_cols > INT32_MAX ||
       !valid_alignment(spec.input_alignment) ||
+      !valid_alignment(spec.secondary_alignment) ||
       !valid_alignment(spec.output_alignment) ||
       !valid_alignment(spec.scales_alignment)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "invalid Quantization Spec");
   }
   if (spec.input_alignment < dtype_bytes(spec.input_dtype) ||
+      (reads_secondary(spec.semantic) &&
+       spec.secondary_alignment < dtype_bytes(spec.input_dtype)) ||
       spec.output_alignment < dtype_bytes(spec.output_dtype) ||
       (has_row_scales(spec.semantic) &&
        spec.scales_alignment < sizeof(float))) {
@@ -265,6 +280,7 @@ void validate_spec(const apxinf_quantization_spec_t& spec) {
       }
       break;
     case APXINF_QUANTIZATION_SEMANTIC_ROWWISE_I8:
+    case APXINF_QUANTIZATION_SEMANTIC_SILU_MUL_ROWWISE_I8:
       if (spec.input_dtype != APXINF_DTYPE_BF16 ||
           spec.output_dtype != APXINF_DTYPE_I8 ||
           spec.input_cols != spec.output_cols) {
@@ -284,6 +300,10 @@ void validate_bindings(const apxinf_quantization_spec_t& spec,
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "missing Quantization binding");
   }
+  if (reads_secondary(spec.semantic) != (bindings.secondary != nullptr)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "Quantization secondary binding disagrees with semantic");
+  }
   if (has_row_scales(spec.semantic) != (bindings.scales != nullptr)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Quantization scales binding disagrees with semantic");
@@ -299,6 +319,8 @@ void validate_bindings(const apxinf_quantization_spec_t& spec,
   }
   validate_recorded_alignment(bindings.input, spec.input_alignment,
                               "Quantization input");
+  validate_recorded_alignment(bindings.secondary, spec.secondary_alignment,
+                              "Quantization secondary");
   validate_recorded_alignment(bindings.output, spec.output_alignment,
                               "Quantization output");
   validate_recorded_alignment(bindings.scales, spec.scales_alignment,
@@ -348,6 +370,21 @@ cudaError_t launch(const apxinf_runtime& runtime,
       return launch_quantize_rows_bf16_int8(
           bindings.input, bindings.output, bindings.scales, rows, input_cols,
           stream);
+    case APXINF_QUANTIZATION_SEMANTIC_SILU_MUL_ROWWISE_I8: {
+      const bool packed4 = runtime.compute_major == 8 &&
+                           runtime.compute_minor == 7 && rows == 156 &&
+                           input_cols == 6144 && input_cols % 4 == 0 &&
+                           spec.input_alignment >= 8 &&
+                           spec.secondary_alignment >= 8 &&
+                           spec.output_alignment >= 4;
+      return packed4
+                 ? apxinf_quantization_silu_mul_quantize_rows_bf16_int8_packed4(
+                       bindings.input, bindings.secondary, bindings.output,
+                       bindings.scales, rows, input_cols, stream)
+                 : apxinf_quantization_silu_mul_quantize_rows_bf16_int8(
+                       bindings.input, bindings.secondary, bindings.output,
+                       bindings.scales, rows, input_cols, stream);
+    }
     default:
       return cudaErrorInvalidValue;
   }

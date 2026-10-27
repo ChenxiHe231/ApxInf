@@ -12,7 +12,13 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
+
+extern "C" cudaError_t apxinf_norm_gated_rms_silu_bf16(
+    const void* x, const void* z, const void* weight, void* out, int rows,
+    int cols, int z_heads, int64_t z_row_stride, int64_t z_col_offset,
+    float eps, cudaStream_t stream);
 
 namespace {
 
@@ -29,7 +35,285 @@ void check(int status, const char* what) {
 
 bool extent(int64_t value) { return value > 0 && value <= INT32_MAX; }
 
+int as_int(int64_t value) { return static_cast<int>(value); }
+
+void require(bool condition, const char* message) {
+  if (!condition) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, message);
+  }
+}
+
+void validate_spec(const apxinf_gdn_spec_t& spec) {
+  require(spec.version == APXINF_GDN_SPEC_VERSION,
+          "unsupported GDN Spec version");
+  require(spec.operation <= APXINF_GDN_OPERATION_CONV_PREPARE,
+          "invalid GDN operation");
+  require(spec.input_dtype <= APXINF_DTYPE_I32 &&
+              spec.output_dtype <= APXINF_DTYPE_I32,
+          "invalid GDN dtype");
+  require(spec.rank >= 1 && spec.rank <= 3, "invalid GDN rank");
+  require(spec.layout <= APXINF_GDN_LAYOUT_INTERLEAVED_QKV,
+          "invalid GDN layout");
+  require(spec.quantization <= APXINF_GDN_QUANTIZATION_STATIC_E4M3,
+          "invalid GDN quantization");
+  require(spec.has_window <= 1, "invalid GDN window predicate");
+}
+
+void validate_finite_positive(float value, const char* message) {
+  require(std::isfinite(value) && value > 0.0F, message);
+}
+
 }  // namespace
+
+extern "C" apxinf_status_t apxinf_gdn_launch(
+    apxinf_runtime_t runtime, const apxinf_gdn_spec_t* spec,
+    const apxinf_gdn_bindings_t* bindings) {
+  return abi_boundary([&] {
+    require(runtime != nullptr && spec != nullptr && bindings != nullptr,
+            "null GDN launch argument");
+    validate_spec(*spec);
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    const auto stream = static_cast<cudaStream_t>(bindings->stream);
+
+    switch (spec->operation) {
+      case APXINF_GDN_OPERATION_RECURRENT_STEP:
+        require(bindings->state != nullptr && bindings->q != nullptr &&
+                    bindings->k != nullptr && bindings->v != nullptr &&
+                    bindings->decay != nullptr && bindings->beta != nullptr &&
+                    bindings->output != nullptr && extent(spec->value_heads) &&
+                    extent(spec->key_heads) && extent(spec->value_dim) &&
+                    extent(spec->key_dim),
+                "invalid GDN recurrent-step contract");
+        check(apxinf::cuda_new::gdn_ops::gdn_recurrent_step(
+                  bindings->state, bindings->q, bindings->k, bindings->v,
+                  bindings->decay, bindings->beta, bindings->output,
+                  as_int(spec->value_heads), as_int(spec->key_heads),
+                  as_int(spec->value_dim), as_int(spec->key_dim), stream),
+              "GDN recurrent step");
+        return;
+
+      case APXINF_GDN_OPERATION_GATED_NORM: {
+        require(bindings->input != nullptr && bindings->gate != nullptr &&
+                    bindings->weight != nullptr && bindings->output != nullptr &&
+                    extent(spec->heads) && extent(spec->head_dim),
+                "invalid GDN gated-norm contract");
+        validate_finite_positive(bindings->epsilon,
+                                 "invalid GDN gated-norm epsilon");
+        if (spec->layout == APXINF_GDN_LAYOUT_STRIDED_GATE) {
+          require(spec->rank == 2 && spec->input_dtype == APXINF_DTYPE_BF16 &&
+                      spec->output_dtype == APXINF_DTYPE_BF16 &&
+                      spec->quantization == APXINF_GDN_QUANTIZATION_NONE &&
+                      extent(spec->tokens) && extent(spec->gate_row_stride) &&
+                      spec->gate_column_offset >= 0,
+                  "invalid strided GDN gated-norm Spec");
+          apxinf::framework::check_cuda(apxinf_norm_gated_rms_silu_bf16(
+              bindings->input, bindings->gate, bindings->weight,
+              bindings->output, as_int(spec->tokens),
+              as_int(spec->head_dim), as_int(spec->heads),
+              spec->gate_row_stride, spec->gate_column_offset,
+              bindings->epsilon, stream));
+          return;
+        }
+        require(spec->layout == APXINF_GDN_LAYOUT_DENSE,
+                "invalid dense GDN gated-norm layout");
+        if (spec->quantization == APXINF_GDN_QUANTIZATION_STATIC_E4M3) {
+          require(spec->rank == 3 && extent(spec->tokens) &&
+                      spec->head_dim == 128 &&
+                      (spec->input_dtype == APXINF_DTYPE_F16 ||
+                       spec->input_dtype == APXINF_DTYPE_BF16) &&
+                      spec->output_dtype == APXINF_DTYPE_BF16 &&
+                      bindings->quantized != nullptr &&
+                      spec->tokens <=
+                          std::numeric_limits<int>::max() / spec->heads,
+                  "invalid quantized GDN gated-norm Spec");
+          validate_finite_positive(bindings->input_scale,
+                                   "invalid GDN quantization scale");
+          check(apxinf::cuda_new::gdn_ops::gdn_gated_norm_quantize(
+                    bindings->input, bindings->gate, bindings->weight,
+                    bindings->output, bindings->quantized,
+                    as_int(spec->tokens * spec->heads),
+                    spec->input_dtype == APXINF_DTYPE_F16,
+                    bindings->epsilon, bindings->input_scale, stream),
+                "GDN norm quantization");
+          return;
+        }
+        require(spec->quantization == APXINF_GDN_QUANTIZATION_NONE &&
+                    spec->output_dtype == APXINF_DTYPE_BF16,
+                "invalid unquantized GDN gated-norm Spec");
+        if (spec->rank == 2) {
+          require(spec->input_dtype == APXINF_DTYPE_BF16,
+                  "GDN step gated norm requires BF16");
+          check(apxinf::cuda_new::gdn_ops::gdn_gated_norm(
+                    bindings->input, bindings->gate, bindings->weight,
+                    bindings->output, as_int(spec->heads),
+                    as_int(spec->head_dim), bindings->epsilon, stream),
+                "GDN gated norm");
+          return;
+        }
+        require(spec->rank == 3 && extent(spec->tokens) &&
+                    (spec->input_dtype == APXINF_DTYPE_F16 ||
+                     spec->input_dtype == APXINF_DTYPE_BF16),
+                "invalid sequence GDN gated-norm Spec");
+        check(spec->input_dtype == APXINF_DTYPE_F16
+                  ? apxinf::cuda_new::gdn_ops::gdn_gated_norm_seq_f16(
+                        bindings->input, bindings->gate, bindings->weight,
+                        bindings->output, as_int(spec->tokens),
+                        as_int(spec->heads), as_int(spec->head_dim),
+                        bindings->epsilon, stream)
+                  : apxinf::cuda_new::gdn_ops::gdn_gated_norm_seq(
+                        bindings->input, bindings->gate, bindings->weight,
+                        bindings->output, as_int(spec->tokens),
+                        as_int(spec->heads), as_int(spec->head_dim),
+                        bindings->epsilon, stream),
+              "GDN sequence gated norm");
+        return;
+      }
+
+      case APXINF_GDN_OPERATION_CAUSAL_CONV:
+        require(bindings->input != nullptr && bindings->weight != nullptr &&
+                    bindings->output != nullptr && extent(spec->channels) &&
+                    extent(spec->kernel_width),
+                "invalid GDN causal-conv contract");
+        if (spec->rank == 1) {
+          require(bindings->window != nullptr && spec->has_window != 0,
+                  "GDN conv step requires a window");
+          check(apxinf::cuda_new::gdn_ops::gdn_causal_conv_step(
+                    bindings->window, bindings->input, bindings->weight,
+                    bindings->output, as_int(spec->channels),
+                    as_int(spec->kernel_width), stream),
+                "GDN conv step");
+          return;
+        }
+        require(spec->rank == 2 && extent(spec->tokens) &&
+                    (spec->has_window != 0) == (bindings->window != nullptr),
+                "invalid GDN conv-forward Spec");
+        check(apxinf::cuda_new::gdn_ops::gdn_causal_conv_forward(
+                  bindings->input, bindings->weight, bindings->output,
+                  bindings->window, as_int(spec->tokens),
+                  as_int(spec->channels), as_int(spec->kernel_width), stream),
+              "GDN conv forward");
+        return;
+
+      case APXINF_GDN_OPERATION_DECAY_AND_BETA:
+        require(bindings->a != nullptr && bindings->b != nullptr &&
+                    bindings->a_log != nullptr && bindings->dt_bias != nullptr &&
+                    bindings->decay != nullptr && bindings->beta != nullptr &&
+                    extent(spec->heads),
+                "invalid GDN decay/beta contract");
+        if (spec->rank == 1) {
+          check(apxinf::cuda_new::gdn_ops::gdn_decay_and_beta(
+                    bindings->a, bindings->b, bindings->a_log,
+                    bindings->dt_bias, bindings->decay, bindings->beta,
+                    as_int(spec->heads),
+                    stream),
+                "GDN gates");
+          return;
+        }
+        require(spec->rank == 2 && extent(spec->tokens),
+                "invalid sequence GDN decay/beta Spec");
+        check(apxinf::cuda_new::gdn_ops::gdn_decay_and_beta_seq(
+                  bindings->a, bindings->b, bindings->a_log,
+                  bindings->dt_bias, bindings->decay, bindings->beta,
+                  as_int(spec->tokens),
+                  as_int(spec->heads), stream),
+              "GDN sequence gates");
+        return;
+
+      case APXINF_GDN_OPERATION_L2_NORMALIZE:
+        require(bindings->output != nullptr && spec->rank == 2 &&
+                    extent(spec->heads) && extent(spec->head_dim),
+                "invalid GDN L2-normalize contract");
+        validate_finite_positive(bindings->epsilon,
+                                 "invalid GDN L2-normalize epsilon");
+        check(apxinf::cuda_new::gdn_ops::gdn_l2_normalize_heads(
+                  bindings->output, as_int(spec->heads),
+                  as_int(spec->head_dim), bindings->epsilon, stream),
+              "GDN head normalization");
+        return;
+
+      case APXINF_GDN_OPERATION_CHUNK_SCAN:
+        require(bindings->q != nullptr && bindings->k != nullptr &&
+                    bindings->v != nullptr && bindings->gate_log != nullptr &&
+                    bindings->beta != nullptr && bindings->output != nullptr &&
+                    bindings->state != nullptr && extent(spec->tokens) &&
+                    extent(spec->value_heads) && extent(spec->key_heads) &&
+                    extent(spec->chunk_size) && extent(spec->key_dim) &&
+                    extent(spec->num_chunks) && extent(spec->q_row_stride) &&
+                    extent(spec->k_row_stride) && extent(spec->v_row_stride),
+                "invalid GDN chunk-scan contract");
+        check(apxinf::cuda_new::gdn_ops::gdn_chunk_scan(
+                  bindings->q, bindings->k, bindings->v,
+                  bindings->gate_log, bindings->beta, bindings->output,
+                  bindings->state, as_int(spec->tokens),
+                  as_int(spec->value_heads), as_int(spec->key_heads),
+                  as_int(spec->chunk_size), as_int(spec->key_dim),
+                  as_int(spec->num_chunks), as_int(spec->q_row_stride),
+                  as_int(spec->k_row_stride), as_int(spec->v_row_stride),
+                  stream),
+              "GDN chunk scan");
+        return;
+
+      case APXINF_GDN_OPERATION_PREFILL:
+        require(bindings->q != nullptr && bindings->k != nullptr &&
+                    bindings->v != nullptr && bindings->output != nullptr &&
+                    bindings->gate_log != nullptr && bindings->beta != nullptr &&
+                    bindings->cu_seqlens != nullptr && bindings->state != nullptr &&
+                    bindings->workspace != nullptr && extent(spec->tokens) &&
+                    extent(spec->key_heads) && extent(spec->value_heads) &&
+                    extent(spec->num_sequences),
+                "invalid GDN prefill contract");
+        check(apxinf::cuda_new::flashinfer_gdn::prefill(
+                  bindings->q, bindings->k, bindings->v, bindings->output,
+                  bindings->gate_log, bindings->beta, bindings->cu_seqlens,
+                  bindings->state, bindings->workspace, as_int(spec->tokens),
+                  as_int(spec->key_heads), as_int(spec->value_heads),
+                  as_int(spec->num_sequences), bindings->scale, stream),
+              "FlashInfer GDN prefill");
+        return;
+
+      case APXINF_GDN_OPERATION_PREPARE_PREFILL:
+        require(bindings->input != nullptr && bindings->q_output != nullptr &&
+                    bindings->k_output != nullptr &&
+                    bindings->v_output != nullptr &&
+                    bindings->gate_log != nullptr && bindings->alpha != nullptr &&
+                    extent(spec->tokens) && extent(spec->row_width) &&
+                    extent(spec->key_heads) && extent(spec->value_heads) &&
+                    extent(spec->head_dim),
+                "invalid GDN prefill-preparation contract");
+        validate_finite_positive(bindings->epsilon,
+                                 "invalid GDN prefill-preparation epsilon");
+        check(apxinf::cuda_new::gdn_ops::gdn_prepare_prefill(
+                  bindings->input, bindings->q_output, bindings->k_output,
+                  bindings->v_output, bindings->gate_log, bindings->alpha,
+                  as_int(spec->tokens), as_int(spec->row_width),
+                  as_int(spec->key_heads), as_int(spec->value_heads),
+                  as_int(spec->head_dim), bindings->epsilon, stream),
+              "GDN FlashInfer preparation");
+        return;
+
+      case APXINF_GDN_OPERATION_CONV_PREPARE:
+        require(bindings->input != nullptr && bindings->weight != nullptr &&
+                    bindings->window != nullptr && bindings->q_output != nullptr &&
+                    bindings->k_output != nullptr &&
+                    bindings->v_output != nullptr &&
+                    bindings->decay != nullptr && bindings->alpha != nullptr &&
+                    extent(spec->tokens) && extent(spec->key_heads) &&
+                    extent(spec->value_heads),
+                "invalid fused GDN conv-preparation contract");
+        validate_finite_positive(bindings->epsilon,
+                                 "invalid GDN conv-preparation epsilon");
+        check(apxinf::cuda_new::gdn_ops::gdn_conv_prepare(
+                  bindings->input, bindings->weight, bindings->window,
+                  bindings->q_output, bindings->k_output,
+                  bindings->v_output, bindings->decay, bindings->alpha,
+                  as_int(spec->tokens), as_int(spec->key_heads),
+                  as_int(spec->value_heads), bindings->epsilon, stream),
+              "fused GDN convolution preparation");
+        return;
+    }
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "unhandled GDN operation");
+  });
+}
 
 extern "C" apxinf_status_t apxinf_gdn_chunk_scan_prepare(int32_t device) {
   return abi_boundary([&] {
@@ -42,153 +326,6 @@ extern "C" apxinf_status_t apxinf_gdn_chunk_scan_prepare(int32_t device) {
   });
 }
 
-extern "C" apxinf_status_t apxinf_gdn_recurrent_step(
-    void* state, const void* q, const void* k, const void* v,
-    const void* decay, const void* beta, void* output, int64_t v_heads,
-    int64_t k_heads, int64_t v_dim, int64_t k_dim,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (state == nullptr || q == nullptr || k == nullptr || v == nullptr ||
-        decay == nullptr || beta == nullptr || output == nullptr ||
-        !extent(v_heads) || !extent(k_heads) || !extent(v_dim) ||
-        !extent(k_dim)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN recurrent step arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_recurrent_step(
-              state, q, k, v, decay, beta, output, static_cast<int>(v_heads),
-              static_cast<int>(k_heads), static_cast<int>(v_dim),
-              static_cast<int>(k_dim), static_cast<cudaStream_t>(stream)),
-          "GDN recurrent step");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_gated_norm(
-    const void* input, const void* gate, const void* weight, void* output,
-    int64_t heads, int64_t head_dim, float epsilon,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (input == nullptr || gate == nullptr || weight == nullptr ||
-        output == nullptr || !extent(heads) || !extent(head_dim)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN gated norm arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_gated_norm(
-              input, gate, weight, output, static_cast<int>(heads),
-              static_cast<int>(head_dim), epsilon,
-              static_cast<cudaStream_t>(stream)),
-          "GDN gated norm");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_gated_norm_quantize(
-    const void* input, const void* gate, const void* weight, void* output,
-    void* quantized, int64_t rows, int32_t fp16_input, float epsilon,
-    float input_scale,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (input == nullptr || gate == nullptr || weight == nullptr ||
-        output == nullptr || quantized == nullptr || !extent(rows) ||
-        (fp16_input != 0 && fp16_input != 1) ||
-        !std::isfinite(epsilon) || epsilon <= 0.0F ||
-        !std::isfinite(input_scale) || input_scale <= 0.0F ||
-        !std::isfinite(1.0F / input_scale)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN norm quantization arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_gated_norm_quantize(
-              input, gate, weight, output, quantized,
-              static_cast<int>(rows), fp16_input != 0, epsilon, input_scale,
-              static_cast<cudaStream_t>(stream)),
-          "GDN norm quantization");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_causal_conv_step(
-    void* window, const void* input, const void* weight, void* output,
-    int64_t channels, int64_t kernel_width, apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (window == nullptr || input == nullptr || weight == nullptr ||
-        output == nullptr || !extent(channels) || !extent(kernel_width)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN conv step arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_causal_conv_step(
-              window, input, weight, output, static_cast<int>(channels),
-              static_cast<int>(kernel_width),
-              static_cast<cudaStream_t>(stream)),
-          "GDN conv step");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_prepare_prefill(
-    const void* fused, void* q_out, void* k_out, void* v_out, const void* g,
-    void* alpha, int64_t tokens, int64_t row_width, int64_t k_heads,
-    int64_t v_heads, int64_t dim, float epsilon, apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (fused == nullptr || q_out == nullptr || k_out == nullptr ||
-        v_out == nullptr || g == nullptr || alpha == nullptr ||
-        !extent(tokens) || !extent(row_width) || !extent(k_heads) ||
-        !extent(v_heads) || !extent(dim)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN FlashInfer preparation arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_prepare_prefill(
-              fused, q_out, k_out, v_out, g, alpha, static_cast<int>(tokens),
-              static_cast<int>(row_width), static_cast<int>(k_heads),
-              static_cast<int>(v_heads), static_cast<int>(dim), epsilon,
-              static_cast<cudaStream_t>(stream)),
-          "GDN FlashInfer preparation");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_conv_prepare(
-    const void* input, const void* weight, void* window, void* q_out,
-    void* k_out, void* v_out, const void* decay, void* alpha,
-    int64_t tokens, int64_t k_heads, int64_t v_heads, float epsilon,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (input == nullptr || weight == nullptr || window == nullptr ||
-        q_out == nullptr || k_out == nullptr || v_out == nullptr ||
-        decay == nullptr || alpha == nullptr || !extent(tokens) ||
-        !extent(k_heads) || !extent(v_heads)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid fused GDN convolution preparation arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_conv_prepare(
-              input, weight, window, q_out, k_out, v_out, decay, alpha,
-              static_cast<int>(tokens), static_cast<int>(k_heads),
-              static_cast<int>(v_heads), epsilon,
-              static_cast<cudaStream_t>(stream)),
-          "fused GDN convolution preparation");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_prefill(
-    const void* q, const void* k, const void* v, void* out,
-    const void* gate_log, const void* beta, const void* cu_seqlens,
-    void* state, void* tensor_map_workspace, int64_t tokens, int64_t q_heads,
-    int64_t v_heads, int64_t num_seqs, float scale,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (q == nullptr || k == nullptr || v == nullptr || out == nullptr ||
-        gate_log == nullptr || beta == nullptr || cu_seqlens == nullptr ||
-        state == nullptr || tensor_map_workspace == nullptr ||
-        !extent(tokens) || !extent(q_heads) || !extent(v_heads) ||
-        !extent(num_seqs)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid FlashInfer GDN prefill arguments");
-    }
-    check(apxinf::cuda_new::flashinfer_gdn::prefill(
-              q, k, v, out, gate_log, beta, cu_seqlens, state,
-              tensor_map_workspace, static_cast<int>(tokens),
-              static_cast<int>(q_heads), static_cast<int>(v_heads),
-              static_cast<int>(num_seqs), scale,
-              static_cast<cudaStream_t>(stream)),
-          "FlashInfer GDN prefill");
-  });
-}
-
 extern "C" int64_t apxinf_gdn_prefill_workspace_bytes(int64_t v_heads,
                                                          int64_t num_seqs) {
   if (v_heads <= 0 || num_seqs <= 0) return 0;
@@ -196,139 +333,4 @@ extern "C" int64_t apxinf_gdn_prefill_workspace_bytes(int64_t v_heads,
                                   tensor_map_workspace_bytes(
                                       static_cast<int>(v_heads),
                                       static_cast<int>(num_seqs)));
-}
-
-extern "C" apxinf_status_t apxinf_gdn_causal_conv_forward(
-    const void* input, const void* weight, void* output, void* window,
-    int64_t tokens, int64_t channels, int64_t kernel_width,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    // window is optional: a caller that will not decode afterwards passes null.
-    if (input == nullptr || weight == nullptr || output == nullptr ||
-        !extent(tokens) || !extent(channels) || !extent(kernel_width)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN conv forward arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_causal_conv_forward(
-              input, weight, output, window, static_cast<int>(tokens),
-              static_cast<int>(channels), static_cast<int>(kernel_width),
-              static_cast<cudaStream_t>(stream)),
-          "GDN conv forward");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_decay_and_beta_seq(
-    const void* a, const void* b, const void* a_log, const void* dt_bias,
-    void* decay, void* beta, int64_t tokens, int64_t heads,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (a == nullptr || b == nullptr || a_log == nullptr ||
-        dt_bias == nullptr || decay == nullptr || beta == nullptr ||
-        !extent(tokens) || !extent(heads)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN sequence gate arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_decay_and_beta_seq(
-              a, b, a_log, dt_bias, decay, beta, static_cast<int>(tokens),
-              static_cast<int>(heads), static_cast<cudaStream_t>(stream)),
-          "GDN sequence gates");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_gated_norm_seq(
-    const void* input, const void* gate, const void* weight, void* output,
-    int64_t tokens, int64_t heads, int64_t head_dim, float epsilon,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (input == nullptr || gate == nullptr || weight == nullptr ||
-        output == nullptr || !extent(tokens) || !extent(heads) ||
-        !extent(head_dim)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN sequence gated norm arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_gated_norm_seq(
-              input, gate, weight, output, static_cast<int>(tokens),
-              static_cast<int>(heads), static_cast<int>(head_dim), epsilon,
-              static_cast<cudaStream_t>(stream)),
-          "GDN sequence gated norm");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_gated_norm_seq_f16(
-    const void* input, const void* gate, const void* weight, void* output,
-    int64_t tokens, int64_t heads, int64_t head_dim, float epsilon,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (input == nullptr || gate == nullptr || weight == nullptr ||
-        output == nullptr || !extent(tokens) || !extent(heads) ||
-        !extent(head_dim)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN FP16 sequence gated norm arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_gated_norm_seq_f16(
-              input, gate, weight, output, static_cast<int>(tokens),
-              static_cast<int>(heads), static_cast<int>(head_dim), epsilon,
-              static_cast<cudaStream_t>(stream)),
-          "GDN FP16 sequence gated norm");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_l2_normalize_heads(
-    void* data, int64_t heads, int64_t head_dim, float epsilon,
-    apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (data == nullptr || !extent(heads) || !extent(head_dim)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN normalization arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_l2_normalize_heads(
-              data, static_cast<int>(heads), static_cast<int>(head_dim),
-              epsilon, static_cast<cudaStream_t>(stream)),
-          "GDN head normalization");
-  });
-}
-
-extern "C" apxinf_status_t apxinf_gdn_decay_and_beta(
-    const void* a, const void* b, const void* a_log, const void* dt_bias,
-    void* decay, void* beta, int64_t heads, apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (a == nullptr || b == nullptr || a_log == nullptr ||
-        dt_bias == nullptr || decay == nullptr || beta == nullptr ||
-        !extent(heads)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN gate arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_decay_and_beta(
-              a, b, a_log, dt_bias, decay, beta, static_cast<int>(heads),
-              static_cast<cudaStream_t>(stream)),
-          "GDN gates");
-  });
-}
-
-
-extern "C" apxinf_status_t apxinf_gdn_chunk_scan(
-    const void* q, const void* k, const void* v, const void* g,
-    const void* beta, void* out, void* state, int64_t seq_padded,
-    int64_t v_heads, int64_t k_heads, int64_t chunk_size, int64_t k_dim,
-    int64_t num_chunks, int64_t q_row_stride, int64_t k_row_stride,
-    int64_t v_row_stride, apxinf_cuda_stream_t stream) {
-  return abi_boundary([&] {
-    if (q == nullptr || k == nullptr || v == nullptr || g == nullptr ||
-        beta == nullptr || out == nullptr || state == nullptr ||
-        !extent(seq_padded) || !extent(v_heads) || !extent(k_heads) ||
-        !extent(chunk_size) || !extent(k_dim) || !extent(num_chunks) ||
-        !extent(q_row_stride) || !extent(k_row_stride) ||
-        !extent(v_row_stride)) {
-      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                    "invalid GDN chunk scan arguments");
-    }
-    check(apxinf::cuda_new::gdn_ops::gdn_chunk_scan(
-              q, k, v, g, beta, out, state, static_cast<int>(seq_padded),
-              static_cast<int>(v_heads), static_cast<int>(k_heads),
-              static_cast<int>(chunk_size), static_cast<int>(k_dim),
-              static_cast<int>(num_chunks), static_cast<int>(q_row_stride),
-              static_cast<int>(k_row_stride), static_cast<int>(v_row_stride),
-              static_cast<cudaStream_t>(stream)),
-          "GDN chunk scan");
-  });
 }

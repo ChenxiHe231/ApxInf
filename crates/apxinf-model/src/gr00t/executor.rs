@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
-use apxinf_core::{Backend, DType, Device, Error, Graph, Result, Tensor};
+use apxinf_core::{Backend, DType, Device, Error, Graph, Result, Shape, Tensor};
 use half::bf16;
 
 use super::action_weights::{
@@ -22,7 +22,7 @@ use super::backbone::vision_weights::transfer_vision_weights;
 use super::backbone::{
     transfer_text_weights, Qwen3VLConfig, Qwen3VLTextWeights, Qwen3VLVisionWeights,
 };
-use super::backend::{ops, transfers, DeviceBuffer, RuntimeBackend};
+use super::backend::{ops, transfers, Context, DeviceBuffer, RuntimeBackend};
 use super::device_weights::DeviceLinearWeights;
 use super::geometry::{
     build_backbone_token_groups, dit_attention_source, Gr00tBackboneTokenGroups,
@@ -80,8 +80,6 @@ pub(super) trait Gr00tPrecisionExecution: Sized + 'static {
     const USE_VISION_POINTWISE_PACK: bool = false;
     const USE_BATCHED_VISION_ATTENTION: bool = false;
     const USE_PACKED_ATTENTION_BIAS_RESIDUAL: bool = false;
-    const VISION_POINTWISE_LEGACY_ENV: Option<&'static str> = None;
-
     fn transfer_dense(
         &self,
         weights: Gr00tLinearWeights,
@@ -909,13 +907,28 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                     let scale = linear
                         .activation_scale()
                         .ok_or_else(|| Error::Other(format!("{name} is not an FP8 linear")))?;
-                    let quantized = ops::norm::layer_quantized(
+                    let quantized = self
+                        .backend
+                        .context()
+                        .allocate_output(input.shape().clone(), DType::F8E4M3)?;
+                    ops::norm::norm(
                         self.backend.context(),
-                        input,
-                        norm_weight,
-                        norm_bias,
-                        eps,
-                        scale,
+                        ops::NormArgs {
+                            input,
+                            output: None,
+                            kind: ops::NormKind::Layer,
+                            affine: ops::Affine::Weight {
+                                weight: norm_weight,
+                                bias: Some(norm_bias),
+                                offset: false,
+                            },
+                            quantized: Some(ops::QuantOut::StaticE4m3 {
+                                output: &quantized,
+                                scale,
+                            }),
+                            numerics: ops::NormNumerics::Flexible,
+                            eps,
+                        },
                     )?;
                     return linear.forward_quantized_tensor(&quantized, &*self.backend);
                 }
@@ -929,9 +942,6 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                 weight,
             )
         };
-        let use_vision_pointwise_pack = E::USE_VISION_POINTWISE_PACK
-            && self.backend.context().caps().sm == 87
-            && E::VISION_POINTWISE_LEGACY_ENV.is_some_and(|name| std::env::var_os(name).is_none());
         let use_thor_fp8_fusions = use_thor_fp8_fusions::<E>(self.backend.context().caps().sm);
         let vision_bias_gelu = |name: &str, input: &Tensor, bias: &Tensor| {
             if let Some(prefix) = name.strip_suffix(".fc1").filter(|_| use_thor_fp8_fusions) {
@@ -947,7 +957,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                     }
                 }
             }
-            ops::pointwise::bias_activation(
+            bias_activation(
                 self.backend.context(),
                 input,
                 Some(bias),
@@ -995,48 +1005,100 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                 if use_fused_vision_residual_norm_quant {
                     if let Some(linear) = self.backbone_linears.get(name) {
                         if let Some(scale) = linear.activation_scale() {
-                            let fused = ops::norm::bias_residual_layer_quantized(
+                            let hidden = self
+                                .backend
+                                .context()
+                                .allocate_output(projection.shape().clone(), DType::BF16)?;
+                            let normalized = self
+                                .backend
+                                .context()
+                                .allocate_output(projection.shape().clone(), DType::F8E4M3)?;
+                            ops::fused_add_norm(
                                 self.backend.context(),
-                                projection,
-                                Some(projection_bias),
-                                residual,
-                                norm_weight,
-                                norm_bias,
-                                eps,
-                                scale,
+                                ops::FusedAddNormArgs {
+                                    input: projection,
+                                    bias: Some(projection_bias),
+                                    residual,
+                                    gate: None,
+                                    hidden: &hidden,
+                                    normalized: None,
+                                    kind: ops::NormKind::Layer,
+                                    affine: ops::Affine::Weight {
+                                        weight: norm_weight,
+                                        bias: Some(norm_bias),
+                                        offset: false,
+                                    },
+                                    quantized: Some(ops::QuantOut::StaticE4m3 {
+                                        output: &normalized,
+                                        scale,
+                                    }),
+                                    numerics: ops::NormNumerics::Flexible,
+                                    bias_order: ops::BiasOrder::SingleRound,
+                                    eps,
+                                },
                             )?;
-                            let output = linear
-                                .forward_quantized_tensor(&fused.normalized, &*self.backend)?;
-                            return Ok((fused.hidden, output));
+                            let output =
+                                linear.forward_quantized_tensor(&normalized, &*self.backend)?;
+                            return Ok((hidden, output));
                         }
                     }
                 }
-                let fused = crate::cuda_ops::norm::bias_residual_layer_norm(
+                let hidden = self
+                    .backend
+                    .context()
+                    .allocate_output(projection.shape().clone(), DType::BF16)?;
+                let normalized = self
+                    .backend
+                    .context()
+                    .allocate_output(projection.shape().clone(), DType::BF16)?;
+                ops::fused_add_norm(
                     self.backend.context(),
-                    projection,
-                    Some(projection_bias),
-                    residual,
-                    norm_weight,
-                    norm_bias,
-                    eps,
+                    ops::FusedAddNormArgs {
+                        input: projection,
+                        bias: Some(projection_bias),
+                        residual,
+                        gate: None,
+                        hidden: &hidden,
+                        normalized: Some(&normalized),
+                        kind: ops::NormKind::Layer,
+                        affine: ops::Affine::Weight {
+                            weight: norm_weight,
+                            bias: Some(norm_bias),
+                            offset: false,
+                        },
+                        quantized: None,
+                        numerics: ops::NormNumerics::Flexible,
+                        bias_order: ops::BiasOrder::SingleRound,
+                        eps,
+                    },
                 )?;
                 let output = qwen_matmul(
                     &*self.backend,
                     &self.backbone_linears,
                     name,
-                    &fused.normalized,
+                    &normalized,
                     weight,
                 )?;
-                Ok((fused.hidden, output))
+                Ok((hidden, output))
             };
         let vision_bias_residual =
             |_name: &str, projection: &Tensor, bias: &Tensor, residual: &Tensor| {
-                crate::cuda_ops::norm::bias_residual(
+                let hidden = self
+                    .backend
+                    .context()
+                    .allocate_output(projection.shape().clone(), DType::BF16)?;
+                ops::residual_add(
                     self.backend.context(),
-                    projection,
-                    Some(bias),
-                    residual,
-                )
+                    ops::ResidualAddArgs {
+                        input: projection,
+                        bias: Some(bias),
+                        residual,
+                        gate: None,
+                        hidden: &hidden,
+                        bias_order: ops::BiasOrder::SingleRound,
+                    },
+                )?;
+                Ok(hidden)
             };
         let vision_output = vision::forward_with_prepared_positions_and_matmul(
             &self.backbone_config,
@@ -1059,7 +1121,6 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             Some(&vision_bias_residual),
             E::USE_CACHED_VISION_RESIDUAL_LAYER_NORM && self.backend.context().caps().sm == 87,
             E::USE_BATCHED_VISION_ATTENTION && self.backend.context().caps().sm == 87,
-            use_vision_pointwise_pack,
         )
         .map_err(|error| Error::Other(format!("GR00T vision forward failed: {error}")))?;
         let image_positions = &token_groups.image;
@@ -1084,7 +1145,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             .as_ref()
             .ok_or_else(|| Error::Other("GR00T token IDs were not prepared".into()))?
             .1;
-        let embedded = ops::embedding::lookup(
+        let embedded = embedding_lookup(
             self.backend.context(),
             &self.backbone_text.token_embedding,
             token_buffer,
@@ -1356,16 +1417,23 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                 } else if let Some((normalized, quantized)) = query_normalized {
                     (normalized, Some(quantized), None)
                 } else {
-                    (
-                        ops::norm::adaptive_layer(
-                            self.backend.context(),
-                            &hidden,
-                            modulation,
-                            self.config.diffusion.norm_eps,
-                        )?,
-                        None,
-                        None,
-                    )
+                    let normalized = self
+                        .backend
+                        .context()
+                        .allocate_output(hidden.shape().clone(), DType::BF16)?;
+                    ops::norm::norm(
+                        self.backend.context(),
+                        ops::NormArgs {
+                            input: &hidden,
+                            output: Some(&normalized),
+                            kind: ops::NormKind::Layer,
+                            affine: ops::Affine::Adaptive { style: modulation },
+                            quantized: None,
+                            numerics: ops::NormNumerics::Flexible,
+                            eps: self.config.diffusion.norm_eps,
+                        },
+                    )?;
+                    (normalized, None, None)
                 };
             let source = match dit_attention_source(&self.config, layer_index)? {
                 Gr00tDitAttentionSource::FullBackbone => {
@@ -1458,12 +1526,22 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                     normalized_quantized = None;
                 } else {
                     residual = if fuse_attention_bias_residual {
-                        crate::cuda_ops::norm::bias_then_residual(
+                        let residual = self
+                            .backend
+                            .context()
+                            .allocate_output(attention.shape().clone(), DType::BF16)?;
+                        ops::residual_add(
                             self.backend.context(),
-                            &attention,
-                            block.attention.output.bias(),
-                            &hidden,
-                        )?
+                            ops::ResidualAddArgs {
+                                input: &attention,
+                                bias: block.attention.output.bias(),
+                                residual: &hidden,
+                                gate: None,
+                                hidden: &residual,
+                                bias_order: ops::BiasOrder::BiasThenResidual,
+                            },
+                        )?;
+                        residual
                     } else {
                         self.backend.add(&hidden, &attention)?
                     };
@@ -1559,7 +1637,25 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
                 })?;
             normalized
         } else {
-            ops::norm::adaptive_layer(self.backend.context(), &hidden, output_modulation, 1e-6)?
+            let normalized = self
+                .backend
+                .context()
+                .allocate_output(hidden.shape().clone(), DType::BF16)?;
+            ops::norm::norm(
+                self.backend.context(),
+                ops::NormArgs {
+                    input: &hidden,
+                    output: Some(&normalized),
+                    kind: ops::NormKind::Layer,
+                    affine: ops::Affine::Adaptive {
+                        style: output_modulation,
+                    },
+                    quantized: None,
+                    numerics: ops::NormNumerics::Flexible,
+                    eps: 1e-6,
+                },
+            )?;
+            normalized
         };
         let hidden = linear(&*self.backend, &hidden, &self.action.output_projection)?;
         let decoded = linear_relu(&*self.backend, &hidden, &selected.action_decoder.input)?;
@@ -1570,7 +1666,7 @@ impl<E: Gr00tPrecisionExecution> Gr00tExecutor<E> {
             1,
             self.config.action_horizon,
         )?;
-        ops::elementwise::euler_update(self.backend.context(), actions, &velocity, step.delta)
+        euler_update(self.backend.context(), actions, &velocity, step.delta)
     }
 }
 
@@ -2001,11 +2097,73 @@ fn linear<L: DeviceLinearWeights>(
     if let Some(output) = weights.packed8_bias(&output, backend)? {
         return Ok(output);
     }
-    ops::elementwise::bias(backend.context(), &output, weights.bias())
+    add_bias(backend.context(), &output, weights.bias())
+}
+
+fn add_bias(ctx: &Context, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+    let Some(bias) = bias else {
+        return Ok(input.clone());
+    };
+    let mut output = ctx.allocate_output(input.shape().clone(), input.dtype())?;
+    let mut args =
+        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
+    args.bias = Some(bias);
+    ops::pointwise(ctx, args)?;
+    Ok(output)
+}
+
+fn embedding_lookup(
+    ctx: &Context,
+    table: &Tensor,
+    ids: &DeviceBuffer,
+    tokens: usize,
+) -> Result<Tensor> {
+    let dims = table.shape().dims();
+    if dims.len() != 2 {
+        return Err(Error::Other("GR00T embedding table must be rank 2".into()));
+    }
+    let mut output = ctx.allocate_output(Shape::new(vec![tokens, dims[1]]), table.dtype())?;
+    let mut args = ops::GatherArgs::new(ops::GatherSemantic::EmbeddingLookup, table, &mut output);
+    args.ids = Some(ids);
+    args.vocab_size = dims[0];
+    args.embedding_scale = ops::EmbeddingScale::None;
+    ops::gather(ctx, args)?;
+    Ok(output)
+}
+
+fn bias_activation(
+    ctx: &Context,
+    input: &Tensor,
+    bias: Option<&Tensor>,
+    activation: ops::PointwiseActivation,
+) -> Result<Tensor> {
+    let mut output = ctx.allocate_output(input.shape().clone(), input.dtype())?;
+    let mut args =
+        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
+    args.bias = bias;
+    args.activation = activation;
+    ops::pointwise(ctx, args)?;
+    Ok(output)
+}
+
+fn euler_update(ctx: &Context, state: &Tensor, velocity: &Tensor, dt: f32) -> Result<Tensor> {
+    let mut output = ctx.allocate_output(state.shape().clone(), state.dtype())?;
+    let mut args = ops::PointwiseArgs::new(ops::PointwiseSemantic::EulerUpdate, state, &mut output);
+    args.secondary = Some(velocity);
+    args.dt = dt;
+    ops::pointwise(ctx, args)?;
+    Ok(output)
 }
 
 fn rms_norm(backend: &RuntimeBackend, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    crate::cuda_ops::norm::rms(backend.context(), input, weight, eps)
+    let output = backend
+        .context()
+        .allocate_output(input.shape().clone(), input.dtype())?;
+    ops::norm::norm(
+        backend.context(),
+        ops::NormArgs::rms(input, weight, &output, eps),
+    )?;
+    Ok(output)
 }
 
 fn layer_norm(
@@ -2015,7 +2173,14 @@ fn layer_norm(
     bias: &Tensor,
     eps: f32,
 ) -> Result<Tensor> {
-    crate::cuda_ops::norm::layer(backend.context(), input, weight, bias, eps)
+    let output = backend
+        .context()
+        .allocate_output(input.shape().clone(), input.dtype())?;
+    ops::norm::norm(
+        backend.context(),
+        ops::NormArgs::layer(input, weight, bias, &output, eps),
+    )?;
+    Ok(output)
 }
 
 fn linear_quantized<L: DeviceLinearWeights>(
@@ -2027,7 +2192,7 @@ fn linear_quantized<L: DeviceLinearWeights>(
     if let Some(output) = weights.packed8_bias(&output, backend)? {
         return Ok(output);
     }
-    ops::elementwise::bias(backend.context(), &output, weights.bias())
+    add_bias(backend.context(), &output, weights.bias())
 }
 
 fn linear_relu<L: DeviceLinearWeights>(
@@ -2036,7 +2201,7 @@ fn linear_relu<L: DeviceLinearWeights>(
     weights: &L,
 ) -> Result<Tensor> {
     let output = weights.forward(input, backend)?;
-    ops::pointwise::bias_activation(
+    bias_activation(
         backend.context(),
         &output,
         weights.bias(),
@@ -2050,7 +2215,7 @@ fn linear_silu<L: DeviceLinearWeights>(
     weights: &L,
 ) -> Result<Tensor> {
     let output = weights.forward(input, backend)?;
-    ops::pointwise::bias_activation(
+    bias_activation(
         backend.context(),
         &output,
         weights.bias(),
@@ -2067,7 +2232,7 @@ fn linear_gelu<L: DeviceLinearWeights>(
     if let Some(output) = weights.packed8_bias_gelu(&output, backend)? {
         return Ok(output);
     }
-    ops::pointwise::bias_activation(
+    bias_activation(
         backend.context(),
         &output,
         weights.bias(),
@@ -2084,7 +2249,7 @@ fn forward_feed_forward<E: Gr00tPrecisionExecution>(
     if let Some(output) = weights.output.packed8_bias(&output, backend)? {
         return Ok(output);
     }
-    ops::elementwise::bias(backend.context(), &output, weights.output.bias())
+    add_bias(backend.context(), &output, weights.output.bias())
 }
 
 fn forward_feed_forward_projection<E: Gr00tPrecisionExecution>(
@@ -2142,7 +2307,7 @@ fn forward_feed_forward_projection_with_quantized_input<E: Gr00tPrecisionExecuti
         let hidden = weights
             .input
             .forward_reusable_quantized(quantized, backend)?;
-        ops::pointwise::bias_activation(
+        bias_activation(
             backend.context(),
             &hidden,
             weights.input.bias(),
@@ -2191,12 +2356,21 @@ fn forward_feed_forward_residual_quantized<E: Gr00tPrecisionExecution>(
     let output = weights
         .output
         .forward_reusable_quantized(&hidden, backend)?;
-    crate::cuda_ops::norm::bias_then_residual(
+    let hidden = backend
+        .context()
+        .allocate_output(output.shape().clone(), DType::BF16)?;
+    ops::residual_add(
         backend.context(),
-        &output,
-        weights.output.bias(),
-        residual,
-    )
+        ops::ResidualAddArgs {
+            input: &output,
+            bias: weights.output.bias(),
+            residual,
+            gate: None,
+            hidden: &hidden,
+            bias_order: ops::BiasOrder::BiasThenResidual,
+        },
+    )?;
+    Ok(hidden)
 }
 
 fn forward_feed_forward_residual<E: Gr00tPrecisionExecution>(
@@ -2221,12 +2395,21 @@ fn forward_feed_forward_residual_with_quantized_input<E: Gr00tPrecisionExecution
         quantized_input,
         weights,
     )?;
-    crate::cuda_ops::norm::bias_then_residual(
+    let hidden = backend
+        .context()
+        .allocate_output(output.shape().clone(), DType::BF16)?;
+    ops::residual_add(
         backend.context(),
-        &output,
-        weights.output.bias(),
-        residual,
-    )
+        ops::ResidualAddArgs {
+            input: &output,
+            bias: weights.output.bias(),
+            residual,
+            gate: None,
+            hidden: &hidden,
+            bias_order: ops::BiasOrder::BiasThenResidual,
+        },
+    )?;
+    Ok(hidden)
 }
 
 fn noncausal_attention<E: Gr00tPrecisionExecution>(
@@ -2237,7 +2420,74 @@ fn noncausal_attention<E: Gr00tPrecisionExecution>(
     heads: usize,
     head_dim: usize,
 ) -> Result<Tensor> {
-    ops::attention::noncausal(backend.context(), query, key, value, heads, head_dim)
+    let q = query.shape().dims();
+    let k = key.shape().dims();
+    if q.len() != 3
+        || k.len() != 3
+        || value.shape() != key.shape()
+        || q != [q[0], heads, head_dim]
+        || q.contains(&0)
+        || k.contains(&0)
+        || k[2] != head_dim
+        || heads % k[1] != 0
+    {
+        return Err(Error::Other(
+            "GR00T non-causal attention shape mismatch".into(),
+        ));
+    }
+    let query = query.reshape(vec![1, q[0], heads, head_dim])?;
+    let key = key.reshape(vec![1, k[0], k[1], head_dim])?;
+    let value = value.reshape(vec![1, k[0], k[1], head_dim])?;
+    let mut output = backend
+        .context()
+        .allocate_output(query.shape().clone(), query.dtype())?;
+    let mut args = ops::KvCacheAttentionArgs::new(&query, &key, &value, &mut output).non_causal();
+    args.valid_key_tokens = k[0];
+    args.numerics = ops::AttentionNumerics::Flexible;
+    ops::kv_cache_attention(backend.context(), args)?;
+    output.reshape(vec![q[0], heads * head_dim])
+}
+
+fn split_qkv_bias(
+    backend: &RuntimeBackend,
+    qkv: &Tensor,
+    bias: Option<&Tensor>,
+    heads: usize,
+    head_dim: usize,
+) -> Result<(Tensor, Tensor, Tensor)> {
+    let dims = qkv.shape().dims();
+    let hidden = heads
+        .checked_mul(head_dim)
+        .ok_or_else(|| Error::Other("GR00T packed QKV width overflow".into()))?;
+    if dims.len() != 2 || dims[0] == 0 || heads == 0 || head_dim == 0 || dims[1] != 3 * hidden {
+        return Err(Error::Other("GR00T packed QKV shape mismatch".into()));
+    }
+    let shape = Shape::new(vec![dims[0], heads, head_dim]);
+    let mut query = backend
+        .context()
+        .allocate_output(shape.clone(), qkv.dtype())?;
+    let mut key = backend
+        .context()
+        .allocate_output(shape.clone(), qkv.dtype())?;
+    let mut value = backend.context().allocate_output(shape, qkv.dtype())?;
+    ops::rope(
+        backend.context(),
+        ops::RopeArgs {
+            semantic: ops::RopeSemantic::SplitQkvBias,
+            qkv,
+            bias,
+            q: &mut query,
+            k: &mut key,
+            v: &mut value,
+            q_heads: heads,
+            kv_heads: heads,
+            head_dim,
+            theta: 0.0,
+            position_offset: 0,
+            kv_output_offset: 0,
+        },
+    )?;
+    Ok((query, key, value))
 }
 
 fn noncausal_strided_qkv_attention<E: Gr00tPrecisionExecution>(
@@ -2246,7 +2496,48 @@ fn noncausal_strided_qkv_attention<E: Gr00tPrecisionExecution>(
     heads: usize,
     head_dim: usize,
 ) -> Result<Tensor> {
-    ops::attention::noncausal_strided_qkv(backend.context(), qkv, heads, head_dim)
+    if qkv.dtype() != DType::BF16 {
+        return Err(Error::Other(
+            "GR00T strided QKV attention requires BF16 input".into(),
+        ));
+    }
+    let (query, key, value) = split_qkv_bias(backend, qkv, None, heads, head_dim)?;
+    noncausal_attention::<E>(backend, &query, &key, &value, heads, head_dim)
+}
+
+fn causal_gqa_prefill(
+    backend: &RuntimeBackend,
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+) -> Result<Tensor> {
+    let q = query.shape().dims();
+    let k = key.shape().dims();
+    if q.len() != 3
+        || k.len() != 3
+        || value.shape() != key.shape()
+        || q.contains(&0)
+        || k.contains(&0)
+        || q[2] != k[2]
+        || q[1] % k[1] != 0
+        || k[0] < q[0]
+    {
+        return Err(Error::Other(
+            "GR00T causal GQA prefill shape mismatch".into(),
+        ));
+    }
+    let query = query.reshape(vec![1, q[0], q[1], q[2]])?;
+    let key = key.reshape(vec![1, k[0], k[1], k[2]])?;
+    let value = value.reshape(vec![1, k[0], k[1], k[2]])?;
+    let mut output = backend
+        .context()
+        .allocate_output(query.shape().clone(), query.dtype())?;
+    let mut args = ops::KvCacheAttentionArgs::new(&query, &key, &value, &mut output);
+    args.valid_key_tokens = k[0];
+    args.query_start = k[0] - q[0];
+    args.numerics = ops::AttentionNumerics::Flexible;
+    ops::kv_cache_attention(backend.context(), args)?;
+    output.reshape(q.to_vec())
 }
 
 fn forward_attention<E: Gr00tPrecisionExecution>(
@@ -2289,11 +2580,7 @@ fn forward_attention<E: Gr00tPrecisionExecution>(
                         if let Some(output) = fused_qkv.packed8_bias(&projected, backend)? {
                             output
                         } else {
-                            ops::elementwise::bias(
-                                backend.context(),
-                                &projected,
-                                fused_qkv.bias(),
-                            )?
+                            add_bias(backend.context(), &projected, fused_qkv.bias())?
                         }
                     }
                 } else {
@@ -2302,14 +2589,8 @@ fn forward_attention<E: Gr00tPrecisionExecution>(
                 let output = if USE_STRIDED_FUSED_QKV_ATTENTION {
                     noncausal_strided_qkv_attention::<E>(backend, &qkv, heads, head_dim)?
                 } else {
-                    let qkv = ops::attention::split_qkv_bias(
-                        backend.context(),
-                        &qkv,
-                        None,
-                        heads,
-                        head_dim,
-                    )?;
-                    noncausal_attention::<E>(backend, &qkv.q, &qkv.k, &qkv.v, heads, head_dim)?
+                    let (query, key, value) = split_qkv_bias(backend, &qkv, None, heads, head_dim)?;
+                    noncausal_attention::<E>(backend, &query, &key, &value, heads, head_dim)?
                 };
                 return if apply_output_bias {
                     linear(backend, &output, &weights.output)
@@ -2587,9 +2868,36 @@ fn qwen_matmul<L: DeviceLinearWeights>(
     let direct_vision_fc2 = name.starts_with("backbone.vision.blocks.") && name.ends_with(".fc2");
     let direct_text_value = name.starts_with("backbone.text.") && name.ends_with(".value");
     if direct_text_value || direct_vision_fc2 {
-        ops::gemm::bf16_direct(backend.context(), input, bf16_weight)
+        let a = input.shape().dims();
+        let b = bf16_weight.shape().dims();
+        if a.len() != 2 || b.len() != 2 || a[1] != b[0] {
+            return Err(Error::Other(format!(
+                "GR00T BF16 GEMM shape mismatch: {a:?} @ {b:?}"
+            )));
+        }
+        let mut output = backend
+            .context()
+            .allocate_output(Shape::new(vec![a[0], b[1]]), DType::BF16)?;
+        let mut gemm = ops::GemmArgs::new(input, bf16_weight, &mut output);
+        gemm.policy.numerics = ops::GemmNumerics::LegacyCublas;
+        ops::gemm(backend.context(), gemm)?;
+        Ok(output)
     } else {
-        ops::gemm::bf16(backend.context(), input, bf16_weight)
+        let a = input.shape().dims();
+        let b = bf16_weight.shape().dims();
+        if a.len() != 2 || b.len() != 2 || a[1] != b[0] {
+            return Err(Error::Other(format!(
+                "GR00T BF16 GEMM shape mismatch: {a:?} @ {b:?}"
+            )));
+        }
+        let mut output = backend
+            .context()
+            .allocate_output(Shape::new(vec![a[0], b[1]]), DType::BF16)?;
+        ops::gemm(
+            backend.context(),
+            ops::GemmArgs::new(input, bf16_weight, &mut output),
+        )?;
+        Ok(output)
     }
 }
 
@@ -2632,15 +2940,33 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
     let shared_qkv_input = shared_qkv
         .map(|((query, _), _)| {
             if fused_qkv_norm {
-                ops::norm::rms_quantized(
+                let output = backend
+                    .context()
+                    .allocate_output(input.shape().clone(), DType::F8E4M3)?;
+                ops::norm::norm(
                     backend.context(),
-                    input,
-                    &layer.attn_norm_weight,
-                    text.rms_norm_eps,
-                    query.activation_scale().ok_or_else(|| {
-                        Error::Other(format!("{query_name} is missing its FP8 activation scale"))
-                    })?,
-                )
+                    ops::NormArgs {
+                        input,
+                        output: None,
+                        kind: ops::NormKind::Rms,
+                        affine: ops::Affine::Weight {
+                            weight: &layer.attn_norm_weight,
+                            bias: None,
+                            offset: false,
+                        },
+                        quantized: Some(ops::QuantOut::StaticE4m3 {
+                            output: &output,
+                            scale: query.activation_scale().ok_or_else(|| {
+                                Error::Other(format!(
+                                    "{query_name} is missing its FP8 activation scale"
+                                ))
+                            })?,
+                        }),
+                        numerics: ops::NormNumerics::Flexible,
+                        eps: text.rms_norm_eps,
+                    },
+                )?;
+                Ok(output)
             } else {
                 query
                     .quantize_tensor_input(
@@ -2745,14 +3071,7 @@ fn forward_qwen_layer<L: DeviceLinearWeights>(
         )?;
         (query, key)
     };
-    let attention =
-        ops::attention::causal_gqa_prefill(backend.context(), &query, &key, &value)?
-            .ok_or_else(|| {
-                Error::Other(
-                    "GR00T Qwen prefill requires the in-tree BF16 causal GQA attention backend"
-                        .into(),
-                )
-            })?;
+    let attention = causal_gqa_prefill(backend, &query, &key, &value)?;
     let attention = attention.reshape(vec![sequence_len, text.n_heads * text.head_dim])?;
     let attention = qwen_matmul(
         backend,
@@ -2968,13 +3287,7 @@ fn scatter_rows(
     add: bool,
     indices: &ops::elementwise::PreparedRowIndices,
 ) -> Result<Tensor> {
-    ops::elementwise::scatter_rows_prepared(
-        backend.context(),
-        destination,
-        indices,
-        source,
-        add,
-    )
+    ops::elementwise::scatter_rows_prepared(backend.context(), destination, indices, source, add)
 }
 
 fn first_host_rows(tensor: &Tensor, rows: usize) -> Result<Tensor> {

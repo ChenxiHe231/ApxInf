@@ -1,4 +1,5 @@
 #include "../../kernels/attention/fixed_f16.cuh"
+#include "internal.h"
 
 extern "C" int apxinf_attention_cublas_gqa_f16(
     const void* q, const void* k, const void* v, void* output,
@@ -121,3 +122,61 @@ extern "C" int apxinf_attention_cublas_gqa_causal_f16(
   }
   return static_cast<int>(status);
 }
+
+namespace apxinf::attention {
+
+size_t cublas_f16_resource_requirements(const Spec& spec, int) {
+  const uint64_t elements = static_cast<uint64_t>(spec.query_heads) *
+                            static_cast<uint64_t>(spec.query_tokens) *
+                            static_cast<uint64_t>(spec.key_tokens);
+  if (elements > SIZE_MAX / sizeof(half)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "cuBLAS F16 Attention workspace size overflow");
+  }
+  return static_cast<size_t>(elements) * sizeof(half);
+}
+
+void prepare_cublas_f16(Execution& execution) {
+  const size_t bytes =
+      cublas_f16_resource_requirements(execution.spec,
+                                       execution.configuration);
+  if (bytes > execution.resource_limit) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "cuBLAS F16 Attention workspace exceeds policy");
+  }
+  const cublasStatus_t status = initialize_mqa(bytes);
+  if (status != CUBLAS_STATUS_SUCCESS) {
+    throw Failure(APXINF_STATUS_PROVIDER_ERROR,
+                  "cuBLAS F16 Attention preparation failed");
+  }
+  execution.resource_bytes = bytes;
+}
+
+cudaError_t launch_cublas_f16(Execution& execution) {
+  const auto& spec = execution.spec;
+  const auto& bindings = execution.bindings;
+  const auto stream = static_cast<cudaStream_t>(bindings.stream);
+  const int status = spec.mask == APXINF_ATTENTION_MASK_CAUSAL
+                         ? apxinf_attention_cublas_gqa_causal_f16(
+                               bindings.query, bindings.key, bindings.value,
+                               bindings.output,
+                               static_cast<int>(spec.query_tokens),
+                               static_cast<int>(spec.key_tokens),
+                               static_cast<int>(spec.query_heads),
+                               static_cast<int>(spec.kv_heads),
+                               static_cast<int>(spec.head_dim),
+                               static_cast<int>(spec.query_start), stream)
+                         : apxinf_attention_cublas_gqa_f16(
+                               bindings.query, bindings.key, bindings.value,
+                               bindings.output,
+                               static_cast<int>(spec.query_tokens),
+                               static_cast<int>(spec.key_tokens),
+                               static_cast<int>(spec.query_heads),
+                               static_cast<int>(spec.kv_heads),
+                               static_cast<int>(spec.head_dim), stream);
+  return status == CUBLAS_STATUS_SUCCESS ? cudaSuccess : cudaErrorUnknown;
+}
+
+void destroy_cublas_f16(Execution&) noexcept {}
+
+}  // namespace apxinf::attention

@@ -31,14 +31,15 @@ void validate_recorded_alignment(const void* pointer, uint32_t alignment,
 }
 
 void validate_spec(const apxinf::gemm::Spec& spec) {
-  if (spec.version != 7 ||
-      spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256 ||
+  if (spec.version != 9 ||
+      spec.semantic > APXINF_GEMM_SEMANTIC_GEMM_SWIGLU ||
       spec.a_dtype > APXINF_DTYPE_E2M1_PAIR ||
       spec.b_dtype > APXINF_DTYPE_E2M1_PAIR ||
       spec.accumulation_dtype > APXINF_DTYPE_I32 ||
       spec.output_dtype > APXINF_DTYPE_E4M3 ||
       spec.quantization > APXINF_GEMM_QUANT_NVFP4_BLOCK ||
-      spec.b_layout > APXINF_GEMM_LAYOUT_NK || spec.m <= 0 ||
+      spec.b_layout > APXINF_GEMM_LAYOUT_GATE_UP_INTERLEAVED_256 ||
+      spec.numerics > APXINF_GEMM_NUMERICS_LEGACY_CUBLAS || spec.m <= 0 ||
       spec.n <= 0 || spec.k <= 0 || spec.m > INT32_MAX ||
       spec.n > INT32_MAX || spec.k > INT32_MAX ||
       spec.alpha_is_unit > 1 || spec.output_scale_is_unit > 1 ||
@@ -70,19 +71,40 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
        spec.quantization != APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL ||
        spec.output_dtype != APXINF_DTYPE_BF16 || spec.k > 131071 ||
        (spec.semantic != APXINF_GEMM_SEMANTIC_GEMM &&
-        spec.semantic != APXINF_GEMM_SEMANTIC_GEMM_BIAS))) {
+        spec.semantic != APXINF_GEMM_SEMANTIC_GEMM_BIAS &&
+        spec.semantic != APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU))) {
     throw Failure(APXINF_STATUS_UNSUPPORTED, "invalid INT8 GEMM contract");
   }
   if (spec.b_layout == APXINF_GEMM_LAYOUT_NK &&
+      spec.quantization != APXINF_GEMM_QUANT_NONE &&
       spec.quantization != APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL &&
       spec.quantization != APXINF_GEMM_QUANT_NVFP4_BLOCK) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
-                  "output-major B is supported only by W8A8 and NVFP4");
+                  "output-major B requires plain, W8A8, or NVFP4 operands");
+  }
+  const bool swiglu =
+      spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_SWIGLU;
+  const bool gate_up_pairs =
+      spec.b_layout == APXINF_GEMM_LAYOUT_GATE_UP_INTERLEAVED_256;
+  if (swiglu != gate_up_pairs) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "GEMM+SwiGLU requires the gate/up-pair B layout");
   }
   if (spec.a_dtype != APXINF_DTYPE_I8 &&
       spec.accumulation_dtype != APXINF_DTYPE_F32) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
                   "floating-point GEMM requires F32 accumulation");
+  }
+  if (spec.numerics == APXINF_GEMM_NUMERICS_LEGACY_CUBLAS &&
+      (spec.semantic != APXINF_GEMM_SEMANTIC_GEMM ||
+       spec.quantization != APXINF_GEMM_QUANT_NONE ||
+       spec.b_layout != APXINF_GEMM_LAYOUT_KN ||
+       spec.a_dtype != APXINF_DTYPE_BF16 ||
+       spec.b_dtype != APXINF_DTYPE_BF16 ||
+       spec.output_dtype != APXINF_DTYPE_BF16 ||
+       spec.alpha_is_unit == 0 || spec.output_scale_is_unit == 0)) {
+    throw Failure(APXINF_STATUS_UNSUPPORTED,
+                  "legacy cuBLAS numerics require unit-scale canonical BF16 GEMM");
   }
   if ((spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE ||
        spec.quantization == APXINF_GEMM_QUANT_FP8_ROW_CHANNEL) &&
@@ -119,13 +141,12 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
   }
   if ((spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ||
        spec.semantic ==
-           APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256) &&
+           APXINF_GEMM_SEMANTIC_GEMM_SWIGLU) &&
       spec.n % 2 != 0) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "gated GEMM requires an even projection width");
   }
-  if (spec.semantic ==
-          APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256 &&
+  if (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_SWIGLU &&
       (spec.a_dtype != APXINF_DTYPE_BF16 ||
        spec.b_dtype != APXINF_DTYPE_BF16 ||
        spec.output_dtype != APXINF_DTYPE_BF16 || spec.n % 512 != 0 ||
@@ -137,7 +158,7 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
   if (apxinf::gemm::has_row_channel_scales(spec) &&
       (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ||
        spec.semantic ==
-           APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256)) {
+           APXINF_GEMM_SEMANTIC_GEMM_SWIGLU)) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
                   "rowwise gated GEMM is not implemented");
   }

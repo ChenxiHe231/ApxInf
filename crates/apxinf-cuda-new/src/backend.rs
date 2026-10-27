@@ -110,25 +110,25 @@ impl CudaNewBackend {
 
 impl Backend for CudaNewBackend {
     fn rms_norm(&self, input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        let mut output = self
+        let output = self
             .ctx
             .allocate_output(input.shape().clone(), input.dtype())?;
-        ops::rms_norm(
-            &self.ctx,
-            ops::RmsNormArgs::new(input, weight, &mut output, eps),
-        )?;
+        ops::norm::norm(&self.ctx, ops::NormArgs::rms(input, weight, &output, eps))?;
         Ok(output)
     }
 
     fn silu(&self, input: &Tensor) -> Result<Tensor> {
-        ops::pointwise::silu(&self.ctx, input)
+        let output = self
+            .ctx
+            .allocate_output(input.shape().clone(), DType::BF16)?;
+        ops::elementwise_activation(&self.ctx, input, &output, ops::ElementwiseActivation::Silu)?;
+        Ok(output)
     }
 
     fn add(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        // Dtype-dispatching like the legacy backend: smolvla's Xavier FP16
-        // path adds residuals through `Backend::add`. BF16 keeps the exact
-        // cuda-new operator route it had before.
-        ops::elementwise::add(&self.ctx, a, b)
+        let output = self.ctx.allocate_output(a.shape().clone(), a.dtype())?;
+        ops::elementwise::add(&self.ctx, a, b, &output)?;
+        Ok(output)
     }
 
     fn mul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
@@ -139,7 +139,11 @@ impl Backend for CudaNewBackend {
     }
 
     fn scale(&self, input: &Tensor, factor: f32) -> Result<Tensor> {
-        ops::elementwise::scale(&self.ctx, input, factor)
+        let output = self
+            .ctx
+            .allocate_output(input.shape().clone(), input.dtype())?;
+        ops::elementwise::scale(&self.ctx, input, &output, factor)?;
+        Ok(output)
     }
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
@@ -179,14 +183,25 @@ impl Backend for CudaNewBackend {
         eps: f32,
     ) -> Result<Tensor> {
         let dims = input.shape().clone();
-        let mut output = self.ctx.allocate_output(dims, DType::BF16)?;
-        let args = ops::LayerNormArgs::new(input, weight, bias, &mut output, eps);
-        ops::layer_norm(&self.ctx, args)?;
+        let output = self.ctx.allocate_output(dims, DType::BF16)?;
+        ops::norm::norm(
+            &self.ctx,
+            ops::NormArgs::layer(input, weight, bias, &output, eps),
+        )?;
         Ok(output)
     }
 
     fn gelu_tanh(&self, input: &Tensor) -> Result<Tensor> {
-        ops::pointwise::gelu_tanh(&self.ctx, input)
+        let output = self
+            .ctx
+            .allocate_output(input.shape().clone(), DType::BF16)?;
+        ops::elementwise_activation(
+            &self.ctx,
+            input,
+            &output,
+            ops::ElementwiseActivation::GeluTanh,
+        )?;
+        Ok(output)
     }
 
     fn add_bias(&self, input: &Tensor, bias: &Tensor) -> Result<Tensor> {
@@ -441,7 +456,7 @@ impl CudaNewBackend {
                 "attention kv_len is smaller than the query".into(),
             ));
         }
-        ops::attention::sdpa(
+        crate::runtime::attention::sdpa(
             &self.ctx,
             q,
             kv,
@@ -468,9 +483,9 @@ impl apxinf_core::SamplingBackend for CudaNewBackend {
 
 #[cfg(test)]
 mod tests {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
     use apxinf_core::{Backend, CpuBackend, Shape, Tensor};
     use half::bf16;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     use super::*;
 

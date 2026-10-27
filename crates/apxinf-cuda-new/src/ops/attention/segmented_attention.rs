@@ -3,7 +3,7 @@ use apxinf_core::{DType, Result, Tensor};
 use super::contracts::{
     alignment, dtype_code, invalid, range, required_bytes, tensor_storage, Normalized, Semantic,
 };
-use super::{execution, AttentionMask, AttentionPolicy};
+use super::{execution, AttentionMask, AttentionNumerics, AttentionPolicy};
 use crate::ffi::abi::attention as abi;
 use crate::{CudaBuffer, CudaContext};
 
@@ -21,6 +21,7 @@ pub struct SegmentedAttentionArgs<'a> {
     pub offsets: &'a CudaBuffer,
     pub host_offsets: &'a [u32],
     pub scale: f32,
+    pub numerics: AttentionNumerics,
     pub policy: AttentionPolicy,
 }
 
@@ -42,6 +43,7 @@ impl<'a> SegmentedAttentionArgs<'a> {
             offsets,
             host_offsets,
             scale: 1.0 / (head_dim as f32).sqrt(),
+            numerics: AttentionNumerics::Flexible,
             policy: AttentionPolicy::default(),
         }
     }
@@ -155,6 +157,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: SegmentedAttentionArgs<'_>) -> 
             dtype: dtype_code(dtype)?,
             output_dtype: dtype_code(dtype)?,
             mask: AttentionMask::None as u32,
+            qkv_layout: abi::QKV_LAYOUT_SEPARATE,
             q_alignment: alignment(bindings.query),
             k_alignment: alignment(bindings.key),
             v_alignment: alignment(bindings.value),
@@ -173,6 +176,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: SegmentedAttentionArgs<'_>) -> 
             offsets_hash: offsets_hash(args.host_offsets),
             scale_is_default: u32::from(args.scale == default_scale),
             dynamic_decode: 0,
+            numerics: args.numerics as u32,
         },
         policy: args.policy,
         bindings,

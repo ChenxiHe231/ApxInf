@@ -1,12 +1,16 @@
 #include "internal.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
+#include <mutex>
+#include <unordered_map>
 
 namespace apxinf::attention {
 namespace {
 
 constexpr uint32_t kProviderCustom = 1;
+constexpr uint32_t kProviderCublas = 5;
 #if defined(APXINF_ATTENTION_FA2)
 constexpr uint32_t kProviderFa2 = 2;
 #endif
@@ -20,7 +24,9 @@ constexpr uint32_t kProviderSpecializedSm110 = 4;
 bool supports_custom(const Spec& spec) {
   return (spec.dtype == APXINF_DTYPE_F16 ||
           spec.dtype == APXINF_DTYPE_BF16) &&
-         spec.output_dtype == spec.dtype;
+         spec.output_dtype == spec.dtype &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
+         spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE;
 }
 
 bool supports_dense_custom(const Spec& spec) {
@@ -38,6 +44,16 @@ bool supports_segmented_custom(const Spec& spec) {
          supports_custom(spec);
 }
 
+bool supports_cublas_f16(const Spec& spec) {
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
+         spec.dtype == APXINF_DTYPE_F16 &&
+         spec.output_dtype == APXINF_DTYPE_F16 &&
+         spec.batch == 1 && spec.key_tokens <= 1024 &&
+         spec.scale_is_default != 0 &&
+         spec.numerics == APXINF_ATTENTION_NUMERICS_STABLE;
+}
+
 AlignmentRequirements natural_alignment(const Spec&) { return {}; }
 
 void one_configuration(const Spec&, std::vector<int>& configurations) {
@@ -45,6 +61,86 @@ void one_configuration(const Spec&, std::vector<int>& configurations) {
 }
 
 #if defined(APXINF_ATTENTION_FA2)
+int multiprocessor_count() {
+  int device = 0;
+  if (cudaGetDevice(&device) != cudaSuccess) return 0;
+  static std::mutex mutex;
+  static std::unordered_map<int, int> counts;
+  std::lock_guard<std::mutex> lock(mutex);
+  const auto cached = counts.find(device);
+  if (cached != counts.end()) return cached->second;
+  cudaDeviceProp properties{};
+  if (cudaGetDeviceProperties(&properties, device) != cudaSuccess) return 0;
+  counts.emplace(device, properties.multiProcessorCount);
+  return properties.multiProcessorCount;
+}
+
+bool splitkv_shape_supported(const Spec& spec) {
+  const int64_t key_tile = spec.head_dim == 128 ? 128 : 64;
+  const bool layout_supported =
+      spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE ||
+      (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+       spec.dynamic_decode == 0 && spec.key_capacity >= spec.key_tokens &&
+       (spec.mask == APXINF_ATTENTION_MASK_NONE ||
+        spec.query_start == spec.key_tokens - spec.query_tokens));
+  const bool bf16_supported = spec.dtype == APXINF_DTYPE_BF16;
+  const bool f16_supported = spec.dtype == APXINF_DTYPE_F16 &&
+                             spec.mask == APXINF_ATTENTION_MASK_NONE;
+  return layout_supported &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
+         (bf16_supported || f16_supported) &&
+         spec.output_dtype == spec.dtype && spec.query_tokens <= 64 &&
+         spec.key_tokens > spec.query_tokens &&
+         spec.query_heads > spec.kv_heads &&
+         spec.query_heads % spec.kv_heads == 0 &&
+         (spec.head_dim == 128 || spec.head_dim == 256) &&
+         spec.key_tokens > key_tile;
+}
+
+// Native copy of the legacy FA2 occupancy policy. Stable numerics uses this
+// single configuration instead of timing reduction variants with different
+// rounding behavior.
+int stable_split_count(const Spec& spec) {
+  const int sm_count = multiprocessor_count();
+  if (sm_count <= 0) return 1;
+  const uint64_t key_tile = spec.head_dim <= 128 ? 128 : 64;
+  const uint64_t key_tiles =
+      (static_cast<uint64_t>(spec.key_tokens) + key_tile - 1) / key_tile;
+  const uint64_t row_tiles =
+      (static_cast<uint64_t>(spec.query_tokens) + 63) / 64;
+  const uint64_t base_jobs = static_cast<uint64_t>(spec.batch) *
+                             static_cast<uint64_t>(spec.query_heads) *
+                             row_tiles;
+  const uint64_t execution_slots =
+      static_cast<uint64_t>(sm_count) * 2;
+  if (key_tiles == 0 || execution_slots == 0 ||
+      base_jobs * 5 >= execution_slots * 4) {
+    return 1;
+  }
+  const uint64_t limit = std::min<uint64_t>(
+      128, std::min<uint64_t>(execution_slots, key_tiles));
+  const auto eligible = [key_tiles](uint64_t splits) {
+    if (splits == 1) return true;
+    return (key_tiles + splits - 1) / splits !=
+           (key_tiles + splits - 2) / (splits - 1);
+  };
+  const auto utilization = [base_jobs, execution_slots](uint64_t splits) {
+    const double waves = static_cast<double>(base_jobs * splits) /
+                         static_cast<double>(execution_slots);
+    return waves / std::ceil(waves);
+  };
+  double peak = 0.0;
+  for (uint64_t splits = 1; splits <= limit; ++splits) {
+    if (eligible(splits)) peak = std::max(peak, utilization(splits));
+  }
+  for (uint64_t splits = 1; splits <= limit; ++splits) {
+    if (eligible(splits) && utilization(splits) >= 0.85 * peak) {
+      return static_cast<int>(splits);
+    }
+  }
+  return 1;
+}
+
 bool supports_fa2(const Spec& spec) {
   const bool layout_supported =
       spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE ||
@@ -57,41 +153,52 @@ bool supports_fa2(const Spec& spec) {
   const bool f16_supported = spec.dtype == APXINF_DTYPE_F16 &&
                              spec.mask == APXINF_ATTENTION_MASK_NONE &&
                              spec.head_dim <= 256;
-  return layout_supported && (bf16_supported || f16_supported) &&
-         spec.output_dtype == spec.dtype;
+  const bool supported = layout_supported &&
+                         spec.qkv_layout ==
+                             APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
+                         (bf16_supported || f16_supported) &&
+                         spec.output_dtype == spec.dtype;
+  return supported &&
+         !(spec.dtype == APXINF_DTYPE_F16 &&
+           spec.numerics == APXINF_ATTENTION_NUMERICS_STABLE) &&
+         !(spec.numerics == APXINF_ATTENTION_NUMERICS_STABLE &&
+           splitkv_shape_supported(spec) && stable_split_count(spec) > 1);
+}
+
+bool supports_fa2_segmented(const Spec& spec) {
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
+         (spec.dtype == APXINF_DTYPE_BF16 ||
+          spec.dtype == APXINF_DTYPE_F16) &&
+         spec.output_dtype == spec.dtype && spec.batch == 1 &&
+         spec.query_heads == spec.kv_heads && spec.head_dim <= 256 &&
+         spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE;
 }
 
 bool supports_fa2_packed_qkv(const Spec& spec) {
-  return spec.semantic == APXINF_ATTENTION_SEMANTIC_PACKED_QKV &&
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_PACKED_TOKEN &&
          spec.dtype == APXINF_DTYPE_F16 &&
          spec.output_dtype == APXINF_DTYPE_F16 && spec.query_tokens == 256 &&
          spec.query_heads == 16 && spec.kv_heads == 16 &&
-         spec.head_dim == 72;
+         spec.head_dim == 72 &&
+         spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE;
 }
 
 bool supports_fa2_splitkv(const Spec& spec) {
   if (std::getenv("APXINF_DISABLE_FA2_SPLITKV") != nullptr) return false;
-  const int64_t key_tile = spec.head_dim == 128 ? 128 : 64;
-  const bool layout_supported =
-      spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE ||
-      (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
-       spec.dynamic_decode == 0 && spec.key_capacity >= spec.key_tokens &&
-       (spec.mask == APXINF_ATTENTION_MASK_NONE ||
-        spec.query_start == spec.key_tokens - spec.query_tokens));
-  const bool bf16_supported = spec.dtype == APXINF_DTYPE_BF16;
-  const bool f16_supported = spec.dtype == APXINF_DTYPE_F16 &&
-                             spec.mask == APXINF_ATTENTION_MASK_NONE;
-  return layout_supported && (bf16_supported || f16_supported) &&
-         spec.output_dtype == spec.dtype &&
-         spec.query_tokens <= 64 && spec.key_tokens > spec.query_tokens &&
-         spec.query_heads > spec.kv_heads &&
-         spec.query_heads % spec.kv_heads == 0 &&
-         (spec.head_dim == 128 || spec.head_dim == 256) &&
-         spec.key_tokens > key_tile;
+  return splitkv_shape_supported(spec) &&
+         (spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE ||
+          stable_split_count(spec) > 1);
 }
 
 void splitkv_configurations(const Spec& spec,
                             std::vector<int>& configurations) {
+  if (spec.numerics == APXINF_ATTENTION_NUMERICS_STABLE) {
+    const int splits = stable_split_count(spec);
+    if (splits > 1) configurations.push_back(splits);
+    return;
+  }
   const uint64_t key_tile = spec.head_dim == 128 ? 128 : 64;
   const uint64_t key_tiles =
       (static_cast<uint64_t>(spec.key_tokens) + key_tile - 1) / key_tile;
@@ -106,6 +213,7 @@ void splitkv_configurations(const Spec& spec,
 #if defined(APXINF_ATTENTION_FA2_E4M3)
 bool supports_fa2_direct_e4m3_522(const Spec& spec) {
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
          spec.mask == APXINF_ATTENTION_MASK_NONE && spec.batch == 1 &&
          spec.query_tokens == 522 && spec.key_tokens == 522 &&
          spec.key_capacity == 522 && spec.query_heads == 8 &&
@@ -123,12 +231,14 @@ AlignmentRequirements fa2_alignment(const Spec&) {
 #if defined(APXINF_ATTENTION_CUTLASS)
 bool supports_cutlass(const Spec& spec) {
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
          spec.mask == APXINF_ATTENTION_MASK_NONE &&
          spec.query_tokens == 256 && spec.key_tokens == 256 &&
          spec.query_heads == 16 && spec.kv_heads == 16 &&
          spec.head_dim == 72 &&
          spec.dtype == APXINF_DTYPE_BF16 &&
-         spec.output_dtype == spec.dtype;
+         spec.output_dtype == spec.dtype &&
+         spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE;
 }
 
 AlignmentRequirements cutlass_alignment(const Spec&) {
@@ -139,17 +249,20 @@ AlignmentRequirements cutlass_alignment(const Spec&) {
 #if defined(APXINF_SEGMENTED_ATTENTION_SM110)
 bool supports_d256_causal_sm110(const Spec& spec) {
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
          spec.dtype == APXINF_DTYPE_BF16 &&
          spec.output_dtype == APXINF_DTYPE_BF16 &&
          spec.mask == APXINF_ATTENTION_MASK_CAUSAL && spec.batch == 1 &&
          spec.query_tokens == 3387 && spec.key_tokens == 3387 &&
          spec.key_capacity == 3387 && spec.query_heads == 16 &&
          spec.kv_heads == 4 && spec.head_dim == 256 &&
-         spec.query_start == 0 && spec.scale_is_default != 0;
+         spec.query_start == 0 && spec.scale_is_default != 0 &&
+         spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE;
 }
 
 bool supports_d256_kv_split_sm110(const Spec& spec) {
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
          spec.dtype == APXINF_DTYPE_BF16 &&
          spec.output_dtype == APXINF_DTYPE_BF16 &&
          spec.mask == APXINF_ATTENTION_MASK_NONE && spec.batch == 1 &&
@@ -157,7 +270,8 @@ bool supports_d256_kv_split_sm110(const Spec& spec) {
          spec.key_tokens <= 3437 && spec.key_capacity == 3438 &&
          spec.query_heads == 16 && spec.kv_heads == 4 &&
          spec.head_dim == 256 && spec.query_start == 0 &&
-         spec.dynamic_decode == 0 && spec.scale_is_default != 0;
+         spec.dynamic_decode == 0 && spec.scale_is_default != 0 &&
+         spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE;
 }
 
 bool supports_segmented_vision_sm110(const Spec& spec) {
@@ -166,6 +280,7 @@ bool supports_segmented_vision_sm110(const Spec& spec) {
   // sync with the host_offsets consumed by the fixed-stride launcher below.
   constexpr uint64_t kOffsetsHash = UINT64_C(0x5febecb608d78843);
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED &&
+         spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
          spec.dtype == APXINF_DTYPE_BF16 &&
          spec.output_dtype == APXINF_DTYPE_BF16 &&
          spec.mask == APXINF_ATTENTION_MASK_NONE && spec.batch == 1 &&
@@ -173,7 +288,8 @@ bool supports_segmented_vision_sm110(const Spec& spec) {
          spec.key_capacity == 12216 && spec.query_heads == 16 &&
          spec.kv_heads == 16 && spec.head_dim == 64 &&
          spec.segments == 12 && spec.max_segment_tokens == 2200 &&
-         spec.offsets_hash == kOffsetsHash && spec.scale_is_default != 0;
+         spec.offsets_hash == kOffsetsHash && spec.scale_is_default != 0 &&
+         spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE;
 }
 
 AlignmentRequirements specialized_sm110_alignment(const Spec&) {
@@ -200,6 +316,10 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        one_configuration, prepare_cutlass, launch_cutlass, destroy_cutlass},
 #endif
 #if defined(APXINF_ATTENTION_FA2)
+      {kProviderFa2, 4, 1, "flash-attention-2-packed-qkv",
+       apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, true,
+       supports_fa2_packed_qkv, fa2_alignment, fa2_resource_requirements,
+       one_configuration, prepare_fa2, launch_fa2, destroy_fa2},
 #if defined(APXINF_ATTENTION_FA2_E4M3)
       {kProviderFa2, 2, 1, "flash-attention-2-f16-e4m3-522",
        apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, false,
@@ -217,6 +337,10 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        fa2_alignment, fa2_resource_requirements, one_configuration,
        prepare_fa2, launch_fa2, destroy_fa2},
 #endif
+      {kProviderCublas, 1, 1, "cublas-f16-gqa-stable", 0, true, true, true,
+       supports_cublas_f16, natural_alignment,
+       cublas_f16_resource_requirements, one_configuration,
+       prepare_cublas_f16, launch_cublas_f16, destroy_cublas_f16},
       {kProviderCustom, 1, 1, "custom-attention-fallback", 0, true, true,
        true, supports_dense_custom, natural_alignment,
        custom_resource_requirements, one_configuration, prepare_custom,
@@ -256,18 +380,18 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        prepare_segmented_vision_sm110, launch_segmented_vision_sm110,
        destroy_segmented_vision_sm110},
 #endif
+#if defined(APXINF_ATTENTION_FA2)
+      {kProviderFa2, 5, 1, "flash-attention-2-segmented",
+       apxinf::gemm::kDeviceFeatureFa2, true, true, true,
+       supports_fa2_segmented, fa2_alignment,
+       fa2_segmented_resource_requirements, one_configuration,
+       prepare_fa2_segmented, launch_fa2_segmented,
+       destroy_fa2_segmented},
+#endif
       {kProviderCustom, 3, 1, "custom-segmented-attention", 0, true, true,
        true, supports_segmented_custom, natural_alignment,
        custom_resource_requirements, one_configuration, prepare_custom,
        launch_custom, destroy_custom},
-  };
-  static const ImplementationRegistry packed_qkv_entries = {
-#if defined(APXINF_ATTENTION_FA2)
-      {kProviderFa2, 4, 1, "flash-attention-2-packed-qkv",
-       apxinf::gemm::kDeviceFeatureCutlassSm100, true, true, true,
-       supports_fa2_packed_qkv, fa2_alignment, fa2_resource_requirements,
-       one_configuration, prepare_fa2, launch_fa2, destroy_fa2},
-#endif
   };
   switch (semantic) {
     case APXINF_ATTENTION_SEMANTIC_DENSE:
@@ -276,8 +400,6 @@ const ImplementationRegistry& registry(uint32_t semantic) {
       return kv_cache_entries;
     case APXINF_ATTENTION_SEMANTIC_SEGMENTED:
       return segmented_entries;
-    case APXINF_ATTENTION_SEMANTIC_PACKED_QKV:
-      return packed_qkv_entries;
   }
   throw Failure(APXINF_STATUS_INTERNAL_ERROR,
                 "unknown Attention semantic registry");

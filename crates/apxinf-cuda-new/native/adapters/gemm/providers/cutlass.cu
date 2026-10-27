@@ -325,6 +325,30 @@ cudaError_t launch_cutlass_w8a8_bias_m41_n4608_k1536(Execution& state) {
 #endif
 }
 
+cudaError_t launch_cutlass_w8a8_bias_gelu_m41_n6144_k1536(
+    Execution& state) {
+#ifdef APXINF_GEMM_CUTLASS_SM87_W8A8
+  const auto& bindings = state.bindings;
+  const auto& spec = state.spec;
+  auto& resources = provider(state);
+  if (!resources.packed_weight_ready ||
+      resources.packed_weight_source != bindings.b ||
+      resources.packed_weight_version != bindings.b_version) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "CUTLASS W8A8 immutable weight was not prepared for these bindings");
+  }
+  return apxinf::cuda_new::cutlass_ops::
+      w8a8_gemm_bias_gelu_bf16_m41_n6144_k1536(
+          bindings.a, bindings.b, bindings.a_scales, bindings.b_scales,
+          bindings.bias, bindings.output, static_cast<int>(spec.m),
+          static_cast<int>(spec.n), static_cast<int>(spec.k),
+          static_cast<cudaStream_t>(bindings.stream));
+#else
+  (void)state;
+  return cudaErrorNotSupported;
+#endif
+}
+
 cudaError_t launch_cutlass_fp8_geglu(Execution& state) {
   const auto& bindings = state.bindings;
 #ifdef APXINF_GEMM_CUTLASS

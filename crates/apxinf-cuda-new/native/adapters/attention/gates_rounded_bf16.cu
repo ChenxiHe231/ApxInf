@@ -8,10 +8,12 @@
 #include <limits>
 
 namespace {
-#include "../../kernels/attention/planning_bf16.cuh"
+#include "../../kernels/attention/gates_rounded_bf16.cuh"
 }  // namespace
 
-extern "C" cudaError_t apxinf_attention_sigmoid_gate_mul_bf16(
+namespace apxinf::attention {
+
+cudaError_t launch_output_gate_projection(
     void* attn, const void* fused, int rows, int heads, int head_dim,
     int64_t fused_width, cudaStream_t stream) {
   if (attn == nullptr || fused == nullptr || rows <= 0 || heads <= 0 ||
@@ -42,7 +44,7 @@ extern "C" cudaError_t apxinf_attention_sigmoid_gate_mul_bf16(
   return cudaGetLastError();
 }
 
-extern "C" cudaError_t apxinf_attention_expert_sigmoid_gate_mul_bf16(
+cudaError_t launch_output_gate_tensor_rounded(
     void* attn, const void* gate, int64_t count, cudaStream_t stream) {
   if (attn == nullptr || gate == nullptr || count <= 0) {
     return cudaErrorInvalidValue;
@@ -54,3 +56,5 @@ extern "C" cudaError_t apxinf_attention_expert_sigmoid_gate_mul_bf16(
       static_cast<const __nv_bfloat16*>(gate), count);
   return cudaGetLastError();
 }
+
+}  // namespace apxinf::attention

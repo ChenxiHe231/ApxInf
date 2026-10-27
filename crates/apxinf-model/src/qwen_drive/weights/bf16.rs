@@ -65,7 +65,12 @@ fn swiglu_layout_gate_up(_backend: &dyn Backend, gate_up: Tensor) -> Result<Tens
         ));
     }
     let (full_n, k) = (dims[0], dims[1]);
-    let packed = ops::pack_bf16_swiglu_weight_host(&gate_up.to_f32_vec()?, full_n, k)?;
+    let packed = ops::pack_swiglu_weight_host(
+        &gate_up.to_f32_vec()?,
+        full_n,
+        k,
+        ops::GemmWeightLayout::GateUpPairs { pair_width: 256 },
+    )?;
     Tensor::from_bf16(vec![k, full_n], &packed)
 }
 

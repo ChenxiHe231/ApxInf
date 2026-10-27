@@ -1,6 +1,6 @@
 //! Prepared execution: stable inputs, workspaces, capture and resource lifetime.
 use super::runner::{rgb_bf16_lut, validate, Validated, ValidatedVision};
-use crate::qwen_drive::backend::{ops, nvtx, transfers, DeviceBuffer};
+use crate::qwen_drive::backend::{nvtx, ops, transfers, DeviceBuffer};
 use crate::qwen_drive::model::{
     DirectExecution, DirectInputs, PlanningState, QwenDriveModel, RawRgbInput, VisionState,
 };
@@ -309,11 +309,17 @@ impl DirectPlan {
                 mutable.generator.generate(rng)?;
                 if self.model.config().noise_init_std != 1.0 {
                     let scaled = ops::with_session(&self.noise_workspace, || {
+                        let scaled = ctx.allocate_output(
+                            self.inputs.noise.shape().clone(),
+                            self.inputs.noise.dtype(),
+                        )?;
                         ops::elementwise::scale(
                             ctx,
                             &self.inputs.noise,
+                            &scaled,
                             self.model.config().noise_init_std,
-                        )
+                        )?;
+                        Ok(scaled)
                     })?;
                     copy(&scaled, &self.inputs.noise)?;
                 }

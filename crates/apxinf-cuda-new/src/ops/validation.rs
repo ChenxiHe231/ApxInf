@@ -17,7 +17,7 @@ pub(super) fn expect_bf16(tensor: &Tensor, name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn checked_bytes(dtype: DType, dims: &[usize], operation: &str) -> Result<usize> {
+pub(crate) fn checked_bytes(dtype: DType, dims: &[usize], operation: &str) -> Result<usize> {
     if !matches!(dtype, DType::F32 | DType::F16 | DType::BF16) {
         return Err(Error::Other(format!(
             "{operation} does not support {dtype}"
@@ -36,7 +36,7 @@ pub(super) fn checked_bytes(dtype: DType, dims: &[usize], operation: &str) -> Re
         })
 }
 
-pub(super) fn require_buffers(
+pub(crate) fn require_buffers(
     ctx: &CudaContext,
     operation: &str,
     buffers: &[(&str, &CudaBuffer, usize)],
@@ -59,7 +59,7 @@ pub(super) fn require_buffers(
     Ok(())
 }
 
-pub(super) fn require_address(
+pub(crate) fn require_address(
     ctx: &CudaContext,
     operation: &str,
     name: &str,
@@ -77,7 +77,7 @@ pub(super) fn require_address(
     Ok(())
 }
 
-pub(super) fn require_finite(operation: &str, values: &[f32]) -> Result<()> {
+pub(crate) fn require_finite(operation: &str, values: &[f32]) -> Result<()> {
     if values.iter().all(|value| value.is_finite()) {
         Ok(())
     } else {
@@ -160,6 +160,6 @@ pub(super) fn f16_output(ctx: &CudaContext, rows: usize, cols: usize) -> Result<
     )
 }
 
-pub(super) fn check_cuda(status: crate::ffi::raw::cuda_runtime::cudaError_t) -> Result<()> {
+pub(crate) fn check_cuda(status: crate::ffi::raw::cuda_runtime::cudaError_t) -> Result<()> {
     crate::ffi::raw::cuda_runtime::check_cuda(status).map_err(Error::Cuda)
 }

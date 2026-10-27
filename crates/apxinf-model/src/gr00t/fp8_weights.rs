@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use apxinf_core::{Error, Result, Tensor};
+use apxinf_core::{DType, Error, Result, Shape, Tensor};
 use serde::Deserialize;
 
 use super::action_weights::Gr00tLinearWeights;
@@ -390,17 +390,37 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         eps: f32,
         backend: &RuntimeBackend,
     ) -> Result<Option<(Tensor, Self::ReusableInput)>> {
-        let fused = ops::norm::bias_residual_layer_quantized(
+        let hidden = backend
+            .context()
+            .allocate_output(projection.shape().clone(), DType::BF16)?;
+        let normalized = backend
+            .context()
+            .allocate_output(projection.shape().clone(), DType::F8E4M3)?;
+        ops::fused_add_norm(
             backend.context(),
-            projection,
-            None,
-            residual,
-            norm_weight,
-            norm_bias,
-            eps,
-            self.activation_scale,
+            ops::FusedAddNormArgs {
+                input: projection,
+                bias: None,
+                residual,
+                gate: None,
+                hidden: &hidden,
+                normalized: None,
+                kind: ops::NormKind::Layer,
+                affine: ops::Affine::Weight {
+                    weight: norm_weight,
+                    bias: Some(norm_bias),
+                    offset: false,
+                },
+                quantized: Some(ops::QuantOut::StaticE4m3 {
+                    output: &normalized,
+                    scale: self.activation_scale,
+                }),
+                numerics: ops::NormNumerics::Flexible,
+                bias_order: ops::BiasOrder::SingleRound,
+                eps,
+            },
         )?;
-        Ok(Some((fused.hidden, fused.normalized)))
+        Ok(Some((hidden, normalized)))
     }
 
     fn supports_fused_bias_gelu_quantization(&self) -> bool {
@@ -424,13 +444,21 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
     }
 
     fn forward_quantized_tensor(&self, input: &Tensor, backend: &RuntimeBackend) -> Result<Tensor> {
-        let weight = ops::gemm::Fp8WeightView {
-            values_e4m3: &self.weight,
-            scale: self.weight_scale,
-            dual_geglu_interleaved: false,
-            dual_geglu_auto_interleaved: None,
-        };
-        ops::gemm::fp8_bf16(backend.context(), input, self.activation_scale, weight)
+        let a = input.shape().dims();
+        let b = self.weight.shape().dims();
+        if a.len() != 2 || b.len() != 2 || a[1] != b[0] {
+            return Err(Error::Other(format!(
+                "GR00T FP8 GEMM shape mismatch: {a:?} @ {b:?}"
+            )));
+        }
+        let mut output = backend
+            .context()
+            .allocate_output(Shape::new(vec![a[0], b[1]]), DType::BF16)?;
+        let mut args = ops::gemm::GemmArgs::new(input, &self.weight, &mut output);
+        args.quantization = ops::gemm::GemmQuantization::Fp8UnitScale;
+        args.alpha = self.activation_scale * self.weight_scale;
+        ops::gemm::gemm(backend.context(), args)?;
+        Ok(output)
     }
 
     fn adaptive_layer_norm_quantized(
@@ -440,12 +468,26 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         eps: f32,
         backend: &RuntimeBackend,
     ) -> Result<Option<(Tensor, Self::ReusableInput)>> {
-        let (normalized, quantized) = ops::norm::adaptive_layer_quantized(
+        let normalized = backend
+            .context()
+            .allocate_output(input.shape().clone(), DType::BF16)?;
+        let quantized = backend
+            .context()
+            .allocate_output(input.shape().clone(), DType::F8E4M3)?;
+        ops::norm::norm(
             backend.context(),
-            input,
-            modulation,
-            eps,
-            self.activation_scale,
+            ops::NormArgs {
+                input,
+                output: Some(&normalized),
+                kind: ops::NormKind::Layer,
+                affine: ops::Affine::Adaptive { style: modulation },
+                quantized: Some(ops::QuantOut::StaticE4m3 {
+                    output: &quantized,
+                    scale: self.activation_scale,
+                }),
+                numerics: ops::NormNumerics::Flexible,
+                eps,
+            },
         )?;
         Ok(Some((normalized, quantized)))
     }
@@ -457,13 +499,29 @@ impl DeviceLinearWeights for Gr00tFp8LinearWeights {
         eps: f32,
         backend: &RuntimeBackend,
     ) -> Result<Option<Self::ReusableInput>> {
-        Ok(Some(ops::norm::rms_quantized(
+        let output = backend
+            .context()
+            .allocate_output(input.shape().clone(), DType::F8E4M3)?;
+        ops::norm::norm(
             backend.context(),
-            input,
-            weight,
-            eps,
-            self.activation_scale,
-        )?))
+            ops::NormArgs {
+                input,
+                output: None,
+                kind: ops::NormKind::Rms,
+                affine: ops::Affine::Weight {
+                    weight,
+                    bias: None,
+                    offset: false,
+                },
+                quantized: Some(ops::QuantOut::StaticE4m3 {
+                    output: &output,
+                    scale: self.activation_scale,
+                }),
+                numerics: ops::NormNumerics::Flexible,
+                eps,
+            },
+        )?;
+        Ok(Some(output))
     }
 
     fn uses_quantized_output(&self) -> bool {

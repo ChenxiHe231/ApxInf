@@ -25,6 +25,12 @@ pub struct DynamicFp8Tensor {
     pub scales: Tensor,
 }
 
+/// Row-quantized signed INT8 tensor plus one F32 scale per row.
+pub struct DynamicI8Tensor {
+    pub values: Tensor,
+    pub scales: Tensor,
+}
+
 /// Quantize each row independently, optionally appending zero-valued FP8
 /// columns up to `output_cols`. Passing `None` preserves the input width.
 pub fn quantize_rows(
@@ -49,15 +55,29 @@ pub fn quantize_rows(
     Ok(DynamicFp8Tensor { values, scales })
 }
 
+/// Quantize each BF16 row independently to signed INT8.
+pub fn quantize_rows_i8(ctx: &CudaContext, input: &Tensor) -> Result<DynamicI8Tensor> {
+    let dims = input.shape().dims();
+    if dims.len() != 2 {
+        return Err(Error::Other(
+            "rowwise INT8 quantization requires a rank-2 input".into(),
+        ));
+    }
+    let rows = dims[0];
+    let mut values = ctx.allocate_output(Shape::new(dims.to_vec()), DType::I8)?;
+    let mut scales = ctx.allocate_output(Shape::new(vec![rows]), DType::F32)?;
+    let mut args =
+        ops::QuantizationArgs::new(ops::QuantizationSemantic::RowwiseI8, input, &mut values);
+    args.scales = Some(&mut scales);
+    ops::quantization(ctx, args)?;
+    Ok(DynamicI8Tensor { values, scales })
+}
+
 /// Keep the leading `output_cols` columns of a matrix.
 ///
 /// The input dtype selects the original BF16 kernel or FP16 strided-copy
 /// implementation; their numerical and launch behavior remain unchanged.
-pub fn slice_columns(
-    ctx: &CudaContext,
-    input: &Tensor,
-    output_cols: usize,
-) -> Result<Tensor> {
+pub fn slice_columns(ctx: &CudaContext, input: &Tensor, output_cols: usize) -> Result<Tensor> {
     match input.dtype() {
         DType::BF16 => slice_columns_bf16(ctx, input, output_cols),
         DType::F16 => slice_columns_f16(ctx, input, output_cols),

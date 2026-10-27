@@ -11,15 +11,9 @@
 #include <cstring>
 #include <limits>
 
-namespace {
-#include "../custom/gdn_policy.h"
-#include "../custom/math.cuh"
-#include "../custom/reduction.cuh"
 #include "../custom/pillow_bicubic_u8.cuh"
-#include "../custom/linear_attention.cuh"
-#include "../custom/gdn_raw_inverse_f1.cuh"
-#include "../custom/gdn_chunk_state_wmma.cuh"
-#include "../custom/gdn_chunk_gemm_tri.cuh"
+
+namespace {
 __global__ void rgb_u8_to_temporal2_merge2_rect_bf16_kernel(
     const uint8_t* __restrict__ rgb, uint16_t* __restrict__ patches,
     const uint16_t* __restrict__ lut, int grid_h, int grid_w) {

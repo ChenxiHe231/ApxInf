@@ -12,14 +12,17 @@
 #include <limits>
 
 namespace {
-#include "../custom/gdn_policy.h"
-#include "../custom/math.cuh"
-#include "../custom/reduction.cuh"
-#include "../custom/pillow_bicubic_u8.cuh"
-#include "../custom/linear_attention.cuh"
-#include "../custom/gdn_raw_inverse_f1.cuh"
-#include "../custom/gdn_chunk_state_wmma.cuh"
-#include "../custom/gdn_chunk_gemm_tri.cuh"
+// Exact (erf) GELU, fp32 compute, bf16 storage.
+__global__ void gelu_exact_bf16_kernel(
+    const __nv_bfloat16* input, __nv_bfloat16* output, int64_t count) {
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    const float x = __bfloat162float(input[index]);
+    output[index] = __float2bfloat16(x * 0.5f * (1.0f + erff(x * 0.70710678f)));
+  }
+}
+
 template <bool RoundSilu = false>
 __global__ void swiglu_bf16_kernel(
     const __nv_bfloat16* gate_up, __nv_bfloat16* output,

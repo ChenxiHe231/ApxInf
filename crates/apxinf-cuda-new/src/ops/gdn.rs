@@ -9,15 +9,17 @@
 use apxinf_core::{DType, Error, Result, Tensor};
 
 use crate::ffi::abi::{gdn as abi, status};
-use crate::ops::gemm::contracts::{invalid, tensor_storage};
+use crate::ops::gemm::contracts::{dtype, invalid, tensor_storage};
 use crate::{CudaBuffer, CudaContext};
 
 mod launches;
 
-pub use crate::ops::norm::gated_rms_silu;
-
 const FIRST_PREFILL_CHUNK: usize = 64;
 const CONTINUATION_CHUNK: usize = 64;
+
+fn launch(ctx: &CudaContext, spec: &abi::Spec, bindings: &abi::Bindings) -> Result<()> {
+    unsafe { status::check(abi::apxinf_gdn_launch(ctx.runtime(), spec, bindings)) }
+}
 
 /// Complete first-prefill causal-convolution + gated-delta scan semantic.
 ///
@@ -28,7 +30,11 @@ pub struct GdnFirstPrefillArgs<'a> {
     pub conv_weight: &'a Tensor,
     pub new_conv_state: &'a Tensor,
     pub a_log: &'a Tensor,
+    /// Canonical FP32 decay bias used by the portable implementation.
     pub dt_bias: &'a Tensor,
+    /// Optional BF16-rounded representation of the same weights. Exact-shape
+    /// candidates may consume it without making the model select a provider.
+    pub rounded_dt_bias: Option<&'a Tensor>,
     pub final_state: &'a Tensor,
     pub output: &'a Tensor,
     /// `[key_heads, value_heads, key_dim, value_dim]`.
@@ -101,6 +107,10 @@ pub fn gdn_first_prefill(ctx: &CudaContext, args: GdnFirstPrefillArgs<'_>) -> Re
         || args.new_conv_state.shape().dims() != [conv_width, 4]
         || args.a_log.shape().dims() != [value_heads]
         || args.dt_bias.shape().dims() != [value_heads]
+        || args.dt_bias.dtype() != DType::F32
+        || args.rounded_dt_bias.is_some_and(|tensor| {
+            tensor.shape().dims() != [value_heads] || tensor.dtype() != DType::BF16
+        })
         || args.final_state.shape().dims() != [value_heads, value_dim, key_dim]
         || args.output.shape().dims() != [seq, value_width]
     {
@@ -113,7 +123,7 @@ pub fn gdn_first_prefill(ctx: &CudaContext, args: GdnFirstPrefillArgs<'_>) -> Re
         args.conv_weight,
         args.new_conv_state,
         args.a_log,
-        args.dt_bias,
+        args.rounded_dt_bias,
         &final_state,
         args.geometry,
     )? {
@@ -716,84 +726,203 @@ pub fn gdn_recurrent_step(
     let decay_buffer = tensor_storage(ctx, decay, DType::F32, &[v_heads])?;
     let beta_buffer = tensor_storage(ctx, beta, DType::F32, &[v_heads])?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &[v_heads, v_dim])?;
-    unsafe {
-        status::check(abi::apxinf_gdn_recurrent_step(
-            state_buffer.ptr(),
-            q_buffer.ptr(),
-            k_buffer.ptr(),
-            v_buffer.ptr(),
-            decay_buffer.ptr(),
-            beta_buffer.ptr(),
-            output_buffer.ptr(),
-            v_heads as i64,
-            k_heads as i64,
-            v_dim as i64,
-            k_dim as i64,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::RECURRENT_STEP, 2);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.key_heads = k_heads as i64;
+    spec.value_heads = v_heads as i64;
+    spec.key_dim = k_dim as i64;
+    spec.value_dim = v_dim as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.state = state_buffer.ptr();
+    bindings.q = q_buffer.ptr();
+    bindings.k = k_buffer.ptr();
+    bindings.v = v_buffer.ptr();
+    bindings.decay = decay_buffer.ptr();
+    bindings.beta = beta_buffer.ptr();
+    bindings.output = output_buffer.ptr();
+    launch(ctx, &spec, &bindings)
+}
+
+/// Optional quantized output produced by [`gdn_gated_norm`].
+///
+/// `input_scale` preserves the existing static-scale quantization contract;
+/// the output format itself is inferred from `tensor`.
+#[derive(Clone, Copy)]
+pub struct GdnQuantizedOutput<'a> {
+    pub tensor: &'a Tensor,
+    pub input_scale: f32,
+}
+
+/// Complete gated RMSNorm semantic.
+///
+/// Rank-2 tensors describe one recurrent step as `[heads, head_dim]`; rank-3
+/// tensors describe a sequence as `[tokens, heads, head_dim]`. The input dtype
+/// and optional quantized output select the preserved native implementation
+/// internally rather than multiplying public L3 entry points.
+#[derive(Clone, Copy)]
+pub enum GdnGate<'a> {
+    /// Gate tensor with the same logical shape as the normalized input.
+    Dense(&'a Tensor),
+    /// Gate values embedded in a wider row. `heads` consecutive gate heads
+    /// begin at `column_offset`; flattened input rows select the corresponding
+    /// source row and head.
+    Strided {
+        tensor: &'a Tensor,
+        column_offset: usize,
+        heads: usize,
+    },
+}
+
+pub struct GdnGatedNormArgs<'a> {
+    pub input: &'a Tensor,
+    pub gate: GdnGate<'a>,
+    pub weight: &'a Tensor,
+    pub output: &'a Tensor,
+    pub quantized: Option<GdnQuantizedOutput<'a>>,
+    pub epsilon: f32,
 }
 
 /// Per-head RMSNorm followed by the swish output gate.
-pub fn gdn_gated_norm(
-    ctx: &CudaContext,
-    input: &Tensor,
-    gate: &Tensor,
-    weight: &Tensor,
-    output: &Tensor,
-    epsilon: f32,
-) -> Result<()> {
-    let dims = input.shape().dims().to_vec();
-    if dims.len() != 2 {
-        return Err(invalid("GDN gated norm expects [heads, head_dim]"));
+pub fn gdn_gated_norm(ctx: &CudaContext, args: GdnGatedNormArgs<'_>) -> Result<()> {
+    match (args.input.shape().dims().len(), args.gate, args.quantized) {
+        (2, GdnGate::Strided { .. }, None) => gdn_gated_norm_strided(ctx, &args),
+        (2, GdnGate::Dense(_), None) => gdn_gated_norm_step(ctx, &args),
+        (3, GdnGate::Dense(_), None) => gdn_gated_norm_sequence(ctx, &args),
+        (3, GdnGate::Dense(_), Some(quantized)) => gdn_gated_norm_quantized(ctx, &args, quantized),
+        (2, _, Some(_)) => Err(invalid(
+            "GDN gated norm quantization expects [tokens, heads, head_dim]",
+        )),
+        (_, GdnGate::Strided { .. }, _) => Err(invalid(
+            "strided GDN gate requires unquantized rank-2 input",
+        )),
+        _ => Err(invalid(
+            "GDN gated norm expects [heads, head_dim] or [tokens, heads, head_dim]",
+        )),
     }
+}
+
+fn dense_gate<'a>(args: &'a GdnGatedNormArgs<'a>) -> Result<&'a Tensor> {
+    match args.gate {
+        GdnGate::Dense(gate) => Ok(gate),
+        GdnGate::Strided { .. } => Err(invalid("GDN gated norm expected a dense gate")),
+    }
+}
+
+fn gdn_gated_norm_strided(ctx: &CudaContext, args: &GdnGatedNormArgs<'_>) -> Result<()> {
+    let GdnGate::Strided {
+        tensor: gate,
+        column_offset,
+        heads,
+    } = args.gate
+    else {
+        return Err(invalid("GDN gated norm expected a strided gate"));
+    };
+    let dims = args.input.shape().dims();
+    let gate_dims = gate.shape().dims();
+    if dims.len() != 2 || gate_dims.len() != 2 {
+        return Err(invalid("strided GDN gated norm expects rank-2 tensors"));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let (gate_rows, gate_width) = (gate_dims[0], gate_dims[1]);
+    if rows == 0
+        || cols == 0
+        || heads == 0
+        || rows % heads != 0
+        || gate_rows != rows / heads
+        || column_offset
+            .checked_add(
+                heads
+                    .checked_mul(cols)
+                    .ok_or_else(|| invalid("strided GDN gate extent overflow"))?,
+            )
+            .is_none_or(|end| end > gate_width)
+        || args.weight.shape().dims() != [cols]
+        || args.output.shape().dims() != dims
+        || !args.epsilon.is_finite()
+        || args.epsilon <= 0.0
+    {
+        return Err(invalid("invalid strided GDN gated norm contract"));
+    }
+    let input = tensor_storage(ctx, args.input, DType::BF16, dims)?;
+    let gate = tensor_storage(ctx, gate, DType::BF16, gate_dims)?;
+    let weight = tensor_storage(ctx, args.weight, DType::BF16, &[cols])?;
+    let output = tensor_storage(ctx, args.output, DType::BF16, dims)?;
+    let mut spec = abi::Spec::new(abi::operation::GATED_NORM, 2);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.layout = abi::layout::STRIDED_GATE;
+    spec.tokens = rows as i64;
+    spec.heads = heads as i64;
+    spec.head_dim = cols as i64;
+    spec.gate_row_stride = gate_width as i64;
+    spec.gate_column_offset = column_offset as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.input = input.ptr();
+    bindings.gate = gate.ptr();
+    bindings.weight = weight.ptr();
+    bindings.output = output.ptr();
+    bindings.epsilon = args.epsilon;
+    launch(ctx, &spec, &bindings)
+}
+
+fn gdn_gated_norm_step(ctx: &CudaContext, args: &GdnGatedNormArgs<'_>) -> Result<()> {
+    let GdnGatedNormArgs {
+        input,
+        weight,
+        output,
+        epsilon,
+        ..
+    } = args;
+    let gate = dense_gate(args)?;
+    let dims = input.shape().dims().to_vec();
     let (heads, head_dim) = (dims[0], dims[1]);
     let input_buffer = tensor_storage(ctx, input, DType::BF16, &dims)?;
     let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
     let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[head_dim])?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
-    unsafe {
-        status::check(abi::apxinf_gdn_gated_norm(
-            input_buffer.ptr(),
-            gate_buffer.ptr(),
-            weight_buffer.ptr(),
-            output_buffer.ptr(),
-            heads as i64,
-            head_dim as i64,
-            epsilon,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::GATED_NORM, 2);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.heads = heads as i64;
+    spec.head_dim = head_dim as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.input = input_buffer.ptr();
+    bindings.gate = gate_buffer.ptr();
+    bindings.weight = weight_buffer.ptr();
+    bindings.output = output_buffer.ptr();
+    bindings.epsilon = *epsilon;
+    launch(ctx, &spec, &bindings)
 }
 
-/// Qwen3.8's fixed-width gated RMSNorm and the following FP8 quantization.
-/// The BF16 output is retained so the fused path preserves the model boundary.
-#[allow(clippy::too_many_arguments)]
-pub fn gdn_gated_norm_quantize(
+fn gdn_gated_norm_quantized(
     ctx: &CudaContext,
-    input: &Tensor,
-    gate: &Tensor,
-    weight: &Tensor,
-    output: &Tensor,
-    quantized: &Tensor,
-    epsilon: f32,
-    input_scale: f32,
+    args: &GdnGatedNormArgs<'_>,
+    quantized: GdnQuantizedOutput<'_>,
 ) -> Result<()> {
+    let GdnGatedNormArgs {
+        input,
+        weight,
+        output,
+        epsilon,
+        ..
+    } = args;
+    let gate = dense_gate(args)?;
     let dims = input.shape().dims().to_vec();
     if dims.len() != 3 || dims[2] != 128 || dims[0] == 0 || dims[1] == 0 {
         return Err(invalid(
             "GDN norm quantization expects nonempty [tokens, heads, 128]",
         ));
     }
-    let rows = dims[0]
+    dims[0]
         .checked_mul(dims[1])
         .filter(|value| *value <= i32::MAX as usize)
         .ok_or_else(|| invalid("GDN norm quantization row extent overflows i32"))?;
     if !epsilon.is_finite()
-        || epsilon <= 0.0
-        || !input_scale.is_finite()
-        || input_scale <= 0.0
-        || !(1.0 / input_scale).is_finite()
+        || *epsilon <= 0.0
+        || !quantized.input_scale.is_finite()
+        || quantized.input_scale <= 0.0
+        || !(1.0 / quantized.input_scale).is_finite()
         || !matches!(input.dtype(), DType::F16 | DType::BF16)
     {
         return Err(invalid(
@@ -804,21 +933,23 @@ pub fn gdn_gated_norm_quantize(
     let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
     let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[128])?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
-    let quantized_buffer = tensor_storage(ctx, quantized, DType::F8E4M3, &dims)?;
-    unsafe {
-        status::check(abi::apxinf_gdn_gated_norm_quantize(
-            input_buffer.ptr(),
-            gate_buffer.ptr(),
-            weight_buffer.ptr(),
-            output_buffer.ptr(),
-            quantized_buffer.ptr(),
-            rows as i64,
-            i32::from(input.dtype() == DType::F16),
-            epsilon,
-            input_scale,
-            ctx.stream().handle(),
-        ))
-    }
+    let quantized_buffer = tensor_storage(ctx, quantized.tensor, DType::F8E4M3, &dims)?;
+    let mut spec = abi::Spec::new(abi::operation::GATED_NORM, 3);
+    spec.input_dtype = dtype(input.dtype())?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.quantization = abi::quantization::STATIC_E4M3;
+    spec.tokens = dims[0] as i64;
+    spec.heads = dims[1] as i64;
+    spec.head_dim = dims[2] as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.input = input_buffer.ptr();
+    bindings.gate = gate_buffer.ptr();
+    bindings.weight = weight_buffer.ptr();
+    bindings.output = output_buffer.ptr();
+    bindings.quantized = quantized_buffer.ptr();
+    bindings.epsilon = *epsilon;
+    bindings.input_scale = quantized.input_scale;
+    launch(ctx, &spec, &bindings)
 }
 
 /// Advance the causal convolution by one token, then apply SiLU.
@@ -841,17 +972,18 @@ pub fn gdn_causal_conv_step(
     let input_buffer = tensor_storage(ctx, input, DType::BF16, &[channels])?;
     let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &window_dims)?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &[channels])?;
-    unsafe {
-        status::check(abi::apxinf_gdn_causal_conv_step(
-            window_buffer.ptr(),
-            input_buffer.ptr(),
-            weight_buffer.ptr(),
-            output_buffer.ptr(),
-            channels as i64,
-            kernel_width as i64,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::CAUSAL_CONV, 1);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.has_window = 1;
+    spec.channels = channels as i64;
+    spec.kernel_width = kernel_width as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.input = input_buffer.ptr();
+    bindings.weight = weight_buffer.ptr();
+    bindings.output = output_buffer.ptr();
+    bindings.window = window_buffer.ptr();
+    launch(ctx, &spec, &bindings)
 }
 
 /// Causal depthwise conv1d over a whole prompt, then SiLU.
@@ -885,76 +1017,92 @@ pub fn gdn_causal_conv_forward(
         )?),
         None => None,
     };
-    unsafe {
-        status::check(abi::apxinf_gdn_causal_conv_forward(
-            input_buffer.ptr(),
-            weight_buffer.ptr(),
-            output_buffer.ptr(),
-            window_buffer
-                .as_ref()
-                .map(|buffer| buffer.ptr())
-                .unwrap_or(std::ptr::null_mut()),
-            tokens as i64,
-            channels as i64,
-            kernel_width as i64,
-            ctx.stream().handle(),
-        ))
+    let mut spec = abi::Spec::new(abi::operation::CAUSAL_CONV, 2);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.has_window = u32::from(window_buffer.is_some());
+    spec.tokens = tokens as i64;
+    spec.channels = channels as i64;
+    spec.kernel_width = kernel_width as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.input = input_buffer.ptr();
+    bindings.weight = weight_buffer.ptr();
+    bindings.output = output_buffer.ptr();
+    bindings.window = window_buffer
+        .as_ref()
+        .map_or(std::ptr::null_mut(), |buffer| buffer.ptr());
+    launch(ctx, &spec, &bindings)
+}
+
+/// Complete GDN decay/beta preparation contract.
+pub struct GdnDecayAndBetaArgs<'a> {
+    pub a: &'a Tensor,
+    pub b: &'a Tensor,
+    pub a_log: &'a Tensor,
+    pub dt_bias: &'a Tensor,
+    pub decay: &'a Tensor,
+    pub beta: &'a Tensor,
+}
+
+/// `decay = -exp(A_log) * softplus(a + dt_bias)`, `beta = sigmoid(b)`.
+///
+/// Rank-1 `a`/`b` describe one recurrent step; rank-2 tensors describe
+/// `[tokens, heads]`. Geometry is inferred from the tensors.
+pub fn gdn_decay_and_beta(ctx: &CudaContext, args: GdnDecayAndBetaArgs<'_>) -> Result<()> {
+    match args.a.shape().dims().len() {
+        1 => gdn_decay_and_beta_step(ctx, &args),
+        2 => gdn_decay_and_beta_sequence(ctx, &args),
+        _ => Err(invalid(
+            "GDN gate inputs must be [heads] or [tokens, heads]",
+        )),
     }
 }
 
-/// Sequence-axis `gdn_decay_and_beta`.
-///
-/// `a`/`b` are `[tokens, heads]` BF16 and `decay`/`beta` `[tokens, heads]`
-/// f32. `a_log` and `dt_bias` stay per-head `[heads]`.
-#[allow(clippy::too_many_arguments)]
-pub fn gdn_decay_and_beta_seq(
-    ctx: &CudaContext,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    decay: &Tensor,
-    beta: &Tensor,
-    tokens: usize,
-    heads: usize,
-) -> Result<()> {
-    let rows = [tokens, heads];
+fn gdn_decay_and_beta_sequence(ctx: &CudaContext, args: &GdnDecayAndBetaArgs<'_>) -> Result<()> {
+    let GdnDecayAndBetaArgs {
+        a,
+        b,
+        a_log,
+        dt_bias,
+        decay,
+        beta,
+    } = args;
+    let rows = a.shape().dims().to_vec();
+    let (tokens, heads) = (rows[0], rows[1]);
     let a_buffer = tensor_storage(ctx, a, DType::BF16, &rows)?;
     let b_buffer = tensor_storage(ctx, b, DType::BF16, &rows)?;
     let a_log_buffer = tensor_storage(ctx, a_log, DType::BF16, &[heads])?;
     let dt_bias_buffer = tensor_storage(ctx, dt_bias, DType::BF16, &[heads])?;
     let decay_buffer = tensor_storage(ctx, decay, DType::F32, &rows)?;
     let beta_buffer = tensor_storage(ctx, beta, DType::F32, &rows)?;
-    unsafe {
-        status::check(abi::apxinf_gdn_decay_and_beta_seq(
-            a_buffer.ptr(),
-            b_buffer.ptr(),
-            a_log_buffer.ptr(),
-            dt_bias_buffer.ptr(),
-            decay_buffer.ptr(),
-            beta_buffer.ptr(),
-            tokens as i64,
-            heads as i64,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::DECAY_AND_BETA, 2);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::F32)?;
+    spec.tokens = tokens as i64;
+    spec.heads = heads as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.a = a_buffer.ptr();
+    bindings.b = b_buffer.ptr();
+    bindings.a_log = a_log_buffer.ptr();
+    bindings.dt_bias = dt_bias_buffer.ptr();
+    bindings.decay = decay_buffer.ptr();
+    bindings.beta = beta_buffer.ptr();
+    launch(ctx, &spec, &bindings)
 }
 
-/// Sequence-axis `gdn_gated_norm`. Tensors are `[tokens, heads, head_dim]`.
-/// FP16 inputs are rounded to BF16 before normalization, matching explicit conversion.
-#[allow(clippy::too_many_arguments)]
-pub fn gdn_gated_norm_seq(
-    ctx: &CudaContext,
-    input: &Tensor,
-    gate: &Tensor,
-    weight: &Tensor,
-    output: &Tensor,
-    tokens: usize,
-    heads: usize,
-    head_dim: usize,
-    epsilon: f32,
-) -> Result<()> {
-    let dims = [tokens, heads, head_dim];
+/// Sequence implementation. FP16 inputs are rounded to BF16 before
+/// normalization, matching the existing explicit conversion contract.
+fn gdn_gated_norm_sequence(ctx: &CudaContext, args: &GdnGatedNormArgs<'_>) -> Result<()> {
+    let GdnGatedNormArgs {
+        input,
+        weight,
+        output,
+        epsilon,
+        ..
+    } = args;
+    let gate = dense_gate(args)?;
+    let dims = input.shape().dims().to_vec();
+    let (tokens, heads, head_dim) = (dims[0], dims[1], dims[2]);
     let input_dtype = input.dtype();
     if input_dtype != DType::BF16 && input_dtype != DType::F16 {
         return Err(invalid("GDN sequence gated norm expects BF16 or F16 input"));
@@ -963,24 +1111,19 @@ pub fn gdn_gated_norm_seq(
     let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &dims)?;
     let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &[head_dim])?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
-    unsafe {
-        let launch = if input_dtype == DType::F16 {
-            abi::apxinf_gdn_gated_norm_seq_f16
-        } else {
-            abi::apxinf_gdn_gated_norm_seq
-        };
-        status::check(launch(
-            input_buffer.ptr(),
-            gate_buffer.ptr(),
-            weight_buffer.ptr(),
-            output_buffer.ptr(),
-            tokens as i64,
-            heads as i64,
-            head_dim as i64,
-            epsilon,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::GATED_NORM, 3);
+    spec.input_dtype = dtype(input_dtype)?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.tokens = tokens as i64;
+    spec.heads = heads as i64;
+    spec.head_dim = head_dim as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.input = input_buffer.ptr();
+    bindings.gate = gate_buffer.ptr();
+    bindings.weight = weight_buffer.ptr();
+    bindings.output = output_buffer.ptr();
+    bindings.epsilon = *epsilon;
+    launch(ctx, &spec, &bindings)
 }
 
 /// L2-normalize each head in place.
@@ -990,32 +1133,27 @@ pub fn gdn_l2_normalize_heads(ctx: &CudaContext, data: &Tensor, epsilon: f32) ->
         return Err(invalid("GDN head normalization expects [heads, head_dim]"));
     }
     let buffer = tensor_storage(ctx, data, DType::BF16, &dims)?;
-    unsafe {
-        status::check(abi::apxinf_gdn_l2_normalize_heads(
-            buffer.ptr(),
-            dims[0] as i64,
-            dims[1] as i64,
-            epsilon,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::L2_NORMALIZE, 2);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.heads = dims[0] as i64;
+    spec.head_dim = dims[1] as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.output = buffer.ptr();
+    bindings.epsilon = epsilon;
+    launch(ctx, &spec, &bindings)
 }
 
-/// `decay = -exp(A_log) * softplus(a + dt_bias)`, `beta = sigmoid(b)`.
-#[allow(clippy::too_many_arguments)]
-pub fn gdn_decay_and_beta(
-    ctx: &CudaContext,
-    a: &Tensor,
-    b: &Tensor,
-    a_log: &Tensor,
-    dt_bias: &Tensor,
-    decay: &Tensor,
-    beta: &Tensor,
-) -> Result<()> {
+fn gdn_decay_and_beta_step(ctx: &CudaContext, args: &GdnDecayAndBetaArgs<'_>) -> Result<()> {
+    let GdnDecayAndBetaArgs {
+        a,
+        b,
+        a_log,
+        dt_bias,
+        decay,
+        beta,
+    } = args;
     let dims = a.shape().dims().to_vec();
-    if dims.len() != 1 {
-        return Err(invalid("GDN gate inputs must be [heads]"));
-    }
     let heads = dims[0];
     let a_buffer = tensor_storage(ctx, a, DType::BF16, &dims)?;
     let b_buffer = tensor_storage(ctx, b, DType::BF16, &dims)?;
@@ -1023,21 +1161,48 @@ pub fn gdn_decay_and_beta(
     let dt_bias_buffer = tensor_storage(ctx, dt_bias, DType::BF16, &dims)?;
     let decay_buffer = tensor_storage(ctx, decay, DType::F32, &dims)?;
     let beta_buffer = tensor_storage(ctx, beta, DType::F32, &dims)?;
-    unsafe {
-        status::check(abi::apxinf_gdn_decay_and_beta(
-            a_buffer.ptr(),
-            b_buffer.ptr(),
-            a_log_buffer.ptr(),
-            dt_bias_buffer.ptr(),
-            decay_buffer.ptr(),
-            beta_buffer.ptr(),
-            heads as i64,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::DECAY_AND_BETA, 1);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::F32)?;
+    spec.heads = heads as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.a = a_buffer.ptr();
+    bindings.b = b_buffer.ptr();
+    bindings.a_log = a_log_buffer.ptr();
+    bindings.dt_bias = dt_bias_buffer.ptr();
+    bindings.decay = decay_buffer.ptr();
+    bindings.beta = beta_buffer.ptr();
+    launch(ctx, &spec, &bindings)
 }
 
-/// Chunked parallel scan over `seq_padded` tokens (prefill).
+/// Q/K/V bindings consumed by [`gdn_chunk_scan`].
+#[derive(Clone, Copy)]
+pub enum GdnChunkScanInput<'a> {
+    /// Separate contiguous `[seq, heads, dim]` tensors.
+    Split {
+        q: &'a Tensor,
+        k: &'a Tensor,
+        v: &'a Tensor,
+    },
+    /// One `[seq, row_width]` projection with per-row element offsets for Q/K/V.
+    Interleaved {
+        fused: &'a Tensor,
+        offsets: [usize; 3],
+    },
+}
+
+/// Complete chunked GDN scan contract.
+pub struct GdnChunkScanArgs<'a> {
+    pub input: GdnChunkScanInput<'a>,
+    pub gate_log: &'a Tensor,
+    pub beta: &'a Tensor,
+    pub output: &'a Tensor,
+    pub state: &'a Tensor,
+    pub key_heads: usize,
+    pub chunk_size: usize,
+}
+
+/// Chunked parallel scan over padded prefill tokens.
 ///
 /// A faithful port of `torch_chunk_gated_delta_rule` (the forward-substitution
 /// export path). Produces the same `core_attn_out` and leaves the recurrent
@@ -1051,34 +1216,37 @@ pub fn gdn_decay_and_beta(
 /// `state` is `[v_heads, v_dim, k_dim]` f32, updated in place. q/k are
 /// L2-normalized in fp32 and q scaled by `k_dim**-0.5` inside the kernel, to
 /// match the reference. `seq_padded` must be a multiple of `chunk_size`.
-#[allow(clippy::too_many_arguments)]
-pub fn gdn_chunk_scan(
+pub fn gdn_chunk_scan(ctx: &CudaContext, args: GdnChunkScanArgs<'_>) -> Result<()> {
+    match args.input {
+        GdnChunkScanInput::Split { q, k, v } => gdn_chunk_scan_split(ctx, &args, q, k, v),
+        GdnChunkScanInput::Interleaved { fused, offsets } => {
+            gdn_chunk_scan_interleaved(ctx, &args, fused, offsets)
+        }
+    }
+}
+
+fn gdn_chunk_scan_split(
     ctx: &CudaContext,
+    args: &GdnChunkScanArgs<'_>,
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
-    g: &Tensor,
-    beta: &Tensor,
-    out: &Tensor,
-    state: &Tensor,
-    v_heads: usize,
-    k_heads: usize,
-    chunk_size: usize,
 ) -> Result<()> {
-    let state_dims = state.shape().dims().to_vec();
+    let state_dims = args.state.shape().dims().to_vec();
     if state_dims.len() != 3 {
         return Err(invalid("GDN state must be [v_heads, v_dim, k_dim]"));
     }
-    let (sv_heads, v_dim, k_dim) = (state_dims[0], state_dims[1], state_dims[2]);
-    if sv_heads != v_heads || v_dim != k_dim {
+    let (v_heads, v_dim, k_dim) = (state_dims[0], state_dims[1], state_dims[2]);
+    if v_dim != k_dim {
         return Err(invalid(
             "GDN chunk scan expects square v_dim == k_dim state",
         ));
     }
+    let k_heads = args.key_heads;
     if k_heads == 0 || v_heads % k_heads != 0 {
         return Err(invalid("GDN value heads must be a multiple of key heads"));
     }
-    if chunk_size == 0 {
+    if args.chunk_size == 0 {
         return Err(invalid("GDN chunk size must be positive"));
     }
     let q_dims = q.shape().dims().to_vec();
@@ -1086,43 +1254,45 @@ pub fn gdn_chunk_scan(
         return Err(invalid("GDN chunk scan q must be [seq, k_heads, k_dim]"));
     }
     let seq_padded = q_dims[0];
-    if seq_padded % chunk_size != 0 {
+    if seq_padded % args.chunk_size != 0 {
         return Err(invalid(
             "GDN chunk scan seq must be a multiple of chunk_size",
         ));
     }
-    let num_chunks = seq_padded / chunk_size;
+    let num_chunks = seq_padded / args.chunk_size;
 
     let q_buffer = tensor_storage(ctx, q, DType::BF16, &[seq_padded, k_heads, k_dim])?;
     let k_buffer = tensor_storage(ctx, k, DType::BF16, &[seq_padded, k_heads, k_dim])?;
     let v_buffer = tensor_storage(ctx, v, DType::BF16, &[seq_padded, v_heads, v_dim])?;
-    let g_buffer = tensor_storage(ctx, g, DType::F32, &[seq_padded, v_heads])?;
-    let beta_buffer = tensor_storage(ctx, beta, DType::F32, &[seq_padded, v_heads])?;
-    let out_buffer = tensor_storage(ctx, out, DType::BF16, &[seq_padded, v_heads, v_dim])?;
-    let state_buffer = tensor_storage(ctx, state, DType::F32, &state_dims)?;
+    let g_buffer = tensor_storage(ctx, args.gate_log, DType::F32, &[seq_padded, v_heads])?;
+    let beta_buffer = tensor_storage(ctx, args.beta, DType::F32, &[seq_padded, v_heads])?;
+    let out_buffer = tensor_storage(ctx, args.output, DType::BF16, &[seq_padded, v_heads, v_dim])?;
+    let state_buffer = tensor_storage(ctx, args.state, DType::F32, &state_dims)?;
     prepare_chunk_scan(ctx)?;
-    unsafe {
-        status::check(abi::apxinf_gdn_chunk_scan(
-            q_buffer.ptr(),
-            k_buffer.ptr(),
-            v_buffer.ptr(),
-            g_buffer.ptr(),
-            beta_buffer.ptr(),
-            out_buffer.ptr(),
-            state_buffer.ptr(),
-            seq_padded as i64,
-            v_heads as i64,
-            k_heads as i64,
-            chunk_size as i64,
-            k_dim as i64,
-            num_chunks as i64,
-            // Contiguous [seq, heads, dim] inputs: one token is heads*dim apart.
-            (k_heads * k_dim) as i64,
-            (k_heads * k_dim) as i64,
-            (v_heads * k_dim) as i64,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::CHUNK_SCAN, 3);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.layout = abi::layout::SPLIT_QKV;
+    spec.tokens = seq_padded as i64;
+    spec.key_heads = k_heads as i64;
+    spec.value_heads = v_heads as i64;
+    spec.key_dim = k_dim as i64;
+    spec.value_dim = v_dim as i64;
+    spec.chunk_size = args.chunk_size as i64;
+    spec.num_chunks = num_chunks as i64;
+    // Contiguous [seq, heads, dim] inputs: one token is heads*dim apart.
+    spec.q_row_stride = (k_heads * k_dim) as i64;
+    spec.k_row_stride = (k_heads * k_dim) as i64;
+    spec.v_row_stride = (v_heads * k_dim) as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.q = q_buffer.ptr();
+    bindings.k = k_buffer.ptr();
+    bindings.v = v_buffer.ptr();
+    bindings.gate_log = g_buffer.ptr();
+    bindings.beta = beta_buffer.ptr();
+    bindings.output = out_buffer.ptr();
+    bindings.state = state_buffer.ptr();
+    launch(ctx, &spec, &bindings)
 }
 
 /// `gdn_chunk_scan` over q, k and v interleaved in one projection row.
@@ -1135,23 +1305,29 @@ pub fn gdn_chunk_scan(
 ///
 /// `fused` is `[seq_padded, row_width]` BF16 with q first, then k, then v.
 /// `q_offset`, `k_offset` and `v_offset` are element offsets into a row.
-#[allow(clippy::too_many_arguments)]
-pub fn gdn_chunk_scan_interleaved(
+fn gdn_chunk_scan_interleaved(
     ctx: &CudaContext,
+    args: &GdnChunkScanArgs<'_>,
     fused: &Tensor,
-    g: &Tensor,
-    beta: &Tensor,
-    out: &Tensor,
-    state: &Tensor,
-    seq_padded: usize,
-    row_width: usize,
     offsets: [usize; 3],
-    v_heads: usize,
-    k_heads: usize,
-    chunk_size: usize,
-    k_dim: usize,
 ) -> Result<()> {
-    if seq_padded % chunk_size != 0 {
+    let state_dims = args.state.shape().dims();
+    if state_dims.len() != 3 || state_dims[1] != state_dims[2] {
+        return Err(invalid(
+            "GDN chunk scan expects square [v_heads, dim, dim] state",
+        ));
+    }
+    let (v_heads, k_dim) = (state_dims[0], state_dims[1]);
+    let k_heads = args.key_heads;
+    if k_heads == 0 || v_heads % k_heads != 0 || args.chunk_size == 0 {
+        return Err(invalid("invalid GDN chunk scan head or chunk geometry"));
+    }
+    let fused_dims = fused.shape().dims();
+    if fused_dims.len() != 2 {
+        return Err(invalid("interleaved GDN input must be [seq, row_width]"));
+    }
+    let (seq_padded, row_width) = (fused_dims[0], fused_dims[1]);
+    if seq_padded % args.chunk_size != 0 {
         return Err(invalid("GDN chunk scan needs a multiple of chunk_size"));
     }
     let [q_offset, k_offset, v_offset] = offsets;
@@ -1161,39 +1337,43 @@ pub fn gdn_chunk_scan_interleaved(
     {
         return Err(invalid("GDN chunk scan offsets run past the fused row"));
     }
-    let num_chunks = seq_padded / chunk_size;
+    let num_chunks = seq_padded / args.chunk_size;
     let element = DType::BF16.size_in_bytes();
 
     let fused_buffer = tensor_storage(ctx, fused, DType::BF16, &[seq_padded, row_width])?;
-    let g_buffer = tensor_storage(ctx, g, DType::F32, &[seq_padded, v_heads])?;
-    let beta_buffer = tensor_storage(ctx, beta, DType::F32, &[seq_padded, v_heads])?;
-    let out_buffer = tensor_storage(ctx, out, DType::BF16, &[seq_padded, v_heads, k_dim])?;
-    let state_buffer = tensor_storage(ctx, state, DType::F32, &[v_heads, k_dim, k_dim])?;
+    let g_buffer = tensor_storage(ctx, args.gate_log, DType::F32, &[seq_padded, v_heads])?;
+    let beta_buffer = tensor_storage(ctx, args.beta, DType::F32, &[seq_padded, v_heads])?;
+    let out_buffer = tensor_storage(ctx, args.output, DType::BF16, &[seq_padded, v_heads, k_dim])?;
+    let state_buffer = tensor_storage(ctx, args.state, DType::F32, state_dims)?;
     prepare_chunk_scan(ctx)?;
 
     // Byte offsets into the one fused allocation; the kernel walks rows itself.
     let base = fused_buffer.ptr() as *const u8;
+    let mut spec = abi::Spec::new(abi::operation::CHUNK_SCAN, 3);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::BF16)?;
+    spec.layout = abi::layout::INTERLEAVED_QKV;
+    spec.tokens = seq_padded as i64;
+    spec.key_heads = k_heads as i64;
+    spec.value_heads = v_heads as i64;
+    spec.key_dim = k_dim as i64;
+    spec.value_dim = k_dim as i64;
+    spec.chunk_size = args.chunk_size as i64;
+    spec.num_chunks = num_chunks as i64;
+    spec.q_row_stride = row_width as i64;
+    spec.k_row_stride = row_width as i64;
+    spec.v_row_stride = row_width as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
     unsafe {
-        status::check(abi::apxinf_gdn_chunk_scan(
-            base.add(q_offset * element) as *const std::ffi::c_void,
-            base.add(k_offset * element) as *const std::ffi::c_void,
-            base.add(v_offset * element) as *const std::ffi::c_void,
-            g_buffer.ptr(),
-            beta_buffer.ptr(),
-            out_buffer.ptr(),
-            state_buffer.ptr(),
-            seq_padded as i64,
-            v_heads as i64,
-            k_heads as i64,
-            chunk_size as i64,
-            k_dim as i64,
-            num_chunks as i64,
-            row_width as i64,
-            row_width as i64,
-            row_width as i64,
-            ctx.stream().handle(),
-        ))
+        bindings.q = base.add(q_offset * element) as *const std::ffi::c_void;
+        bindings.k = base.add(k_offset * element) as *const std::ffi::c_void;
+        bindings.v = base.add(v_offset * element) as *const std::ffi::c_void;
     }
+    bindings.gate_log = g_buffer.ptr();
+    bindings.beta = beta_buffer.ptr();
+    bindings.output = out_buffer.ptr();
+    bindings.state = state_buffer.ptr();
+    launch(ctx, &spec, &bindings)
 }
 
 /// Chunked gated delta rule on the vendored FlashInfer Cake kernel.
@@ -1254,25 +1434,28 @@ pub fn gdn_prefill(
     let workspace_dims = workspace.shape().dims().to_vec();
     let workspace_buffer = tensor_storage(ctx, workspace, workspace.dtype(), &workspace_dims)?;
 
-    unsafe {
-        status::check(abi::apxinf_gdn_prefill(
-            q_buffer.ptr(),
-            k_buffer.ptr(),
-            v_buffer.ptr(),
-            out_buffer.ptr(),
-            gate_buffer.ptr(),
-            beta_buffer.ptr(),
-            seqlens_buffer.ptr(),
-            state_buffer.ptr(),
-            workspace_buffer.ptr(),
-            tokens as i64,
-            q_heads as i64,
-            v_heads as i64,
-            num_seqs as i64,
-            scale,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::PREFILL, 3);
+    spec.input_dtype = dtype(DType::F16)?;
+    spec.output_dtype = dtype(DType::F16)?;
+    spec.layout = abi::layout::SPLIT_QKV;
+    spec.tokens = tokens as i64;
+    spec.key_heads = q_heads as i64;
+    spec.value_heads = v_heads as i64;
+    spec.key_dim = head_dim as i64;
+    spec.value_dim = head_dim as i64;
+    spec.num_sequences = num_seqs as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.q = q_buffer.ptr();
+    bindings.k = k_buffer.ptr();
+    bindings.v = v_buffer.ptr();
+    bindings.output = out_buffer.ptr();
+    bindings.gate_log = gate_buffer.ptr();
+    bindings.beta = beta_buffer.ptr();
+    bindings.cu_seqlens = seqlens_buffer.ptr();
+    bindings.state = state_buffer.ptr();
+    bindings.workspace = workspace_buffer.ptr();
+    bindings.scale = scale;
+    launch(ctx, &spec, &bindings)
 }
 
 /// Scratch bytes `gdn_prefill` needs for its TMA rewrites.
@@ -1313,23 +1496,24 @@ pub fn gdn_prepare_prefill(
     let v_buffer = tensor_storage(ctx, v_out, DType::F16, &[tokens, v_heads, dim])?;
     let g_buffer = tensor_storage(ctx, g, DType::F32, &[tokens, v_heads])?;
     let alpha_buffer = tensor_storage(ctx, alpha, DType::F32, &[tokens, v_heads])?;
-    unsafe {
-        status::check(abi::apxinf_gdn_prepare_prefill(
-            fused_buffer.ptr(),
-            q_buffer.ptr(),
-            k_buffer.ptr(),
-            v_buffer.ptr(),
-            g_buffer.ptr(),
-            alpha_buffer.ptr(),
-            tokens as i64,
-            row_width as i64,
-            k_heads as i64,
-            v_heads as i64,
-            dim as i64,
-            epsilon,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::PREPARE_PREFILL, 2);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::F16)?;
+    spec.layout = abi::layout::INTERLEAVED_QKV;
+    spec.tokens = tokens as i64;
+    spec.row_width = row_width as i64;
+    spec.key_heads = k_heads as i64;
+    spec.value_heads = v_heads as i64;
+    spec.head_dim = dim as i64;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.input = fused_buffer.ptr();
+    bindings.q_output = q_buffer.ptr();
+    bindings.k_output = k_buffer.ptr();
+    bindings.v_output = v_buffer.ptr();
+    bindings.gate_log = g_buffer.ptr();
+    bindings.alpha = alpha_buffer.ptr();
+    bindings.epsilon = epsilon;
+    launch(ctx, &spec, &bindings)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1371,21 +1555,25 @@ pub fn gdn_conv_prepare(
     let v_buffer = tensor_storage(ctx, v_out, DType::F16, &[tokens, v_heads, 128])?;
     let decay_buffer = tensor_storage(ctx, decay, DType::F32, &[tokens, v_heads])?;
     let alpha_buffer = tensor_storage(ctx, alpha, DType::F32, &[tokens, v_heads])?;
-    unsafe {
-        status::check(abi::apxinf_gdn_conv_prepare(
-            input_buffer.ptr(),
-            weight_buffer.ptr(),
-            window_buffer.ptr(),
-            q_buffer.ptr(),
-            k_buffer.ptr(),
-            v_buffer.ptr(),
-            decay_buffer.ptr(),
-            alpha_buffer.ptr(),
-            tokens as i64,
-            k_heads as i64,
-            v_heads as i64,
-            epsilon,
-            ctx.stream().handle(),
-        ))
-    }
+    let mut spec = abi::Spec::new(abi::operation::CONV_PREPARE, 2);
+    spec.input_dtype = dtype(DType::BF16)?;
+    spec.output_dtype = dtype(DType::F16)?;
+    spec.layout = abi::layout::INTERLEAVED_QKV;
+    spec.tokens = tokens as i64;
+    spec.key_heads = k_heads as i64;
+    spec.value_heads = v_heads as i64;
+    spec.head_dim = 128;
+    spec.channels = channels as i64;
+    spec.kernel_width = 4;
+    let mut bindings = abi::Bindings::new(ctx.stream().handle());
+    bindings.input = input_buffer.ptr();
+    bindings.weight = weight_buffer.ptr();
+    bindings.window = window_buffer.ptr();
+    bindings.q_output = q_buffer.ptr();
+    bindings.k_output = k_buffer.ptr();
+    bindings.v_output = v_buffer.ptr();
+    bindings.decay = decay_buffer.ptr();
+    bindings.alpha = alpha_buffer.ptr();
+    bindings.epsilon = epsilon;
+    launch(ctx, &spec, &bindings)
 }

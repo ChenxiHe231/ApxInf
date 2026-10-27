@@ -26,19 +26,6 @@ extern "C" cudaError_t apxinf_rope_fixed_decode_decode_bf16(
     return cudaGetLastError();
 }
 
-extern "C" cudaError_t apxinf_rope_fixed_decode_k_write_bf16(
-    const void* k_in, void* k_cache,
-    uint32_t head_dim, uint32_t n_kv_heads, uint32_t max_seq_len,
-    float rope_theta, const void* pos_ptr, void* stream)
-{
-    dim3 grid((head_dim / 2 + FIXED_DECODE_BLOCK_SIZE - 1) / FIXED_DECODE_BLOCK_SIZE, n_kv_heads, 1);
-    dim3 block(FIXED_DECODE_BLOCK_SIZE, 1, 1);
-    llmdec_rope_k_write_bf16_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
-        (const __nv_bfloat16*)k_in, (__nv_bfloat16*)k_cache,
-        head_dim, n_kv_heads, max_seq_len, rope_theta, (const uint32_t*)pos_ptr);
-    return cudaGetLastError();
-}
-
 extern "C" cudaError_t apxinf_rope_fixed_decode_mrope_decode_bf16(
     const void* input, void* output,
     uint32_t head_dim, uint32_t n_heads,

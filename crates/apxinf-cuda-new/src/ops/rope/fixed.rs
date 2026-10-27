@@ -2,118 +2,9 @@
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-pub use crate::ops::attention::QkvTensors;
-use crate::{ops, CudaContext};
-
-fn split_impl(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: Option<&Tensor>,
-    q_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
-    theta: f32,
-    position_offset: usize,
-    cache: Option<(&Tensor, &Tensor, usize)>,
-) -> Result<QkvTensors> {
-    let dims = qkv.shape().dims();
-    if dims.len() != 2 {
-        return Err(Error::Other("packed QKV must be rank 2".into()));
-    }
-    let tokens = dims[0];
-    let q_shape = Shape::new(vec![tokens, q_heads, head_dim]);
-    let dtype = qkv.dtype();
-    if !matches!(dtype, DType::BF16 | DType::F16) {
-        return Err(Error::Other("packed QKV must be BF16 or F16".into()));
-    }
-    let mut q = ctx.allocate_output(q_shape, dtype)?;
-    let (mut k, mut v, kv_output_offset) = match cache {
-        // Rotate K and copy V directly into caller-owned cache rows.
-        Some((k_cache, v_cache, offset)) => (k_cache.clone(), v_cache.clone(), offset),
-        None => {
-            let kv_shape = Shape::new(vec![tokens, kv_heads, head_dim]);
-            (
-                ctx.allocate_output(kv_shape.clone(), dtype)?,
-                ctx.allocate_output(kv_shape, dtype)?,
-                0,
-            )
-        }
-    };
-    ops::rope(
-        ctx,
-        ops::RopeArgs {
-            semantic: ops::RopeSemantic::SplitQkvRope,
-            qkv,
-            bias,
-            q: &mut q,
-            k: &mut k,
-            v: &mut v,
-            q_heads,
-            kv_heads,
-            head_dim,
-            theta,
-            position_offset,
-            kv_output_offset,
-        },
-    )?;
-    Ok(QkvTensors { q, k, v })
-}
-
-/// Split a packed GQA projection and rotate Q/K into fresh per-call buffers.
-/// Output dtype is inferred from `qkv`.
-#[allow(clippy::too_many_arguments)]
-pub fn split_qkv_apply(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: Option<&Tensor>,
-    q_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
-    theta: f32,
-    position_offset: usize,
-) -> Result<QkvTensors> {
-    split_impl(
-        ctx,
-        qkv,
-        bias,
-        q_heads,
-        kv_heads,
-        head_dim,
-        theta,
-        position_offset,
-        None,
-    )
-}
-
-/// Split and rotate, appending K/V into caller-owned
-/// caches at `output_offset`, returning only the rotated Q.
-#[allow(clippy::too_many_arguments)]
-pub fn apply_q_write_kv(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: Option<&Tensor>,
-    q_heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
-    theta: f32,
-    position_offset: usize,
-    k_cache: &Tensor,
-    v_cache: &Tensor,
-    output_offset: usize,
-) -> Result<Tensor> {
-    Ok(split_impl(
-        ctx,
-        qkv,
-        bias,
-        q_heads,
-        kv_heads,
-        head_dim,
-        theta,
-        position_offset,
-        Some((k_cache, v_cache, output_offset)),
-    )?
-    .q)
-}
+use super::contracts::{alignment_of, Normalized};
+use super::launch;
+use crate::CudaContext;
 
 // ── gr00t RoPE surface ───────────────────────────────────────────────────
 //
@@ -122,8 +13,7 @@ pub fn apply_q_write_kv(
 // own, so validation is equivalent.
 
 use crate::ops::validation::{
-    checked_bytes, gpu_ptr, make_gpu_tensor, matrix_shape, require_address, require_buffers,
-    require_finite,
+    checked_bytes, make_gpu_tensor, matrix_shape, require_address, require_buffers, require_finite,
 };
 use crate::CudaBuffer;
 
@@ -138,31 +28,22 @@ pub fn apply_mrope(
     sections: [usize; 3],
     pos_ids: &CudaBuffer,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::rope as abi;
-    use crate::ffi::raw::cuda_runtime as raw;
-    let dims = input.shape().dims();
-    let seq_len = if dims.len() == 2 { 1 } else { dims[0] };
     if input.dtype() != DType::BF16 {
         return Err(Error::Other("rope_mrope: only BF16 supported".into()));
     }
     let output = ctx.allocate_output(input.shape().clone(), DType::BF16)?;
-    let input_buffer = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
-    let output_buffer = CudaBuffer::from_tensor(&output).map_err(Error::Cuda)?;
-    unsafe {
-        raw::check_cuda(abi::apxinf_rope_mrope_bf16(
-            input_buffer.ptr(),
-            output_buffer.ptr(),
-            u32::try_from(head_dim).map_err(|_| Error::Other("head dim exceeds u32".into()))?,
-            u32::try_from(n_heads).map_err(|_| Error::Other("head count exceeds u32".into()))?,
-            u32::try_from(seq_len).map_err(|_| Error::Other("sequence exceeds u32".into()))?,
-            theta,
-            pos_ids.ptr(),
-            u32::try_from(sections[1]).map_err(|_| Error::Other("sec_h exceeds u32".into()))?,
-            u32::try_from(sections[2]).map_err(|_| Error::Other("sec_w exceeds u32".into()))?,
-            ctx.stream().handle(),
-        ))
-        .map_err(Error::Cuda)?;
-    }
+    super::rope::apply_tensor(
+        ctx,
+        input,
+        &output,
+        n_heads,
+        head_dim,
+        theta,
+        super::rope::ApplyRotation::Multimodal {
+            positions: pos_ids,
+            sections,
+        },
+    )?;
     Ok(output)
 }
 
@@ -410,149 +291,147 @@ pub fn rms_norm_apply_mrope_qk(
     Ok((q_out, k_out))
 }
 
-/// `split_qkv_bias_apply_vision_2d`: split a packed vision QKV, add the bias,
-/// and rotate Q/K with the dynamic two-axis vision RoPE.
-#[allow(clippy::too_many_arguments)]
-pub fn split_qkv_bias_apply_vision_2d(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: &Tensor,
-    n_heads: usize,
-    head_dim: usize,
-    theta: f32,
-    pos_ids: &CudaBuffer,
-) -> Result<QkvTensors> {
-    vision_split_impl(ctx, qkv, bias, n_heads, head_dim, pos_ids, theta)
+/// Position source for the vision packed-QKV RoPE semantic.
+pub enum VisionRotation<'a> {
+    Positions { ids: &'a CudaBuffer, theta: f32 },
+    Table(&'a CudaBuffer),
 }
 
-/// `split_qkv_bias_apply_vision_2d_precomputed`: precomputed-table variant.
-pub fn split_qkv_bias_apply_vision_2d_precomputed(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: &Tensor,
-    n_heads: usize,
-    head_dim: usize,
-    rotation_table: &CudaBuffer,
-) -> Result<QkvTensors> {
-    vision_split_precomputed_impl(ctx, qkv, bias, n_heads, head_dim, rotation_table, false)
+/// Split packed vision QKV, add bias, and apply the selected two-axis RoPE.
+/// The position source is semantic input; scalar/vectorized table launchers
+/// remain private implementation candidates.
+pub struct VisionQkvRopeArgs<'a> {
+    pub qkv: &'a Tensor,
+    pub bias: &'a Tensor,
+    pub q: &'a mut Tensor,
+    pub k: &'a mut Tensor,
+    pub v: &'a mut Tensor,
+    pub heads: usize,
+    pub head_dim: usize,
+    pub rotation: VisionRotation<'a>,
 }
 
-/// `split_qkv_bias_apply_vision_2d_precomputed_vec2`: GR00T exact-shape
-/// opt-in using two RoPE pairs per thread.
-pub fn split_qkv_bias_apply_vision_2d_precomputed_vec2(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: &Tensor,
-    n_heads: usize,
-    head_dim: usize,
-    rotation_table: &CudaBuffer,
-) -> Result<QkvTensors> {
-    vision_split_precomputed_impl(ctx, qkv, bias, n_heads, head_dim, rotation_table, true)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn vision_split_impl(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: &Tensor,
-    n_heads: usize,
-    head_dim: usize,
-    pos_ids: &CudaBuffer,
-    theta: f32,
-) -> Result<QkvTensors> {
-    let (qkv_buffer, bias_buffer, q, k, v) =
-        vision_split_common(ctx, qkv, bias, n_heads, head_dim)?;
-    use crate::ffi::abi::{rope as abi, status};
-    require_finite("vision fused QKV 2D-RoPE", &[theta])?;
-    let (seq_len, _, _) = (qkv.shape().dims()[0], n_heads, head_dim);
-    let q_buffer = CudaBuffer::from_tensor(&q).map_err(Error::Cuda)?;
-    let k_buffer = CudaBuffer::from_tensor(&k).map_err(Error::Cuda)?;
-    let v_buffer = CudaBuffer::from_tensor(&v).map_err(Error::Cuda)?;
-    unsafe {
-        status::check(abi::apxinf_rope_qkv_split_bias_vision_rope_bf16(
-            qkv_buffer.ptr(),
-            bias_buffer.ptr(),
-            q_buffer.ptr(),
-            k_buffer.ptr(),
-            v_buffer.ptr(),
-            to_u32(head_dim, "head dim")?,
-            to_u32(n_heads, "head count")?,
-            to_u32(seq_len, "sequence")?,
-            theta,
-            pos_ids.ptr(),
-            ctx.stream().handle(),
-        ))?;
-    }
-    Ok(QkvTensors { q, k, v })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn vision_split_precomputed_impl(
-    ctx: &CudaContext,
-    qkv: &Tensor,
-    bias: &Tensor,
-    n_heads: usize,
-    head_dim: usize,
-    rotation_table: &CudaBuffer,
-    vec2: bool,
-) -> Result<QkvTensors> {
-    let (seq_len, _, _) = (qkv.shape().dims()[0], n_heads, head_dim);
-    let (qkv_buffer, bias_buffer, q, k, v) =
-        vision_split_common(ctx, qkv, bias, n_heads, head_dim)?;
-    use crate::ffi::abi::rope as abi;
-    use crate::ffi::raw::cuda_runtime as raw;
-    let rotation_bytes = seq_len
-        .checked_mul(head_dim / 2)
-        .and_then(|count| count.checked_mul(2 * std::mem::size_of::<f32>()))
-        .ok_or_else(|| Error::Other("precomputed vision rotation size overflow".into()))?;
-    require_buffers(
+pub fn split_qkv_vision(ctx: &CudaContext, args: VisionQkvRopeArgs<'_>) -> Result<()> {
+    let (qkv_buffer, bias_buffer, q_buffer, k_buffer, v_buffer) = vision_split_common(
         ctx,
-        "precomputed vision fused QKV 2D-RoPE",
-        &[("rotation table", rotation_table, rotation_bytes)],
+        args.qkv,
+        args.bias,
+        args.q,
+        args.k,
+        args.v,
+        args.heads,
+        args.head_dim,
     )?;
-    let q_buffer = CudaBuffer::from_tensor(&q).map_err(Error::Cuda)?;
-    let k_buffer = CudaBuffer::from_tensor(&k).map_err(Error::Cuda)?;
-    let v_buffer = CudaBuffer::from_tensor(&v).map_err(Error::Cuda)?;
-    unsafe {
-        let code = if vec2 {
-            abi::apxinf_rope_qkv_split_bias_vision_rope_precomputed_vec2_bf16(
-                qkv_buffer.ptr(),
-                bias_buffer.ptr(),
-                q_buffer.ptr(),
-                k_buffer.ptr(),
-                v_buffer.ptr(),
-                to_u32(head_dim, "head dim")?,
-                to_u32(n_heads, "head count")?,
-                to_u32(seq_len, "sequence")?,
-                rotation_table.ptr(),
-                ctx.stream().handle(),
+    use crate::ffi::abi::rope as abi;
+    let seq_len = args.qkv.shape().dims()[0];
+    let (rotation_source, theta, position, rotation_table, rotation) = match args.rotation {
+        VisionRotation::Positions { ids, theta } => {
+            require_finite("vision fused QKV 2D-RoPE", &[theta])?;
+            if theta <= 0.0 {
+                return Err(Error::Other(
+                    "vision fused QKV 2D-RoPE theta must be positive".into(),
+                ));
+            }
+            let position_bytes = seq_len
+                .checked_mul(2)
+                .and_then(|count| count.checked_mul(std::mem::size_of::<u32>()))
+                .ok_or_else(|| Error::Other("vision position size overflow".into()))?;
+            require_buffers(
+                ctx,
+                "vision fused QKV 2D-RoPE",
+                &[("positions", ids, position_bytes)],
+            )?;
+            (
+                abi::ROTATION_AXIAL_IDS,
+                theta,
+                ids.ptr().cast_const().cast::<u32>(),
+                std::ptr::null(),
+                ids.clone(),
             )
-        } else {
-            abi::apxinf_rope_qkv_split_bias_vision_rope_precomputed_bf16(
-                qkv_buffer.ptr(),
-                bias_buffer.ptr(),
-                q_buffer.ptr(),
-                k_buffer.ptr(),
-                v_buffer.ptr(),
-                to_u32(head_dim, "head dim")?,
-                to_u32(n_heads, "head count")?,
-                to_u32(seq_len, "sequence")?,
-                rotation_table.ptr(),
-                ctx.stream().handle(),
+        }
+        VisionRotation::Table(table) => {
+            let rotation_bytes = seq_len
+                .checked_mul(args.head_dim / 2)
+                .and_then(|count| count.checked_mul(2 * std::mem::size_of::<f32>()))
+                .ok_or_else(|| Error::Other("precomputed vision rotation size overflow".into()))?;
+            require_buffers(
+                ctx,
+                "precomputed vision fused QKV 2D-RoPE",
+                &[("rotation table", table, rotation_bytes)],
+            )?;
+            (
+                abi::ROTATION_PRECOMPUTED_TABLE,
+                0.0,
+                std::ptr::null(),
+                table.ptr().cast_const(),
+                table.clone(),
             )
-        };
-        raw::check_cuda(code).map_err(Error::Cuda)?;
-    }
-    Ok(QkvTensors { q, k, v })
+        }
+    };
+    let normalized = Normalized {
+        spec: abi::Spec {
+            version: abi::SPEC_VERSION,
+            semantic: 5,
+            dtype: 2,
+            has_bias: 1,
+            layout: abi::LAYOUT_PACKED_QKV,
+            cache_write: abi::CACHE_WRITE_TOKEN_MAJOR,
+            rotation_source,
+            rotary_convention: abi::CONVENTION_HALF_SPLIT_AXIAL,
+            q_heads: to_u32(args.heads, "head count")?,
+            kv_heads: to_u32(args.heads, "head count")?,
+            head_dim: to_u32(args.head_dim, "head dim")?,
+            rotary_dim: to_u32(args.head_dim, "rotary dim")?,
+            section_t: 0,
+            section_h: to_u32(args.head_dim / 4, "height section")?,
+            section_w: to_u32(args.head_dim / 4, "width section")?,
+            qkv_alignment: alignment_of(qkv_buffer.ptr() as usize),
+            bias_alignment: alignment_of(bias_buffer.ptr() as usize),
+            q_alignment: alignment_of(q_buffer.ptr() as usize),
+            kv_alignment: alignment_of(k_buffer.ptr() as usize),
+            rotation_alignment: alignment_of(rotation.ptr() as usize),
+            tokens: i64::try_from(seq_len)
+                .map_err(|_| Error::Other("sequence exceeds i64".into()))?,
+            cache_capacity: 0,
+        },
+        bindings: abi::Bindings {
+            qkv: qkv_buffer.ptr(),
+            bias: bias_buffer.ptr(),
+            q: q_buffer.ptr(),
+            k: k_buffer.ptr(),
+            v: v_buffer.ptr(),
+            key_input: std::ptr::null(),
+            value_input: std::ptr::null(),
+            position,
+            rotation_table,
+            stream: ctx.stream().handle(),
+            theta,
+            position_offset: 0,
+            kv_output_offset: 0,
+        },
+        storage: vec![
+            qkv_buffer,
+            bias_buffer,
+            q_buffer,
+            k_buffer,
+            v_buffer,
+            rotation,
+        ],
+    };
+    launch::execute(ctx, normalized)?;
+    Ok(())
 }
 
 fn vision_split_common(
     ctx: &CudaContext,
     qkv: &Tensor,
     bias: &Tensor,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
     n_heads: usize,
     head_dim: usize,
-) -> Result<(CudaBuffer, CudaBuffer, Tensor, Tensor, Tensor)> {
+) -> Result<(CudaBuffer, CudaBuffer, CudaBuffer, CudaBuffer, CudaBuffer)> {
     let (seq_len, width) = matrix_shape(qkv, "vision fused QKV 2D-RoPE")?;
     let projection_width = n_heads
         .checked_mul(head_dim)
@@ -561,6 +440,12 @@ fn vision_split_common(
         || width != 3 * projection_width
         || bias.dtype() != DType::BF16
         || bias.shape().dims() != [width]
+        || q.dtype() != DType::BF16
+        || k.dtype() != DType::BF16
+        || v.dtype() != DType::BF16
+        || q.shape().dims() != [seq_len, n_heads, head_dim]
+        || k.shape().dims() != [seq_len, n_heads, head_dim]
+        || v.shape().dims() != [seq_len, n_heads, head_dim]
         || head_dim == 0
         || head_dim % 2 != 0
         || n_heads == 0
@@ -571,21 +456,28 @@ fn vision_split_common(
     }
     let qkv_bytes = checked_bytes(DType::BF16, &[seq_len, width], "vision fused QKV")?;
     let bias_bytes = checked_bytes(DType::BF16, &[width], "vision fused QKV bias")?;
+    let output_bytes = checked_bytes(
+        DType::BF16,
+        &[seq_len, n_heads, head_dim],
+        "vision fused QKV output",
+    )?;
     let qkv_buffer = CudaBuffer::from_tensor(qkv).map_err(Error::Cuda)?;
     let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
+    let q_buffer = CudaBuffer::from_tensor(q).map_err(Error::Cuda)?;
+    let k_buffer = CudaBuffer::from_tensor(k).map_err(Error::Cuda)?;
+    let v_buffer = CudaBuffer::from_tensor(v).map_err(Error::Cuda)?;
     require_buffers(
         ctx,
         "vision fused QKV 2D-RoPE",
         &[
             ("qkv", &qkv_buffer, qkv_bytes),
             ("bias", &bias_buffer, bias_bytes),
+            ("q", &q_buffer, output_bytes),
+            ("k", &k_buffer, output_bytes),
+            ("v", &v_buffer, output_bytes),
         ],
     )?;
-    let shape = Shape::new(vec![seq_len, n_heads, head_dim]);
-    let q = ctx.allocate_output(shape.clone(), DType::BF16)?;
-    let k = ctx.allocate_output(shape.clone(), DType::BF16)?;
-    let v = ctx.allocate_output(shape, DType::BF16)?;
-    Ok((qkv_buffer, bias_buffer, q, k, v))
+    Ok((qkv_buffer, bias_buffer, q_buffer, k_buffer, v_buffer))
 }
 
 fn to_u32(value: usize, what: &str) -> Result<u32> {
@@ -594,30 +486,9 @@ fn to_u32(value: usize, what: &str) -> Result<u32> {
 
 // ── smolvla RoPE surface ────────────────────────────────────────────────────
 
-/// `apply_batched`: standalone half-split RoPE over `[seq, n_heads, head_dim]`.
-/// Legacy signature kept (it dispatched on dtype); cuda-new carries the BF16
-/// operator, which is what SmolVLA's BF16 cross-attention path uses.
-pub fn apply_batched(
-    ctx: &CudaContext,
-    input: &Tensor,
-    n_heads: usize,
-    head_dim: usize,
-    rope_theta: f32,
-    pos_offset: u32,
-) -> Result<Tensor> {
-    match input.dtype() {
-        DType::BF16 => {
-            ops::rope_apply_batched(ctx, input, n_heads, head_dim, rope_theta, pos_offset)
-        }
-        dtype => Err(Error::Other(format!(
-            "CUDA rope_batched does not support {dtype}"
-        ))),
-    }
-}
-
 /// The half-split RoPE convention used by SmolVLA
-/// FP16 cross-attention. Ported verbatim from the legacy wrapper over the
-/// `apxinf_rope_half_split_f16` launcher.
+/// FP16 cross-attention. The unified RoPE family dispatch preserves the
+/// legacy half-split kernel and parameter order as its F16 candidate.
 pub fn apply_half_split(
     ctx: &CudaContext,
     input: &Tensor,
@@ -626,7 +497,6 @@ pub fn apply_half_split(
     rope_theta: f32,
     pos_offset: u32,
 ) -> Result<Tensor> {
-    use crate::ffi::abi::rope as abi;
     let dims = input.shape().dims();
     let seq_len = if dims.len() == 2 { 1 } else { dims[0] };
     let out_buf = crate::workspace::output_buffer(ctx, input.size_in_bytes())?;
@@ -642,32 +512,29 @@ pub fn apply_half_split(
         ));
     }
 
-    unsafe {
-        crate::ops::validation::check_cuda(abi::apxinf_rope_half_split_f16(
-            gpu_ptr(input)?,
-            out_buf.ptr(),
-            head_dim as u32,
-            n_heads as u32,
-            seq_len as u32,
-            rope_theta,
-            pos_offset,
-            ctx.stream().handle(),
-        ))?;
-    }
-
-    Ok(make_gpu_tensor(
+    let output = make_gpu_tensor(
         input.shape().clone(),
         input.dtype(),
         ctx.device_id(),
         out_buf,
-    ))
+    );
+    super::rope::apply_tensor(
+        ctx,
+        input,
+        &output,
+        n_heads,
+        head_dim,
+        rope_theta,
+        super::rope::ApplyRotation::PositionOffset(pos_offset as usize),
+    )?;
+    Ok(output)
 }
 
 // ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
 
 /// Apply RoPE into caller-owned storage using a device-resident position.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_into(
+pub(super) fn apply_into(
     ctx: &CudaContext,
     dtype: DType,
     input: &crate::CudaBuffer,
@@ -727,7 +594,7 @@ pub fn apply_into(
 /// Apply multimodal RoPE into caller-owned BF16 storage. `positions` is a
 /// `[3]` u32 device buffer of per-token (t, h, w) axes.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_mrope_into(
+pub(super) fn apply_mrope_into(
     ctx: &CudaContext,
     input: &crate::CudaBuffer,
     output: &crate::CudaBuffer,
@@ -765,60 +632,6 @@ pub fn apply_mrope_into(
             positions.ptr(),
             section_h as u32,
             section_w as u32,
-            ctx.stream().handle(),
-        )
-    })
-}
-
-/// Apply BF16 RoPE to K and write it directly into a head-major
-/// `[kv_heads, max_seq_len, head_dim]` KV cache at the device-resident
-/// position.
-#[allow(clippy::too_many_arguments)]
-pub fn apply_k_write_cache(
-    ctx: &CudaContext,
-    input: &crate::CudaBuffer,
-    cache: &crate::CudaBuffer,
-    head_dim: usize,
-    kv_heads: usize,
-    max_seq_len: usize,
-    theta: f32,
-    position: crate::CudaDeviceAddress,
-) -> Result<()> {
-    use crate::ffi::abi::rope as abi;
-    use crate::ops::validation::{
-        check_cuda, checked_bytes, require_address, require_buffers, require_finite,
-    };
-    require_finite("RoPE K write", &[theta])?;
-    require_buffers(
-        ctx,
-        "RoPE K write",
-        &[
-            (
-                "input",
-                input,
-                checked_bytes(DType::BF16, &[kv_heads, head_dim], "RoPE K write")?,
-            ),
-            (
-                "cache",
-                cache,
-                checked_bytes(
-                    DType::BF16,
-                    &[kv_heads, max_seq_len, head_dim],
-                    "RoPE K write",
-                )?,
-            ),
-        ],
-    )?;
-    require_address(ctx, "RoPE K write", "position", position, 4)?;
-    check_cuda(unsafe {
-        abi::apxinf_rope_fixed_decode_k_write_bf16(
-            input.ptr(),
-            cache.ptr(),
-            head_dim as u32,
-            kv_heads as u32,
-            max_seq_len as u32,
-            theta,
-            position.ptr(),
             ctx.stream().handle(),
         )
     })

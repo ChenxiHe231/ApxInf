@@ -14,6 +14,7 @@ pub(crate) struct Spec {
     pub output_dtype: u32,
     pub quantization: u32,
     pub b_layout: u32,
+    pub numerics: u32,
     pub b_is_immutable: u32,
     pub a_alignment: u32,
     pub b_alignment: u32,
@@ -33,7 +34,6 @@ pub(crate) struct Spec {
     pub alpha_is_unit: u32,
     pub output_scale_is_unit: u32,
 }
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Bindings {
@@ -170,25 +170,3 @@ unsafe extern "C" {
         configuration: i32,
     ) -> i32;
 }
-
-mod fixed_launchers {
-    use std::ffi::c_void;
-
-    use crate::ffi::raw::cuda_runtime::{cudaError_t, cudaStream_t};
-
-    unsafe extern "C" {
-        pub(crate) fn apxinf_gemm_cutlass_int8_gemm_bias_gelu_bf16_m41_n6144_k1536(
-            activation: *const c_void,
-            weight_output_major: *const c_void,
-            row_scales: *const c_void,
-            column_scales: *const c_void,
-            bias: *const c_void,
-            output: *mut c_void,
-            m: i32,
-            n: i32,
-            k: i32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-    }
-}
-pub(crate) use fixed_launchers::*;

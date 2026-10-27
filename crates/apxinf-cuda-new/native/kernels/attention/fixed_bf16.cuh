@@ -1,25 +1,13 @@
 // Copyright 2026 ApxInf contributors.
 // Fixed implementation for this operator family; ported without numerical changes.
-#include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
-#include <mma.h>
 
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <limits>
 
 namespace {
-#include "../custom/gdn_policy.h"
-#include "../custom/math.cuh"
 #include "../custom/reduction.cuh"
-#include "../custom/pillow_bicubic_u8.cuh"
-#include "../custom/linear_attention.cuh"
-#include "../custom/gdn_raw_inverse_f1.cuh"
-#include "../custom/gdn_chunk_state_wmma.cuh"
-#include "../custom/gdn_chunk_gemm_tri.cuh"
 __global__ void row_softmax_f32_bf16_kernel(
     const float* input, __nv_bfloat16* output, uint32_t cols, uint32_t rows) {
   const uint32_t row = blockIdx.x;

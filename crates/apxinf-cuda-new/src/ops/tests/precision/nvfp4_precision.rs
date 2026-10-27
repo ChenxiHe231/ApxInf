@@ -114,15 +114,27 @@ fn packed_scale_tensor(
     let device = ctx.device_id();
     let blocks = k / block_size as usize;
     let source = bytes_tensor(device, vec![rows, blocks], DType::F8E4M3, codes);
-    let bytes = crate::ops::nvfp4_scale_buffer_bytes(rows, k, block_size)?;
+    let bytes = crate::ops::block_scale_buffer_bytes(rows, k, block_size)?;
     let destination = zeros_tensor(device, vec![bytes], DType::F8E4M3);
-    crate::ops::nvfp4_pack_block_scales(ctx, &source, &destination, rows, k, block_size)?;
+    crate::ops::pack_block_scales(
+        ctx,
+        crate::ops::PackBlockScalesArgs {
+            source: &source,
+            output: &destination,
+            rows,
+            k,
+            block_size,
+        },
+    )?;
     ctx.synchronize().map_err(apxinf_core::Error::Cuda)?;
     Ok(destination)
 }
 
 #[test]
 fn nvfp4_all_candidates_match_reference() {
+    if CudaContext::new(0).unwrap().caps().sm < 100 {
+        return;
+    }
     for rows in [1, 63, 128, 256] {
         nvfp4_candidates_match_reference_for_rows(rows);
     }
@@ -165,7 +177,8 @@ fn nvfp4_candidates_match_reference_for_rows(m: usize) {
     }
 
     let mut out = zeros_tensor(device, vec![m, n], DType::BF16);
-    let mut args = GemmArgs::nvfp4(&a, &a_scales, &b, &b_scales, block_size, alpha, &mut out);
+    let mut args =
+        GemmArgs::block_quantized(&a, &a_scales, &b, &b_scales, block_size, alpha, &mut out);
     args.policy.allow_fallback = false;
     args.policy.graph_safe = true;
     validate_all_candidates(&ctx, args, None, &expected).unwrap();
@@ -174,6 +187,9 @@ fn nvfp4_candidates_match_reference_for_rows(m: usize) {
 #[test]
 fn nvfp4_rejects_operands_that_are_not_packed_fp4() {
     let ctx = CudaContext::new(0).unwrap();
+    if ctx.caps().sm < 100 {
+        return;
+    }
     let device = ctx.device_id();
     let (m, n, k, block_size) = (64usize, 64usize, 128usize, 16u32);
     let blocks = k / block_size as usize;
@@ -190,13 +206,16 @@ fn nvfp4_rejects_operands_that_are_not_packed_fp4() {
     let b_scales = packed_scale_tensor(&ctx, &b_scale_codes, n, k, block_size).unwrap();
     let mut out = zeros_tensor(device, vec![m, n], DType::BF16);
 
-    let args = GemmArgs::nvfp4(&a, &a_scales, &b, &b_scales, block_size, 1.0, &mut out);
+    let args = GemmArgs::block_quantized(&a, &a_scales, &b, &b_scales, block_size, 1.0, &mut out);
     assert!(crate::ops::gemm(&ctx, args).is_err());
 }
 
 #[test]
 fn nvfp4_scale_saturates_to_finite_e4m3() {
     let ctx = CudaContext::new(0).unwrap();
+    if ctx.caps().sm < 100 {
+        return;
+    }
     let device = ctx.device_id();
     let scales = [0.0f32, 1.0, 416.0, 448.0, 464.0, 480.0, 512.0, 65536.0];
     let expected = [0x00u8, 0x38, 0x7d, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e];
@@ -216,14 +235,16 @@ fn nvfp4_scale_saturates_to_finite_e4m3() {
     let activation = tensor(device, vec![1, width], &input);
     let packed = zeros_tensor(device, vec![1, width / 2], DType::E2M1Pair);
     let output_scales = zeros_tensor(device, vec![scales.len()], DType::F8E4M3);
-    crate::ops::nvfp4_quantize_activation(
+    crate::ops::block_quantize(
         &ctx,
-        &activation,
-        &packed,
-        &output_scales,
-        1.0,
-        16,
-        crate::ops::ScaleLayout::RowMajor,
+        crate::ops::BlockQuantizationArgs::activation(
+            &activation,
+            &packed,
+            &output_scales,
+            1.0,
+            16,
+            crate::ops::ScaleLayout::RowMajor,
+        ),
     )
     .unwrap();
     ctx.synchronize().unwrap();
@@ -294,7 +315,7 @@ fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
         ..GemmPolicy::default()
     };
     {
-        let mut args = GemmArgs::nvfp4(
+        let mut args = GemmArgs::block_quantized(
             &activation,
             &first_scales,
             &weights,
@@ -312,7 +333,7 @@ fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
     let session = ExecutionSession::with_capacity(1, 0).unwrap();
     super::execution::reset_execution_create_count();
     prepare_with_session(&session, || {
-        let mut args = GemmArgs::nvfp4(
+        let mut args = GemmArgs::block_quantized(
             &activation,
             &first_scales,
             &weights,
@@ -328,7 +349,7 @@ fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
     ctx.synchronize().unwrap();
     assert_eq!(values(&output), vec![512.0; rows * columns]);
     let missing_binding = with_session(&session, || {
-        let mut args = GemmArgs::nvfp4(
+        let mut args = GemmArgs::block_quantized(
             &activation,
             &second_scales,
             &weights,
@@ -342,7 +363,7 @@ fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
     });
     assert!(missing_binding.is_err());
     prepare_with_session(&session, || {
-        let mut args = GemmArgs::nvfp4(
+        let mut args = GemmArgs::block_quantized(
             &activation,
             &second_scales,
             &weights,
@@ -356,7 +377,7 @@ fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
     })
     .unwrap();
     with_session(&session, || {
-        let mut args = GemmArgs::nvfp4(
+        let mut args = GemmArgs::block_quantized(
             &activation,
             &second_scales,
             &weights,
@@ -373,7 +394,7 @@ fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
     assert_eq!(values(&output), vec![1024.0; rows * columns]);
     assert_eq!(super::execution::execution_create_count(), 2);
     prepare_with_session(&session, || {
-        let mut args = GemmArgs::nvfp4(
+        let mut args = GemmArgs::block_quantized(
             &activation,
             &first_scales,
             &weights,
@@ -389,7 +410,7 @@ fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
     assert_eq!(super::execution::execution_create_count(), 2);
     let graph = crate::capture(&ctx, || {
         with_session(&session, || {
-            let mut args = GemmArgs::nvfp4(
+            let mut args = GemmArgs::block_quantized(
                 &activation,
                 &first_scales,
                 &weights,
@@ -413,7 +434,17 @@ fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
         DType::F8E4M3,
         &vec![0x44; rows * reduction / 16],
     );
-    crate::ops::nvfp4_pack_block_scales(&ctx, &source, &first_scales, rows, reduction, 16).unwrap();
+    crate::ops::pack_block_scales(
+        &ctx,
+        crate::ops::PackBlockScalesArgs {
+            source: &source,
+            output: &first_scales,
+            rows,
+            k: reduction,
+            block_size: 16,
+        },
+    )
+    .unwrap();
     graph.replay().unwrap();
     ctx.synchronize().unwrap();
     assert_eq!(values(&output), vec![1536.0; rows * columns]);
@@ -421,12 +452,15 @@ fn nvfp4_cublaslt_rebinds_scales_and_retains_graph_resources() {
 
 #[test]
 fn nvfp4_scale_buffer_is_padded_beyond_the_checkpoint_layout() {
+    if CudaContext::new(0).unwrap().caps().sm < 100 {
+        return;
+    }
     // The kernel's atom layout pads the logical [rows, K/block] grid, so a
     // loader that sizes its buffer as rows*K/block would overrun. Pin that the
     // queried size is the larger one.
     let (rows, k, block_size) = (17408usize, 5120usize, 16u32);
     let logical = rows * (k / block_size as usize);
-    let actual = crate::ops::nvfp4_scale_buffer_bytes(rows, k, block_size).unwrap();
+    let actual = crate::ops::block_scale_buffer_bytes(rows, k, block_size).unwrap();
     assert!(
         actual >= logical,
         "atom layout {actual} must not be smaller than the logical grid {logical}"
@@ -440,6 +474,9 @@ fn quantized_activation_reproduces_the_bf16_projection() {
     // the NVFP4 GEMM, against the same projection computed in f64 from the
     // unquantized BF16 values.
     let ctx = CudaContext::new(0).unwrap();
+    if ctx.caps().sm < 100 {
+        return;
+    }
     let device = ctx.device_id();
     let (m, n, k, block_size) = (64usize, 128usize, 512usize, 16u32);
     let blocks = k / block_size as usize;
@@ -467,21 +504,23 @@ fn quantized_activation_reproduces_the_bf16_projection() {
     let input_scale = amax / (6.0 * 448.0);
 
     let packed = zeros_tensor(device, vec![m, k / 2], DType::E2M1Pair);
-    let scale_bytes = crate::ops::nvfp4_scale_buffer_bytes(m, k, block_size).unwrap();
+    let scale_bytes = crate::ops::block_scale_buffer_bytes(m, k, block_size).unwrap();
     let a_scales = zeros_tensor(device, vec![scale_bytes], DType::F8E4M3);
-    crate::ops::nvfp4_quantize_activation(
+    crate::ops::block_quantize(
         &ctx,
-        &activation,
-        &packed,
-        &a_scales,
-        input_scale,
-        block_size,
-        crate::ops::ScaleLayout::GemmAtom,
+        crate::ops::BlockQuantizationArgs::activation(
+            &activation,
+            &packed,
+            &a_scales,
+            input_scale,
+            block_size,
+            crate::ops::ScaleLayout::GemmAtom,
+        ),
     )
     .unwrap();
 
     let mut out = zeros_tensor(device, vec![m, n], DType::BF16);
-    let args = GemmArgs::nvfp4(
+    let args = GemmArgs::block_quantized(
         &packed,
         &a_scales,
         &b,
@@ -554,6 +593,9 @@ fn nvfp4_gemv_matches_the_block_scaled_gemm() {
     // rather than the kernel's atom layout, so this covers that difference
     // too: both sides are fed from the same checkpoint-order bytes.
     let ctx = CudaContext::new(0).unwrap();
+    if ctx.caps().sm < 100 {
+        return;
+    }
     let device = ctx.device_id();
     let (n, k, block_size) = (512usize, 512usize, 16u32);
     let blocks = k / block_size as usize;
@@ -573,7 +615,7 @@ fn nvfp4_gemv_matches_the_block_scaled_gemm() {
     let mut gemm_out = zeros_tensor(device, vec![1, n], DType::BF16);
     crate::ops::gemm(
         &ctx,
-        GemmArgs::nvfp4(&a, &a_atom, &b, &b_atom, block_size, alpha, &mut gemm_out),
+        GemmArgs::block_quantized(&a, &a_atom, &b, &b_atom, block_size, alpha, &mut gemm_out),
     )
     .unwrap();
 
@@ -581,7 +623,21 @@ fn nvfp4_gemv_matches_the_block_scaled_gemm() {
     let a_rows = bytes_tensor(device, vec![1, blocks], DType::F8E4M3, &a_scale_codes);
     let b_rows = bytes_tensor(device, vec![n, blocks], DType::F8E4M3, &b_scale_codes);
     let gemv_out = zeros_tensor(device, vec![n], DType::BF16);
-    crate::ops::nvfp4_gemv(&ctx, &b, &b_rows, &a, &a_rows, &gemv_out, alpha).unwrap();
+    crate::ops::gemv(
+        &ctx,
+        crate::ops::GemvArgs {
+            weight: &b,
+            activation: &a,
+            output: &gemv_out,
+            block_scales: Some(crate::ops::GemvBlockScales {
+                weight: &b_rows,
+                activation: &a_rows,
+                block_size,
+            }),
+            alpha,
+        },
+    )
+    .unwrap();
     ctx.synchronize().map_err(apxinf_core::Error::Cuda).unwrap();
 
     let from_gemm = values(&gemm_out);

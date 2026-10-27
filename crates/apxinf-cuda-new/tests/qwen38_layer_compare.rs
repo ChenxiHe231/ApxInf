@@ -8,9 +8,9 @@
 //! `scripts/compare.py` then reports cosine and relative L2 per tensor and
 //! flags the first divergence.
 //!
-//! Deliberately unfused: `rms_norm` + `nvfp4_quantize_activation` + `gemm`
-//! rather than `nvfp4_quantize_rms_norm`, and `swiglu` + separate quantize
-//! rather than `nvfp4_quantize_swiglu`. The fused kernels skip a BF16 rounding
+//! Deliberately unfused: `rms_norm` + activation block quantization + `gemm`
+//! rather than fused RMSNorm block quantization, and `swiglu` + separate
+//! quantization rather than fused SwiGLU block quantization. The fused kernels skip a BF16 rounding
 //! the reference performs; this establishes the unfused baseline.
 //!
 //! ```text
@@ -96,9 +96,19 @@ struct Nvfp4Weight {
 }
 
 fn relayout(ctx: &CudaContext, source: &Tensor, rows: usize, k: usize) -> Tensor {
-    let bytes = ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap();
+    let bytes = ops::block_scale_buffer_bytes(rows, k, BLOCK).unwrap();
     let destination = zeros(ctx, vec![bytes], DType::F8E4M3);
-    ops::nvfp4_pack_block_scales(ctx, source, &destination, rows, k, BLOCK).unwrap();
+    ops::pack_block_scales(
+        ctx,
+        ops::PackBlockScalesArgs {
+            source,
+            output: &destination,
+            rows,
+            k,
+            block_size: BLOCK,
+        },
+    )
+    .unwrap();
     destination
 }
 
@@ -505,7 +515,17 @@ fn fp8_projection(
     output: &mut Tensor,
 ) {
     ops::quantize_per_tensor(ctx, source, quantized, weight.input_scale).unwrap();
-    ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha).unwrap();
+    ops::gemv(
+        ctx,
+        ops::GemvArgs {
+            weight: &weight.weight,
+            activation: quantized,
+            output,
+            block_scales: None,
+            alpha: weight.alpha,
+        },
+    )
+    .unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -647,28 +667,28 @@ fn unfused_mlp(
     dump: &mut RefDump,
     names: (&str, &str, &str, &str, &str, &str),
 ) {
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        norm_weight,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(&scratch.hidden, norm_weight, &scratch.normalized, EPSILON)
+            .with_weight_offset(),
     )
     .unwrap();
     dump.push_bf16(ctx, names.0, &scratch.normalized, HIDDEN);
-    ops::nvfp4_quantize_activation(
+    ops::block_quantize(
         ctx,
-        &scratch.normalized,
-        &scratch.nvfp4_activation,
-        &scratch.nvfp4_scales,
-        gate_up.input_scale,
-        BLOCK,
-        ops::ScaleLayout::GemmAtom,
+        ops::BlockQuantizationArgs::activation(
+            &scratch.normalized,
+            &scratch.nvfp4_activation,
+            &scratch.nvfp4_scales,
+            gate_up.input_scale,
+            BLOCK,
+            ops::ScaleLayout::GemmAtom,
+        ),
     )
     .unwrap();
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.nvfp4_activation,
             &scratch.nvfp4_scales,
             &gate_up.packed,
@@ -699,19 +719,21 @@ fn unfused_mlp(
 
     ops::swiglu_into(ctx, &scratch.mlp_fused, swiglu_out).unwrap();
     dump.push_bf16(ctx, names.3, swiglu_out, INTERMEDIATE);
-    ops::nvfp4_quantize_activation(
+    ops::block_quantize(
         ctx,
-        swiglu_out,
-        &scratch.mlp_activation,
-        &scratch.mlp_scales,
-        down.input_scale,
-        BLOCK,
-        ops::ScaleLayout::GemmAtom,
+        ops::BlockQuantizationArgs::activation(
+            swiglu_out,
+            &scratch.mlp_activation,
+            &scratch.mlp_scales,
+            down.input_scale,
+            BLOCK,
+            ops::ScaleLayout::GemmAtom,
+        ),
     )
     .unwrap();
     ops::gemm(
         ctx,
-        ops::GemmArgs::nvfp4(
+        ops::GemmArgs::block_quantized(
             &scratch.mlp_activation,
             &scratch.mlp_scales,
             &down.packed,
@@ -763,7 +785,7 @@ struct Scratch {
 impl Scratch {
     fn new(ctx: &CudaContext) -> Scratch {
         let scale_bytes =
-            |rows: usize, k: usize| vec![ops::nvfp4_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
+            |rows: usize, k: usize| vec![ops::block_scale_buffer_bytes(rows, k, BLOCK).unwrap()];
         Scratch {
             hidden: zeros(ctx, vec![1, HIDDEN], DType::BF16),
             normalized: zeros(ctx, vec![1, HIDDEN], DType::BF16),
@@ -808,12 +830,15 @@ fn gdn_reference_step(
     dump: &mut RefDump,
 ) {
     dump.push_bf16(ctx, "l0_00_hidden_in", &scratch.hidden, HIDDEN);
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        &gdn.input_norm,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(
+            &scratch.hidden,
+            &gdn.input_norm,
+            &scratch.normalized,
+            EPSILON,
+        )
+        .with_weight_offset(),
     )
     .unwrap();
     dump.push_bf16(ctx, "l0_01_input_layernorm", &scratch.normalized, HIDDEN);
@@ -864,12 +889,14 @@ fn gdn_reference_step(
 
     ops::gdn_decay_and_beta(
         ctx,
-        &scratch.gdn_a,
-        &scratch.gdn_b,
-        &gdn.a_log,
-        &gdn.dt_bias,
-        &scratch.gdn_decay,
-        &scratch.gdn_beta,
+        ops::GdnDecayAndBetaArgs {
+            a: &scratch.gdn_a,
+            b: &scratch.gdn_b,
+            a_log: &gdn.a_log,
+            dt_bias: &gdn.dt_bias,
+            decay: &scratch.gdn_decay,
+            beta: &scratch.gdn_beta,
+        },
     )
     .unwrap();
     dump.push_f32(ctx, "l0_10_g_log_decay", &scratch.gdn_decay, GDN_V_HEADS);
@@ -904,11 +931,14 @@ fn gdn_reference_step(
 
     ops::gdn_gated_norm(
         ctx,
-        &scratch.gdn_readout,
-        &gdn_z_heads(&scratch.gdn_z),
-        &gdn.norm_weight,
-        &scratch.gdn_gated,
-        EPSILON,
+        ops::GdnGatedNormArgs {
+            input: &scratch.gdn_readout,
+            gate: ops::GdnGate::Dense(&gdn_z_heads(&scratch.gdn_z)),
+            weight: &gdn.norm_weight,
+            output: &scratch.gdn_gated,
+            quantized: None,
+            epsilon: EPSILON,
+        },
     )
     .unwrap();
     dump.push_bf16(ctx, "l0_17_gated_rmsnorm", &scratch.gdn_gated, Z_WIDTH);
@@ -956,12 +986,15 @@ fn attention_reference_step(
     dump: &mut RefDump,
 ) {
     dump.push_bf16(ctx, "l3_00_hidden_in", &scratch.hidden, HIDDEN);
-    ops::norm::rms_norm_weight_offset(
+    ops::norm::norm(
         ctx,
-        &scratch.hidden,
-        &attention.input_norm,
-        &scratch.normalized,
-        EPSILON,
+        ops::NormArgs::rms(
+            &scratch.hidden,
+            &attention.input_norm,
+            &scratch.normalized,
+            EPSILON,
+        )
+        .with_weight_offset(),
     )
     .unwrap();
     dump.push_bf16(ctx, "l3_01_input_layernorm", &scratch.normalized, HIDDEN);
@@ -1014,8 +1047,17 @@ fn attention_reference_step(
 
     let key_heads = cache_slot(&cache.keys, position, vec![KV_HEADS, HEAD_DIM]);
     let query_heads = view(&scratch.query, vec![HEADS, HEAD_DIM], DType::BF16);
-    ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, EPSILON).unwrap();
-    ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, EPSILON).unwrap();
+    ops::norm::norm(
+        ctx,
+        ops::NormArgs::rms(&query_heads, &attention.q_norm, &query_heads, EPSILON)
+            .with_weight_offset(),
+    )
+    .unwrap();
+    ops::norm::norm(
+        ctx,
+        ops::NormArgs::rms(&key_heads, &attention.k_norm, &key_heads, EPSILON).with_weight_offset(),
+    )
+    .unwrap();
     dump.push_bf16(ctx, "l3_06_q_norm", &scratch.query, HEADS * HEAD_DIM);
     dump.push_bf16(ctx, "l3_06_k_norm", &key_slot, KV_HEADS * HEAD_DIM);
     dump.push_bf16(ctx, "l3_06_v_states", &value_slot, KV_HEADS * HEAD_DIM);
@@ -1056,7 +1098,11 @@ fn attention_reference_step(
     );
 
     let gate_flat = view(&scratch.query_gate, vec![1, HEADS * HEAD_DIM], DType::BF16);
-    ops::apply_output_gate(ctx, &scratch.attention_out, &gate_flat).unwrap();
+    ops::apply_output_gate(
+        ctx,
+        ops::OutputGateArgs::new(&scratch.attention_out, &gate_flat),
+    )
+    .unwrap();
     dump.push_bf16(
         ctx,
         "l3_10_attn_gated",

@@ -386,6 +386,9 @@ fn profile_pi05_f16_attention_shapes() {
 #[test]
 fn attention_f16_mqa_522_uses_direct_e4m3_fa2() {
     let ctx = CudaContext::new(0).unwrap();
+    if ctx.caps().sm < 100 {
+        return;
+    }
     let (batch, tokens, query_heads, kv_heads, head_dim) = (1, 522, 8, 1, 256);
     let query_shape = vec![batch, tokens, query_heads, head_dim];
     let kv_shape = vec![batch, tokens, kv_heads, head_dim];
@@ -495,7 +498,7 @@ fn gemm_all_candidates_match_torch() {
     let row_scales = scales(0, f::ROW_SCALES);
     let channel_scales = scales(0, f::CHANNEL_SCALES);
     let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
-    let mut args = GemmArgs::fp8(&a, &row_scales, &b, &channel_scales, &mut out);
+    let mut args = GemmArgs::row_channel_quantized(&a, &row_scales, &b, &channel_scales, &mut out);
     configure_torch_case(&mut args, f::FP8_SCALED_ALPHA, f::FP8_SCALED_OUTPUT_SCALE);
     validate_all_candidates(
         &ctx,
@@ -512,7 +515,7 @@ fn gemm_all_candidates_match_torch() {
     let row_scales = scales(0, f::ROW_SCALES);
     let channel_scales = scales(0, f::CHANNEL_SCALES);
     let mut out = zeros_tensor(0, vec![f::M, f::N], DType::BF16);
-    let mut args = GemmArgs::w8a8(&a, &row_scales, &b, &channel_scales, &mut out);
+    let mut args = GemmArgs::row_channel_quantized(&a, &row_scales, &b, &channel_scales, &mut out);
     configure_torch_case(&mut args, f::W8A8_ALPHA, f::W8A8_OUTPUT_SCALE);
     validate_all_candidates(
         &ctx,
@@ -551,7 +554,7 @@ fn gemm_bias_all_candidates_match_torch() {
     let row_scales = scales(0, f::ROW_SCALES);
     let channel_scales = scales(0, f::CHANNEL_SCALES);
     let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
-    let mut args = GemmArgs::fp8(&a, &row_scales, &b, &channel_scales, &mut out);
+    let mut args = GemmArgs::row_channel_quantized(&a, &row_scales, &b, &channel_scales, &mut out);
     configure_torch_case(&mut args, f::FP8_SCALED_ALPHA, f::FP8_SCALED_OUTPUT_SCALE);
     validate_all_candidates(
         &ctx,
@@ -569,7 +572,7 @@ fn gemm_bias_all_candidates_match_torch() {
     let row_scales = scales(0, f::ROW_SCALES);
     let channel_scales = scales(0, f::CHANNEL_SCALES);
     let mut out = zeros_tensor(0, vec![f::M, f::N], DType::BF16);
-    let mut args = GemmArgs::w8a8(&a, &row_scales, &b, &channel_scales, &mut out);
+    let mut args = GemmArgs::row_channel_quantized(&a, &row_scales, &b, &channel_scales, &mut out);
     configure_torch_case(&mut args, f::W8A8_ALPHA, f::W8A8_OUTPUT_SCALE);
     validate_all_candidates(
         &ctx,
@@ -608,7 +611,7 @@ fn gemm_bias_gelu_all_candidates_match_torch() {
     let row_scales = scales(0, f::ROW_SCALES);
     let channel_scales = scales(0, f::CHANNEL_SCALES);
     let mut out = zeros_tensor(0, vec![f::M, f::N], DType::F32);
-    let mut args = GemmArgs::fp8(&a, &row_scales, &b, &channel_scales, &mut out);
+    let mut args = GemmArgs::row_channel_quantized(&a, &row_scales, &b, &channel_scales, &mut out);
     configure_torch_case(&mut args, f::FP8_SCALED_ALPHA, f::FP8_SCALED_OUTPUT_SCALE);
     validate_all_candidates(
         &ctx,

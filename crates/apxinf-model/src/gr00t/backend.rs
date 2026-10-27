@@ -8,5 +8,6 @@ pub(crate) use crate::accelerator::downcast_cuda_new_arc as downcast_arc;
 pub(crate) use apxinf_cuda_new::CudaNewBackend as CudaBackend;
 #[cfg(feature = "cuda")]
 pub(crate) use apxinf_cuda_new::{
-    ops, transfers, CudaBuffer as DeviceBuffer, CudaNewBackend as RuntimeBackend,
+    ops, transfers, CudaBuffer as DeviceBuffer, CudaContext as Context,
+    CudaNewBackend as RuntimeBackend,
 };

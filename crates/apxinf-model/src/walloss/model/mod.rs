@@ -76,10 +76,7 @@ pub(super) struct WallossSchedule {
 }
 
 impl WallossSchedule {
-    pub(super) fn new(
-        config: &WallossConfig,
-        backend: &RuntimeBackend,
-    ) -> Result<Self> {
+    pub(super) fn new(config: &WallossConfig, backend: &RuntimeBackend) -> Result<Self> {
         let steps = config.action.solver_steps;
         let times = solver_times(steps, config.action.scheduler_s, 1.0)?;
         let action_tokens = config.action.action_horizon;
@@ -196,20 +193,29 @@ impl WallossModel {
         let image_processor = self.image_processor.as_ref().ok_or_else(|| {
             Error::Other("walloss RGB input requires checkpoint preprocessor_config.json".into())
         })?;
-        ops::preprocess::rgb_u8_to_normalized_temporal_merged_patches(
+        ops::preprocess::preprocess(
             self.backend.context(),
-            raw_images,
-            patches,
-            views.views,
-            views.grid_h * self.config.vision.patch_size,
-            views.grid_w * self.config.vision.patch_size,
-            self.config.vision.patch_size,
-            self.config.vision.temporal_patch_size,
-            self.config.vision.spatial_merge_size,
-            kernel_image_layout(layout),
-            image_processor.rescale_factor,
-            image_processor.image_mean,
-            image_processor.image_std,
+            ops::preprocess::PreprocessArgs {
+                images: raw_images,
+                patches,
+                lookup_table: None,
+                spec: ops::preprocess::PreprocessSpec {
+                    layout: kernel_image_layout(layout),
+                    geometry: ops::preprocess::PatchGeometry::Uniform {
+                        views: views.views,
+                        image_height: views.grid_h * self.config.vision.patch_size,
+                        image_width: views.grid_w * self.config.vision.patch_size,
+                        patch_size: self.config.vision.patch_size,
+                        temporal_patch_size: self.config.vision.temporal_patch_size,
+                        merge_size: self.config.vision.spatial_merge_size,
+                    },
+                    normalization: ops::preprocess::PatchNormalization::MeanStd {
+                        rescale_factor: image_processor.rescale_factor,
+                        image_mean: image_processor.image_mean,
+                        image_std: image_processor.image_std,
+                    },
+                },
+            },
         )
     }
 
@@ -403,20 +409,29 @@ mod tests {
     const MERGE: usize = 2;
 
     fn preprocess(backend: &RuntimeBackend, input: &DeviceBuffer, output: &Tensor) {
-        ops::preprocess::rgb_u8_to_normalized_temporal_merged_patches(
+        ops::preprocess::preprocess(
             backend.context(),
-            input,
-            output,
-            VIEWS,
-            HEIGHT,
-            WIDTH,
-            PATCH,
-            TEMPORAL,
-            MERGE,
-            ops::preprocess::ImageLayout::Nhwc,
-            1.0 / 255.0,
-            [0.481_454_66, 0.457_827_5, 0.408_210_72],
-            [0.268_629_55, 0.261_302_6, 0.275_777_1],
+            ops::preprocess::PreprocessArgs {
+                images: input,
+                patches: output,
+                lookup_table: None,
+                spec: ops::preprocess::PreprocessSpec {
+                    layout: ops::preprocess::ImageLayout::Nhwc,
+                    geometry: ops::preprocess::PatchGeometry::Uniform {
+                        views: VIEWS,
+                        image_height: HEIGHT,
+                        image_width: WIDTH,
+                        patch_size: PATCH,
+                        temporal_patch_size: TEMPORAL,
+                        merge_size: MERGE,
+                    },
+                    normalization: ops::preprocess::PatchNormalization::MeanStd {
+                        rescale_factor: 1.0 / 255.0,
+                        image_mean: [0.481_454_66, 0.457_827_5, 0.408_210_72],
+                        image_std: [0.268_629_55, 0.261_302_6, 0.275_777_1],
+                    },
+                },
+            },
         )
         .unwrap();
     }
@@ -434,7 +449,9 @@ mod tests {
             .to_device(&Tensor::zeros((rows, width), DType::BF16))
             .unwrap();
         let first = (0..bytes).map(|i| (i * 17 % 256) as u8).collect::<Vec<_>>();
-        let changed = (0..bytes).map(|i| (255 - i * 29 % 256) as u8).collect::<Vec<_>>();
+        let changed = (0..bytes)
+            .map(|i| (255 - i * 29 % 256) as u8)
+            .collect::<Vec<_>>();
         let eager = |data: &[u8]| {
             input.copy_from_host(data).unwrap();
             preprocess(&backend, &input, &output);
@@ -453,9 +470,15 @@ mod tests {
             backend.synchronize().unwrap();
             backend.to_cpu(&output).unwrap()
         };
-        assert_eq!(replay(&first).as_bf16().unwrap(), expected_first.as_bf16().unwrap());
+        assert_eq!(
+            replay(&first).as_bf16().unwrap(),
+            expected_first.as_bf16().unwrap()
+        );
         let actual = replay(&changed);
-        assert_eq!(actual.as_bf16().unwrap(), expected_changed.as_bf16().unwrap());
+        assert_eq!(
+            actual.as_bf16().unwrap(),
+            expected_changed.as_bf16().unwrap()
+        );
         assert_ne!(actual.as_bf16().unwrap(), expected_first.as_bf16().unwrap());
     }
 }

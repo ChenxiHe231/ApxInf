@@ -4,6 +4,25 @@
 > Public API listing: `doc/cuda-new-api.md`;
 > English contract: `crates/apxinf-cuda-new/README.md`; tunable operator catalog: `cuda-operator.md`.
 
+## Migration status
+
+This document defines the target architecture. The implementation is still being
+converged toward it; `plan.md` is the authoritative completed/partial/remaining
+checklist. In particular, `ops::fused` has been removed and model entry points now
+go through `ops`, while legacy dtype/layout/shape-named L3 wrappers remain as an
+explicit shrinking allowlist.
+
+The architecture guard is intentionally CUDA-build independent:
+
+```bash
+python3 scripts/check_cuda_new_architecture.py          # CI checks
+python3 scripts/check_cuda_new_architecture.py --list   # public src/ops inventory
+```
+
+It rejects new forbidden L3 names, model-layer calls into cuda-new FFI, and CUDA
+kernel definitions in adapters. Passing the guard means no new layering debt was
+introduced; it does not mean every existing item in `plan.md` is complete.
+
 Contents:
 
 1. Choosing how to add an operator (§1) — **read this first**
@@ -83,8 +102,9 @@ BAD    mlp.rs  attn_ops.rs  model.rs       ← named after a call site
 A file named after a call site becomes a junk drawer: the next model's RMSNorm
 lands in it instead of in the norm family, and the same mathematical semantic ends
 up implemented twice. That is not a hypothetical — `ops::mlp::rms_norm` and
-`ops::rms_norm` coexisted for exactly this reason until they were merged, and
-`gdn_widen_f16_to_bf16` still duplicates `QuantizationSemantic::CastF16ToBf16`.
+`ops::rms_norm` coexisted for exactly this reason until they were merged, while
+the former `gdn_widen_f16_to_bf16` duplicate has since been removed in favor of
+`QuantizationSemantic::CastF16ToBf16`.
 
 The three names on the BAD line are kept as the worked example, not as a
 description of the tree: they held twelve operators from seven families and have
@@ -239,7 +259,7 @@ precision, and hardware.
 
 ### Semantics and candidates (`native/adapters/*/candidates.cpp`)
 
-GEMM family — 5 semantics, each an independent tuning domain:
+GEMM family — 6 semantics, each an independent tuning domain:
 
 | Semantic | Candidates | Fallback |
 |---|---|---|
@@ -248,6 +268,7 @@ GEMM family — 5 semantics, each an independent tuning domain:
 | `gemm_bias_gelu` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue` | cublas |
 | `gemm_bias_residual` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue` | cublas |
 | `gemm_geglu` | `cublas+custom-epilogue`, `cublasLt+custom-epilogue`, `cutlass-dual-geglu`, `cutlass-bf16-dual-geglu` | cublas |
+| `gemm_swiglu` | `cublas+rounded-swiglu`, `cublasLt+rounded-swiglu`, fixed SM110 CUTLASS when compiled | cublas |
 
 Attention family — 3 tuned semantics, each an independent tuning domain:
 
@@ -257,13 +278,11 @@ Attention family — 3 tuned semantics, each an independent tuning domain:
 | `kv_cache_attention` | `flash-attention-2-kv-cache`, `custom-kv-cache-attention` | custom |
 | `segmented_attention` | `custom-segmented-attention` | custom |
 
-There is a fourth, `packed_qkv`. Mathematically it is the dense semantic over a
-packed QKV buffer — a storage layout, which by §1.1 is a field — but it is wired
-as a full semantic: `SEMANTIC_PACKED_QKV = 3`, a crate-root `pub fn
-packed_qkv_attention`, its own `normalize_packed_qkv`, and its own
-`packed_qkv_entries` registry in `attention/candidates.cpp`, i.e. a fourth
-independent tuning domain. Recorded as debt; it is also absent from
-`cuda-operator.md`.
+Packed QKV is part of the dense `attention` semantic. `AttentionInput::PackedQkv`
+describes the storage layout and static Q/K/V offsets; normalization produces the
+same dense semantic and tuning key as separate Q/K/V tensors. Providers decide
+support from the layout binding, so packed FA2 shares the dense candidate registry
+and recipe domain rather than maintaining a fourth semantic.
 
 Not every candidate is compiled into every binary: CUTLASS / FA2 candidates are only
 registered when the corresponding build target is enabled (e.g.
@@ -273,7 +292,7 @@ hardware features it needs; selection compares them against the current device's
 Registry construction asserts that each semantic has exactly one fallback.
 
 > **Note — the epilogue axis applies here too, and is not yet factored out.**
-> The five GEMM semantics differ only in their epilogue: add bias, then GELU, then
+> The six GEMM semantics differ only in their epilogue: add bias, then GELU, then
 > a residual, or split `B` in half for GeGLU. The `A@B` body is identical. By §1.1
 > that is the *second* axis, so by §4.3 it should be a field rather than five
 > names — and the cost of not doing so is visible in `candidates.cpp`, where the
@@ -374,17 +393,17 @@ error anywhere.
 Each predicate must be derived from the single field that decides it:
 
 ```text
-reads_weight     ⟸ affine_kind ∈ {weight, weight_offset}
-reads_norm_style ⟸ affine_kind == ada_scale_shift
+reads_weight     ⟸ affine_kind ∈ {weight, weighted_adaptive}
+reads_norm_style ⟸ affine_kind ∈ {adaptive, weighted_adaptive}
 reads_norm_bias  ⟸ norm_kind == layer
-writes_hidden    ⟸ semantic != norm             # fused_add_norm *and* residual_add
-reads_residual   ⟸ semantic != norm
+writes_hidden    ⟸ operation != norm             # fused_add_norm *and* residual_add
+reads_residual   ⟸ operation != norm
 quantizes_output ⟸ quant_kind != none
 ```
 
 Note what the first two lines are not: `affine_kind != none` would make the
 adaptive forms demand a `weight` binding they do not take, and
-`semantic == fused_add_norm` would null the only output `residual_add` has.
+`operation == fused_add_norm` would null the only output `residual_add` has.
 Each predicate reads the field that decides it and no coarser test.
 
 One field decides one predicate, on both sides, so the two sides cannot drift.
@@ -428,8 +447,15 @@ So the norm family is three entry points, not nine:
 | `fused_add_norm` | 2 (hidden + normalized) | the same, with a residual prologue |
 | `residual_add` | 1 | prologue only, no normalization |
 
-and the axes inside them are fields: `NormKind`, `Affine { offset }`,
-`Option<QuantOut>`, `Option<bias>`, `Option<gate>`, `BiasOrder`.
+and the axes inside them are fields: `NormKind`, `Affine` (including
+weight-offset and weighted-adaptive forms), `Option<QuantOut>`, `Option<bias>`,
+`Option<ResidualGate>`, `NormNumerics`, and `BiasOrder`.
+
+The common native Norm Spec is currently version 6. Planning-compatible
+weighted-adaptive and unit-offset-gate paths already share the formal L3
+entries, but still use preserved private launch ABIs internally. Consolidating
+those private launchers into the one family ABI is a cleanup/merge gate; it is
+not a reason to reintroduce public specialized names.
 
 `BiasOrder` deserves a note: `bias → round → residual` and `bias → residual → round`
 differ only in an intermediate BF16 rounding. That is not an implementation detail
@@ -538,55 +564,63 @@ one `launch(spec, bindings)`, N scattered validations become one `validate_spec`
 call sites change signature, and **no kernel is touched**. The kernel count and the
 arithmetic are unaffected — this shape question only concerns L3/L2/ABI/L1.
 
-The GDN family is past this threshold: `gdn_gated_norm` / `_seq` / `_seq_f16` /
-`_quantize` are four entry points for one semantic, differing in three axes that
-should be fields (tokens, input dtype, quantized output). Two pairs have already
-collapsed in practice without the ABI following: `gdn_chunk_scan` and
-`_interleaved` call the **same** C function with different strides, and the Rust
-layer already selects between `_seq` and `_seq_f16` with an `if dtype`.
+The GDN family is past this threshold. Its gated norm formerly exposed
+`gdn_gated_norm` / `_seq` / `_seq_f16` / `_quantize`; the Rust L3 surface now
+uses one `gdn_gated_norm(GdnGatedNormArgs)` entry whose tensor rank, input dtype,
+optional quantized output, and `GdnGate::{Dense, Strided}` carry those axes.
+Decay/beta preparation similarly
+uses one `gdn_decay_and_beta(GdnDecayAndBetaArgs)` entry and infers step versus
+sequence from rank. Chunk scan uses one `gdn_chunk_scan(GdnChunkScanArgs)` entry;
+`GdnChunkScanInput` carries split versus interleaved layout while geometry is
+inferred from tensors. All formal GDN semantics cross one versioned
+`apxinf_gdn_launch(runtime, spec, bindings)` family ABI; native dispatch still calls
+the preserved kernels with the same arithmetic and parameter order.
 
 ### 5.2 Catalog (L3 ↔ L1)
 
 | L3 (`src/ops/`) | L1 ABI | Description |
 |---|---|---|
 | **gdn.rs** (↔ `abi/gdn.rs` ↔ `kernels/custom/gdn_ops.cu`) | | GDN linear attention — past the §5.1 threshold |
-| `gdn_recurrent_step` | `apxinf_gdn_recurrent_step` | single-step decode recurrence |
-| `gdn_gated_norm` / `_seq` / `_seq_f16` | `apxinf_gdn_gated_norm*` | gated RMSNorm |
-| `gdn_gated_norm_quantize` | `apxinf_gdn_gated_norm_quantize` | gated norm + FP8 quantization |
-| `gdn_causal_conv_step` / `_forward` | `apxinf_gdn_causal_conv_*` | causal convolution |
-| `gdn_decay_and_beta` / `_seq` | `apxinf_gdn_decay_and_beta*` | decay coefficients |
-| `gdn_l2_normalize_heads` | `apxinf_gdn_l2_normalize_heads` | per-head L2 normalization of q/k |
-| `gdn_chunk_scan` / `_interleaved` | `apxinf_gdn_chunk_scan` | chunked scan (reference implementation) |
-| `gdn_prefill` | `apxinf_gdn_prefill` | batched prefill scan |
-| `gdn_prepare_prefill` / `gdn_conv_prepare` | `apxinf_gdn_*prepare*` | prefill input reordering |
-| `gdn_widen_f16_to_bf16` | `apxinf_gdn_widen_f16_to_bf16` | F16 → BF16; duplicates `QuantizationSemantic::CastF16ToBf16` |
-| **rope/partial.rs** (↔ `abi/rope.rs` ↔ `kernels/custom/rope_partial.cu`) | | |
+| `gdn_recurrent_step` | `apxinf_gdn_launch` | single-step decode recurrence |
+| `gdn_gated_norm(GdnGatedNormArgs)` | `apxinf_gdn_launch` | gated RMSNorm; rank, input dtype, dense/strided gate layout and optional quantized output are contract fields |
+| `gdn_causal_conv_step` / `_forward` | `apxinf_gdn_launch` | causal convolution |
+| `gdn_decay_and_beta(GdnDecayAndBetaArgs)` | `apxinf_gdn_launch` | decay coefficients; rank selects step or sequence |
+| `gdn_l2_normalize_heads` | `apxinf_gdn_launch` | per-head L2 normalization of q/k |
+| `gdn_chunk_scan(GdnChunkScanArgs)` | `apxinf_gdn_launch` | chunked scan; split/interleaved input is a layout binding |
+| `gdn_prefill` | `apxinf_gdn_launch` | batched prefill scan |
+| `gdn_prepare_prefill` / `gdn_conv_prepare` | `apxinf_gdn_launch` | prefill input reordering |
+| `quantization::cast` | `apxinf_quantization_launch` | F16 → BF16, BF16 → F32, or F32 → BF16 inferred from tensors |
+| **rope/** (↔ `abi/rope.rs` ↔ `adapters/rope/`) | | |
 | `partial_rope` | `apxinf_rope_partial` | in-place partial rotary embedding; the Spec semantics fuse a QKV split and write three outputs, this rotates one tensor |
+| `execute_batched` / `execute_mrope` / `apply_vision_2d` / `apply_half_split` | `apxinf_rope_launch` | standalone rotary embedding; dtype, position source, section layout and convention are Spec fields; preserved CUDA kernels remain private dispatch targets |
 | `rotary_dim` | — | host helper (§5.3) |
-| **norm/head.rs** (↔ `abi/norm.rs` ↔ `kernels/custom/norm_head.cu`) | | |
-| `head_rms_norm` | `apxinf_norm_head_rms` | per-head RMSNorm of q/k; in place, and the family's third reduction tree — see §4.1 |
+| **norm/** (↔ `abi/norm.rs` ↔ `adapters/norm/`) | | |
+| `norm(NormArgs::with_weight_offset())` | `apxinf_norm_launch` | `(1 + weight)` RMSNorm; an aliased input/output binding selects the preserved q/k head kernel behind the family dispatch |
 | **attention/gates.rs** (↔ `abi/attention.rs` ↔ `kernels/custom/attention_gates.cu`) | | |
-| `split_query_and_gate` | `apxinf_attention_split_query_and_gate` | q_proj output split |
-| `apply_output_gate` | `apxinf_attention_apply_output_gate` | sigmoid output gate; needs a quantization epilogue (§4.3) |
+| `split_query_and_gate` | `apxinf_attention_gate_launch` | q_proj output split; projection geometry is carried by the versioned gate Spec |
+| `apply_output_gate(OutputGateArgs)` | `apxinf_attention_gate_launch` | sigmoid output gate; dense/projection source and rounding policy are gate Spec fields; preserved kernels remain private dispatch targets |
+| **rope/qkv.rs** (↔ private `abi/rope.rs` launchers ↔ `adapters/rope/qkv_bf16.cu`) | | |
+| `split_qkv_cache(QkvCacheRopeArgs)` | `apxinf_rope_split_qkv_cache_bf16` | packed Q/G/K/V projection split, Q/K norm, partial RoPE and token-major cache write |
+| `split_grouped_qkv(GroupedQkvRopeArgs)` | `apxinf_rope_split_grouped_qkv_bf16` | group-major Q/G/K/V split, Q/K norm and partial RoPE |
 | **attention/kv_cache_attention.rs** | | |
 | `decode_attention` | `apxinf_decode_attention` | single-token decode, allocation-free |
 | **pointwise/elementwise.rs** (↔ `abi/pointwise.rs` ↔ `kernels/custom/pointwise_ops.cu`) | | |
 | `swiglu` | `apxinf_pointwise_swiglu` | SwiGLU; the SiLU-gated form, not `PointwiseSemantic::Geglu` |
 | `add_into` | `apxinf_pointwise_add_into` | residual accumulation |
 | **quantization/per_tensor.rs** (↔ `abi/quantization.rs` ↔ `kernels/custom/quantization_ops.cu`) | | |
-| `quantize_fp8_per_tensor` | `apxinf_quantization_fp8_per_tensor` | per-tensor FP8; same arithmetic as `FixedScaleE4m3` but 8-wide where that is scalar, and differs on NaN — merging is a measurement |
+| `quantize_fp8_per_tensor` | `apxinf_quantization_fp8_per_tensor` | per-tensor FP8; finite-domain arithmetic matches the independent RNE/SATFINITE oracle in scalar/vector/native-pair/tail modes, while NaN/Inf behavior differs from `FixedScaleE4m3`, so it remains a separate semantic |
 | **gemm/gemv.rs** (↔ `abi/gemm.rs` ↔ `kernels/custom/gemv.cu`) | | |
-| `fp8_gemv` / `nvfp4_gemv` | `apxinf_gemm_fp8_gemv` / `apxinf_gemm_nvfp4_gemv` | M=1 projections; GEMMs, but one implementation each, so no registry |
+| `gemv(GemvArgs)` | private `apxinf_gemm_*_gemv` launchers | M=1 projection; optional block-scale binding selects the preserved direct implementation, so no registry |
 | **gather/embedding.rs** (↔ `abi/gather.rs` ↔ `kernels/custom/gather_embedding.cu`) | | |
 | `embedding_gather` | `apxinf_gather_embedding` | plain BF16 row gather; **not** `GatherSemantic::EmbeddingLookup`, which always applies Gemma's `sqrt(cols)` scale and indexes with `u32` |
 | **sampling.rs** (↔ `abi/sampling.rs` ↔ `kernels/custom/sampling_argmax.cu`) | | |
 | `argmax` | `apxinf_sampling_argmax` | greedy selection; correctly fixed — no variants expected |
 | **crate-root `sampling.rs`** (↔ `raw/sampling.rs` ↔ `kernels/custom/sampling.cuh`) | | stateful samplers: workspace + device RNG |
 | `create_token_sampler` / `create_normal_generator` | `apxinf_sampling_sample_token` etc. | return `cudaError_t`, so they are declared through `raw/` rather than `abi/` — that split is the error convention, not an inconsistency |
-| **gemm/nvfp4_scales.rs** (↔ `abi/gemm.rs` ↔ `kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.cu`) | | |
-| `nvfp4_quantize_activation` / `_rms_norm` / `_swiglu` | `apxinf_gemm_nvfp4_quantize_*` | NVFP4 activation quantization; the `_rms_norm` / `_swiglu` forms are epilogues (§4.3) |
-| `nvfp4_pack_block_scales` | `apxinf_gemm_nvfp4_pack_block_scales` | block-scale layout |
-| `nvfp4_dense_swiglu_aot` | `apxinf_gemm_nvfp4_dense_swiglu_aot` | AOT fused FC1, specialized for M=2048 — the name carries both a build method and a shape, which §8.2 forbids; recorded debt |
+| **quantization/block.rs** (↔ private `gemm/nvfp4_scales.rs` ↔ `abi/gemm.rs` ↔ `kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.cu`) | | |
+| `block_quantize(BlockQuantizationArgs)` | private `apxinf_gemm_nvfp4_quantize_*` launchers | packed block quantization; activation, RMSNorm and SwiGLU producers are semantic variants, while the concrete format comes from tensors |
+| `pack_block_scales(PackBlockScalesArgs)` | `apxinf_gemm_nvfp4_pack_block_scales` | checkpoint-to-candidate block-scale layout conversion |
+| `gemm_swiglu(GemmSwiGluArgs::BlockQuantized)` | `apxinf_gemm_nvfp4_dense_swiglu_aot` | fixed fused FC1 implementation selected behind the existing GEMM semantic entry point; build method and shape stay private |
 
 The entries annotated "past the §5.1 threshold" are recorded debt, not precedent.
 New operators follow §1.3 and §5.1.
@@ -600,9 +634,9 @@ case the operator looked mergeable into an existing Spec and was not:
 
 | Looks like | Why it is not |
 |---|---|
-| `quantize_fp8_per_tensor` = `FixedScaleE4m3` | same arithmetic, but the family's BF16 path is scalar where this is 8-wide, and `fminf`/`fmaxf` clamping maps NaN to −448 instead of to the FP8 NaN encoding |
+| `quantize_fp8_per_tensor` = `FixedScaleE4m3` | exhaustive finite BF16 coverage proves scalar/vector/native-pair/tail parity, but all-NaN/Inf coverage still finds 254/256 differing codes (12/13 in the tail fixture); this is a real non-finite-value contract, not just vectorization |
 | `embedding_gather` = `EmbeddingLookup` | that semantic always multiplies by `sqrt(cols)`; dropping or adding the scale silently changes every embedding. Index dtype and out-of-range behaviour differ too |
-| `head_rms_norm` = `AFFINE_WEIGHT_OFFSET` | same `(1 + weight)` affine, but a third reduction order again (§4.1), and it writes in place over a rank-3 activation the `[rows, cols]` Spec cannot name |
+| `head_rms_norm` = `AFFINE_WEIGHT_OFFSET` | resolved: q/k callers expose a rank-2 `[rows, head_dim]` view and use `rms_norm_weight_offset` with aliased input/output; 128/256-wide fixtures are bit-identical to the out-of-place family path, while the original in-place kernel remains an internal candidate |
 | `swiglu` = `PointwiseSemantic::Geglu` | identical shapes and `PointwiseActivation::Silu` already exists, but `geglu` hard-codes `gelu_tanh` instead of calling `apply_activation` |
 
 Each of these is a field away from being real, and each needs a numerics gate
@@ -617,7 +651,7 @@ list.
 | `gdn_state_elements(v_heads, v_dim, k_dim)` | `gdn.rs` | state element count, pure arithmetic |
 | `gdn_prefill_workspace_bytes(v_heads, num_seqs)` | `gdn.rs` | prefill scratch bytes |
 | `decode_attention_workspace_bytes()` | `kv_cache_attention.rs` | decode workspace bytes |
-| `nvfp4_scale_buffer_bytes(rows, k, block)` | `nvfp4_scales.rs` | block-scale buffer bytes |
+| `block_scale_buffer_bytes(rows, k, block)` | `quantization/block.rs` | block-scale buffer bytes |
 
 Workspace queries cross the ABI to read L1 constants; they launch no kernels.
 
@@ -976,10 +1010,10 @@ variant axis should become a field (§5.1):
 
 | Signal | Example | Action |
 |---|---|---|
-| a third `_seq` / `_f16` / `_v2` / `_interleaved` suffix on one semantic | `gdn_gated_norm` / `_seq` / `_seq_f16` / `_quantize` | promote to a Spec family (§5.1) |
-| two entry points calling the **same** C function with different arguments | `gdn_chunk_scan` / `_interleaved` | the difference is already a field; make it one |
-| the Rust layer selecting between ABIs with an `if dtype` | `gdn_gated_norm_seq` vs `_seq_f16` | dtype is a Spec field |
-| a `*_quantize` twin of an existing operator | `gdn_gated_norm` / `_quantize` | quantization is an epilogue field (§4.3) |
+| a third `_seq` / `_f16` / `_v2` / `_interleaved` suffix on one semantic | the former `gdn_gated_norm` / `_seq` / `_seq_f16` / `_quantize` surface | promote to a Spec family (§5.1) |
+| two entry points calling the **same** C function with different arguments | the former `gdn_chunk_scan` / `_interleaved` pair | the difference is already a field; make it one |
+| the Rust layer selecting between ABIs with an `if dtype` | the former `gdn_gated_norm_seq` vs `_seq_f16` split | dtype is a Spec field |
+| a `*_quantize` twin of an existing operator | the former `gdn_gated_norm` / `_quantize` pair | quantization is an epilogue field (§4.3) |
 | the same math reachable through two ABIs | `ops::mlp::rms_norm` vs `ops::rms_norm` | merge; two paths mean the design can be bypassed |
 
 The last one is worth its own warning. When one mathematical semantic is reachable

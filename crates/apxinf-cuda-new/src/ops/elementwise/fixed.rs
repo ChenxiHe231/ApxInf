@@ -3,110 +3,17 @@
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 
 use crate::ffi::abi::{elementwise as abi, status};
-use crate::{ops, CudaBuffer, CudaContext};
+use crate::{CudaBuffer, CudaContext};
 
 use crate::ops::validation::{bf16_output, matrix_shape, matrix_tensor};
 
 fn invalid(message: &str) -> Error {
     Error::Other(message.into())
 }
-
-/// `add`: elementwise `a + b` into a fresh tensor. Dispatches on dtype like
-/// the legacy helper: BF16 routes to the cuda-new operator, F16 takes the
-/// ported smolvla launcher (the Xavier FP16 path).
-pub fn add(ctx: &CudaContext, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-    if a.dtype() == DType::F16 {
-        use crate::ffi::abi::elementwise as abi;
-        use crate::ops::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
-        if b.dtype() != DType::F16 || b.shape() != a.shape() {
-            return Err(invalid("FP16 add requires matching FP16 tensors"));
-        }
-        let output = crate::workspace::output_buffer(ctx, a.size_in_bytes())?;
-        unsafe {
-            check_cuda(abi::apxinf_elementwise_add_f16(
-                gpu_ptr(a)?,
-                gpu_ptr(b)?,
-                output.ptr(),
-                u32::try_from(a.numel())
-                    .map_err(|_| invalid("FP16 add element count exceeds u32"))?,
-                ctx.stream().handle(),
-            ))?;
-        }
-        return Ok(make_gpu_tensor(
-            a.shape().clone(),
-            DType::F16,
-            ctx.device_id(),
-            output,
-        ));
-    }
-    let output = ctx.allocate_output(Shape::new(a.shape().dims().to_vec()), DType::BF16)?;
-    ops::elementwise_add(ctx, a, b, &output)?;
-    Ok(output)
-}
-
-/// `scale`: elementwise `input * factor` into a fresh tensor. Dispatches on
-/// dtype like the legacy helper: BF16 routes to the cuda-new operator, F16
-/// takes the ported smolvla launcher (the Xavier FP16 path).
-pub fn scale(ctx: &CudaContext, input: &Tensor, factor: f32) -> Result<Tensor> {
-    if input.dtype() == DType::F16 {
-        use crate::ffi::abi::elementwise as abi;
-        use crate::ops::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
-        if !factor.is_finite() {
-            return Err(invalid("scale factor must be finite"));
-        }
-        let output = crate::workspace::output_buffer(ctx, input.size_in_bytes())?;
-        unsafe {
-            check_cuda(abi::apxinf_elementwise_scale_f16(
-                gpu_ptr(input)?,
-                output.ptr(),
-                u32::try_from(input.numel())
-                    .map_err(|_| invalid("FP16 scale element count exceeds u32"))?,
-                factor,
-                ctx.stream().handle(),
-            ))?;
-        }
-        return Ok(make_gpu_tensor(
-            input.shape().clone(),
-            DType::F16,
-            ctx.device_id(),
-            output,
-        ));
-    }
-    let output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    ops::elementwise_scale(ctx, input, &output, factor)?;
-    Ok(output)
-}
-
-/// Broadcast-add an optional `[cols]` bias over rows. A missing bias returns
-/// the input unchanged. The input dtype selects the unchanged implementation.
-pub fn bias(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
-    match input.dtype() {
-        DType::BF16 => bias_bf16(ctx, input, value),
-        DType::F16 => bias_f16(ctx, input, value),
-        dtype => Err(Error::Other(format!(
-            "bias requires F16 or BF16 input, got {dtype}"
-        ))),
-    }
-}
-
-fn bias_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
-    let Some(bias) = value else {
-        return Ok(input.clone());
-    };
-    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    let mut args =
-        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
-    args.bias = Some(bias);
-    args.activation = ops::PointwiseActivation::None;
-    ops::pointwise(ctx, args)?;
-    Ok(output)
-}
-
 /// Stack two row-major matrices with equal columns.
 pub fn concat_rows(ctx: &CudaContext, first: &Tensor, second: &Tensor) -> Result<Tensor> {
-    ops::concat_rows(ctx, first, second)
+    crate::ops::concat_rows(ctx, first, second)
 }
-
 /// `gather_rows_bf16`: gather `rows` whole rows of `input` by u32 indices
 /// held in a device buffer.
 pub fn gather_rows(
@@ -177,35 +84,6 @@ pub fn replace_rows(
             ctx.stream().handle(),
         ))?;
     }
-    Ok(output)
-}
-
-/// `output = state + velocity * dt`, preserving the existing launcher for
-/// the input dtype.
-pub fn euler_update(
-    ctx: &CudaContext,
-    state: &Tensor,
-    velocity: &Tensor,
-    dt: f32,
-) -> Result<Tensor> {
-    match state.dtype() {
-        DType::BF16 => euler_update_bf16(ctx, state, velocity, dt),
-        DType::F16 => euler_update_f16(ctx, state, velocity, dt),
-        _ => Err(invalid("Euler update requires BF16 or F16 tensors")),
-    }
-}
-
-fn euler_update_bf16(
-    ctx: &CudaContext,
-    state: &Tensor,
-    velocity: &Tensor,
-    dt: f32,
-) -> Result<Tensor> {
-    let mut output = ctx.allocate_output(Shape::new(state.shape().dims().to_vec()), DType::BF16)?;
-    let mut args = ops::PointwiseArgs::new(ops::PointwiseSemantic::EulerUpdate, state, &mut output);
-    args.secondary = Some(velocity);
-    args.dt = dt;
-    ops::pointwise(ctx, args)?;
     Ok(output)
 }
 
@@ -564,37 +442,6 @@ pub fn bias_qkv_in_place(
 // Ported verbatim from the legacy FP16 elementwise wrappers over
 // the `family-specific FP16` launchers (native/adapters/elementwise/fixed_f16.cu).
 
-/// `bias_f16`: broadcast-add an optional `[cols]` FP16 bias over rows.
-fn bias_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
-    use crate::ffi::abi::elementwise as abi;
-    use crate::ops::validation::{check_cuda, f16_output, gpu_ptr, make_gpu_tensor, optional_ptr};
-    let (rows, cols) = matrix_shape(input, "bias")?;
-    if input.dtype() != DType::F16
-        || bias.is_some_and(|x| x.dtype() != DType::F16 || x.shape().dims() != [cols])
-    {
-        return Err(invalid(
-            "static inference bias expects an FP16 matrix and matching bias",
-        ));
-    }
-    let output = f16_output(ctx, rows, cols)?;
-    unsafe {
-        check_cuda(abi::apxinf_elementwise_bias_f16(
-            gpu_ptr(input)?,
-            optional_ptr(bias)?,
-            output.ptr(),
-            rows as i32,
-            cols as i32,
-            ctx.stream().handle(),
-        ))?;
-    }
-    Ok(make_gpu_tensor(
-        Shape::new(vec![rows, cols]),
-        DType::F16,
-        ctx.device_id(),
-        output,
-    ))
-}
-
 /// `concat_columns_f16`: concatenate equally tall FP16 matrices along their
 /// column dimension with a 2D strided device copy per input.
 fn concat_columns_f16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tensor> {
@@ -657,124 +504,4 @@ fn concat_columns_f16(ctx: &CudaContext, tensors: &[&Tensor]) -> Result<Tensor> 
         DType::F16,
         output,
     ))
-}
-
-/// `euler_update_f16`: `output = state + velocity * dt` in FP16.
-fn euler_update_f16(
-    ctx: &CudaContext,
-    state: &Tensor,
-    velocity: &Tensor,
-    dt: f32,
-) -> Result<Tensor> {
-    use crate::ffi::abi::elementwise as abi;
-    use crate::ops::validation::{check_cuda, gpu_ptr, make_gpu_tensor};
-    if state.dtype() != DType::F16
-        || velocity.dtype() != DType::F16
-        || state.shape() != velocity.shape()
-    {
-        return Err(invalid(
-            "static inference Euler update expects matching FP16 tensors",
-        ));
-    }
-    let output = crate::workspace::output_buffer(ctx, state.size_in_bytes())?;
-    unsafe {
-        check_cuda(abi::apxinf_elementwise_euler_update_f16(
-            gpu_ptr(state)?,
-            gpu_ptr(velocity)?,
-            output.ptr(),
-            state.numel() as i64,
-            dt,
-            ctx.stream().handle(),
-        ))?;
-    }
-    Ok(make_gpu_tensor(
-        state.shape().clone(),
-        DType::F16,
-        ctx.device_id(),
-        output,
-    ))
-}
-
-// ── Decode fast-path `_into` surface (caller-owned buffers, graph-safe) ───
-
-/// Allocation-free elementwise add into caller-owned decode storage.
-pub fn decode_add_into(
-    ctx: &CudaContext,
-    dtype: DType,
-    a: &CudaBuffer,
-    b: &CudaBuffer,
-    output: &CudaBuffer,
-    count: usize,
-) -> Result<()> {
-    use crate::ffi::abi::elementwise as llmdec;
-    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
-    let bytes = checked_bytes(dtype, &[count], "decode add")?;
-    require_buffers(
-        ctx,
-        "decode add",
-        &[("A", a, bytes), ("B", b, bytes), ("output", output, bytes)],
-    )?;
-    let status = unsafe {
-        match dtype {
-            DType::F32 => llmdec::apxinf_elementwise_fixed_decode_add_f32(
-                a.ptr(),
-                b.ptr(),
-                output.ptr(),
-                count as u32,
-                ctx.stream().handle(),
-            ),
-            DType::BF16 => llmdec::apxinf_elementwise_fixed_decode_add_bf16(
-                a.ptr(),
-                b.ptr(),
-                output.ptr(),
-                count as u32,
-                ctx.stream().handle(),
-            ),
-            dtype => return Err(Error::Other(format!("decode add does not support {dtype}"))),
-        }
-    };
-    check_cuda(status)
-}
-
-/// Allocation-free elementwise multiply into caller-owned decode storage.
-pub fn mul_into(
-    ctx: &CudaContext,
-    dtype: DType,
-    a: &CudaBuffer,
-    b: &CudaBuffer,
-    output: &CudaBuffer,
-    count: usize,
-) -> Result<()> {
-    use crate::ffi::abi::elementwise as llmdec;
-    use crate::ops::validation::{check_cuda, checked_bytes, require_buffers};
-    let bytes = checked_bytes(dtype, &[count], "decode multiply")?;
-    require_buffers(
-        ctx,
-        "decode multiply",
-        &[("A", a, bytes), ("B", b, bytes), ("output", output, bytes)],
-    )?;
-    let status = unsafe {
-        match dtype {
-            DType::F32 => llmdec::apxinf_elementwise_fixed_decode_mul_f32(
-                a.ptr(),
-                b.ptr(),
-                output.ptr(),
-                count as u32,
-                ctx.stream().handle(),
-            ),
-            DType::BF16 => llmdec::apxinf_elementwise_fixed_decode_mul_bf16(
-                a.ptr(),
-                b.ptr(),
-                output.ptr(),
-                count as u32,
-                ctx.stream().handle(),
-            ),
-            dtype => {
-                return Err(Error::Other(format!(
-                    "decode multiply does not support {dtype}"
-                )))
-            }
-        }
-    };
-    check_cuda(status)
 }

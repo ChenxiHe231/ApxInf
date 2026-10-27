@@ -4,20 +4,6 @@
 
 #include <cstdlib>
 
-extern "C" cudaError_t apxinf_rope_mrope_bf16(
-    const void* input, void* output, uint32_t head_dim, uint32_t n_heads,
-    uint32_t seq_len, float theta, const void* pos_ids, uint32_t sec_h,
-    uint32_t sec_w, cudaStream_t stream) {
-  dim3 grid((head_dim / 2 + kBlockSize - 1) / kBlockSize, n_heads,
-            seq_len);
-  dim3 block(kBlockSize, 1, 1);
-  rope_mrope_bf16_kernel<<<grid, block, 0, stream>>>(
-      static_cast<const __nv_bfloat16*>(input),
-      static_cast<__nv_bfloat16*>(output), head_dim, n_heads, seq_len, theta,
-      static_cast<const uint32_t*>(pos_ids), sec_h, sec_w);
-  return cudaGetLastError();
-}
-
 extern "C" cudaError_t apxinf_rope_build_vision_rotation_table_f32(
     const void* pos_ids, void* rotation_table, uint32_t head_dim,
     uint32_t seq_len, float theta, cudaStream_t stream) {

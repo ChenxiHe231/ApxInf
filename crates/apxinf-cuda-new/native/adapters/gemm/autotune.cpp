@@ -27,7 +27,7 @@ class GemmTuningProblem {
                     spec.m *
                     ((spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ||
                       spec.semantic ==
-                          APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256)
+                          APXINF_GEMM_SEMANTIC_GEMM_SWIGLU)
                          ? spec.n / 2
                          : spec.n)) *
                 dtype_bytes(spec.output_dtype)),

@@ -13,7 +13,7 @@ constexpr uint32_t kProviderCublas = 1;
 constexpr uint32_t kProviderCublasLt = 2;
 constexpr uint32_t kProviderCutlass = 3;
 
-bool supports_vendor(const Spec& spec) {
+bool supports_vendor_math(const Spec& spec) {
   // Packed FP4 has no vendor BLAS path: cuBLAS would read the bytes as some
   // other dtype rather than fail, so exclude it by encoding, not by dtype
   // equality.
@@ -29,8 +29,21 @@ bool supports_vendor(const Spec& spec) {
            spec.accumulation_dtype == APXINF_DTYPE_F32));
 }
 
+bool supports_cublas(const Spec& spec) {
+  return supports_vendor_math(spec);
+}
+
+bool supports_vendor(const Spec& spec) {
+  return spec.numerics == APXINF_GEMM_NUMERICS_DEFAULT &&
+         supports_vendor_math(spec);
+}
+
 bool supports_cublaslt(const Spec& spec) {
-  return spec.b_layout == APXINF_GEMM_LAYOUT_KN && supports_vendor(spec);
+  const bool vendor_layout =
+      spec.b_layout == APXINF_GEMM_LAYOUT_KN ||
+      (spec.b_layout == APXINF_GEMM_LAYOUT_GATE_UP_INTERLEAVED_256 &&
+       spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_SWIGLU);
+  return vendor_layout && supports_vendor(spec);
 }
 
 bool supports_native_fp8(const Spec& spec) {
@@ -174,6 +187,18 @@ bool supports_cutlass_w8a8_bias_m41_n4608_k1536(const Spec& spec) {
          spec.n == 4608 && spec.k == 1536 && spec.alpha_is_unit != 0 &&
          spec.output_scale_is_unit != 0;
 }
+
+bool supports_cutlass_w8a8_bias_gelu_m41_n6144_k1536(const Spec& spec) {
+  return spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_BIAS_GELU &&
+         spec.a_dtype == APXINF_DTYPE_I8 && spec.b_dtype == APXINF_DTYPE_I8 &&
+         spec.accumulation_dtype == APXINF_DTYPE_I32 &&
+         spec.output_dtype == APXINF_DTYPE_BF16 &&
+         spec.quantization == APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL &&
+         spec.b_is_immutable != 0 &&
+         spec.b_layout == APXINF_GEMM_LAYOUT_NK && spec.m == 41 &&
+         spec.n == 6144 && spec.k == 1536 && spec.alpha_is_unit != 0 &&
+         spec.output_scale_is_unit != 0;
+}
 #endif
 
 void one_configuration(const Spec&, std::vector<int>& configs) {
@@ -278,8 +303,8 @@ bool supports_cutlass_bf16_swiglu_sm110(const Spec& spec) {
          spec.accumulation_dtype == APXINF_DTYPE_F32 &&
          spec.alpha_is_unit != 0 && spec.output_scale_is_unit != 0 &&
          spec.quantization == APXINF_GEMM_QUANT_NONE &&
-         spec.semantic ==
-             APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256;
+         spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_SWIGLU &&
+         spec.b_layout == APXINF_GEMM_LAYOUT_GATE_UP_INTERLEAVED_256;
 }
 
 void cutlass_configurations(const Spec&,
@@ -383,7 +408,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
   // faster or more specialized providers remain autotuning candidates only.
   static const ImplementationRegistry gemm_bias_gelu_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
-       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       supports_cublas, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
@@ -395,12 +420,21 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        cublaslt_native_fp8_gelu_resource_requirements,
        cublaslt_configurations, prepare_cublaslt_native_fp8_gelu,
        launch_cublaslt, destroy_cublaslt},
+#ifdef APXINF_GEMM_CUTLASS_SM87_W8A8
+      {kProviderCutlass, 10, 1,
+       "cutlass-w8a8-bias-gelu-m41-n6144-k1536-sm87",
+       kDeviceFeatureCutlassSm87W8A8, true, true, false,
+       supports_cutlass_w8a8_bias_gelu_m41_n6144_k1536,
+       cutlass_w8a8_alignment, cutlass_w8a8_resource_requirements,
+       one_configuration, prepare_cutlass_w8a8,
+       launch_cutlass_w8a8_bias_gelu_m41_n6144_k1536, destroy_cutlass},
+#endif
   };
   // Keep GEMM+bias as a separate L3 tuning domain even though its current L1
   // candidates happen to be the same vendor implementations.
   static const ImplementationRegistry gemm_bias_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
-       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       supports_cublas, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
@@ -422,7 +456,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
   };
   static const ImplementationRegistry gemm_bias_residual_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
-       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       supports_cublas, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
@@ -436,7 +470,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
   };
   static const ImplementationRegistry gemm_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", 0, true, true, true,
-       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       supports_cublas, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
@@ -486,7 +520,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
   };
   static const ImplementationRegistry gemm_geglu_entries = {
       {kProviderCublas, 1, 2, "cublas+custom-epilogue", 0, true, true, true,
-       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       supports_cublas, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 2, "cublasLt+custom-epilogue", 0, true, false, false,
        supports_cublaslt, cublaslt_alignment, cublaslt_resource_requirements,
@@ -525,7 +559,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
   };
   static const ImplementationRegistry gemm_swiglu_entries = {
       {kProviderCublas, 1, 1, "cublas+rounded-swiglu", 0, true, true, true,
-       supports_vendor, vendor_alignment, cublas_resource_requirements,
+       supports_cublas, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},
       {kProviderCublasLt, 1, 1, "cublasLt+rounded-swiglu", 0, true, false,
        false, supports_cublaslt, cublaslt_alignment,
@@ -557,7 +591,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
     case APXINF_GEMM_SEMANTIC_GEMM_BIAS_RESIDUAL:
       selected = &gemm_bias_residual_entries;
       break;
-    case APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256:
+    case APXINF_GEMM_SEMANTIC_GEMM_SWIGLU:
       selected = &gemm_swiglu_entries;
       break;
     default:

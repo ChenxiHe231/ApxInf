@@ -187,6 +187,8 @@ cudaError_t launch_cutlass_fp8_rowwise_gemm(Execution& execution);
 cudaError_t launch_cutlass_w8a8(Execution& execution);
 cudaError_t launch_cutlass_w8a8_m41_n6144_k1536(Execution& execution);
 cudaError_t launch_cutlass_w8a8_bias_m41_n4608_k1536(Execution& execution);
+cudaError_t launch_cutlass_w8a8_bias_gelu_m41_n6144_k1536(
+    Execution& execution);
 cudaError_t launch_cutlass_fp8_geglu(Execution& execution);
 cudaError_t launch_cutlass_bf16_geglu(Execution& execution);
 cudaError_t launch_cutlass_bf16_swiglu(Execution& execution);

@@ -17,9 +17,134 @@ pub enum ImageLayout {
     Nchw,
 }
 
+/// Patch geometry interpreted by [`preprocess`]. Uniform images share one
+/// geometry; rectangular frames carry one patch-grid extent per frame.
+#[derive(Clone, Copy, Debug)]
+pub enum PatchGeometry<'a> {
+    Uniform {
+        views: usize,
+        image_height: usize,
+        image_width: usize,
+        patch_size: usize,
+        temporal_patch_size: usize,
+        merge_size: usize,
+    },
+    RectangularFrames {
+        frames: &'a [RgbRectFrame],
+        patch_size: usize,
+        temporal_patch_size: usize,
+        merge_size: usize,
+    },
+}
+
+/// Mathematical RGB normalization policy. Output dtype is inferred from the
+/// output tensor rather than encoded in the public function name.
+#[derive(Clone, Copy, Debug)]
+pub enum PatchNormalization {
+    /// Map each byte from `[0, 255]` to `[-1, 1]`.
+    UnitRange,
+    /// Apply the Transformers rescale/mean/std boundary.
+    MeanStd {
+        rescale_factor: f64,
+        image_mean: [f32; 3],
+        image_std: [f32; 3],
+    },
+    /// Apply a caller-supplied 256-entry BF16 lookup table.
+    LookupTable,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PreprocessSpec<'a> {
+    pub layout: ImageLayout,
+    pub geometry: PatchGeometry<'a>,
+    pub normalization: PatchNormalization,
+}
+
+pub struct PreprocessArgs<'a> {
+    pub images: &'a CudaBuffer,
+    pub patches: &'a Tensor,
+    pub lookup_table: Option<&'a CudaBuffer>,
+    pub spec: PreprocessSpec<'a>,
+}
+
+/// Convert packed RGB bytes to patch rows according to one semantic Spec.
+/// Dispatch preserves the existing kernels and their exact arithmetic.
+pub fn preprocess(ctx: &CudaContext, args: PreprocessArgs<'_>) -> Result<()> {
+    match (args.spec.geometry, args.spec.normalization) {
+        (
+            PatchGeometry::Uniform {
+                views,
+                image_height,
+                image_width,
+                patch_size,
+                temporal_patch_size: 1,
+                merge_size: 1,
+            },
+            PatchNormalization::UnitRange,
+        ) if image_height == image_width && args.lookup_table.is_none() => unit_range_patches(
+            ctx,
+            args.images,
+            args.patches,
+            views,
+            image_height,
+            patch_size,
+            args.spec.layout,
+        ),
+        (
+            PatchGeometry::Uniform {
+                views,
+                image_height,
+                image_width,
+                patch_size,
+                temporal_patch_size,
+                merge_size,
+            },
+            PatchNormalization::MeanStd {
+                rescale_factor,
+                image_mean,
+                image_std,
+            },
+        ) if args.lookup_table.is_none() => normalized_temporal_merged_patches(
+            ctx,
+            args.images,
+            args.patches,
+            views,
+            image_height,
+            image_width,
+            patch_size,
+            temporal_patch_size,
+            merge_size,
+            args.spec.layout,
+            rescale_factor,
+            image_mean,
+            image_std,
+        ),
+        (
+            PatchGeometry::RectangularFrames {
+                frames,
+                patch_size: 16,
+                temporal_patch_size: 2,
+                merge_size: 2,
+            },
+            PatchNormalization::LookupTable,
+        ) if args.spec.layout == ImageLayout::Nhwc => temporal_merged_rect_patches(
+            ctx,
+            args.images,
+            args.patches,
+            args.lookup_table.ok_or_else(|| {
+                Error::Other("lookup-table preprocessing requires a lookup table".into())
+            })?,
+            frames,
+        ),
+        _ => Err(Error::Other(
+            "unsupported RGB preprocessing Spec/binding combination".into(),
+        )),
+    }
+}
+
 /// Normalize a `u8` RGB batch to `[-1, 1]` and patchify into
 /// `[views*(size/patch)^2, 3*patch^2]`. Output dtype is read from `patches`.
-pub fn rgb_u8_to_patches(
+fn unit_range_patches(
     ctx: &CudaContext,
     images: &CudaBuffer,
     patches: &Tensor,
@@ -127,7 +252,7 @@ fn temporal_merged_dimensions(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn rgb_u8_to_normalized_temporal_merged_patches(
+fn normalized_temporal_merged_patches(
     ctx: &CudaContext,
     images: &CudaBuffer,
     patches: &Tensor,
@@ -240,7 +365,7 @@ pub struct RgbRectFrame {
 /// temporal-2 / spatial-merge-2 patch stream used by compatible vision towers.
 /// `lut` contains 256 BF16 bit patterns; its construction belongs to the model.
 /// The safe boundary checks every byte/row range before launching any frame.
-pub fn rgb_u8_to_temporal2_merge2_rect(
+fn temporal_merged_rect_patches(
     ctx: &CudaContext,
     rgb: &CudaBuffer,
     patches: &Tensor,

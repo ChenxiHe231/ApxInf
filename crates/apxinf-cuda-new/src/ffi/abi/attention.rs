@@ -4,11 +4,21 @@ pub(crate) use super::types::Policy;
 use super::types::{CudaStream, Runtime};
 use crate::ffi::raw::cuda_runtime::{cudaError_t, cudaStream_t};
 
-pub(crate) const SPEC_VERSION: u32 = 4;
+pub(crate) const SPEC_VERSION: u32 = 6;
 pub(crate) const SEMANTIC_DENSE: u32 = 0;
 pub(crate) const SEMANTIC_KV_CACHE: u32 = 1;
 pub(crate) const SEMANTIC_SEGMENTED: u32 = 2;
-pub(crate) const SEMANTIC_PACKED_QKV: u32 = 3;
+
+pub(crate) const QKV_LAYOUT_SEPARATE: u32 = 0;
+pub(crate) const QKV_LAYOUT_PACKED_TOKEN: u32 = 1;
+
+pub(crate) const GATE_SPEC_VERSION: u32 = 1;
+pub(crate) const GATE_SEMANTIC_SPLIT_QUERY_GATE: u32 = 0;
+pub(crate) const GATE_SEMANTIC_APPLY_OUTPUT_GATE: u32 = 1;
+pub(crate) const GATE_SOURCE_TENSOR: u32 = 0;
+pub(crate) const GATE_SOURCE_PROJECTION: u32 = 1;
+pub(crate) const GATE_NUMERICS_FLEXIBLE: u32 = 0;
+pub(crate) const GATE_NUMERICS_ROUNDED_SIGMOID: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -18,6 +28,7 @@ pub(crate) struct Spec {
     pub dtype: u32,
     pub output_dtype: u32,
     pub mask: u32,
+    pub qkv_layout: u32,
     pub q_alignment: u32,
     pub k_alignment: u32,
     pub v_alignment: u32,
@@ -36,6 +47,7 @@ pub(crate) struct Spec {
     pub offsets_hash: u64,
     pub scale_is_default: u32,
     pub dynamic_decode: u32,
+    pub numerics: u32,
 }
 
 #[repr(C)]
@@ -52,23 +64,40 @@ pub(crate) struct Bindings {
     pub output_scale: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct GateSpec {
+    pub version: u32,
+    pub semantic: u32,
+    pub dtype: u32,
+    pub source: u32,
+    pub numerics: u32,
+    pub input_alignment: u32,
+    pub output_alignment: u32,
+    pub auxiliary_alignment: u32,
+    pub tokens: i64,
+    pub heads: i64,
+    pub head_dim: i64,
+    pub elements: i64,
+    pub source_row_width: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GateBindings {
+    pub input: *const c_void,
+    pub output: *mut c_void,
+    pub auxiliary: *mut c_void,
+    pub stream: CudaStream,
+}
+
 pub(crate) type Execution = *mut c_void;
 
 unsafe extern "C" {
-    pub(crate) fn apxinf_attention_split_query_and_gate(
-        fused: *const c_void,
-        query: *mut c_void,
-        gate: *mut c_void,
-        tokens: i64,
-        heads: i64,
-        head_dim: i64,
-        stream: CudaStream,
-    ) -> i32;
-    pub(crate) fn apxinf_attention_apply_output_gate(
-        data: *mut c_void,
-        gate: *const c_void,
-        count: i64,
-        stream: CudaStream,
+    pub(crate) fn apxinf_attention_gate_launch(
+        runtime: Runtime,
+        spec: *const GateSpec,
+        bindings: *const GateBindings,
     ) -> i32;
     pub(crate) fn apxinf_decode_attention_workspace_bytes() -> i64;
     pub(crate) fn apxinf_decode_attention(
@@ -177,87 +206,6 @@ mod fixed_launchers {
             n_heads: u32,
             stream: cudaStream_t,
         ) -> cudaError_t;
-        #[allow(clippy::too_many_arguments)]
-        pub(crate) fn apxinf_attention_full_prepare_bf16(
-            fused: *const c_void,
-            q_norm_w: *const c_void,
-            k_norm_w: *const c_void,
-            cos: *const c_void,
-            sin: *const c_void,
-            q_out: *mut c_void,
-            k_cache: *mut c_void,
-            v_cache: *mut c_void,
-            seq: i32,
-            cache_offset: i32,
-            q_heads: i32,
-            kv_heads: i32,
-            head_dim: i32,
-            rotary_dim: i32,
-            fused_width: i64,
-            cache_width: i64,
-            eps: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_attention_sigmoid_gate_mul_bf16(
-            attn: *mut c_void,
-            fused: *const c_void,
-            rows: i32,
-            heads: i32,
-            head_dim: i32,
-            fused_width: i64,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        #[allow(clippy::too_many_arguments)]
-        pub(crate) fn apxinf_attention_expert_qkv_prepare_bf16(
-            fused: *const c_void,
-            q_norm_w: *const c_void,
-            k_norm_w: *const c_void,
-            cos: *const c_void,
-            sin: *const c_void,
-            q_out: *mut c_void,
-            gate_out: *mut c_void,
-            k_out: *mut c_void,
-            v_out: *mut c_void,
-            seq: i32,
-            q_heads: i32,
-            kv_heads: i32,
-            head_dim: i32,
-            rotary_dim: i32,
-            fused_width: i64,
-            eps: f32,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_attention_expert_sigmoid_gate_mul_bf16(
-            attn: *mut c_void,
-            gate: *const c_void,
-            count: i64,
-            stream: cudaStream_t,
-        ) -> cudaError_t;
-        pub(crate) fn apxinf_attention_cublas_gqa_f16(
-            q: *const c_void,
-            k: *const c_void,
-            v: *const c_void,
-            output: *mut c_void,
-            query_tokens: i32,
-            key_tokens: i32,
-            q_heads: i32,
-            kv_heads: i32,
-            head_dim: i32,
-            stream: cudaStream_t,
-        ) -> i32;
-        pub(crate) fn apxinf_attention_cublas_gqa_causal_f16(
-            q: *const c_void,
-            k: *const c_void,
-            v: *const c_void,
-            output: *mut c_void,
-            query_tokens: i32,
-            key_tokens: i32,
-            q_heads: i32,
-            kv_heads: i32,
-            head_dim: i32,
-            key_offset: i32,
-            stream: cudaStream_t,
-        ) -> i32;
     }
 }
 pub(crate) use fixed_launchers::*;

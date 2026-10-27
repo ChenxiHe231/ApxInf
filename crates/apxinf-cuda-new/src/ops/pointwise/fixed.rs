@@ -2,40 +2,13 @@
 
 use apxinf_core::{DType, Error, Result, Shape, Tensor};
 
-use crate::{ops, CudaContext};
-
-/// `silu`: elementwise SiLU into a fresh tensor.
-pub fn silu(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
-    let output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    ops::elementwise_activation(ctx, input, &output, ops::ElementwiseActivation::Silu)?;
-    Ok(output)
-}
-
-/// `gelu_tanh`: elementwise tanh-approximated GELU into a fresh tensor.
-pub fn gelu_tanh(ctx: &CudaContext, input: &Tensor) -> Result<Tensor> {
-    let output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    ops::elementwise_activation(ctx, input, &output, ops::ElementwiseActivation::GeluTanh)?;
-    Ok(output)
-}
+use crate::CudaContext;
 
 /// Whether SwiGLU rounds the SiLU intermediate before multiplying by `up`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SwiGluRounding {
     FullPrecision,
     RoundedToInput,
-}
-
-/// `[rows, 2*cols]` gate/up projection to `[rows, cols]` GeGLU.
-pub fn geglu(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
-    let dims = gate_up.shape().dims();
-    if dims.len() != 2 || dims[1] % 2 != 0 {
-        return Err(Error::Other("GeGLU requires a [rows, 2*cols] input".into()));
-    }
-    let mut output =
-        ctx.allocate_output(Shape::new(vec![dims[0], dims[1] / 2]), gate_up.dtype())?;
-    let args = ops::PointwiseArgs::new(ops::PointwiseSemantic::Geglu, gate_up, &mut output);
-    ops::pointwise(ctx, args)?;
-    Ok(output)
 }
 
 /// SwiGLU with its numerical rounding contract expressed explicitly.
@@ -48,26 +21,6 @@ pub fn swiglu(ctx: &CudaContext, gate_up: &Tensor, rounding: SwiGluRounding) -> 
             "rounded SwiGLU is not available for F16 input".into(),
         )),
         _ => Err(Error::Other("SwiGLU requires BF16 or F16 input".into())),
-    }
-}
-
-/// Broadcast an optional bias and apply the requested activation. Dtype is
-/// inferred from `input`; each branch retains its existing CUDA launcher.
-pub fn bias_activation(
-    ctx: &CudaContext,
-    input: &Tensor,
-    bias: Option<&Tensor>,
-    activation: ops::PointwiseActivation,
-) -> Result<Tensor> {
-    match (input.dtype(), activation) {
-        (DType::BF16, ops::PointwiseActivation::Gelu) => bias_gelu_bf16(ctx, input, bias),
-        (DType::BF16, ops::PointwiseActivation::Silu) => bias_silu_bf16(ctx, input, bias),
-        (DType::BF16, ops::PointwiseActivation::Relu) => bias_relu_bf16(ctx, input, bias),
-        (DType::F16, ops::PointwiseActivation::Gelu) => bias_gelu_f16(ctx, input, bias),
-        (DType::F16, ops::PointwiseActivation::Silu) => bias_silu_f16(ctx, input, bias),
-        _ => Err(Error::Other(
-            "bias activation does not support this dtype/activation pair".into(),
-        )),
     }
 }
 
@@ -103,43 +56,6 @@ fn swiglu_bf16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
         ))
         .map_err(Error::Cuda)?;
     }
-    Ok(output)
-}
-
-/// `bias_gelu_bf16`: broadcast bias then tanh-GELU. A missing bias is a plain
-/// GELU, matching the legacy contract.
-fn bias_gelu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
-    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    let mut args =
-        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
-    args.bias = value;
-    args.activation = ops::PointwiseActivation::Gelu;
-    ops::pointwise(ctx, args)?;
-    Ok(output)
-}
-
-/// `bias_silu_bf16`: broadcast bias then SiLU. A missing bias is a plain SiLU,
-/// matching the legacy `bias_activation(.., activation = 2)` contract.
-fn bias_silu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
-    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    let mut args =
-        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
-    args.bias = value;
-    args.activation = ops::PointwiseActivation::Silu;
-    ops::pointwise(ctx, args)?;
-    Ok(output)
-}
-
-/// `bias_relu_bf16`: broadcast bias then ReLU (`fmaxf(value, 0.0f)` after the
-/// bias add, matching the legacy `bias_relu_bf16_kernel`). A missing bias is a
-/// plain ReLU.
-fn bias_relu_bf16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
-    let mut output = ctx.allocate_output(Shape::new(input.shape().dims().to_vec()), DType::BF16)?;
-    let mut args =
-        ops::PointwiseArgs::new(ops::PointwiseSemantic::BiasActivation, input, &mut output);
-    args.bias = value;
-    args.activation = ops::PointwiseActivation::Relu;
-    ops::pointwise(ctx, args)?;
     Ok(output)
 }
 
@@ -267,6 +183,86 @@ pub fn bias_gelu_quantized(
     Ok(output)
 }
 
+/// Broadcast BF16 bias, apply tanh-GELU, then quantize each row to signed
+/// INT8 with an F32 scale. The output representation is carried by the return
+/// type rather than encoded in the L3 function name.
+pub fn bias_gelu_quantize_rows(
+    ctx: &CudaContext,
+    input: &Tensor,
+    bias: &Tensor,
+) -> Result<crate::ops::quantization::DynamicI8Tensor> {
+    use crate::ffi::abi::quantization as abi;
+    use crate::ffi::raw::cuda_runtime as raw;
+    use crate::CudaBuffer;
+
+    let dims = input.shape().dims();
+    if input.dtype() != DType::BF16
+        || bias.dtype() != DType::BF16
+        || dims.len() != 2
+        || dims[0] == 0
+        || dims[1] == 0
+        || bias.shape().dims() != [dims[1]]
+    {
+        return Err(Error::Other(
+            "fused bias-GELU row quantization expects [rows,cols] BF16 input and [cols] bias"
+                .into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let values = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::I8)?;
+    let scales = ctx.allocate_output(Shape::new(vec![rows]), DType::F32)?;
+    let input_buffer = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
+    let bias_buffer = CudaBuffer::from_tensor(bias).map_err(Error::Cuda)?;
+    let values_buffer = CudaBuffer::from_tensor(&values).map_err(Error::Cuda)?;
+    let scales_buffer = CudaBuffer::from_tensor(&scales).map_err(Error::Cuda)?;
+    unsafe {
+        raw::check_cuda(abi::apxinf_quantization_bias_gelu_quantize_rows_bf16_int8(
+            input_buffer.ptr(),
+            bias_buffer.ptr(),
+            values_buffer.ptr(),
+            scales_buffer.ptr(),
+            i32::try_from(rows).map_err(|_| Error::Other("rows exceed i32".into()))?,
+            i32::try_from(cols).map_err(|_| Error::Other("cols exceed i32".into()))?,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(crate::ops::quantization::DynamicI8Tensor { values, scales })
+}
+
+/// Apply the legacy rounded SiLU-multiply semantic and quantize each row to
+/// signed INT8. The packed-4 implementation is selected internally when its
+/// existing SM87/exact-shape support predicate is satisfied.
+pub fn silu_mul_quantize_rows(
+    ctx: &CudaContext,
+    gate: &Tensor,
+    up: &Tensor,
+) -> Result<crate::ops::quantization::DynamicI8Tensor> {
+    if gate.dtype() != DType::BF16 || up.dtype() != DType::BF16 || gate.shape() != up.shape() {
+        return Err(Error::Other(
+            "fused SiLU-multiply row quantization expects equal BF16 tensors".into(),
+        ));
+    }
+    let dims = gate.shape().dims();
+    if dims.len() != 2 || dims[0] == 0 || dims[1] == 0 {
+        return Err(Error::Other(
+            "fused SiLU-multiply row quantization expects a non-empty matrix".into(),
+        ));
+    }
+    let (rows, cols) = (dims[0], dims[1]);
+    let mut values = ctx.allocate_output(Shape::new(vec![rows, cols]), DType::I8)?;
+    let mut scales = ctx.allocate_output(Shape::new(vec![rows]), DType::F32)?;
+    let mut args = crate::ops::QuantizationArgs::new(
+        crate::ops::QuantizationSemantic::SiluMulRowwiseI8,
+        gate,
+        &mut values,
+    );
+    args.secondary = Some(up);
+    args.scales = Some(&mut scales);
+    crate::ops::quantization(ctx, args)?;
+    Ok(crate::ops::quantization::DynamicI8Tensor { values, scales })
+}
+
 /// SwiGLU over a packed gate/up projection
 /// followed by rowwise E4M3 quantization, zero-padded to `output_cols`.
 pub fn swiglu_quantize_rows(
@@ -276,8 +272,6 @@ pub fn swiglu_quantize_rows(
     logical_inner: usize,
     output_cols: usize,
 ) -> Result<crate::ops::quantization::DynamicFp8Tensor> {
-    use crate::ffi::abi::{pointwise as abi, status};
-    use crate::CudaBuffer;
     let dims = gate_up.shape().dims();
     if dims.len() != 2 || gate_up.dtype() != DType::BF16 {
         return Err(Error::Other(
@@ -290,33 +284,17 @@ pub fn swiglu_quantize_rows(
             "fused SwiGLU quantization shape mismatch".into(),
         ));
     }
-    let values = ctx.allocate_output(Shape::new(vec![rows, output_cols]), DType::F8E4M3)?;
-    let scales = ctx.allocate_output(Shape::new(vec![rows]), DType::F32)?;
-    let to_i32 = |value: usize, what: &str| {
-        i32::try_from(value).map_err(|_| Error::Other(format!("{what} exceeds i32")))
-    };
-    let gate_up_buffer = CudaBuffer::from_tensor(gate_up).map_err(Error::Cuda)?;
-    let bias_buffer = bias
-        .map(CudaBuffer::from_tensor)
-        .transpose()
-        .map_err(Error::Cuda)?;
-    let values_buffer = CudaBuffer::from_tensor(&values).map_err(Error::Cuda)?;
-    let scales_buffer = CudaBuffer::from_tensor(&scales).map_err(Error::Cuda)?;
-    unsafe {
-        status::check(abi::apxinf_pointwise_swiglu_rows_bf16_e4m3(
-            gate_up_buffer.ptr(),
-            bias_buffer
-                .as_ref()
-                .map_or(std::ptr::null(), |buffer| buffer.ptr() as *const _),
-            values_buffer.ptr(),
-            scales_buffer.ptr(),
-            to_i32(rows, "rows")?,
-            to_i32(input_cols, "input cols")?,
-            to_i32(logical_inner, "inner")?,
-            to_i32(output_cols, "output cols")?,
-            ctx.stream().handle(),
-        ))?;
-    }
+    let mut values = ctx.allocate_output(Shape::new(vec![rows, output_cols]), DType::F8E4M3)?;
+    let mut scales = ctx.allocate_output(Shape::new(vec![rows]), DType::F32)?;
+    let mut args = crate::ops::PointwiseArgs::new(
+        crate::ops::PointwiseSemantic::SwigluRowwiseE4m3,
+        gate_up,
+        &mut values,
+    );
+    args.bias = bias;
+    args.scales = Some(&mut scales);
+    args.logical_cols = logical_inner;
+    crate::ops::pointwise(ctx, args)?;
     Ok(crate::ops::quantization::DynamicFp8Tensor { values, scales })
 }
 
@@ -379,72 +357,6 @@ fn swiglu_f16(ctx: &CudaContext, gate_up: &Tensor) -> Result<Tensor> {
     }
     Ok(make_gpu_tensor(
         Shape::new(vec![rows, inner]),
-        DType::F16,
-        ctx.device_id(),
-        output,
-    ))
-}
-
-/// `bias_gelu_f16`: optional-bias tanh-GELU over an FP16 matrix.
-fn bias_gelu_f16(ctx: &CudaContext, input: &Tensor, value: Option<&Tensor>) -> Result<Tensor> {
-    use crate::ffi::abi::activation as abi;
-    use crate::ops::validation::{
-        check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
-    };
-    let (rows, cols) = matrix_shape(input, "bias GELU")?;
-    if input.dtype() != DType::F16
-        || value.is_some_and(|bias| bias.dtype() != DType::F16 || bias.shape().dims() != [cols])
-    {
-        return Err(Error::Other(
-            "static inference FP16 bias GELU has incompatible dtype or shape".into(),
-        ));
-    }
-    let output = f16_output(ctx, rows, cols)?;
-    unsafe {
-        check_cuda(abi::apxinf_activation_bias_gelu_f16(
-            gpu_ptr(input)?,
-            optional_ptr(value)?,
-            output.ptr(),
-            rows as i32,
-            cols as i32,
-            ctx.stream().handle(),
-        ))?;
-    }
-    Ok(make_gpu_tensor(
-        Shape::new(vec![rows, cols]),
-        DType::F16,
-        ctx.device_id(),
-        output,
-    ))
-}
-
-/// `bias_silu_f16`: optional-bias SiLU over an FP16 matrix.
-fn bias_silu_f16(ctx: &CudaContext, input: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
-    use crate::ffi::abi::activation as abi;
-    use crate::ops::validation::{
-        check_cuda, f16_output, gpu_ptr, make_gpu_tensor, matrix_shape, optional_ptr,
-    };
-    let (rows, cols) = matrix_shape(input, "bias SiLU")?;
-    if input.dtype() != DType::F16
-        || bias.is_some_and(|x| x.dtype() != DType::F16 || x.shape().dims() != [cols])
-    {
-        return Err(Error::Other(
-            "static inference bias SiLU expects an FP16 matrix and matching bias".into(),
-        ));
-    }
-    let output = f16_output(ctx, rows, cols)?;
-    unsafe {
-        check_cuda(abi::apxinf_activation_bias_silu_f16(
-            gpu_ptr(input)?,
-            optional_ptr(bias)?,
-            output.ptr(),
-            rows as i32,
-            cols as i32,
-            ctx.stream().handle(),
-        ))?;
-    }
-    Ok(make_gpu_tensor(
-        Shape::new(vec![rows, cols]),
         DType::F16,
         ctx.device_id(),
         output,

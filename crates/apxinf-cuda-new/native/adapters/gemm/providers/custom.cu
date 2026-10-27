@@ -59,6 +59,19 @@ bool fp8_f32_projection_forced() {
   return forced;
 }
 
+// Dtype of caller-owned fused operands. This mirrors the Rust L3 contract's
+// `projection_dtype` calculation; it is deliberately separate from
+// `common_projection_dtype`, which describes an internal provider buffer and
+// may be widened for final-rounding reasons.
+uint32_t binding_projection_dtype(const Spec& spec) {
+  if (has_row_channel_scales(spec)) return spec.output_dtype;
+  if (spec.a_dtype == APXINF_DTYPE_E4M3) {
+    return spec.output_dtype == APXINF_DTYPE_F16 ? APXINF_DTYPE_F16
+                                                 : APXINF_DTYPE_F32;
+  }
+  return spec.a_dtype;
+}
+
 }  // namespace
 
 uint32_t common_projection_dtype(const Spec& spec) {
@@ -235,7 +248,7 @@ cudaError_t launch_postprocess(const Spec& spec,
         static_cast<cudaStream_t>(bindings.stream));
   }
   if (spec.semantic ==
-          APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256 &&
+          APXINF_GEMM_SEMANTIC_GEMM_SWIGLU &&
       spec.quantization == APXINF_GEMM_QUANT_NONE &&
       resources.projection_dtype == APXINF_DTYPE_BF16 &&
       spec.output_dtype == APXINF_DTYPE_BF16 && spec.alpha_is_unit != 0 &&
@@ -248,7 +261,7 @@ cudaError_t launch_postprocess(const Spec& spec,
   const int64_t output_width =
       (spec.semantic == APXINF_GEMM_SEMANTIC_GEMM_GEGLU ||
        spec.semantic ==
-           APXINF_GEMM_SEMANTIC_GEMM_SWIGLU_PAIR_INTERLEAVED_256)
+           APXINF_GEMM_SEMANTIC_GEMM_SWIGLU)
           ? spec.n / 2
           : spec.n;
   const int64_t count = spec.m * output_width;
@@ -259,7 +272,7 @@ cudaError_t launch_postprocess(const Spec& spec,
               spec.a_dtype == APXINF_DTYPE_E4M3 &&
               spec.output_dtype == APXINF_DTYPE_E4M3
           ? APXINF_DTYPE_F16
-          : spec.output_dtype;
+          : binding_projection_dtype(spec);
   apxinf::cuda_new::custom::finish<<<blocks, 256, 0,
                                  static_cast<cudaStream_t>(bindings.stream)>>>(
       projection, resources.projection_dtype, bindings.output,

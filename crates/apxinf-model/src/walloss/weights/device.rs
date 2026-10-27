@@ -28,14 +28,6 @@ impl DynamicFp8LinearWeights {
         self.weight.shape().dims()[0]
     }
 
-    #[cfg(feature = "cuda")]
-    pub fn as_kernel_view(&self) -> ops::gemm::DynamicFp8WeightView<'_> {
-        ops::gemm::DynamicFp8WeightView {
-            values_e4m3: &self.weight,
-            channel_scales: &self.channel_scales,
-        }
-    }
-
     pub fn from_host(weight: &Tensor, backend: &dyn Backend) -> Result<Self> {
         let shape = weight.shape().dims();
         if shape.len() != 2 || shape[0] == 0 || shape[1] == 0 {
@@ -170,8 +162,8 @@ mod tests {
         {
             for input in 0..2 {
                 // Resident layout is [K, N] = [input, output].
-                let decoded = crate::walloss::fp8::decode_e4m3(values[input * 16 + output])
-                    * scales[output];
+                let decoded =
+                    crate::walloss::fp8::decode_e4m3(values[input * 16 + output]) * scales[output];
                 assert!((decoded - expected[input]).abs() < expected[input].abs() * 0.05);
             }
         }
