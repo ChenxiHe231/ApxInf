@@ -55,13 +55,14 @@ pub use ops::{
     RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs, RoutedMoeSemantic, SegmentedAttentionArgs,
     SharedExpertOutput, FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
     5, BF16, EDGE_BF16_MOE, EdgeBf16DecodeMoeArgs, EdgeBf16DecodeMoeWeights, MTP, Qwen3, apxinf_edge_bf16_moe, by, edge_bf16_decode_moe, edge_bf16_decode_moe_available, edge_bf16_decode_moe_workspace_size, grouped, used,
+    CudaEvent,
     QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_Q_PROJECTION_WIDTH,
     QWEN35_ATTENTION_RMS_EPSILON, QWEN35_ATTENTION_ROTARY_DIM, QWEN35_MTP_DRAFT_STEPS,
     QWEN35_MTP_EXPERTS, QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_LAYERS,
     QWEN35_MTP_TOP_K, QWEN35_MTP_VOCAB_SIZE,
 };
 pub use phase::PreparedPhase;
-pub use stream::CudaStream;
+pub use stream::{CudaEvent, CudaStream};
 
 pub mod ops;
 pub use ops::{Conv3dArgs, Conv3dPolicy, PreparedConv3d, Unfold3dGeometry};

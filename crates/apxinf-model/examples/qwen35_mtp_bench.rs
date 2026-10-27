@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 use std::time::Instant;
 
 use apxinf_core::Device;
+use apxinf_model::qwen35moe::{Qwen35KvCacheDType, Qwen35MoeActivation};
 use apxinf_model::{
     AutoModel, GenerationOptions, LlmInput, LoadOptions, LoadedModel, SamplingMode,
     SpeculativeGenerationStats,
@@ -72,9 +73,11 @@ impl Mode {
         match self {
             Self::Mtp => GenerationOptions::greedy(max_new_tokens, None),
             Self::Scalar => GenerationOptions {
-                // MTP rejects positive top-k, but explicit greedy selection
-                // ignores the filter and remains exact argmax.
-                top_k: Some(1),
+                // Requesting log probabilities changes only the returned
+                // metadata, not greedy argmax token selection. MTP does not
+                // expose log probabilities, so this forces the exact scalar
+                // path while preserving token parity with MTP.
+                return_logprob: Some(true),
                 sampling_mode: Some(SamplingMode::Greedy),
                 ..GenerationOptions::greedy(max_new_tokens, None)
             },
@@ -199,7 +202,20 @@ fn run_mode(
         }
         if let Some(expected) = &canonical_tokens {
             if expected != &token_ids {
-                return Err(format!("{} output changed across repeats", mode.name()).into());
+                let mismatch = expected
+                    .iter()
+                    .zip(&token_ids)
+                    .position(|(left, right)| left != right)
+                    .unwrap_or(expected.len().min(token_ids.len()));
+                return Err(format!(
+                    "{} output changed across repeats at token {mismatch}: expected={:?}, actual={:?}, expected_digest={:016x}, actual_digest={:016x}",
+                    mode.name(),
+                    expected.get(mismatch),
+                    token_ids.get(mismatch),
+                    token_digest(expected),
+                    token_digest(&token_ids),
+                )
+                .into());
             }
         } else {
             canonical_tokens = Some(token_ids.clone());
@@ -242,6 +258,7 @@ fn run_mode(
                 "ttft_ms": ttft_ms,
                 "prefill_tokens_per_second": prefill_tps,
                 "generation_tokens_per_second": generation_tps,
+                "token_digest_fnv1a64": format!("{:016x}", token_digest(&token_ids)),
                 "speculation": speculation,
             })
         );
@@ -283,6 +300,14 @@ fn run_mode(
     })
 }
 
+fn token_digest(tokens: &[u32]) -> u64 {
+    tokens.iter().fold(0xcbf29ce484222325u64, |hash, token| {
+        token.to_le_bytes().into_iter().fold(hash, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        })
+    })
+}
+
 fn arg_value(args: &[String], name: &str, default: usize) -> usize {
     args.iter()
         .position(|arg| arg == name)
@@ -291,19 +316,38 @@ fn arg_value(args: &[String], name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn precision_arg<T>(args: &[String], name: &str) -> Result<T, Box<dyn std::error::Error>>
+where
+    T: std::str::FromStr<Err = String> + Default,
+{
+    args.iter()
+        .position(|arg| arg == name)
+        .map(|index| {
+            args.get(index + 1)
+                .ok_or_else(|| format!("{name} requires a value"))?
+                .parse::<T>()
+        })
+        .transpose()
+        .map(|value| value.unwrap_or_default())
+        .map_err(Into::into)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let checkpoint = args.get(1).filter(|arg| !arg.starts_with("--")).ok_or(
         "usage: qwen35_mtp_bench <checkpoint-dir> [--device N] [--max-new N] \
-             [--warmups N] [--repeats N] [--mode scalar|mtp|both]",
+             [--warmups N] [--repeats N] [--mode scalar|mtp|both] \
+             [--qwen35-moe-activation nvfp4|bf16] [--qwen35-kv-cache bf16|fp8]",
     )?;
     let device = arg_value(&args, "--device", 0);
     let max_new_tokens = arg_value(&args, "--max-new", DEFAULT_OUTPUT_TOKENS);
     let warmups = arg_value(&args, "--warmups", DEFAULT_WARMUPS);
     let repeats = arg_value(&args, "--repeats", DEFAULT_REPEATS);
     let benchmark_mode = BenchmarkMode::parse(&args)?;
-    if max_new_tokens < DEFAULT_OUTPUT_TOKENS {
-        return Err(format!("--max-new must be at least {DEFAULT_OUTPUT_TOKENS}").into());
+    let moe_activation = precision_arg::<Qwen35MoeActivation>(&args, "--qwen35-moe-activation")?;
+    let kv_cache = precision_arg::<Qwen35KvCacheDType>(&args, "--qwen35-kv-cache")?;
+    if max_new_tokens == 0 {
+        return Err("--max-new must be at least 1".into());
     }
     if repeats == 0 {
         return Err("--repeats must be at least 1".into());
@@ -313,6 +357,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(prompt.len(), PROMPT_TOKENS);
     let options = LoadOptions {
         text_kv_capacity: Some(PROMPT_TOKENS + max_new_tokens + MTP_LOOKAHEAD),
+        qwen35_moe_activation: Some(moe_activation),
+        qwen35_kv_cache: Some(kv_cache),
         ..LoadOptions::default()
     };
     let load_start = Instant::now();
@@ -328,6 +374,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "warmups": warmups,
             "repeats": repeats,
             "mode": benchmark_mode.name(),
+            "qwen35_moe_activation": moe_activation.as_str(),
+            "qwen35_kv_cache": kv_cache.as_str(),
             "load_seconds": load_start.elapsed().as_secs_f64(),
         })
     );
@@ -373,7 +421,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 repeats,
             )?;
             if scalar.canonical_tokens != mtp.canonical_tokens {
-                return Err("MTP token IDs differ from forced-scalar greedy token IDs".into());
+                let mismatch = scalar
+                    .canonical_tokens
+                    .iter()
+                    .zip(&mtp.canonical_tokens)
+                    .position(|(scalar, mtp)| scalar != mtp)
+                    .unwrap_or(max_new_tokens);
+                return Err(format!(
+                    "MTP token IDs differ from forced-scalar greedy token IDs at {mismatch}: scalar={:?}, mtp={:?}",
+                    scalar.canonical_tokens.get(mismatch),
+                    mtp.canonical_tokens.get(mismatch),
+                )
+                .into());
             }
             println!("{}", scalar.summary);
             println!("{}", mtp.summary);

@@ -167,12 +167,21 @@ __global__ void build_layout_kernel(
   __syncthreads();
   for (int row = tid; row < max_padded; row += blockDim.x) permuted_idx[row] = -1;
   for (int e = tid; e < experts; e += blockDim.x) scatter[e] = 0;
+  // All padded entries must be initialized before any live route is written.
+  // Without this barrier a slower initialization lane can overwrite a route
+  // inserted by another lane, leaving the generated MoE kernel with a missing
+  // or invalid permutation entry.
   __syncthreads();
-  for (int row = tid; row < routes; row += blockDim.x) {
-    const int expert = selected_experts[row];
-    if (expert >= 0 && expert < experts) {
-      const int position = atomicAdd_block(&scatter[expert], 1);
-      permuted_idx[offsets[expert] + position] = row;
+  // Preserve route order inside each expert. Besides making prefill bitwise
+  // reproducible, this avoids run-to-run accumulation-order drift in FC2 that
+  // can eventually change greedy decoding after many tokens.
+  if (tid == 0) {
+    for (int row = 0; row < routes; ++row) {
+      const int expert = selected_experts[row];
+      if (expert >= 0 && expert < experts) {
+        const int position = scatter[expert]++;
+        permuted_idx[offsets[expert] + position] = row;
+      }
     }
   }
 }
@@ -269,8 +278,8 @@ __global__ __launch_bounds__(512, 4) void quantize_routed_kernel(
   }
 }
 
-__global__ __launch_bounds__(512, 4) void decode_setup_kernel(
-    int top_k, int hidden, int experts, const __nv_bfloat16* input,
+__global__ __launch_bounds__(512, 4) void small_batch_setup_kernel(
+    int tokens, int top_k, int hidden, int experts, const __nv_bfloat16* input,
     const int32_t* expert_ids, const float* expert_scales,
     int32_t* permuted_idx, int32_t* tile_group, int32_t* tile_limit,
     int32_t* num_tiles, uint32_t* output_fp4, uint8_t* output_sf) {
@@ -278,10 +287,12 @@ __global__ __launch_bounds__(512, 4) void decode_setup_kernel(
   __shared__ int32_t offsets[kMaxDecodeExperts];
   __shared__ int32_t scatter[kMaxDecodeExperts];
   const int tid = threadIdx.x;
+  const int routes = tokens * top_k;
   if (blockIdx.x == 0) {
     for (int e = tid; e < experts; e += blockDim.x) counts[e] = scatter[e] = 0;
     __syncthreads();
-    if (tid < top_k) atomicAdd_block(&counts[expert_ids[tid]], 1);
+    for (int row = tid; row < routes; row += blockDim.x)
+      atomicAdd_block(&counts[expert_ids[row]], 1);
     __syncthreads();
     if (tid == 0) {
       int row = 0;
@@ -298,15 +309,17 @@ __global__ __launch_bounds__(512, 4) void decode_setup_kernel(
       num_tiles[0] = tile;
     }
     __syncthreads();
-    if (tid < top_k) {
-      const int expert = expert_ids[tid];
-      permuted_idx[offsets[expert] + atomicAdd_block(&scatter[expert], 1)] = tid;
+    for (int row = tid; row < routes; row += blockDim.x) {
+      const int expert = expert_ids[row];
+      permuted_idx[offsets[expert] + atomicAdd_block(&scatter[expert], 1)] = row;
     }
     return;
   }
   const int quant_blocks = gridDim.x - 1;
-  for (int row = blockIdx.x - 1; row < top_k; row += quant_blocks) {
-    quantize_row(input, hidden, expert_scales[expert_ids[row]],
+  for (int row = blockIdx.x - 1; row < routes; row += quant_blocks) {
+    const int token = row / top_k;
+    quantize_row(input + static_cast<int64_t>(token) * hidden, hidden,
+                 expert_scales[expert_ids[row]],
                  output_fp4 + static_cast<int64_t>(row) * hidden / 8,
                  output_sf + static_cast<int64_t>(row) * hidden / kSfVecSize);
   }
@@ -368,10 +381,10 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
   const int routes = static_cast<int>(spec.tokens * spec.top_k);
   const auto stream = reinterpret_cast<cudaStream_t>(bindings.stream);
 
-  if (spec.tokens == 1) {
-    const int quant_blocks = std::min<int>(spec.top_k, properties.multiProcessorCount * 4);
-    decode_setup_kernel<<<quant_blocks + 1, kThreads, 0, stream>>>(
-        spec.top_k, spec.hidden, spec.experts,
+  if (spec.tokens <= 4) {
+    const int quant_blocks = std::min<int>(routes, properties.multiProcessorCount * 4);
+    small_batch_setup_kernel<<<quant_blocks + 1, kThreads, 0, stream>>>(
+        spec.tokens, spec.top_k, spec.hidden, spec.experts,
         static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
         bindings.input_global_scale, permutation, tile_group, tile_limit,
         num_tiles, input_fp4, input_sf);

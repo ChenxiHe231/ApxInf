@@ -16,6 +16,7 @@ use apxinf_cuda_new::{
 use super::device_weights::{
     DeviceGdnWeights, DeviceNvfp4Moe, DeviceNvfp4RoutedExperts, Qwen35DeviceWeights,
 };
+use super::execution::Qwen35MoeActivation;
 
 const NVFP4_BLOCK_SIZE: u32 = 16;
 
@@ -120,10 +121,7 @@ impl TextBoundaryScratch {
             &self.normalized,
             eps,
         )?;
-        ops::gemm(
-            ctx,
-            ops::GemmArgs::new(&self.normalized, &weights.lm_head, &mut self.logits),
-        )
+        project_lm_head(ctx, weights, &self.normalized, &mut self.logits)
     }
 
     pub fn hidden(&self) -> &Tensor {
@@ -137,6 +135,35 @@ impl TextBoundaryScratch {
     pub fn logits(&self) -> &Tensor {
         &self.logits
     }
+}
+
+/// Use Edge-LLM's weight-only W4 head for the bandwidth-bound one-row decode
+/// projection, while preserving the BF16 GEMM for multi-row public forward.
+pub(crate) fn project_lm_head(
+    ctx: &CudaContext,
+    weights: &Qwen35DeviceWeights,
+    input: &Tensor,
+    output: &mut Tensor,
+) -> Result<()> {
+    let rows = input
+        .shape()
+        .dims()
+        .first()
+        .copied()
+        .ok_or_else(|| invalid("Qwen3.5 lm_head input must be rank 2"))?;
+    if rows == 1 {
+        if let Some(weight) = &weights.lm_head_nvfp4_a16 {
+            return ops::nvfp4_a16_blackwell_gemv(
+                ctx,
+                input,
+                &weight.qweight,
+                &weight.block_scales,
+                &weight.global_scale,
+                output,
+            );
+        }
+    }
+    ops::gemm(ctx, ops::GemmArgs::new(input, &weights.lm_head, output))
 }
 
 /// Stable, capture-compatible scratch for one base routed-MoE invocation.
@@ -203,7 +230,10 @@ impl BaseMoeScratch {
         let routes = tokens
             .checked_mul(top_k)
             .ok_or_else(|| invalid("Qwen3.5 routed-MoE route count overflow"))?;
-        let nvfp4_ok = std::env::var("APXINF_GEMM_CUBLASLT_NVFP4").as_deref() == Ok("1");
+        // Keep both execution candidates allocation-stable. The load-time
+        // Qwen3.5 policy selects which one runs; process-global environment
+        // variables must not override the CLI contract.
+        let nvfp4_ok = true;
         let edge_ok = ops::edge_nvfp4_moe_available();
         let quant_rows = if nvfp4_ok { routes } else { tokens };
         let edge_workspace = edge_ok
@@ -273,12 +303,16 @@ impl BaseMoeScratch {
     ) -> Result<()> {
         self.validate(ctx, weights, input)?;
         let config = RoutedMoeConfig::new(self.experts, self.top_k);
-        let nvfp4_ok = std::env::var("APXINF_GEMM_CUBLASLT_NVFP4").as_deref() == Ok("1");
+        let nvfp4_ok = weights.activation == Qwen35MoeActivation::Nvfp4;
 
-        ops::gemm(
-            ctx,
-            ops::GemmArgs::new(input, &weights.router.weight, &mut self.router_logits),
-        )?;
+        if self.tokens == 1 && std::env::var("APXINF_QWEN35_ROUTER_GEMV").as_deref() == Ok("1") {
+            ops::bf16_gemv(ctx, input, &weights.router.weight, &self.router_logits)?;
+        } else {
+            ops::gemm(
+                ctx,
+                ops::GemmArgs::new(input, &weights.router.weight, &mut self.router_logits),
+            )?;
+        }
         if matches!(&weights.routed_experts, DeviceNvfp4RoutedExperts::Edge(_)) {
             ops::routed_moe_route_topk(
                 ctx,
@@ -306,7 +340,6 @@ impl BaseMoeScratch {
                 },
             )?;
         }
-
         if let DeviceNvfp4RoutedExperts::Edge(edge) = &weights.routed_experts {
             let workspace = self
                 .edge_workspace
@@ -341,14 +374,23 @@ impl BaseMoeScratch {
                 },
             )?;
             self.run_shared_nvfp4(ctx, weights, input)?;
-            ops::gemm(
-                ctx,
-                ops::GemmArgs::new(
+            if self.tokens == 1 && std::env::var("APXINF_QWEN35_GATE_GEMV").as_deref() == Ok("1") {
+                ops::bf16_gemv(
+                    ctx,
                     input,
                     &weights.shared_expert_gate.weight,
-                    &mut self.shared_gate_logits,
-                ),
-            )?;
+                    &self.shared_gate_logits,
+                )?;
+            } else {
+                ops::gemm(
+                    ctx,
+                    ops::GemmArgs::new(
+                        input,
+                        &weights.shared_expert_gate.weight,
+                        &mut self.shared_gate_logits,
+                    ),
+                )?;
+            }
             let shared_gate_logits =
                 view(&self.shared_gate_logits, vec![self.tokens], DType::BF16)?;
             return ops::routed_moe_add_shared(
@@ -536,17 +578,12 @@ impl BaseMoeScratch {
                     &mut up_out,
                 )?;
 
-                let fused_view = view(
-                    expert_fused,
-                    vec![expert_tokens, 2 * self.intermediate],
-                    DType::BF16,
-                )?;
                 let mut inter_out = view(
                     &self.route_intermediate,
                     vec![expert_tokens, self.intermediate],
                     DType::BF16,
                 )?;
-                ops::swiglu(ctx, &fused_view, &mut inter_out)?;
+                ops::swiglu_split(ctx, &gate_out, &up_out, &mut inter_out)?;
 
                 let inter_p = view(
                     inter_packed,
@@ -647,12 +684,7 @@ impl BaseMoeScratch {
                 &mut s_up,
             )?;
 
-            let s_fused = view(
-                expert_fused,
-                vec![self.tokens, 2 * self.intermediate],
-                DType::BF16,
-            )?;
-            ops::swiglu(ctx, &s_fused, &mut self.shared_intermediate)?;
+            ops::swiglu_split(ctx, &s_gate, &s_up, &self.shared_intermediate)?;
 
             let s_inter_p = view(
                 inter_packed,
@@ -782,6 +814,60 @@ impl BaseMoeScratch {
             .as_ref()
             .ok_or_else(|| invalid("shared NVFP4 intermediate scales are unavailable"))?;
 
+        if matches!(self.tokens, 1 | 2 | 4 | 8 | 16) {
+            if let (Some(gate), Some(up), Some(down)) = (
+                weights.shared_gate.a16.as_ref(),
+                weights.shared_up.a16.as_ref(),
+                weights.shared_down.a16.as_ref(),
+            ) {
+                let half_fused_bytes =
+                    self.tokens * self.intermediate * DType::BF16.size_in_bytes();
+                let gate_output = CudaBuffer::from_tensor(expert_fused)
+                    .map_err(Error::Cuda)?
+                    .view(0, half_fused_bytes)
+                    .map_err(Error::Cuda)?
+                    .as_tensor(
+                        Shape::new(vec![self.tokens, self.intermediate]),
+                        DType::BF16,
+                    )
+                    .map_err(Error::Cuda)?;
+                let up_output = CudaBuffer::from_tensor(expert_fused)
+                    .map_err(Error::Cuda)?
+                    .view(half_fused_bytes, half_fused_bytes)
+                    .map_err(Error::Cuda)?
+                    .as_tensor(
+                        Shape::new(vec![self.tokens, self.intermediate]),
+                        DType::BF16,
+                    )
+                    .map_err(Error::Cuda)?;
+                ops::nvfp4_a16_blackwell_gemv(
+                    ctx,
+                    input,
+                    &gate.qweight,
+                    &gate.block_scales,
+                    &gate.global_scale,
+                    &gate_output,
+                )?;
+                ops::nvfp4_a16_blackwell_gemv(
+                    ctx,
+                    input,
+                    &up.qweight,
+                    &up.block_scales,
+                    &up.global_scale,
+                    &up_output,
+                )?;
+                ops::swiglu_split(ctx, &gate_output, &up_output, &self.shared_intermediate)?;
+                return ops::nvfp4_a16_blackwell_gemv(
+                    ctx,
+                    &self.shared_intermediate,
+                    &down.qweight,
+                    &down.block_scales,
+                    &down.global_scale,
+                    &self.shared_output,
+                );
+            }
+        }
+
         let nvfp4_gemm = |a: &Tensor,
                           a_scales: &Tensor,
                           b: &Tensor,
@@ -870,12 +956,7 @@ impl BaseMoeScratch {
             &mut up_output,
         )?;
 
-        let fused = view(
-            expert_fused,
-            vec![self.tokens, 2 * self.intermediate],
-            DType::BF16,
-        )?;
-        ops::swiglu(ctx, &fused, &mut self.shared_intermediate)?;
+        ops::swiglu_split(ctx, &gate_output, &up_output, &self.shared_intermediate)?;
         let inter_packed = view(
             inter_packed,
             vec![self.tokens, self.intermediate / 2],
@@ -947,6 +1028,11 @@ impl BaseMoeScratch {
                 }
             }
             DeviceNvfp4RoutedExperts::Edge(edge) => {
+                if weights.activation != Qwen35MoeActivation::Nvfp4 {
+                    return Err(invalid(
+                        "Qwen3.5 Edge NVFP4 experts require runtime NVFP4 activations",
+                    ));
+                }
                 if edge.experts != self.experts
                     || edge.hidden != self.hidden
                     || edge.intermediate != self.intermediate
@@ -1030,6 +1116,25 @@ impl GdnState {
     pub fn copy_from(&self, ctx: &CudaContext, source: &Self) -> Result<()> {
         transfers::copy_cuda_to_cuda(ctx, &source.conv, &self.conv)?;
         transfers::copy_cuda_to_cuda(ctx, &source.recurrent, &self.recurrent)
+    }
+
+    pub(super) fn first_mismatch(
+        &self,
+        other: &Self,
+    ) -> Result<Option<(&'static str, usize, u32, u32)>> {
+        for (label, left, right) in [
+            ("conv", &self.conv, &other.conv),
+            ("recurrent", &self.recurrent, &other.recurrent),
+        ] {
+            let left = transfers::to_cpu(left)?;
+            let right = transfers::to_cpu(right)?;
+            for (index, (left, right)) in left.as_f32()?.iter().zip(right.as_f32()?).enumerate() {
+                if left.to_bits() != right.to_bits() {
+                    return Ok(Some((label, index, left.to_bits(), right.to_bits())));
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -1171,13 +1276,92 @@ impl GdnScratch {
         state: &GdnState,
         normalized_hidden: &Tensor,
     ) -> Result<()> {
+        self.decode_core(ctx, weights, state, normalized_hidden)?;
+        self.output_projection(ctx, weights)
+    }
+
+    pub(super) fn decode_core(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceGdnWeights,
+        state: &GdnState,
+        normalized_hidden: &Tensor,
+    ) -> Result<()> {
+        self.prepare_decode_inputs(ctx, weights, state, normalized_hidden)?;
+        self.decode_prepared_core(ctx, weights, state)
+    }
+
+    pub(super) fn prepare_decode_inputs(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceGdnWeights,
+        state: &GdnState,
+        normalized_hidden: &Tensor,
+    ) -> Result<()> {
         if self.tokens != 1 {
             return Err(invalid(
                 "Qwen3.5 GDN decode requires a one-token scratch profile",
             ));
         }
         self.validate(ctx, weights, state, normalized_hidden)?;
-        self.project(ctx, weights, normalized_hidden)?;
+        self.project(ctx, weights, normalized_hidden)
+    }
+
+    /// Validate the fixed one-row projection contract before the projection
+    /// GEMMs are split across two CUDA streams.
+    pub(super) fn validate_parallel_decode_inputs(
+        &self,
+        ctx: &CudaContext,
+        weights: &DeviceGdnWeights,
+        state: &GdnState,
+        normalized_hidden: &Tensor,
+    ) -> Result<()> {
+        if self.tokens != 1 {
+            return Err(invalid(
+                "Qwen3.5 parallel GDN decode requires a one-token scratch profile",
+            ));
+        }
+        self.validate(ctx, weights, state, normalized_hidden)
+    }
+
+    /// Enqueue the widest GDN input projection. The caller owns the execution
+    /// session and stream dependency.
+    pub(super) fn project_decode_qkv(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceGdnWeights,
+        input: &Tensor,
+    ) -> Result<()> {
+        ops::gemm(
+            ctx,
+            ops::GemmArgs::new(input, &weights.in_proj_qkv.weight, &mut self.projected_qkv),
+        )
+    }
+
+    /// Enqueue the remaining independent GDN input projections. These share
+    /// an auxiliary stream while QKV runs on the primary stream.
+    pub(super) fn project_decode_zab(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceGdnWeights,
+        input: &Tensor,
+    ) -> Result<()> {
+        for (weight, output) in [
+            (&weights.in_proj_z.weight, &mut self.z),
+            (&weights.in_proj_a.weight, &mut self.a),
+            (&weights.in_proj_b.weight, &mut self.b),
+        ] {
+            ops::gemm(ctx, ops::GemmArgs::new(input, weight, output))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn decode_prepared_core(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceGdnWeights,
+        state: &GdnState,
+    ) -> Result<()> {
         let projected_qkv = view(
             &self.projected_qkv,
             vec![ops::QWEN35_GDN_QKV_WIDTH],
@@ -1220,7 +1404,14 @@ impl GdnScratch {
                     gated_output: &gated_output,
                 },
             },
-        )?;
+        )
+    }
+
+    pub(super) fn finish_decode_projection(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceGdnWeights,
+    ) -> Result<()> {
         self.output_projection(ctx, weights)
     }
 
@@ -1234,15 +1425,8 @@ impl GdnScratch {
         weights: &DeviceGdnWeights,
         input: &Tensor,
     ) -> Result<()> {
-        for (weight, output) in [
-            (&weights.in_proj_qkv.weight, &mut self.projected_qkv),
-            (&weights.in_proj_z.weight, &mut self.z),
-            (&weights.in_proj_a.weight, &mut self.a),
-            (&weights.in_proj_b.weight, &mut self.b),
-        ] {
-            ops::gemm(ctx, ops::GemmArgs::new(input, weight, output))?;
-        }
-        Ok(())
+        self.project_decode_qkv(ctx, weights, input)?;
+        self.project_decode_zab(ctx, weights, input)
     }
 
     fn output_projection(&mut self, ctx: &CudaContext, weights: &DeviceGdnWeights) -> Result<()> {
@@ -1425,7 +1609,15 @@ fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
 }
 
 fn view(tensor: &Tensor, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
+    let bytes = shape
+        .iter()
+        .try_fold(dtype.size_in_bytes(), |bytes, dimension| {
+            bytes.checked_mul(*dimension)
+        })
+        .ok_or_else(|| invalid("Qwen3.5 CUDA view size overflow"))?;
     CudaBuffer::from_tensor(tensor)
+        .map_err(Error::Cuda)?
+        .view(0, bytes)
         .map_err(Error::Cuda)?
         .as_tensor(Shape::new(shape), dtype)
         .map_err(Error::Cuda)

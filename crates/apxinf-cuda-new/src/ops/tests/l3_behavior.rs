@@ -1151,6 +1151,7 @@ fn quantization_rejects_packed_fp4_input() {
         (QuantizationSemantic::CastF16ToBf16, DType::BF16),
         (QuantizationSemantic::CastBf16ToF32, DType::F32),
         (QuantizationSemantic::CastF32ToBf16, DType::BF16),
+        (QuantizationSemantic::FixedScaleE4m3ToBf16, DType::BF16),
         (QuantizationSemantic::SliceColumnsBf16, DType::BF16),
         (QuantizationSemantic::RowwiseI8, DType::I8),
     ] {
@@ -1163,6 +1164,31 @@ fn quantization_rejects_packed_fp4_input() {
             "{semantic:?}: {error}"
         );
     }
+}
+
+#[test]
+fn fixed_scale_e4m3_round_trip_supports_fp8_kv_cache() {
+    use apxinf_core::DType;
+
+    let ctx = CudaContext::new(0).unwrap();
+    let source = [0.25, -0.5, 1.0, 2.0];
+    let input = tensor(0, vec![1, source.len()], &source);
+    let mut quantized = zeros_tensor(0, vec![1, source.len()], DType::F8E4M3);
+    let mut quantize =
+        QuantizationArgs::new(QuantizationSemantic::FixedScaleE4m3, &input, &mut quantized);
+    quantize.scale = 0.25;
+    quantization(&ctx, quantize).unwrap();
+
+    let mut output = zeros_tensor(0, vec![1, source.len()], DType::BF16);
+    let mut dequantize = QuantizationArgs::new(
+        QuantizationSemantic::FixedScaleE4m3ToBf16,
+        &quantized,
+        &mut output,
+    );
+    dequantize.scale = 0.25;
+    quantization(&ctx, dequantize).unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(values(&output), source);
 }
 
 #[test]

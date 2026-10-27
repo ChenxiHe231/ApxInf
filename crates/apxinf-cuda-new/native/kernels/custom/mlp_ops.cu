@@ -89,6 +89,23 @@ __global__ void swiglu_kernel(const __nv_bfloat16* __restrict__ fused,
   output[index] = __float2bfloat16(activated * up);
 }
 
+// Gate and up are separate contiguous [rows, width] matrices. This is used
+// when two independent projections share one scratch allocation as
+// [all-gate-rows][all-up-rows], which is not the row-interleaved layout
+// accepted by swiglu_kernel for rows > 1.
+__global__ void swiglu_split_kernel(
+    const __nv_bfloat16* __restrict__ gate,
+    const __nv_bfloat16* __restrict__ up,
+    __nv_bfloat16* __restrict__ output, long long total) {
+  const long long index = blockIdx.x * (long long)blockDim.x + threadIdx.x;
+  if (index >= total) return;
+  const float gate_value = __bfloat162float(gate[index]);
+  const float up_value = __bfloat162float(up[index]);
+  const float activated =
+      __bfloat162float(__float2bfloat16(silu(gate_value)));
+  output[index] = __float2bfloat16(activated * up_value);
+}
+
 __global__ void swiglu_round_product_kernel(
     const __nv_bfloat16* __restrict__ fused,
     __nv_bfloat16* __restrict__ output, int rows, int width) {
@@ -101,6 +118,55 @@ __global__ void swiglu_round_product_kernel(
   const float gate = __bfloat162float(fused[base + column]);
   const float up = __bfloat162float(fused[base + width + column]);
   output[index] = __float2bfloat16((gate / (1.0f + expf(-gate))) * up);
+}
+
+// Canonical GEMM weights are [K, N]. One block owns 32 adjacent output
+// columns while its eight warps split K. Every iteration therefore issues a
+// coalesced weight load and broadcasts one activation value per warp. The
+// fixed eight-way reduction avoids the 2K-long dependent FMA chain of the old
+// one-thread-per-column implementation.
+__global__ void bf16_gemv_kernel(
+    const __nv_bfloat16* __restrict__ activation,
+    const __nv_bfloat16* __restrict__ weight,
+    __nv_bfloat16* __restrict__ output, int n, int k) {
+  __shared__ float partials[8][32];
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int column = blockIdx.x * 32 + lane;
+  float sum = 0.0f;
+  if (column < n) {
+    for (int index = warp; index < k; index += 8) {
+      sum = fmaf(__bfloat162float(activation[index]),
+                 __bfloat162float(weight[(long long)index * n + column]), sum);
+    }
+  }
+  partials[warp][lane] = sum;
+  __syncthreads();
+  if (warp == 0 && column < n) {
+    float total = partials[0][lane];
+#pragma unroll
+    for (int split = 1; split < 8; ++split) total += partials[split][lane];
+    output[column] = __float2bfloat16(total);
+  }
+}
+
+// Very narrow projections (the shared-expert gate is [K, 1]) need a K-wise
+// warp reduction rather than the N-wise tiled kernel above. One warp owns one
+// output and reads contiguous [K, N] elements when N is at most four.
+__global__ void bf16_narrow_gemv_kernel(
+    const __nv_bfloat16* __restrict__ activation,
+    const __nv_bfloat16* __restrict__ weight,
+    __nv_bfloat16* __restrict__ output, int n, int k) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  if (warp >= n) return;
+  float sum = 0.0f;
+  for (int index = lane; index < k; index += 32) {
+    sum = fmaf(__bfloat162float(activation[index]),
+               __bfloat162float(weight[(long long)index * n + warp]), sum);
+  }
+  sum = warp_sum(sum);
+  if (lane == 0) output[warp] = __float2bfloat16(sum);
 }
 
 // Eight elements per thread through 16-byte vectors. One bf16 per thread
@@ -496,6 +562,25 @@ int nvfp4_gemv(const void* weight, const void* weight_scales,
   return cudaGetLastError() == cudaSuccess ? 0 : -3;
 }
 
+int bf16_gemv(const void* activation, const void* weight, void* output, int n,
+              int k, cudaStream_t stream) {
+  if (n <= 0 || k <= 0) return -1;
+  constexpr int kThreads = 256;
+  if (n <= 4) {
+    bf16_narrow_gemv_kernel<<<1, 128, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(activation),
+        static_cast<const __nv_bfloat16*>(weight),
+        static_cast<__nv_bfloat16*>(output), n, k);
+    return cudaGetLastError() == cudaSuccess ? 0 : -2;
+  }
+  const int blocks = (n + 31) / 32;
+  bf16_gemv_kernel<<<blocks, kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(activation),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(output), n, k);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
 int fp8_gemv(const void* weight, const void* activation, void* output, int n,
              int k, float alpha, cudaStream_t stream) {
   if (n <= 0 || k <= 0) return -1;
@@ -568,6 +653,22 @@ int swiglu_bf16(const void* fused_gate_up, void* output, int rows, int width,
   swiglu_kernel<<<static_cast<int>(blocks), threads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(fused_gate_up),
       static_cast<__nv_bfloat16*>(output), rows, width);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int swiglu_split_bf16(const void* gate, const void* up, void* output, int rows,
+                      int width, cudaStream_t stream) {
+  if (gate == nullptr || up == nullptr || output == nullptr || rows <= 0 ||
+      width <= 0) {
+    return -1;
+  }
+  const long long total = static_cast<long long>(rows) * width;
+  const int threads = 256;
+  const int blocks = static_cast<int>((total + threads - 1) / threads);
+  swiglu_split_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(gate),
+      static_cast<const __nv_bfloat16*>(up),
+      static_cast<__nv_bfloat16*>(output), total);
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 

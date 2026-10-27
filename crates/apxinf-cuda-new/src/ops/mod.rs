@@ -70,6 +70,7 @@ pub use gemm::{
     RepackedWeight, WeightVersion,
 };
 pub use mlp::{fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu, swiglu_round_product, rms_norm};
+pub use mlp::{bf16_gemv, nvfp4_a16_blackwell_gemv, swiglu_split};
 pub use moe::{
     combine_reference as routed_moe_combine_reference, edge_bf16_decode_moe,
     edge_bf16_decode_moe_available, edge_bf16_decode_moe_workspace_size, edge_nvfp4_interleave_fc1,

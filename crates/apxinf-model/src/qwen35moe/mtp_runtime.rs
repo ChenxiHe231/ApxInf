@@ -40,7 +40,6 @@ pub struct MtpPositionContract {
     pub logical_position: usize,
     pub cache_rows: usize,
 }
-
 impl MtpPositionContract {
     pub fn after_prompt(prompt_len: usize) -> Result<Self> {
         if prompt_len == 0 {
@@ -1553,10 +1552,7 @@ fn forward_one(
     ops::mlp::rms_norm(ctx, &scratch.hidden, &mtp.norm, &scratch.final_hidden, eps)?;
     if produce_logits {
         let mut logits = scratch.logits.clone();
-        ops::gemm(
-            ctx,
-            ops::GemmArgs::new(&scratch.final_hidden, &weights.lm_head, &mut logits),
-        )?;
+        super::forward::project_lm_head(ctx, weights, &scratch.final_hidden, &mut logits)?;
         ops::argmax(ctx, &scratch.logits, &scratch.next_token)?;
     }
     Ok(())

@@ -7,14 +7,134 @@
 //! attention/cache semantic would invalidate both accuracy and MTP rollback.
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
-use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{
+    ops, transfers, CudaBuffer, CudaContext, CudaEvent, ExecutionSession, PreparedPhase,
+};
+use std::cell::Cell;
 use std::ops::Range;
+use std::rc::Rc;
 
 use super::architecture::{AttentionGeometry, MixerKind, Qwen35MoeArchitecture};
 use super::config::Qwen35MoeConfig;
-use super::device_weights::{DeviceAttentionWeights, DeviceMixerWeights, Qwen35DeviceWeights};
-use super::forward::{BaseMoeScratch, GdnScratch, GdnState};
+use super::device_weights::{
+    DeviceAttentionWeights, DeviceLayerWeights, DeviceMixerWeights, Qwen35DeviceWeights,
+};
+use super::forward::{project_lm_head, BaseMoeScratch, GdnScratch, GdnState};
 use super::runtime_weights::KvCacheScales;
+
+const DECODE_PHASE_WORKSPACE: usize = 4 * 1024 * 1024;
+const GDN_PARALLEL_EVENT_SLOTS: usize = 4;
+
+/// Shared auxiliary stream and reusable event pair for sequential GDN layers.
+/// Projection phases own their prepared executions separately because every
+/// layer has different weight bindings.
+struct GdnParallelStreams {
+    auxiliary: CudaContext,
+}
+struct GdnProjectionEvents {
+    normalized_ready: CudaEvent,
+    projections_ready: CudaEvent,
+}
+
+struct GdnProjectionPhase {
+    // Sessions must drop before `streams`: their native executions were
+    // prepared by the runtimes owned by the primary/auxiliary contexts.
+    primary_session: ExecutionSession,
+    auxiliary_session: ExecutionSession,
+    streams: Rc<GdnParallelStreams>,
+    events: Vec<GdnProjectionEvents>,
+    next_event: Cell<usize>,
+}
+
+impl GdnProjectionPhase {
+    fn prepare(
+        ctx: &CudaContext,
+        streams: Rc<GdnParallelStreams>,
+        weights: &super::device_weights::DeviceGdnWeights,
+        state: &GdnState,
+        scratch: &mut GdnScratch,
+        input: &Tensor,
+    ) -> Result<Self> {
+        scratch.validate_parallel_decode_inputs(ctx, weights, state, input)?;
+        let primary_session =
+            ExecutionSession::with_capacity(DECODE_PHASE_WORKSPACE, ctx.device_id())?;
+        primary_session.prepare(|| scratch.project_decode_qkv(ctx, weights, input))?;
+        let auxiliary_session =
+            ExecutionSession::with_capacity(DECODE_PHASE_WORKSPACE, ctx.device_id())?;
+        auxiliary_session
+            .prepare(|| scratch.project_decode_zab(&streams.auxiliary, weights, input))?;
+        let events = (0..GDN_PARALLEL_EVENT_SLOTS)
+            .map(|_| {
+                Ok(GdnProjectionEvents {
+                    normalized_ready: CudaEvent::new(ctx.device_id()).map_err(Error::Cuda)?,
+                    projections_ready: CudaEvent::new(ctx.device_id()).map_err(Error::Cuda)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            primary_session,
+            auxiliary_session,
+            streams,
+            events,
+            next_event: Cell::new(0),
+        })
+    }
+
+    fn run(
+        &self,
+        ctx: &CudaContext,
+        weights: &super::device_weights::DeviceGdnWeights,
+        state: &GdnState,
+        scratch: &mut GdnScratch,
+        input: &Tensor,
+    ) -> Result<()> {
+        scratch.validate_parallel_decode_inputs(ctx, weights, state, input)?;
+        let event_index = self.next_event.get();
+        self.next_event
+            .set((event_index + 1) % GDN_PARALLEL_EVENT_SLOTS);
+        let events = &self.events[event_index];
+
+        events
+            .normalized_ready
+            .record(ctx.stream())
+            .map_err(Error::Cuda)?;
+        self.streams
+            .auxiliary
+            .stream()
+            .wait_event(&events.normalized_ready)
+            .map_err(Error::Cuda)?;
+
+        self.primary_session
+            .run(|| scratch.project_decode_qkv(ctx, weights, input))?;
+        self.auxiliary_session
+            .run(|| scratch.project_decode_zab(&self.streams.auxiliary, weights, input))?;
+
+        events
+            .projections_ready
+            .record(self.streams.auxiliary.stream())
+            .map_err(Error::Cuda)?;
+        ctx.stream()
+            .wait_event(&events.projections_ready)
+            .map_err(Error::Cuda)
+    }
+}
+
+/// One layer's prepared/captured body plus the optional exact multi-stream
+/// projection front-end used by `APXINF_QWEN35_GRAPH_GDN=parallel`.
+pub(super) struct Qwen35DecodePhase {
+    prepared: PreparedPhase,
+    projections: Option<GdnProjectionPhase>,
+}
+
+impl Qwen35DecodePhase {
+    fn run(&self, operation: impl FnOnce() -> Result<()>) -> Result<()> {
+        self.prepared.run(operation)
+    }
+
+    fn replay(&self) -> Result<()> {
+        self.prepared.replay()
+    }
+}
 
 /// Whether a decoder call processes a prompt/chunk or one autoregressive row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,8 +149,8 @@ pub enum LogitsSelection {
     /// Only the final row, used by ordinary prefill and decode.
     Last,
     /// Every row, for callers that explicitly need a dense logits matrix.
-    /// The opt-in batched MTP verification candidate uses this mode; the
-    /// canonical path invokes four one-row decode calls instead.
+    /// Canonical MTP verification does not use this mode: it invokes four
+    /// separate one-row decode calls so every row follows scalar reductions.
     All,
 }
 
@@ -119,28 +239,40 @@ impl DecoderOutput {
         row_view(&self.hidden_states, self.hidden_rows - 1, dims[1])
     }
 
-    /// View the final row as a scalar-decode-shaped output without copying.
-    pub(super) fn last_row(&self) -> Result<Self> {
-        let logit_dims = self.logits.shape().dims();
-        let hidden_dims = self.hidden_states.shape().dims();
-        if logit_dims.len() != 2
-            || hidden_dims.len() != 2
-            || logit_dims[0] != self.rows
-            || hidden_dims[0] != self.hidden_rows
-            || self.rows == 0
-            || self.hidden_rows == 0
-            || self.end_position == 0
-        {
-            return Err(invalid(
-                "Qwen3.5 decoder output cannot expose an empty final row",
-            ));
+    /// Retain only the final logits/hidden row as stable views of this
+    /// output's owned storage. Batched speculative verification uses this to
+    /// publish the state after its final row through the ordinary scalar
+    /// commit contract.
+    pub fn into_last_row(self) -> Result<Self> {
+        if self.rows == 0 || self.hidden_rows == 0 {
+            return Err(invalid("Qwen3.5 decoder output has no final row"));
         }
+        let vocab = self
+            .logits
+            .shape()
+            .dims()
+            .get(1)
+            .copied()
+            .ok_or_else(|| invalid("Qwen3.5 logits must be rank-2"))?;
+        let hidden = self
+            .hidden_states
+            .shape()
+            .dims()
+            .get(1)
+            .copied()
+            .ok_or_else(|| invalid("Qwen3.5 hidden states must be rank-2"))?;
+        let logits = row_view(&self.logits, self.rows - 1, vocab)?;
+        let hidden_states = row_view(&self.hidden_states, self.hidden_rows - 1, hidden)?;
+        let start_position = self
+            .end_position
+            .checked_sub(1)
+            .ok_or_else(|| invalid("Qwen3.5 final output position underflow"))?;
         Ok(Self {
-            logits: row_view(&self.logits, self.rows - 1, logit_dims[1])?,
+            logits,
             rows: 1,
-            hidden_states: row_view(&self.hidden_states, self.hidden_rows - 1, hidden_dims[1])?,
+            hidden_states,
             hidden_rows: 1,
-            start_position: self.end_position - 1,
+            start_position,
             end_position: self.end_position,
         })
     }
@@ -298,6 +430,7 @@ impl Qwen35Decoder {
             logits_selection,
             hidden_selection,
             &mut scratch,
+            None,
         )
     }
 
@@ -319,7 +452,6 @@ impl Qwen35Decoder {
         )
     }
 
-    /// Persistent four-row scratch for the speculative target candidate.
     pub(super) fn allocate_verify_scratch(&self, ctx: &CudaContext) -> Result<DecoderScratch> {
         let moe = self.architecture.layers[0].moe;
         DecoderScratch::new(
@@ -333,6 +465,273 @@ impl Qwen35Decoder {
             LogitsSelection::All,
             HiddenSelection::All,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_verify_reusing<B: FullAttentionBackend>(
+        &self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        attention: &mut B,
+        attention_caches: &mut [B::Cache],
+        gdn_states: &[GdnState],
+        token_ids: &[u32],
+        start_position: usize,
+        scratch: &mut DecoderScratch,
+    ) -> Result<DecoderOutput> {
+        self.validate_weights(weights)?;
+        self.validate_call(
+            attention_caches.len(),
+            gdn_states.len(),
+            token_ids,
+            start_position,
+            DecoderPhase::Prefill,
+        )?;
+        scratch.validate_contract(
+            token_ids.len(),
+            self.architecture.hidden_size,
+            self.architecture.vocab_size,
+            LogitsSelection::All,
+            HiddenSelection::All,
+        )?;
+        self.run_validated(
+            ctx,
+            weights,
+            attention,
+            attention_caches,
+            gdn_states,
+            token_ids,
+            start_position,
+            DecoderPhase::Prefill,
+            LogitsSelection::All,
+            HiddenSelection::All,
+            scratch,
+            None,
+        )
+    }
+
+    /// Capture one fixed-shape decode graph per transformer layer. Full
+    /// attention remains eager because its live KV prefix changes every row;
+    /// its position-independent MoE tail is captured. GDN projections remain
+    /// eager to preserve the exact GEMM result while the fixed-shape recurrent
+    /// state update is captured.
+    pub(super) fn capture_decode_phases(
+        &self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        gdn_states: &[GdnState],
+        scratch: &mut DecoderScratch,
+    ) -> Result<Vec<Qwen35DecodePhase>> {
+        let graph_gdn_mode = std::env::var("APXINF_QWEN35_GRAPH_GDN").unwrap_or_default();
+        let graph_gdn_full = matches!(graph_gdn_mode.as_str(), "full" | "prepared");
+        let graph_gdn_moe = graph_gdn_mode == "moe";
+        let parallel_gdn = graph_gdn_mode == "parallel";
+        let parallel_streams = parallel_gdn
+            .then(|| -> Result<_> {
+                Ok(Rc::new(GdnParallelStreams {
+                    auxiliary: CudaContext::new_with_autotune(ctx.device_id(), false)
+                        .map_err(Error::Cuda)?,
+                }))
+            })
+            .transpose()?;
+        let mut phases = Vec::with_capacity(self.architecture.layers.len());
+        let mut gdn_index = 0usize;
+        for (layer, resident) in self.architecture.layers.iter().zip(&weights.layers) {
+            let session = ExecutionSession::with_capacity(DECODE_PHASE_WORKSPACE, ctx.device_id())?;
+            let (prepared, projections) = match (&layer.mixer, &resident.mixer) {
+                (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) => {
+                    let state = &gdn_states[gdn_index];
+                    gdn_index += 1;
+                    let projections = parallel_streams
+                        .as_ref()
+                        .map(|streams| {
+                            GdnProjectionPhase::prepare(
+                                ctx,
+                                Rc::clone(streams),
+                                gdn,
+                                state,
+                                &mut scratch.gdn,
+                                &scratch.normalized,
+                            )
+                        })
+                        .transpose()?;
+                    let prepared = PreparedPhase::prepare_and_capture(ctx, session, || {
+                        if graph_gdn_full {
+                            qwen35_rms_norm(
+                                ctx,
+                                &scratch.hidden,
+                                &resident.input_layernorm,
+                                &mut scratch.normalized,
+                                self.rms_norm_eps,
+                            )?;
+                            scratch
+                                .gdn
+                                .decode_core(ctx, gdn, state, &scratch.normalized)?;
+                            scratch.gdn.finish_decode_projection(ctx, gdn)?;
+                            ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)?;
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        } else if parallel_gdn {
+                            scratch.gdn.decode_prepared_core(ctx, gdn, state)?;
+                            scratch.gdn.finish_decode_projection(ctx, gdn)?;
+                            ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)?;
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        } else if graph_gdn_moe {
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        } else {
+                            scratch.gdn.decode_prepared_core(ctx, gdn, state)
+                        }
+                    })?;
+                    (prepared, projections)
+                }
+                (MixerKind::FullAttention(_), DeviceMixerWeights::FullAttention(_)) => (
+                    PreparedPhase::prepare_and_capture(ctx, session, || {
+                        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                    })?,
+                    None,
+                ),
+                _ => {
+                    return Err(invalid(format!(
+                        "Qwen3.5 layer {} mixer changed during graph capture",
+                        layer.index
+                    )))
+                }
+            };
+            phases.push(Qwen35DecodePhase {
+                prepared,
+                projections,
+            });
+        }
+        Ok(phases)
+    }
+
+    /// Diagnostic used while bringing up graph replay on a new CUDA target.
+    /// It advances independent eager/captured GDN banks with identical hidden
+    /// rows and reports the first layer whose BF16 output differs.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn verify_decode_phases(
+        &self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        eager_states: &[GdnState],
+        eager_phases: &[Qwen35DecodePhase],
+        graph_states: &[GdnState],
+        graph_phases: &[Qwen35DecodePhase],
+        scratch: &mut DecoderScratch,
+    ) -> Result<()> {
+        let graph_gdn_full = std::env::var("APXINF_QWEN35_GRAPH_GDN").as_deref() == Ok("full");
+        if eager_phases.len() != self.architecture.layers.len()
+            || graph_phases.len() != self.architecture.layers.len()
+        {
+            return Err(invalid("Qwen3.5 graph verification phase count mismatch"));
+        }
+        for state in eager_states.iter().chain(graph_states) {
+            state.reset(ctx)?;
+        }
+        ctx.synchronize().map_err(Error::Cuda)?;
+        let mut gdn_index = 0usize;
+        for (layer_offset, (layer, resident)) in self
+            .architecture
+            .layers
+            .iter()
+            .zip(&weights.layers)
+            .enumerate()
+        {
+            for step in 0..3usize {
+                let values = (0..self.architecture.hidden_size)
+                    .map(|column| {
+                        half::bf16::from_f32(
+                            ((column * 17 + layer.index * 23 + step * 31) % 257) as f32 / 128.0
+                                - 1.0,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let input = Tensor::from_bf16(vec![1, self.architecture.hidden_size], &values)?;
+                transfers::copy_cpu_to_cuda(&input, &scratch.hidden)?;
+                if !graph_gdn_full {
+                    if let (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) =
+                        (&layer.mixer, &resident.mixer)
+                    {
+                        qwen35_rms_norm(
+                            ctx,
+                            &scratch.hidden,
+                            &resident.input_layernorm,
+                            &mut scratch.normalized,
+                            self.rms_norm_eps,
+                        )?;
+                        scratch.gdn.prepare_decode_inputs(
+                            ctx,
+                            gdn,
+                            &eager_states[gdn_index],
+                            &scratch.normalized,
+                        )?;
+                    }
+                }
+                eager_phases[layer_offset].run(|| match (&layer.mixer, &resident.mixer) {
+                    (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) => {
+                        if graph_gdn_full {
+                            qwen35_rms_norm(
+                                ctx,
+                                &scratch.hidden,
+                                &resident.input_layernorm,
+                                &mut scratch.normalized,
+                                self.rms_norm_eps,
+                            )?;
+                            scratch.gdn.decode_core(
+                                ctx,
+                                gdn,
+                                &eager_states[gdn_index],
+                                &scratch.normalized,
+                            )?;
+                            scratch.gdn.finish_decode_projection(ctx, gdn)?;
+                            ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)?;
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        } else {
+                            scratch
+                                .gdn
+                                .decode_prepared_core(ctx, gdn, &eager_states[gdn_index])
+                        }
+                    }
+                    (MixerKind::FullAttention(_), DeviceMixerWeights::FullAttention(_)) => {
+                        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                    }
+                    _ => Err(invalid("Qwen3.5 graph verification mixer mismatch")),
+                })?;
+                ctx.synchronize().map_err(Error::Cuda)?;
+                let expected = transfers::to_cpu(&scratch.hidden)?.as_bf16()?.to_vec();
+
+                transfers::copy_cpu_to_cuda(&input, &scratch.hidden)?;
+                graph_phases[layer_offset].replay()?;
+                ctx.synchronize().map_err(Error::Cuda)?;
+                if matches!(&layer.mixer, MixerKind::Gdn(_)) {
+                    if let Some((state, element, eager, graph)) =
+                        eager_states[gdn_index].first_mismatch(&graph_states[gdn_index])?
+                    {
+                        return Err(invalid(format!(
+                            "Qwen3.5 decode graph state mismatch at layer {} step {step} {state}[{element}]: eager={eager:#010x}, graph={graph:#010x}",
+                            layer.index,
+                        )));
+                    }
+                }
+                let actual = transfers::to_cpu(&scratch.hidden)?.as_bf16()?.to_vec();
+                if expected != actual {
+                    let element = expected
+                        .iter()
+                        .zip(&actual)
+                        .position(|(expected, actual)| expected != actual)
+                        .unwrap_or(0);
+                    return Err(invalid(format!(
+                        "Qwen3.5 decode graph mismatch at layer {} step {step} element {element}: eager={:#06x}, graph={:#06x}",
+                        layer.index,
+                        expected[element].to_bits(),
+                        actual[element].to_bits(),
+                    )));
+                }
+            }
+            if matches!(&layer.mixer, MixerKind::Gdn(_)) {
+                gdn_index += 1;
+            }
+        }
+        Ok(())
     }
 
     /// Execute one scalar decode row into caller-owned persistent scratch.
@@ -350,6 +749,7 @@ impl Qwen35Decoder {
         token_ids: &[u32],
         start_position: usize,
         scratch: &mut DecoderScratch,
+        decode_phases: Option<&[Qwen35DecodePhase]>,
     ) -> Result<DecoderOutput> {
         self.validate_weights(weights)?;
         self.validate_call(
@@ -378,6 +778,7 @@ impl Qwen35Decoder {
             LogitsSelection::Last,
             HiddenSelection::Last,
             scratch,
+            decode_phases,
         )
     }
 
@@ -398,6 +799,7 @@ impl Qwen35Decoder {
         token_offset: usize,
         start_position: usize,
         scratch: &mut DecoderScratch,
+        decode_phases: Option<&[Qwen35DecodePhase]>,
     ) -> Result<DecoderOutput> {
         self.validate_weights(weights)?;
         self.validate_call(
@@ -426,51 +828,7 @@ impl Qwen35Decoder {
             LogitsSelection::Last,
             HiddenSelection::Last,
             scratch,
-        )
-    }
-
-    /// Execute the fixed four-row speculative verification candidate through
-    /// the batched prefill kernels while appending to an existing prefix.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn run_verify_reusing_from_block<B: FullAttentionBackend>(
-        &self,
-        ctx: &CudaContext,
-        weights: &Qwen35DeviceWeights,
-        attention: &mut B,
-        attention_caches: &mut [B::Cache],
-        gdn_states: &[GdnState],
-        token_ids: &[u32],
-        token_block: &Tensor,
-        start_position: usize,
-        scratch: &mut DecoderScratch,
-    ) -> Result<DecoderOutput> {
-        self.validate_weights(weights)?;
-        self.validate_call(
-            attention_caches.len(),
-            gdn_states.len(),
-            token_ids,
-            start_position,
-            DecoderPhase::Prefill,
-        )?;
-        scratch.validate_contract(
-            token_ids.len(),
-            self.architecture.hidden_size,
-            self.architecture.vocab_size,
-            LogitsSelection::All,
-            HiddenSelection::All,
-        )?;
-        scratch.stage_device_tokens(ctx, token_block)?;
-        self.run_after_token_ids(
-            ctx,
-            weights,
-            attention,
-            attention_caches,
-            gdn_states,
-            start_position,
-            DecoderPhase::Prefill,
-            LogitsSelection::All,
-            HiddenSelection::All,
-            scratch,
+            decode_phases,
         )
     }
 
@@ -488,6 +846,7 @@ impl Qwen35Decoder {
         logits_selection: LogitsSelection,
         hidden_selection: HiddenSelection,
         scratch: &mut DecoderScratch,
+        decode_phases: Option<&[Qwen35DecodePhase]>,
     ) -> Result<DecoderOutput> {
         scratch.write_token_ids(token_ids)?;
         self.run_after_token_ids(
@@ -501,6 +860,7 @@ impl Qwen35Decoder {
             logits_selection,
             hidden_selection,
             scratch,
+            decode_phases,
         )
     }
 
@@ -517,43 +877,184 @@ impl Qwen35Decoder {
         logits_selection: LogitsSelection,
         hidden_selection: HiddenSelection,
         scratch: &mut DecoderScratch,
+        decode_phases: Option<&[Qwen35DecodePhase]>,
     ) -> Result<DecoderOutput> {
         let tokens = scratch.tokens;
         scratch.embed(ctx, &weights.embedding)?;
 
         let mut gdn_index = 0usize;
         let mut attention_index = 0usize;
-        for (layer, resident) in self.architecture.layers.iter().zip(&weights.layers) {
-            qwen35_rms_norm(
-                ctx,
-                &scratch.hidden,
-                &resident.input_layernorm,
-                &mut scratch.normalized,
-                self.rms_norm_eps,
-            )
-            .map_err(|error| layer_error(layer.index, "input RMSNorm", error))?;
-
+        if let Some(phases) = decode_phases {
+            if phase != DecoderPhase::Decode || phases.len() != self.architecture.layers.len() {
+                return Err(invalid(
+                    "Qwen3.5 decode graph set does not match the architecture",
+                ));
+            }
+        }
+        let graph_gdn_mode = std::env::var("APXINF_QWEN35_GRAPH_GDN").unwrap_or_default();
+        let graph_gdn = matches!(
+            graph_gdn_mode.as_str(),
+            "1" | "moe" | "full" | "prepared" | "parallel"
+        );
+        let graph_gdn_moe = graph_gdn_mode == "moe";
+        let graph_gdn_full = graph_gdn_mode == "full";
+        let prepared_gdn_full = graph_gdn_mode == "prepared";
+        let parallel_gdn = graph_gdn_mode == "parallel";
+        let graph_attention_moe =
+            std::env::var("APXINF_QWEN35_GRAPH_ATTN_MOE").as_deref() != Ok("0");
+        for (layer_offset, (layer, resident)) in self
+            .architecture
+            .layers
+            .iter()
+            .zip(&weights.layers)
+            .enumerate()
+        {
             match (&layer.mixer, &resident.mixer) {
                 (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) => {
                     let state = &gdn_states[gdn_index];
-                    match phase {
-                        DecoderPhase::Prefill => scratch
-                            .gdn
-                            .prefill(ctx, gdn, state, &scratch.normalized)
-                            .map_err(|error| layer_error(layer.index, "GDN prefill", error))?,
-                        DecoderPhase::Decode => scratch
-                            .gdn
-                            .decode(ctx, gdn, state, &scratch.normalized)
-                            .map_err(|error| layer_error(layer.index, "GDN decode", error))?,
+                    if let Some(phases) = decode_phases.filter(|_| graph_gdn) {
+                        if parallel_gdn {
+                            qwen35_rms_norm(
+                                ctx,
+                                &scratch.hidden,
+                                &resident.input_layernorm,
+                                &mut scratch.normalized,
+                                self.rms_norm_eps,
+                            )
+                            .map_err(|error| layer_error(layer.index, "input RMSNorm", error))?;
+                            phases[layer_offset]
+                                .projections
+                                .as_ref()
+                                .ok_or_else(|| {
+                                    invalid(format!(
+                                        "Qwen3.5 layer {} is missing parallel GDN projections",
+                                        layer.index
+                                    ))
+                                })?
+                                .run(ctx, gdn, state, &mut scratch.gdn, &scratch.normalized)
+                                .map_err(|error| {
+                                    layer_error(layer.index, "parallel GDN projections", error)
+                                })?;
+                            phases[layer_offset]
+                                .run(|| {
+                                    scratch.gdn.decode_prepared_core(ctx, gdn, state)?;
+                                    scratch.gdn.finish_decode_projection(ctx, gdn)?;
+                                    ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)?;
+                                    run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                                })
+                                .map_err(|error| {
+                                    layer_error(layer.index, "parallel prepared GDN layer", error)
+                                })?;
+                        } else if prepared_gdn_full {
+                            phases[layer_offset]
+                                .run(|| {
+                                    qwen35_rms_norm(
+                                        ctx,
+                                        &scratch.hidden,
+                                        &resident.input_layernorm,
+                                        &mut scratch.normalized,
+                                        self.rms_norm_eps,
+                                    )?;
+                                    scratch.gdn.decode_core(
+                                        ctx,
+                                        gdn,
+                                        state,
+                                        &scratch.normalized,
+                                    )?;
+                                    scratch.gdn.finish_decode_projection(ctx, gdn)?;
+                                    ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)?;
+                                    run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                                })
+                                .map_err(|error| {
+                                    layer_error(layer.index, "prepared GDN layer", error)
+                                })?;
+                        } else if graph_gdn_moe {
+                            qwen35_rms_norm(
+                                ctx,
+                                &scratch.hidden,
+                                &resident.input_layernorm,
+                                &mut scratch.normalized,
+                                self.rms_norm_eps,
+                            )
+                            .map_err(|error| layer_error(layer.index, "input RMSNorm", error))?;
+                            scratch
+                                .gdn
+                                .decode(ctx, gdn, state, &scratch.normalized)
+                                .map_err(|error| layer_error(layer.index, "GDN decode", error))?;
+                            ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
+                                .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
+                        } else if !graph_gdn_full {
+                            qwen35_rms_norm(
+                                ctx,
+                                &scratch.hidden,
+                                &resident.input_layernorm,
+                                &mut scratch.normalized,
+                                self.rms_norm_eps,
+                            )
+                            .map_err(|error| layer_error(layer.index, "input RMSNorm", error))?;
+                            scratch
+                                .gdn
+                                .prepare_decode_inputs(ctx, gdn, state, &scratch.normalized)
+                                .map_err(|error| {
+                                    layer_error(layer.index, "GDN input projections", error)
+                                })?;
+                        }
+                        if !prepared_gdn_full && !parallel_gdn {
+                            phases[layer_offset].replay().map_err(|error| {
+                                layer_error(layer.index, "GDN graph replay", error)
+                            })?;
+                        }
+                        if !graph_gdn_full && !graph_gdn_moe && !prepared_gdn_full && !parallel_gdn
+                        {
+                            scratch
+                                .gdn
+                                .finish_decode_projection(ctx, gdn)
+                                .map_err(|error| {
+                                    layer_error(layer.index, "GDN output projection", error)
+                                })?;
+                            ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
+                                .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                                .map_err(|error| layer_error(layer.index, "MoE tail", error))?;
+                        }
+                    } else {
+                        qwen35_rms_norm(
+                            ctx,
+                            &scratch.hidden,
+                            &resident.input_layernorm,
+                            &mut scratch.normalized,
+                            self.rms_norm_eps,
+                        )
+                        .map_err(|error| layer_error(layer.index, "input RMSNorm", error))?;
+                        match phase {
+                            DecoderPhase::Prefill => scratch
+                                .gdn
+                                .prefill(ctx, gdn, state, &scratch.normalized)
+                                .map_err(|error| layer_error(layer.index, "GDN prefill", error))?,
+                            DecoderPhase::Decode => scratch
+                                .gdn
+                                .decode(ctx, gdn, state, &scratch.normalized)
+                                .map_err(|error| layer_error(layer.index, "GDN decode", error))?,
+                        }
+                        ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
+                            .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
+                        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                            .map_err(|error| layer_error(layer.index, "MoE tail", error))?;
                     }
-                    ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
-                        .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
                     gdn_index += 1;
                 }
                 (
                     MixerKind::FullAttention(geometry),
                     DeviceMixerWeights::FullAttention(full_attention),
                 ) => {
+                    qwen35_rms_norm(
+                        ctx,
+                        &scratch.hidden,
+                        &resident.input_layernorm,
+                        &mut scratch.normalized,
+                        self.rms_norm_eps,
+                    )
+                    .map_err(|error| layer_error(layer.index, "input RMSNorm", error))?;
                     attention
                         .run(
                             ctx,
@@ -571,6 +1072,14 @@ impl Qwen35Decoder {
                         .map_err(|error| layer_error(layer.index, "attention", error))?;
                     ops::add_into(ctx, &scratch.mixer_output, &scratch.hidden)
                         .map_err(|error| layer_error(layer.index, "attention residual", error))?;
+                    if let Some(phases) = decode_phases.filter(|_| graph_attention_moe) {
+                        phases[layer_offset].replay().map_err(|error| {
+                            layer_error(layer.index, "attention MoE graph replay", error)
+                        })?;
+                    } else {
+                        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                            .map_err(|error| layer_error(layer.index, "MoE tail", error))?;
+                    }
                     attention_index += 1;
                 }
                 _ => {
@@ -580,27 +1089,11 @@ impl Qwen35Decoder {
                     )));
                 }
             }
-
-            qwen35_rms_norm(
-                ctx,
-                &scratch.hidden,
-                &resident.post_attention_layernorm,
-                &mut scratch.normalized,
-                self.rms_norm_eps,
-            )
-            .map_err(|error| layer_error(layer.index, "post-attention RMSNorm", error))?;
-            scratch
-                .moe
-                .run(ctx, &resident.moe, &scratch.normalized)
-                .map_err(|error| layer_error(layer.index, "MoE", error))?;
-            ops::add_into(ctx, scratch.moe.output(), &scratch.hidden)
-                .map_err(|error| layer_error(layer.index, "MoE residual", error))?;
         }
 
         scratch.finish(
             ctx,
-            &weights.final_norm,
-            &weights.lm_head,
+            weights,
             self.rms_norm_eps,
             logits_selection,
             hidden_selection,
@@ -763,19 +1256,6 @@ impl DecoderScratch {
         transfers::copy_cuda_to_cuda(ctx, &source, &self.token_ids)
     }
 
-    fn stage_device_tokens(&self, ctx: &CudaContext, token_block: &Tensor) -> Result<()> {
-        let dims = token_block.shape().dims();
-        if token_block.device() != Device::Cuda(ctx.device_id())
-            || token_block.dtype() != DType::I32
-            || dims != [self.tokens]
-        {
-            return Err(invalid(
-                "Qwen3.5 verification token block has the wrong CUDA I32 shape",
-            ));
-        }
-        transfers::copy_cuda_to_cuda(ctx, token_block, &self.token_ids)
-    }
-
     fn embed(&self, ctx: &CudaContext, embedding: &Tensor) -> Result<()> {
         validate_tensor(
             embedding,
@@ -790,21 +1270,20 @@ impl DecoderScratch {
     fn finish(
         &mut self,
         ctx: &CudaContext,
-        final_norm: &Tensor,
-        lm_head: &Tensor,
+        weights: &Qwen35DeviceWeights,
         eps: f32,
         logits_selection: LogitsSelection,
         hidden_selection: HiddenSelection,
     ) -> Result<()> {
         validate_tensor(
-            final_norm,
+            &weights.final_norm,
             ctx,
             DType::BF16,
             &[self.hidden_size],
             "final norm",
         )?;
         validate_tensor(
-            lm_head,
+            &weights.lm_head,
             ctx,
             DType::BF16,
             &[self.hidden_size, self.vocab_size],
@@ -814,7 +1293,13 @@ impl DecoderScratch {
             HiddenSelection::All => self.hidden.clone(),
             HiddenSelection::Last => row_view(&self.hidden, self.tokens - 1, self.hidden_size)?,
         };
-        qwen35_rms_norm(ctx, &source, final_norm, &mut self.final_normalized, eps)?;
+        qwen35_rms_norm(
+            ctx,
+            &source,
+            &weights.final_norm,
+            &mut self.final_normalized,
+            eps,
+        )?;
         let head_input = match logits_selection {
             LogitsSelection::All => self.final_normalized.clone(),
             LogitsSelection::Last => row_view(
@@ -823,11 +1308,25 @@ impl DecoderScratch {
                 self.hidden_size,
             )?,
         };
-        ops::gemm(
-            ctx,
-            ops::GemmArgs::new(&head_input, lm_head, &mut self.logits),
-        )
+        project_lm_head(ctx, weights, &head_input, &mut self.logits)
     }
+}
+
+fn run_decode_moe_tail(
+    ctx: &CudaContext,
+    resident: &DeviceLayerWeights,
+    scratch: &mut DecoderScratch,
+    rms_norm_eps: f32,
+) -> Result<()> {
+    qwen35_rms_norm(
+        ctx,
+        &scratch.hidden,
+        &resident.post_attention_layernorm,
+        &mut scratch.normalized,
+        rms_norm_eps,
+    )?;
+    scratch.moe.run(ctx, &resident.moe, &scratch.normalized)?;
+    ops::add_into(ctx, scratch.moe.output(), &scratch.hidden)
 }
 
 fn selected_rows(tokens: usize, selection: LogitsSelection) -> usize {

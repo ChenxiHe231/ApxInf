@@ -491,6 +491,12 @@ fn main() {
         .iter()
         .any(|target| is_cutlass_sm100_family(&target.cutlass_arch))
     {
+        // The NVFP4-A16 GEMV does not use CUTLASS, but its FP4 conversion
+        // instructions require the architecture-specific Blackwell feature
+        // target (sm_101a on CUDA 12 Thor, sm_110a on CUDA 13).  Compiling it
+        // with generic sm_101 is valid but silently lowers the conversions to
+        // a roughly 4x slower sequence.
+        cutlass_sources.push(native.join("kernels/custom/nvfp4_a16_blackwell_gemv.cu"));
         let operators = cutlass_root.join("ops/gemm");
         cutlass_sources.extend(
             [
@@ -528,6 +534,7 @@ fn main() {
         // tcgen05 and TMA. See native/kernels/flashinfer_gdn/README.md.
         cutlass_sources.push(native.join("kernels/flashinfer_gdn/flashinfer_gdn_launch.cu"));
     } else {
+        generic_sources.push(native.join("kernels/custom/nvfp4_a16_blackwell_gemv_stub.cpp"));
         // No sm100 target: the kernel translation unit is absent, so link the
         // unsupported-status stub in its place (a weak symbol is not enough —
         // once the archive resolves the weak definition it never pulls the

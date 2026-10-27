@@ -68,53 +68,90 @@ __global__ void route_topk_kernel(const T* __restrict__ logits,
                                   int tokens, int experts, int top_k,
                                   bool renormalize) {
   const int token = blockIdx.x;
-  if (threadIdx.x != 0 || token >= tokens) return;
+  if (token >= tokens) return;
 
   const T* row = logits + static_cast<int64_t>(token) * experts;
-  float maximum = -FLT_MAX;
-  for (int expert = 0; expert < experts; ++expert) {
-    maximum = fmaxf(maximum, as_float(row[expert]));
+  __shared__ float values[kMaxExperts];
+  __shared__ float probabilities[kMaxExperts];
+  __shared__ int indices[kMaxExperts];
+  __shared__ float maximum;
+  __shared__ float denominator;
+
+  const int expert = threadIdx.x;
+  if (expert < experts) {
+    values[expert] = as_float(row[expert]);
+    indices[expert] = expert;
+  } else {
+    values[expert] = -FLT_MAX;
+    indices[expert] = INT_MAX;
   }
-  float denominator = 0.0f;
-  for (int expert = 0; expert < experts; ++expert) {
-    denominator += expf(as_float(row[expert]) - maximum);
+  __syncthreads();
+
+  if (expert == 0) {
+    float value = -FLT_MAX;
+    for (int candidate = 0; candidate < experts; ++candidate) {
+      value = fmaxf(value, values[candidate]);
+    }
+    maximum = value;
+  }
+  __syncthreads();
+
+  // Compute independent exponentials in parallel, but retain the original
+  // expert-order sum for numerically stable serving output.
+  if (expert < experts) {
+    probabilities[expert] = expf(values[expert] - maximum);
+  }
+  __syncthreads();
+
+  if (expert == 0) {
+    float sum = 0.0f;
+    for (int candidate = 0; candidate < experts; ++candidate) {
+      sum += probabilities[candidate];
+    }
+    denominator = sum;
+  }
+  __syncthreads();
+
+  // Sort all 256 candidates in parallel by descending logit and then ascending
+  // expert ID. Inactive lanes carry the worst possible key and sort last.
+  for (int width = 2; width <= kThreads; width <<= 1) {
+    for (int stride = width >> 1; stride > 0; stride >>= 1) {
+      const int other = expert ^ stride;
+      if (other > expert) {
+        const float left_value = values[expert];
+        const int left_id = indices[expert];
+        const float right_value = values[other];
+        const int right_id = indices[other];
+        const bool right_better =
+            right_value > left_value ||
+            (right_value == left_value && right_id < left_id);
+        const bool left_better =
+            left_value > right_value ||
+            (left_value == right_value && left_id < right_id);
+        const bool best_first = (expert & width) == 0;
+        const bool swap = best_first ? right_better : left_better;
+        if (swap) {
+          values[expert] = right_value;
+          indices[expert] = right_id;
+          values[other] = left_value;
+          indices[other] = left_id;
+        }
+      }
+      __syncthreads();
+    }
   }
 
-  float selected_values[kMaxTopK];
-  int selected_ids[kMaxTopK];
-#pragma unroll
-  for (int slot = 0; slot < kMaxTopK; ++slot) {
-    selected_values[slot] = -FLT_MAX;
-    selected_ids[slot] = INT_MAX;
-  }
-  for (int expert = 0; expert < experts; ++expert) {
-    const float value = as_float(row[expert]);
-    int insertion = top_k;
-    for (int slot = 0; slot < top_k; ++slot) {
-      if (value > selected_values[slot] ||
-          (value == selected_values[slot] && expert < selected_ids[slot])) {
-        insertion = slot;
-        break;
-      }
-    }
-    if (insertion == top_k) continue;
-    for (int slot = top_k - 1; slot > insertion; --slot) {
-      selected_values[slot] = selected_values[slot - 1];
-      selected_ids[slot] = selected_ids[slot - 1];
-    }
-    selected_values[insertion] = value;
-    selected_ids[insertion] = expert;
-  }
+  if (expert != 0) return;
 
   float selected_sum = 0.0f;
   float weights[kMaxTopK];
   for (int slot = 0; slot < top_k; ++slot) {
-    weights[slot] = expf(selected_values[slot] - maximum) / denominator;
+    weights[slot] = probabilities[indices[slot]] / denominator;
     selected_sum += weights[slot];
   }
   const int64_t output = static_cast<int64_t>(token) * top_k;
   for (int slot = 0; slot < top_k; ++slot) {
-    expert_ids[output + slot] = selected_ids[slot];
+    expert_ids[output + slot] = indices[slot];
     expert_weights[output + slot] =
         renormalize ? weights[slot] / selected_sum : weights[slot];
   }
@@ -497,7 +534,7 @@ template <class T>
 cudaError_t launch_route_topk(const apxinf_moe_route_spec_t& spec,
                               const apxinf_moe_route_bindings_t& bindings) {
   auto stream = static_cast<cudaStream_t>(bindings.stream);
-  route_topk_kernel<T><<<static_cast<int>(spec.tokens), 1, 0, stream>>>(
+  route_topk_kernel<T><<<static_cast<int>(spec.tokens), kThreads, 0, stream>>>(
       static_cast<const T*>(bindings.logits), bindings.expert_ids,
       bindings.expert_weights, static_cast<int>(spec.tokens),
       static_cast<int>(spec.experts), static_cast<int>(spec.top_k),
