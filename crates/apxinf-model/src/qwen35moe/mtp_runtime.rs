@@ -1064,6 +1064,20 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
                 self.target.position()
             )));
         }
+        // APXINF_QWEN35_MTP_TIMING=1 reports where a speculative round spends
+        // its wall clock. Each phase is bracketed by a synchronize so the
+        // numbers are attributable; that extra serialization means the totals
+        // are only valid relative to each other, not as absolute throughput.
+        let timing = std::env::var_os("APXINF_QWEN35_MTP_TIMING").is_some();
+        let mark = |label: &str, at: std::time::Instant| {
+            if timing {
+                eprintln!("[mtp-round] {label} {:.3} ms", at.elapsed().as_secs_f64() * 1e3);
+            }
+        };
+        if timing {
+            ctx.synchronize().map_err(Error::Cuda)?;
+        }
+        let phase = std::time::Instant::now();
         let proposals = self.mtp.draft(
             ctx,
             weights,
@@ -1073,6 +1087,11 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
             start,
             target_hidden,
         )?;
+        if timing {
+            ctx.synchronize().map_err(Error::Cuda)?;
+        }
+        mark("draft", phase);
+        let phase = std::time::Instant::now();
         let ticket = schedule
             .begin_round(pending, &proposals)
             .map_err(schedule_error)?;
@@ -1080,6 +1099,11 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         let verification =
             self.target
                 .verify_target_chunk(ctx, decoder, weights, &verification_inputs)?;
+        if timing {
+            ctx.synchronize().map_err(Error::Cuda)?;
+        }
+        mark("verify", phase);
+        let phase = std::time::Instant::now();
         let plan = schedule
             .finish_round(ticket, verification.predictions())
             .map_err(schedule_error)?;
@@ -1101,6 +1125,7 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
             self.mtp
                 .prepare_commit(ctx, weights, &mut self.shadow_mtp, contract.mtp)?;
         ctx.synchronize().map_err(Error::Cuda)?;
+        mark("commit", phase);
 
         // The published target output aliases the session's persistent decode
         // scratch. Its final hidden row was captured above for the next MTP
@@ -1255,6 +1280,13 @@ fn prefill_kv_chunk(
 }
 
 struct MtpScratch {
+    /// Device-resident `[valid_key_tokens, query_start]` for the draft layer
+    /// attention, created on first use because the cache capacity is only
+    /// known then. Without it the draft attention Spec carries the live
+    /// prefix, so every draft step is a fresh tuning key and a full autotune:
+    /// measured at 2055 ms for the three draft forwards of one round, against
+    /// 20 ms for an entire 40-layer scalar decode step.
+    decode_meta: Option<ops::KvCacheDecodeMeta>,
     token: Tensor,
     position: Tensor,
     embedding: Tensor,
@@ -1287,6 +1319,7 @@ struct MtpScratch {
 impl MtpScratch {
     fn new(ctx: &CudaContext, geometry: AttentionGeometry) -> Result<Self> {
         Ok(Self {
+            decode_meta: None,
             token: zeros(ctx, vec![1], DType::I32)?,
             position: zeros(ctx, vec![1], DType::I32)?,
             embedding: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
@@ -1459,8 +1492,19 @@ fn forward_one(
     ops::partial_rope(ctx, &key_slot, position, geometry.rotary_dim, rope_theta)?;
 
     let valid = cache_row + 1;
-    let keys = cache_prefix_view(&state.key, valid, geometry.kv_heads, geometry.head_dim)?;
-    let values = cache_prefix_view(&state.value, valid, geometry.kv_heads, geometry.head_dim)?;
+    // Capacity-shaped views plus a device-resident length, so one tuned Recipe
+    // serves every draft step. Rows past `valid` are never read: each split
+    // clamps to the device length. Needs `valid >= 1`, which holds since
+    // `valid = cache_row + 1`.
+    if scratch.decode_meta.is_none() {
+        scratch.decode_meta = Some(ops::KvCacheDecodeMeta::new(
+            ctx.device_id(),
+            state.capacity,
+        )?);
+    }
+    let keys = cache_prefix_view(&state.key, state.capacity, geometry.kv_heads, geometry.head_dim)?;
+    let values =
+        cache_prefix_view(&state.value, state.capacity, geometry.kv_heads, geometry.head_dim)?;
     let query = reshape(
         &scratch.query,
         vec![1, 1, geometry.query_heads, geometry.head_dim],
@@ -1471,9 +1515,19 @@ fn forward_one(
         vec![1, 1, geometry.query_heads, geometry.head_dim],
         DType::BF16,
     )?;
-    let mut args = ops::KvCacheAttentionArgs::new(&query, &keys, &values, &mut attention_out);
+    let meta = scratch
+        .decode_meta
+        .clone()
+        .ok_or_else(|| invalid("Qwen3.5 MTP decode metadata was not initialized"))?;
+    meta.update(valid, cache_row)?;
+    let mut args = ops::KvCacheAttentionArgs::new(&query, &keys, &values, &mut attention_out)
+        .with_decode_meta(&meta);
     args.valid_key_tokens = valid;
     args.query_start = cache_row;
+    // The draft attention previously fell back silently to the naive custom
+    // kernel on any failure; that path timed 47.79 ms against 0.209 ms for the
+    // split-KV winner on the decode shape.
+    args.policy.allow_fallback = false;
     ops::kv_cache_attention(ctx, args)?;
     let gate = reshape(
         &scratch.query_gate,
