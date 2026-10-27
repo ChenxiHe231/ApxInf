@@ -1,6 +1,10 @@
-# Qwen3.5-35B-A3B on Thor-U
+# Qwen3.6-35B-A3B-NVFP4 on Thor-U
 
-This guide covers the Qwen3.5-35B-A3B NVFP4 runtime on Thor-U: fast builds,
+This guide covers the `Qwen3.6-35B-A3B-NVFP4` checkpoint installed on Thor-U.
+Its Hugging Face architecture metadata remains `qwen3_5_moe`, so the internal
+Rust module and registry name continue to use `qwen35`; that name must not be
+interpreted as support for the older `txn545/Qwen3.5-35B-A3B-NVFP4` checkpoint.
+The guide includes fast builds,
 the fixed 4,096-token benchmark, precision comparisons, text generation and
 the OpenAI-compatible server.
 
@@ -13,19 +17,48 @@ ssh thor-u
 cd /opt/data/dev/apxinf-qwen35-thoru-perf
 ```
 
-Set the build and checkpoint paths once per shell:
+### Required build/inference memory split
+
+Thor-U uses system RAM for both host processes and CUDA allocations, while the
+CUDA runtime draws from the reserved HugeTLB pool. Never compile CUDA code with
+the inference-sized pool still reserved: parallel `cicc` processes can exhaust
+the remaining ordinary memory and trigger the system OOM killer.
+
+Stop every ApxInf/Edge-LLM inference process, release HugeTLB, and limit both
+Cargo and the native CUDA worker pool to two jobs before compiling:
+
+```bash
+sudo sysctl -w vm.nr_hugepages=0
+grep -E 'MemAvailable|HugePages_Total|HugePages_Free|Hugetlb' /proc/meminfo
+
+export APXINF_NVCC_PARALLELISM=2
+export CARGO_BUILD_JOBS=2
+```
+
+After the build finishes, restore the 40 GiB inference pool **before** loading
+the model, and do not run Cargo/NVCC at the same time as inference:
+
+```bash
+sudo sysctl -w vm.nr_hugepages=20480
+grep -E 'MemAvailable|HugePages_Total|HugePages_Free|Hugetlb' /proc/meminfo
+```
+
+`HugePages_Total` must report `20480`. If the kernel cannot reserve the full
+pool, stop memory-heavy processes and retry before starting inference.
+
+Set the remaining build and checkpoint paths once per shell:
 
 ```bash
 export PATH=/usr/local/cuda/bin:$HOME/.cargo/bin:$PATH
 export CARGO_TARGET_DIR=/opt/data/dev/apxinf-qwen35-mtp-serving/target
-export APXINF_NVCC_PARALLELISM=1
-export CARGO_BUILD_JOBS=1
 export QWEN35_CHECKPOINT=/opt/data/models/Qwen3.6-35B-A3B-NVFP4
 ```
 
-`APXINF_NVCC_PARALLELISM=1` is intentional on Thor-U: individual CUTLASS
-translation units can consume more than 10 GiB of RAM. Raising it may make a
-cold build faster, but can also cause an out-of-memory failure.
+The branch caches native CUDA objects by command line and dependency
+fingerprint, and the `qwen35-cuda` feature avoids compiling the unrelated
+legacy CUDA runtime. Incremental builds therefore reuse unchanged CUDA objects;
+a cold build uses at most two native workers. Do not raise either job limit on
+Thor-U even when more CPU cores are idle.
 
 The checkpoint directory name is not used for dispatch. Its `config.json`
 must identify `qwen3_5_moe` / `qwen3_5_moe_text` and contain the complete
