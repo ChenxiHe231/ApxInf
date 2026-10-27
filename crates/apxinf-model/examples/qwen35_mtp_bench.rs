@@ -1,6 +1,7 @@
 //! Load-once Qwen3.5-35B-A3B NVFP4 scalar-versus-MTP benchmark.
 //!
-//! The prompt is exactly 4,096 deterministic token IDs. Each mode runs two
+//! The default prompt is exactly 4,096 deterministic token IDs; smoke tests
+//! may override it with `--prompt-tokens`. Each mode runs two
 //! warmups followed by five measured iterations and emits exactly 256 tokens
 //! unless a larger `--max-new` value is requested. EOS stopping is disabled.
 //! The model and its CUDA allocations are loaded once for the whole process.
@@ -148,10 +149,10 @@ struct ModeResult {
     summary: Value,
 }
 
-fn exact_prompt() -> Vec<u32> {
+fn exact_prompt(prompt_tokens: usize) -> Vec<u32> {
     let mut state = 0x35A3_BF04_4096_0001u64;
-    let mut tokens = Vec::with_capacity(PROMPT_TOKENS);
-    for _ in 0..PROMPT_TOKENS {
+    let mut tokens = Vec::with_capacity(prompt_tokens);
+    for _ in 0..prompt_tokens {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
@@ -336,16 +337,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let checkpoint = args.get(1).filter(|arg| !arg.starts_with("--")).ok_or(
         "usage: qwen35_mtp_bench <checkpoint-dir> [--device N] [--max-new N] \
-             [--warmups N] [--repeats N] [--mode scalar|mtp|both] \
+             [--prompt-tokens N] [--warmups N] [--repeats N] [--mode scalar|mtp|both] \
              [--qwen35-moe-activation nvfp4|bf16] [--qwen35-kv-cache bf16|fp8]",
     )?;
     let device = arg_value(&args, "--device", 0);
+    let prompt_tokens = arg_value(&args, "--prompt-tokens", PROMPT_TOKENS);
     let max_new_tokens = arg_value(&args, "--max-new", DEFAULT_OUTPUT_TOKENS);
     let warmups = arg_value(&args, "--warmups", DEFAULT_WARMUPS);
     let repeats = arg_value(&args, "--repeats", DEFAULT_REPEATS);
     let benchmark_mode = BenchmarkMode::parse(&args)?;
     let moe_activation = precision_arg::<Qwen35MoeActivation>(&args, "--qwen35-moe-activation")?;
     let kv_cache = precision_arg::<Qwen35KvCacheDType>(&args, "--qwen35-kv-cache")?;
+    if prompt_tokens == 0 {
+        return Err("--prompt-tokens must be at least 1".into());
+    }
     if max_new_tokens == 0 {
         return Err("--max-new must be at least 1".into());
     }
@@ -353,10 +358,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--repeats must be at least 1".into());
     }
 
-    let prompt = exact_prompt();
-    assert_eq!(prompt.len(), PROMPT_TOKENS);
+    let prompt = exact_prompt(prompt_tokens);
     let options = LoadOptions {
-        text_kv_capacity: Some(PROMPT_TOKENS + max_new_tokens + MTP_LOOKAHEAD),
+        text_kv_capacity: Some(prompt_tokens + max_new_tokens + MTP_LOOKAHEAD),
         qwen35_moe_activation: Some(moe_activation),
         qwen35_kv_cache: Some(kv_cache),
         ..LoadOptions::default()
@@ -369,7 +373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "schema": "apxinf.qwen35.benchmark.config.v1",
             "checkpoint": checkpoint,
             "device": device,
-            "prompt_tokens": PROMPT_TOKENS,
+            "prompt_tokens": prompt_tokens,
             "output_tokens": max_new_tokens,
             "warmups": warmups,
             "repeats": repeats,

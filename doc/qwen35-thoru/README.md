@@ -8,6 +8,14 @@ The guide includes fast builds,
 the fixed 4,096-token benchmark, precision comparisons, text generation and
 the OpenAI-compatible server.
 
+> **Current validation status:** the Qwen3.6 checkpoint completes a one-token
+> prefill plus scalar decode with BF16 KV cache. The current dual-orientation
+> FP8 weight layout still makes the 4,096-token prefill exhaust or stall
+> Thor-U's unified-memory environment and render the host temporarily
+> unreachable. Treat the 4,096-token command below as a target benchmark, not
+> a production-ready validation, until the duplicate FP8 transpose storage is
+> removed or the inference HugeTLB/ordinary-memory split is requalified.
+
 ## 1. Connect and prepare the environment
 
 Connect to Thor-U directly and enter this branch's checkout:
@@ -209,6 +217,18 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 ## 7. Fast validation
+
+After restoring HugeTLB, use a one-token prompt and two output tokens to
+validate load, prefill and one actual decode step. One output token is
+insufficient because generation TPS needs a post-TTFT interval:
+
+```bash
+"$CARGO_TARGET_DIR/debug/examples/qwen35_mtp_bench" \
+  "$QWEN35_CHECKPOINT" \
+  --device 0 --prompt-tokens 1 --max-new 2 \
+  --warmups 0 --repeats 1 --mode scalar \
+  --qwen35-moe-activation nvfp4 --qwen35-kv-cache bf16
+```
 
 ```bash
 cargo check -p apxinf-model \
