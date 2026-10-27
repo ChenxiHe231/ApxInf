@@ -14,7 +14,7 @@ use super::decoder::{
     LogitsSelection, Qwen35DecodePhase, Qwen35Decoder,
 };
 use super::device_weights::{DeviceMixerWeights, Qwen35DeviceWeights};
-use super::forward::GdnState;
+use super::forward::{GdnState, GdnStateCheckpoints};
 use super::mtp_schedule::{MtpCommit, TokenId, QWEN35_MTP_DRAFT_STEPS, QWEN35_MTP_VERIFY_ROWS};
 
 /// Device MTP execution boundary. The schedule already decides which rows are
@@ -175,23 +175,22 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     attention: B,
     committed_gdn: Vec<GdnState>,
     shadow_gdn: Vec<GdnState>,
+    /// State after each row of the fixed four-token target verification.
+    verify_gdn_checkpoints: Vec<GdnStateCheckpoints>,
     committed_attention: Vec<B::Cache>,
     shadow_attention: Vec<B::Cache>,
     /// Prefix of the inactive cache bank known to equal the committed bank.
     shadow_attention_valid: usize,
-    /// Persistent one-row workspace shared by ordinary decode, four-row exact
-    /// target verification, and partial-commit replay. Variable-size prefill
+    /// Persistent one-row workspace for ordinary decode. Variable-size prefill
     /// deliberately keeps using call-sized temporary scratch.
     decode_scratch: DecoderScratch,
-    /// Persistent four-row workspace for the opt-in batched target verifier.
+    /// Persistent four-row workspace for the batched target verifier.
     verify_scratch: DecoderScratch,
     /// Graph sets follow their physical GDN state banks when transactions
     /// publish by swapping committed and shadow storage.
     committed_decode_phases: Option<Vec<Qwen35DecodePhase>>,
     shadow_decode_phases: Option<Vec<Qwen35DecodePhase>>,
-    /// Four staged verification inputs and their device argmax outputs. These
-    /// eliminate per-row H2D traffic, allocation and host synchronization.
-    verify_token_ids: Tensor,
+    /// Device argmax outputs for the four-row verifier.
     verify_predictions: Tensor,
     capacity: usize,
     position: usize,
@@ -230,6 +229,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         }
         let mut committed_gdn = Vec::with_capacity(architecture.gdn_layers().count());
         let mut shadow_gdn = Vec::with_capacity(architecture.gdn_layers().count());
+        let mut verify_gdn_checkpoints = Vec::with_capacity(architecture.gdn_layers().count());
         let mut committed_attention =
             Vec::with_capacity(architecture.full_attention_layers().count());
         let mut shadow_attention = Vec::with_capacity(architecture.full_attention_layers().count());
@@ -239,17 +239,14 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                 (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(_)) => {
                     committed_gdn.push(GdnState::new(ctx)?);
                     shadow_gdn.push(GdnState::new(ctx)?);
+                    verify_gdn_checkpoints
+                        .push(GdnStateCheckpoints::new(ctx, QWEN35_MTP_VERIFY_ROWS)?);
                 }
                 (
                     MixerKind::FullAttention(geometry),
                     DeviceMixerWeights::FullAttention(full_attention),
                 ) => {
-                    let scales = full_attention.kv_cache_scales.ok_or_else(|| {
-                        invalid(format!(
-                            "Qwen3.5 base attention layer {} is missing FP8 KV scales",
-                            layer.index
-                        ))
-                    })?;
+                    let scales = full_attention.kv_cache_scales;
                     let committed =
                         attention.allocate_cache(ctx, layer.index, *geometry, capacity, scales)?;
                     let shadow =
@@ -268,12 +265,12 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
 
         let verify_zeros = vec![0i32; QWEN35_MTP_VERIFY_ROWS];
         let verify_zeros = Tensor::from_i32(vec![QWEN35_MTP_VERIFY_ROWS], &verify_zeros)?;
-        let verify_token_ids = transfers::to_cuda(&verify_zeros, ctx.device_id())?;
         let verify_predictions = transfers::to_cuda(&verify_zeros, ctx.device_id())?;
         let mut session = Self {
             attention,
             committed_gdn,
             shadow_gdn,
+            verify_gdn_checkpoints,
             committed_attention,
             shadow_attention,
             shadow_attention_valid: 0,
@@ -281,7 +278,6 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             verify_scratch: decoder.allocate_verify_scratch(ctx)?,
             committed_decode_phases: None,
             shadow_decode_phases: None,
-            verify_token_ids,
             verify_predictions,
             capacity,
             position: 0,
@@ -364,12 +360,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                     MixerKind::FullAttention(geometry),
                     DeviceMixerWeights::FullAttention(full_attention),
                 ) => {
-                    let scales = full_attention.kv_cache_scales.ok_or_else(|| {
-                        invalid(format!(
-                            "Qwen3.5 base attention layer {} is missing FP8 KV scales",
-                            layer.index
-                        ))
-                    })?;
+                    let scales = full_attention.kv_cache_scales;
                     attention.push(self.attention.allocate_cache(
                         ctx,
                         layer.index,
@@ -670,18 +661,15 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         Ok(output)
     }
 
-    /// Evaluate a target-verification chunk one decode row at a time without
-    /// changing committed state or position.
+    /// Evaluate all four target-verification rows in one fixed-shape forward
+    /// without changing committed state or position.
     ///
     /// This is the exact base-model half required by `mtp_schedule`: an MTP
     /// executor can draft three tokens, call this method with
     /// `[pending,d0,d1,d2]`, and derive four target predictions. It is
-    /// intentionally *not* a batched prefill: the validated MTP contract
-    /// requires each verification row to use the exact scalar decode
-    /// attention provider, reductions, and recurrent-state transition. Pass
-    /// the resulting ticket to [`Self::prepare_target_commit`] with the
-    /// schedule's committed row count; partial acceptance replays that prefix
-    /// through the same scalar path.
+    /// Each GDN layer records the state after every row, allowing partial
+    /// acceptance to select the correct recurrent boundary without replaying
+    /// the target model.
     pub fn verify_target_chunk(
         &mut self,
         ctx: &CudaContext,
@@ -704,39 +692,18 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         self.validate_capacity(start_position, token_ids.len())?;
         self.bump_shadow_generation()?;
         self.prepare_shadow_from_committed(ctx)?;
-        let final_output = if std::env::var("APXINF_QWEN35_BATCH_VERIFY").as_deref() == Ok("1") {
-            let output = decoder.run_verify_reusing(
-                ctx,
-                weights,
-                &mut self.attention,
-                &mut self.shadow_attention,
-                &self.shadow_gdn,
-                token_ids,
-                start_position,
-                &mut self.verify_scratch,
-            )?;
-            output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, 0)?;
-            Some(output.into_last_row()?)
-        } else {
-            self.stage_verify_tokens(token_ids)?;
-            let mut final_output = None;
-            for (offset, (&token, (position, phase))) in token_ids
-                .iter()
-                .zip(exact_decode_plan(start_position, token_ids.len())?)
-                .enumerate()
-            {
-                debug_assert_eq!(phase, DecoderPhase::Decode);
-                let output = self.run_decode_shadow_from_block_enqueued(
-                    ctx, decoder, weights, token, offset, position,
-                )?;
-                // Argmax is enqueued before the next scalar row overwrites the
-                // persistent logits buffer. All work shares ctx.stream, so one
-                // round-level synchronization preserves exact kernel ordering.
-                output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, offset)?;
-                final_output = Some(output);
-            }
-            final_output
-        };
+        let final_output = decoder.run_verify_reusing(
+            ctx,
+            weights,
+            &mut self.attention,
+            &mut self.shadow_attention,
+            &self.shadow_gdn,
+            &self.verify_gdn_checkpoints,
+            token_ids,
+            start_position,
+            &mut self.verify_scratch,
+        )?;
+        final_output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, 0)?;
         ctx.synchronize().map_err(Error::Cuda)?;
         let host_predictions = transfers::to_cpu(&self.verify_predictions)?;
         let predictions = host_predictions
@@ -757,20 +724,19 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             start_position,
             inputs: token_ids.to_vec(),
             predictions,
-            final_output: final_output
-                .ok_or_else(|| invalid("Qwen3.5 target verification produced no rows"))?,
+            final_output,
         })
     }
 
     /// Complete all fallible target-side work for a speculative commit.
-    /// Partial acceptance rebuilds the shadow from committed state and replays
-    /// exactly `committed_rows`; full acceptance keeps the already verified
-    /// shadow. No committed state is changed here.
+    /// Partial acceptance selects the saved GDN state after `committed_rows`
+    /// and the matching hidden row. No target-model replay or committed-state
+    /// mutation occurs here.
     pub fn prepare_target_commit(
         &mut self,
         ctx: &CudaContext,
-        decoder: &Qwen35Decoder,
-        weights: &Qwen35DeviceWeights,
+        _decoder: &Qwen35Decoder,
+        _weights: &Qwen35DeviceWeights,
         verification: TargetVerification,
         committed_rows: usize,
     ) -> Result<PreparedTargetCommit> {
@@ -781,18 +747,13 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                 verification.inputs.len()
             )));
         }
-        let output = if committed_rows < verification.inputs.len() {
-            self.prepare_shadow_from_committed(ctx)?;
-            self.run_exact_decode_rows(
-                ctx,
-                decoder,
-                weights,
-                &verification.inputs[..committed_rows],
-                verification.start_position,
-            )?
-        } else {
-            verification.final_output
-        };
+        if committed_rows < verification.inputs.len() {
+            let row = committed_rows - 1;
+            for (checkpoint, shadow) in self.verify_gdn_checkpoints.iter().zip(&self.shadow_gdn) {
+                checkpoint.copy_row_to(ctx, row, shadow)?;
+            }
+        }
+        let output = verification.final_output.into_row(committed_rows - 1)?;
         let end_position = verification
             .start_position
             .checked_add(committed_rows)
@@ -915,63 +876,6 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         Ok(output)
     }
 
-    fn run_decode_shadow_from_block_enqueued(
-        &mut self,
-        ctx: &CudaContext,
-        decoder: &Qwen35Decoder,
-        weights: &Qwen35DeviceWeights,
-        token_id: TokenId,
-        token_offset: usize,
-        start_position: usize,
-    ) -> Result<DecoderOutput> {
-        decoder.run_decode_reusing_from_block(
-            ctx,
-            weights,
-            &mut self.attention,
-            &mut self.shadow_attention,
-            &self.shadow_gdn,
-            token_id,
-            &self.verify_token_ids,
-            token_offset,
-            start_position,
-            &mut self.decode_scratch,
-            self.shadow_decode_phases.as_deref(),
-        )
-    }
-
-    /// Canonical target verification/replay path. Keeping this as an explicit
-    /// scalar loop prevents a future optimization from substituting batched
-    /// prefill and changing reductions or attention-provider selection.
-    fn run_exact_decode_rows(
-        &mut self,
-        ctx: &CudaContext,
-        decoder: &Qwen35Decoder,
-        weights: &Qwen35DeviceWeights,
-        token_ids: &[TokenId],
-        start_position: usize,
-    ) -> Result<DecoderOutput> {
-        self.stage_verify_tokens(token_ids)?;
-        let mut output = None;
-        for (offset, (&token, (position, phase))) in token_ids
-            .iter()
-            .zip(exact_decode_plan(start_position, token_ids.len())?)
-            .enumerate()
-        {
-            debug_assert_eq!(phase, DecoderPhase::Decode);
-            output = Some(self.run_decode_shadow_from_block_enqueued(
-                ctx, decoder, weights, token, offset, position,
-            )?);
-        }
-        ctx.synchronize().map_err(Error::Cuda)?;
-        output.ok_or_else(|| invalid("Qwen3.5 exact decode produced no rows"))
-    }
-
-    fn stage_verify_tokens(&self, token_ids: &[TokenId]) -> Result<()> {
-        let staged = staged_verify_values(token_ids)?;
-        let host = Tensor::from_i32(vec![QWEN35_MTP_VERIFY_ROWS], &staged)?;
-        transfers::copy_cpu_to_cuda(&host, &self.verify_token_ids)
-    }
-
     fn prepare_empty_shadow(&mut self, ctx: &CudaContext) -> Result<()> {
         for state in &self.shadow_gdn {
             state.reset(ctx)?;
@@ -1087,59 +991,4 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
-}
-
-fn exact_decode_plan(start: usize, rows: usize) -> Result<Vec<(usize, DecoderPhase)>> {
-    (0..rows)
-        .map(|offset| {
-            start
-                .checked_add(offset)
-                .map(|position| (position, DecoderPhase::Decode))
-                .ok_or_else(|| invalid("Qwen3.5 exact-verify position overflow"))
-        })
-        .collect()
-}
-
-fn staged_verify_values(token_ids: &[TokenId]) -> Result<[i32; QWEN35_MTP_VERIFY_ROWS]> {
-    if token_ids.is_empty() || token_ids.len() > QWEN35_MTP_VERIFY_ROWS {
-        return Err(invalid(format!(
-            "Qwen3.5 verification staging requires 1..={QWEN35_MTP_VERIFY_ROWS} tokens"
-        )));
-    }
-    let mut staged = [0i32; QWEN35_MTP_VERIFY_ROWS];
-    for (destination, &token) in staged.iter_mut().zip(token_ids) {
-        *destination = i32::try_from(token)
-            .map_err(|_| invalid(format!("Qwen3.5 token ID {token} exceeds i32")))?;
-    }
-    Ok(staged)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mtp_verify_positions_are_scalar_and_contiguous() {
-        assert_eq!(
-            exact_decode_plan(4_096, QWEN35_MTP_VERIFY_ROWS).unwrap(),
-            vec![
-                (4_096, DecoderPhase::Decode),
-                (4_097, DecoderPhase::Decode),
-                (4_098, DecoderPhase::Decode),
-                (4_099, DecoderPhase::Decode),
-            ]
-        );
-    }
-
-    #[test]
-    fn exact_decode_plan_rejects_overflow() {
-        assert!(exact_decode_plan(usize::MAX, 2).is_err());
-    }
-
-    #[test]
-    fn verify_tokens_are_staged_once_with_zeroed_unused_tail() {
-        assert_eq!(staged_verify_values(&[11, 22]).unwrap(), [11, 22, 0, 0]);
-        assert!(staged_verify_values(&[]).is_err());
-        assert!(staged_verify_values(&[1, 2, 3, 4, 5]).is_err());
-    }
 }

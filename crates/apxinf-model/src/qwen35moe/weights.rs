@@ -64,7 +64,7 @@ impl WeightSpec {
 pub fn expected_text_and_mtp_weights(config: &Qwen35MoeConfig) -> Result<Vec<WeightSpec>> {
     let architecture = Qwen35MoeArchitecture::from_config(config)?;
     let hidden = architecture.hidden_size;
-    let mut weights = Vec::with_capacity(124_658);
+    let mut weights = Vec::with_capacity(124_135);
 
     push_bf16(
         &mut weights,
@@ -78,10 +78,11 @@ pub fn expected_text_and_mtp_weights(config: &Qwen35MoeConfig) -> Result<Vec<Wei
         [hidden],
         WeightRole::Normalization,
     );
-    push_bf16(
+    push_nvfp4_linear(
         &mut weights,
-        "lm_head.weight",
-        [architecture.vocab_size, hidden],
+        "lm_head".to_owned(),
+        hidden,
+        architecture.vocab_size,
         WeightRole::LmHead,
     );
 
@@ -128,16 +129,18 @@ pub fn expected_text_and_mtp_weights(config: &Qwen35MoeConfig) -> Result<Vec<Wei
                         WeightRole::Mixer,
                     );
                 }
-                push_bf16(
+                push_fp8_linear(
                     &mut weights,
-                    format!("{prefix}.linear_attn.in_proj_qkv.weight"),
-                    [gdn.qkv_width, hidden],
+                    format!("{prefix}.linear_attn.in_proj_qkv"),
+                    hidden,
+                    gdn.qkv_width,
                     WeightRole::Mixer,
                 );
-                push_bf16(
+                push_fp8_linear(
                     &mut weights,
-                    format!("{prefix}.linear_attn.in_proj_z.weight"),
-                    [gdn.z_width, hidden],
+                    format!("{prefix}.linear_attn.in_proj_z"),
+                    hidden,
+                    gdn.z_width,
                     WeightRole::Mixer,
                 );
                 push_bf16(
@@ -146,22 +149,22 @@ pub fn expected_text_and_mtp_weights(config: &Qwen35MoeConfig) -> Result<Vec<Wei
                     [gdn.value_head_dim],
                     WeightRole::Normalization,
                 );
-                push_bf16(
+                push_fp8_linear(
                     &mut weights,
-                    format!("{prefix}.linear_attn.out_proj.weight"),
-                    [hidden, gdn.z_width],
+                    format!("{prefix}.linear_attn.out_proj"),
+                    gdn.z_width,
+                    hidden,
                     WeightRole::Mixer,
                 );
             }
             MixerKind::FullAttention(attention) => {
-                push_attention(
+                push_fp8_attention(
                     &mut weights,
                     &format!("{prefix}.self_attn"),
                     hidden,
                     attention.query_projection_width,
                     attention.kv_projection_width,
                     attention.head_dim,
-                    true,
                 );
             }
         }
@@ -257,7 +260,6 @@ pub fn expected_text_and_mtp_weights(config: &Qwen35MoeConfig) -> Result<Vec<Wei
         attention.query_projection_width,
         attention.kv_projection_width,
         attention.head_dim,
-        false,
     );
     push_bf16(
         &mut weights,
@@ -265,30 +267,26 @@ pub fn expected_text_and_mtp_weights(config: &Qwen35MoeConfig) -> Result<Vec<Wei
         [architecture.mtp.moe.experts, hidden],
         WeightRole::Router,
     );
-    for expert in 0..architecture.mtp.moe.experts {
-        let expert_prefix = format!("{mtp_prefix}.mlp.experts.{expert}");
-        push_bf16_linear(
-            &mut weights,
-            format!("{expert_prefix}.gate_proj"),
+    push_bf16(
+        &mut weights,
+        format!("{mtp_prefix}.mlp.experts.gate_up_proj"),
+        [
+            architecture.mtp.moe.experts,
+            2 * architecture.mtp.moe.expert_intermediate_size,
+            hidden,
+        ],
+        WeightRole::RoutedExpert,
+    );
+    push_bf16(
+        &mut weights,
+        format!("{mtp_prefix}.mlp.experts.down_proj"),
+        [
+            architecture.mtp.moe.experts,
             hidden,
             architecture.mtp.moe.expert_intermediate_size,
-            WeightRole::RoutedExpert,
-        );
-        push_bf16_linear(
-            &mut weights,
-            format!("{expert_prefix}.up_proj"),
-            hidden,
-            architecture.mtp.moe.expert_intermediate_size,
-            WeightRole::RoutedExpert,
-        );
-        push_bf16_linear(
-            &mut weights,
-            format!("{expert_prefix}.down_proj"),
-            architecture.mtp.moe.expert_intermediate_size,
-            hidden,
-            WeightRole::RoutedExpert,
-        );
-    }
+        ],
+        WeightRole::RoutedExpert,
+    );
     let shared_prefix = format!("{mtp_prefix}.mlp.shared_expert");
     push_bf16_linear(
         &mut weights,
@@ -318,7 +316,7 @@ pub fn expected_text_and_mtp_weights(config: &Qwen35MoeConfig) -> Result<Vec<Wei
         WeightRole::SharedExpertGate,
     );
 
-    debug_assert_eq!(weights.len(), 124_658);
+    debug_assert_eq!(weights.len(), 124_135);
     debug_assert_eq!(
         weights
             .iter()
@@ -341,7 +339,6 @@ pub(super) fn push_attention(
     query_width: usize,
     kv_width: usize,
     head_dim: usize,
-    include_fp8_kv_scales: bool,
 ) {
     for (projection, output) in [
         ("q_proj", query_width),
@@ -369,18 +366,60 @@ pub(super) fn push_attention(
             WeightRole::Normalization,
         );
     }
-    if include_fp8_kv_scales {
-        // ModelOpt stores each KV-cache amax next to the projection which
-        // produces that cache.  These scalars are not direct dequantization
-        // scales; the loader converts them by FP8_E4M3_MAX (448).
-        for (projection, scale) in [("k_proj", "k_scale"), ("v_proj", "v_scale")] {
-            weights.push(WeightSpec::new(
-                format!("{prefix}.{projection}.{scale}"),
-                CheckpointDType::F32,
-                Vec::new(),
-                WeightRole::Mixer,
-            ));
-        }
+}
+
+fn push_fp8_attention(
+    weights: &mut Vec<WeightSpec>,
+    prefix: &str,
+    hidden: usize,
+    query_width: usize,
+    kv_width: usize,
+    head_dim: usize,
+) {
+    for (projection, input, output) in [
+        ("q_proj", hidden, query_width),
+        ("k_proj", hidden, kv_width),
+        ("v_proj", hidden, kv_width),
+        ("o_proj", query_width / 2, hidden),
+    ] {
+        push_fp8_linear(
+            weights,
+            format!("{prefix}.{projection}"),
+            input,
+            output,
+            WeightRole::Mixer,
+        );
+    }
+    for norm in ["q_norm", "k_norm"] {
+        push_bf16(
+            weights,
+            format!("{prefix}.{norm}.weight"),
+            [head_dim],
+            WeightRole::Normalization,
+        );
+    }
+}
+
+fn push_fp8_linear(
+    weights: &mut Vec<WeightSpec>,
+    prefix: String,
+    input: usize,
+    output: usize,
+    role: WeightRole,
+) {
+    weights.push(WeightSpec::new(
+        format!("{prefix}.weight"),
+        CheckpointDType::F8E4M3,
+        [output, input],
+        role,
+    ));
+    for suffix in ["input_scale", "weight_scale"] {
+        weights.push(WeightSpec::new(
+            format!("{prefix}.{suffix}"),
+            CheckpointDType::F32,
+            Vec::new(),
+            role,
+        ));
     }
 }
 
@@ -447,7 +486,7 @@ mod tests {
     #[test]
     fn maps_every_text_and_mtp_tensor_once() {
         let weights = expected_text_and_mtp_weights(&valid_config()).unwrap();
-        assert_eq!(weights.len(), 124_658);
+        assert_eq!(weights.len(), 124_135);
         let names: HashSet<_> = weights.iter().map(|weight| &weight.name).collect();
         assert_eq!(names.len(), weights.len());
         assert!(weights.iter().all(|weight| !is_visual_weight(&weight.name)));
@@ -480,22 +519,11 @@ mod tests {
         assert_eq!(
             lookup(
                 &weights,
-                "model.language_model.layers.3.self_attn.k_proj.k_scale"
+                "model.language_model.layers.3.self_attn.q_proj.weight"
             )
             .dtype,
-            CheckpointDType::F32
+            CheckpointDType::F8E4M3
         );
-        assert_eq!(
-            lookup(
-                &weights,
-                "model.language_model.layers.3.self_attn.v_proj.v_scale"
-            )
-            .dtype,
-            CheckpointDType::F32
-        );
-        assert!(!weights
-            .iter()
-            .any(|weight| weight.name == "model.language_model.layers.3.self_attn.k_scale"));
         assert_eq!(
             lookup(
                 &weights,
@@ -529,13 +557,13 @@ mod tests {
     #[test]
     fn keeps_the_ignored_mtp_subtree_in_bf16() {
         let weights = expected_text_and_mtp_weights(&valid_config()).unwrap();
-        let mtp_expert = "mtp.layers.0.mlp.experts.0.gate_proj";
+        let mtp_expert = "mtp.layers.0.mlp.experts.gate_up_proj";
         assert_eq!(
-            lookup(&weights, &format!("{mtp_expert}.weight")),
+            lookup(&weights, mtp_expert),
             &WeightSpec::new(
-                format!("{mtp_expert}.weight"),
+                mtp_expert,
                 CheckpointDType::Bf16,
-                [512, 2_048],
+                [256, 1_024, 2_048],
                 WeightRole::RoutedExpert,
             )
         );

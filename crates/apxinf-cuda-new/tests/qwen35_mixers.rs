@@ -525,6 +525,7 @@ fn chunk_prefill_and_decode_share_exact_qwen35_state_contract() {
                 conv: &fast.conv_state,
                 recurrent: &fast.recurrent_state,
             },
+            checkpoints: None,
             scratch: ops::Qwen35GdnPrefillScratch {
                 convolved_qkv: &fast.convolved,
                 decay: &fast.decay,
@@ -716,6 +717,7 @@ fn long_prefill_output_window_and_state_match_canonical_decode() {
                 conv: &fast.conv_state,
                 recurrent: &fast.recurrent_state,
             },
+            checkpoints: None,
             scratch: ops::Qwen35GdnPrefillScratch {
                 convolved_qkv: &view(
                     &fast.convolved,

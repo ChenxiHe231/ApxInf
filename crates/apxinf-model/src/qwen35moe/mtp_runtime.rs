@@ -205,13 +205,9 @@ impl Qwen35MtpRuntime {
             &[VOCAB, HIDDEN],
             "embedding",
         )?;
-        validate_tensor(
-            &weights.lm_head,
-            ctx,
-            DType::BF16,
-            &[HIDDEN, VOCAB],
-            "lm_head",
-        )?;
+        if weights.lm_head.input_features != HIDDEN || weights.lm_head.output_features != VOCAB {
+            return Err(invalid("Qwen3.6 lm_head geometry mismatch"));
+        }
         validate_mtp_weights(ctx, &weights.mtp, self.geometry)
     }
 }
