@@ -4,6 +4,7 @@
 //! batch one, so a request resets and reuses that storage while model weights
 //! and cache allocations remain resident on CUDA.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -65,6 +66,11 @@ pub struct Qwen35Moe {
     context_reuse_enabled: bool,
     system_prefix_cache: Option<SystemPrefixCache>,
     last_reused_tokens: usize,
+    /// Reused destination for decode logits. This used to be a fresh
+    /// cudaMalloc plus memset per decode step, freed on drop; on a HugeTLB
+    /// pool that free synchronizes, so it was a device stall on every token.
+    /// Keyed by row count so a shape change still reallocates.
+    decode_logits_cache: RefCell<Option<(usize, Tensor)>>,
 }
 
 impl Qwen35Moe {
@@ -188,6 +194,7 @@ impl Qwen35Moe {
             context_reuse_enabled: false,
             system_prefix_cache: None,
             last_reused_tokens: 0,
+            decode_logits_cache: RefCell::new(None),
         })
     }
 
@@ -533,12 +540,20 @@ impl Qwen35Moe {
     }
 
     fn allocate_decode_logits(&self, rows: usize) -> Result<Tensor> {
+        // Every row is fully overwritten by copy_decode_logits_row before any
+        // reader sees it, so the reused buffer does not need re-zeroing.
+        if let Some((cached_rows, tensor)) = self.decode_logits_cache.borrow().as_ref() {
+            if *cached_rows == rows {
+                return Ok(tensor.clone());
+            }
+        }
         let (_, total_bytes) = decode_logits_layout(rows, self.vocab_size)?;
         let output =
             CudaBuffer::alloc_zeros_async(total_bytes, self.ctx.device_id(), self.ctx.stream())
                 .map_err(Error::Cuda)?
                 .as_tensor(Shape::new(vec![rows, self.vocab_size]), DType::BF16)
                 .map_err(Error::Cuda)?;
+        *self.decode_logits_cache.borrow_mut() = Some((rows, output.clone()));
         Ok(output)
     }
 
