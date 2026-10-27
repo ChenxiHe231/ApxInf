@@ -480,6 +480,9 @@ impl Qwen35Moe {
             )));
         }
 
+        // A verified round can be rejected, so the pre-round state must survive.
+        self.runtime.target_mut().set_decode_in_place(false);
+
         let mut profile = GenerationProfile::new();
         let prefill = self.prefill_mtp_with_system_reuse(
             prompt,
@@ -636,6 +639,11 @@ impl LlmTrait for Qwen35Moe {
                 .prefill_all_logits(&self.ctx, &self.decoder, &self.weights, token_ids)?
                 .logits);
         }
+
+        // Non-speculative decode: every step commits, so the per-step
+        // transactional shadow copy only reproduces state the step already
+        // owns. Worth 0.844 ms of a 19.42 ms step.
+        self.runtime.target_mut().set_decode_in_place(true);
 
         // Decode uses one persistent scratch row. Copy each row to the stable
         // result immediately, on the same CUDA stream, before the next decode
