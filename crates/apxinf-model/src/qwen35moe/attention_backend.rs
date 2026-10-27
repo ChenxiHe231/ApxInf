@@ -513,6 +513,14 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         fa2_args.query_start = request.start_position;
         fa2_args.scale = scale;
         fa2_args.policy.allow_fallback = false;
+        // Deliberately not wrapped in an ExecutionSession. Caching the prepared
+        // Execution would remove the per-call ctx.synchronize() that
+        // attention::execution::execute performs outside a session, but it also
+        // makes graph capture fail with "Attention execution cache miss during
+        // capture": capture requires the exact ExecutionKey to be present
+        // already, and this call is not warmed before capture_decode_phases
+        // runs. Graph capture is worth far more here (50.4 vs 23.0 tok/s), so
+        // the synchronize stays until a pre-capture warmup exists.
         ops::kv_cache_attention(ctx, fa2_args)?;
 
         // ---- Output gate (sigmoid, not silu) ----
