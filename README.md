@@ -349,6 +349,33 @@ kernels for exactly that architecture, so build on the machine you deploy to;
 cross-compiling fails unless `APXINF_CUDA_ARCH` names the target (`sm_87` Orin,
 `sm_101` Thor-U, `sm_110` Thor).
 
+### Thor-U Qwen3.6 long-prefill stability
+
+On the `p3960-0010` Thor-U platform, keep the GPU governor on
+`simple_ondemand` and cap the GPU at 1206 MHz before running
+`Qwen3.6-35B-A3B-NVFP4` with a 4096-token FP8 prefill. Running the same workload
+with the GPU locked at 1530 MHz can hard-reset the whole board without an OOM,
+CUDA Xid, or kernel panic.
+
+Apply the safe runtime settings after every reboot:
+
+```bash
+GPU_DEVFREQ=/sys/class/devfreq/gpu-0
+sudo sh -c "echo 54000000 > $GPU_DEVFREQ/min_freq
+echo 1206000000 > $GPU_DEVFREQ/max_freq
+echo simple_ondemand > $GPU_DEVFREQ/governor"
+
+cat "$GPU_DEVFREQ/min_freq"
+cat "$GPU_DEVFREQ/max_freq"
+cat "$GPU_DEVFREQ/governor"
+```
+
+The expected values are `54000000`, `1206000000`, and `simple_ondemand`.
+These sysfs settings are not persistent across a reboot. This cap has been
+validated with repeated 4096-token prefills; a cache-warm run completed with a
+1.022 s TTFT (4008 prefill tokens/s). Do not copy an AGX Thor `p3834` nvpmodel
+file onto `p3960`; the permanent fix is a valid `p3960-0010` BSP power profile.
+
 Confirm the binding imports and reaches the GPU:
 
 ```bash
