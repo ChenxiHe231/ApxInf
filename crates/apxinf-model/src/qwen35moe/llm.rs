@@ -23,8 +23,10 @@ use super::attention_backend::{Qwen35AttentionCache, Qwen35Fp8AttentionBackend};
 use super::config::Qwen35MoeConfig;
 use super::decoder::Qwen35Decoder;
 use super::device_weights::{
-    load_qwen35_device_weights_from_path, upload_qwen35_device_weights, Qwen35DeviceWeights,
+    load_qwen35_device_weights_from_path_with_options, upload_qwen35_device_weights_with_options,
+    Qwen35DeviceWeights,
 };
+use super::execution::Qwen35ExecutionOptions;
 use super::loader::load_qwen35_runtime_weights;
 use super::mtp_runtime::{
     MtpGreedyPolicy, Qwen35ContextSnapshot, Qwen35MtpCoordinator, Qwen35MtpRuntime, Qwen35MtpState,
@@ -73,6 +75,24 @@ impl Qwen35Moe {
         backend: Arc<dyn Backend>,
         kv_capacity: usize,
     ) -> Result<Self> {
+        Self::from_checkpoint_with_options(
+            config,
+            tensors,
+            device,
+            backend,
+            kv_capacity,
+            Qwen35ExecutionOptions::default(),
+        )
+    }
+
+    pub fn from_checkpoint_with_options(
+        config: Qwen35MoeConfig,
+        tensors: HashMap<String, Tensor>,
+        device: Device,
+        backend: Arc<dyn Backend>,
+        kv_capacity: usize,
+        execution: Qwen35ExecutionOptions,
+    ) -> Result<Self> {
         config.validate()?;
         let Device::Cuda(ordinal) = device else {
             return Err(Error::Other(
@@ -88,8 +108,9 @@ impl Qwen35Moe {
 
         let ctx = CudaContext::new(ordinal).map_err(Error::Cuda)?;
         let host_weights = load_qwen35_runtime_weights(&config, tensors)?;
-        let weights = upload_qwen35_device_weights(&ctx, &config, host_weights)?;
-        Self::from_device_weights(config, ctx, weights, backend, kv_capacity)
+        let weights =
+            upload_qwen35_device_weights_with_options(&ctx, &config, host_weights, execution)?;
+        Self::from_device_weights(config, ctx, weights, backend, kv_capacity, execution)
     }
 
     /// Load the exact checkpoint through the layer-streaming SafeTensors path.
@@ -101,6 +122,24 @@ impl Qwen35Moe {
         device: Device,
         backend: Arc<dyn Backend>,
         kv_capacity: usize,
+    ) -> Result<Self> {
+        Self::from_checkpoint_path_with_options(
+            config,
+            path,
+            device,
+            backend,
+            kv_capacity,
+            Qwen35ExecutionOptions::default(),
+        )
+    }
+
+    pub fn from_checkpoint_path_with_options(
+        config: Qwen35MoeConfig,
+        path: &Path,
+        device: Device,
+        backend: Arc<dyn Backend>,
+        kv_capacity: usize,
+        execution: Qwen35ExecutionOptions,
     ) -> Result<Self> {
         config.validate()?;
         let Device::Cuda(ordinal) = device else {
@@ -116,8 +155,9 @@ impl Qwen35Moe {
         }
 
         let ctx = CudaContext::new(ordinal).map_err(Error::Cuda)?;
-        let weights = load_qwen35_device_weights_from_path(&ctx, &config, path)?;
-        Self::from_device_weights(config, ctx, weights, backend, kv_capacity)
+        let weights =
+            load_qwen35_device_weights_from_path_with_options(&ctx, &config, path, execution)?;
+        Self::from_device_weights(config, ctx, weights, backend, kv_capacity, execution)
     }
 
     fn from_device_weights(
@@ -126,9 +166,10 @@ impl Qwen35Moe {
         weights: Qwen35DeviceWeights,
         backend: Arc<dyn Backend>,
         kv_capacity: usize,
+        execution: Qwen35ExecutionOptions,
     ) -> Result<Self> {
         let decoder = Qwen35Decoder::new(&config)?;
-        let attention = Qwen35Fp8AttentionBackend::new(&config)?;
+        let attention = Qwen35Fp8AttentionBackend::with_kv_cache(&config, execution.kv_cache)?;
         let target = Qwen35Session::new(&ctx, &decoder, &weights, attention, kv_capacity)?;
         let mtp = Qwen35MtpRuntime::new(&config)?;
         let runtime = Qwen35MtpCoordinator::new(&ctx, target, mtp)?;

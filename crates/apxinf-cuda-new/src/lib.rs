@@ -24,8 +24,8 @@ pub use ops::{
     qwen35_attention_reference, qwen35_mtp_moe, qwen35_mtp_moe_reference, reserve_prefix, rms_norm,
     rope, route_topk_reference, routed_moe_add_shared, routed_moe_combine,
     routed_moe_combine_reference, routed_moe_nvfp4_experts, routed_moe_route,
-    routed_moe_route_topk, segmented_attention, split_qkv_axial_rope, AdaGateResidualArgs,
-    AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, AttentionArgs,
+    routed_moe_route_topk, segmented_attention, split_qkv_axial_rope, vision_position,
+    AdaGateResidualArgs, AdaGateResidualRmsNormArgs, AdaptiveRmsNormArgs, AttentionArgs,
     AttentionMask, AttentionPolicy, AxialRopeArgs, BiasResidualArgs, BiasResidualLayerNormArgs,
     BiasResidualRmsNormArgs, BiasThenResidualArgs, DecodeRopeArgs, EdgeBf16DecodeMoeArgs,
     EdgeBf16DecodeMoeWeights, EdgeNvfp4MoeArgs, EdgeNvfp4MoeWeights, ExecutionSession,
@@ -38,15 +38,15 @@ pub use ops::{
     Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput, Qwen35MtpReferenceWeights,
     RmsNormArgs, RopeArgs, RopeSemantic, RoutePlan, RoutedMoeAddSharedArgs, RoutedMoeCombineArgs,
     RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs,
-    RoutedMoeSemantic, SegmentedAttentionArgs, SharedExpertOutput, FP8_E4M3_MAX_FINITE,
-    QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
+    RoutedMoeSemantic, SegmentedAttentionArgs, SharedExpertOutput, VisionPositionArgs,
+    FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
     QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_Q_PROJECTION_WIDTH,
     QWEN35_ATTENTION_RMS_EPSILON, QWEN35_ATTENTION_ROTARY_DIM, QWEN35_MTP_DRAFT_STEPS,
     QWEN35_MTP_EXPERTS, QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE, QWEN35_MTP_LAYERS,
-    QWEN35_MTP_TOP_K, QWEN35_MTP_VOCAB_SIZE, vision_position, VisionPositionArgs,
+    QWEN35_MTP_TOP_K, QWEN35_MTP_VOCAB_SIZE,
 };
 pub use phase::PreparedPhase;
-pub use stream::CudaStream;
+pub use stream::{CudaEvent, CudaStream};
 
 pub mod ops;
 

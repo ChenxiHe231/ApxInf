@@ -15,6 +15,7 @@ pub mod config;
 pub mod decoder;
 #[cfg(feature = "cuda")]
 pub mod device_weights;
+pub mod execution;
 #[cfg(feature = "cuda")]
 pub mod forward;
 #[cfg(feature = "cuda")]
@@ -35,6 +36,7 @@ pub use architecture::{
 #[cfg(feature = "cuda")]
 pub use attention_backend::{Qwen35AttentionCache, Qwen35Fp8AttentionBackend};
 pub use config::{Qwen35MoeConfig, Qwen35MoeTextConfig};
+pub use execution::{Qwen35ExecutionOptions, Qwen35KvCacheDType, Qwen35MoeActivation};
 #[cfg(feature = "cuda")]
 pub use llm::{Qwen35Moe, DEFAULT_KV_CAPACITY};
 #[cfg(feature = "cuda")]

@@ -19,6 +19,11 @@ int rms_norm_bf16(const void* input, const void* weight, void* output,
 int swiglu_bf16(const void* fused_gate_up, void* output, int rows, int width,
                 cudaStream_t stream);
 
+// Same Qwen rounding semantics as swiglu_bf16, with independent contiguous
+// [rows, width] gate and up matrices.
+int swiglu_split_bf16(const void* gate, const void* up, void* output, int rows,
+                      int width, cudaStream_t stream);
+
 // Same expression, but only the final product is rounded to BF16. Qwen3.5's
 // MTP reference kernel uses this operation order for its BF16 expert MLPs.
 int swiglu_bf16_round_product(const void* fused_gate_up, void* output, int rows,
@@ -38,6 +43,12 @@ int add_bf16(const void* addend, void* accumulator, long long count,
 // needed for attention or GDN.
 int quantize_fp8_per_tensor(const void* input, void* output, long long count,
                             float input_scale, cudaStream_t stream);
+
+// Single-row BF16 GEMM with canonical [K, N] weights. Each output is reduced
+// serially by one thread, so eager launch and CUDA Graph replay are bitwise
+// stable.
+int bf16_gemv(const void* activation, const void* weight, void* output, int n,
+              int k, cudaStream_t stream);
 
 // y[n] = alpha * sum_k weight[n, k] * activation[k], E4M3 operands, BF16 out.
 //
@@ -74,5 +85,13 @@ int fp8_gemv(const void* weight, const void* activation, void* output, int n,
 int nvfp4_gemv(const void* weight, const void* weight_scales,
                const void* activation, const void* activation_scales,
                void* output, int n, int k, float alpha, cudaStream_t stream);
+
+// TensorRT-Edge-LLM BLACKWELL_N128_K64_V1 weight-only GEMV. The activation
+// and output are BF16; qweights/scales use opaque N128xK64 tiled storage and
+// global_scale points to one device F32 value.
+int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
+                             const void* block_scales,
+                             const void* global_scale, void* output, int n,
+                             int k, int rows, cudaStream_t stream);
 
 }  // namespace apxinf::cuda_new::mlp_ops

@@ -16,6 +16,7 @@ use apxinf_cuda_new::{
 
 use super::architecture::{MixerKind, Qwen35MoeArchitecture};
 use super::config::Qwen35MoeConfig;
+use super::execution::{Qwen35ExecutionOptions, Qwen35MoeActivation};
 use super::loader::{
     load_nvfp4_moe, load_qwen35_layer, load_qwen35_mtp, ManifestAccess, Qwen35SafetensorsLoader,
 };
@@ -31,6 +32,16 @@ const NVFP4_BLOCK_SIZE: usize = 16;
 #[derive(Debug)]
 pub struct DeviceDenseLinear {
     pub weight: Tensor,
+    pub input_features: usize,
+    pub output_features: usize,
+}
+/// TensorRT-Edge-LLM `BLACKWELL_N128_K64_V1` weight-only NVFP4 linear.
+/// Activations and outputs remain BF16; only the resident weight is W4.
+#[derive(Debug)]
+pub struct DeviceNvfp4A16Linear {
+    pub qweight: Tensor,
+    pub block_scales: Tensor,
+    pub global_scale: Tensor,
     pub input_features: usize,
     pub output_features: usize,
 }
@@ -51,6 +62,10 @@ pub struct DeviceNvfp4Linear {
     pub weight_scale_2: Tensor,
     /// Host scalar mirror used to configure quantized GEMM without a D2H copy.
     pub weight_scale_2_value: f32,
+    /// Optional Edge-LLM BLACKWELL_N128_K64_V1 copy for small-row W4A16
+    /// decode. The checkpoint-native buffers remain available for W4A4
+    /// prefill and larger batches.
+    pub a16: Option<DeviceNvfp4A16Linear>,
     pub input_features: usize,
     pub output_features: usize,
 }
@@ -101,6 +116,7 @@ pub struct DeviceNvfp4ExpertProjection {
 
 #[derive(Debug)]
 pub struct DeviceNvfp4Moe {
+    pub activation: Qwen35MoeActivation,
     pub router: DeviceDenseLinear,
     pub routed_experts: DeviceNvfp4RoutedExperts,
     pub shared_gate: DeviceNvfp4Linear,
@@ -213,6 +229,8 @@ pub struct Qwen35DeviceWeights {
     pub final_norm: Tensor,
     /// `[hidden, vocab]`, ready for cuda-new GEMM.
     pub lm_head: Tensor,
+    /// Edge-LLM-compatible weight-only head used by single-token decode.
+    pub lm_head_nvfp4_a16: Option<DeviceNvfp4A16Linear>,
     pub mtp: DeviceMtpWeights,
 }
 
@@ -226,6 +244,15 @@ pub fn upload_qwen35_device_weights(
     ctx: &CudaContext,
     config: &Qwen35MoeConfig,
     host: Qwen35RuntimeWeights<Tensor>,
+) -> Result<Qwen35DeviceWeights> {
+    upload_qwen35_device_weights_with_options(ctx, config, host, Qwen35ExecutionOptions::default())
+}
+
+pub fn upload_qwen35_device_weights_with_options(
+    ctx: &CudaContext,
+    config: &Qwen35MoeConfig,
+    host: Qwen35RuntimeWeights<Tensor>,
+    execution: Qwen35ExecutionOptions,
 ) -> Result<Qwen35DeviceWeights> {
     host.validate_against(config)?;
     let architecture = Qwen35MoeArchitecture::from_config(config)?;
@@ -243,6 +270,9 @@ pub fn upload_qwen35_device_weights(
 
     let embedding = upload_unchanged(ctx, embedding)?;
     let final_norm = upload_unchanged(ctx, final_norm)?;
+    let lm_head_nvfp4_a16 = w4a16_lm_head_enabled()
+        .then(|| quantize_and_upload_nvfp4_a16(ctx, &lm_head, "lm_head"))
+        .transpose()?;
     let lm_head = transpose_and_upload_bf16(
         ctx,
         lm_head,
@@ -253,7 +283,12 @@ pub fn upload_qwen35_device_weights(
 
     let mut device_layers = Vec::with_capacity(layers.len());
     for (weights, layer) in layers.into_iter().zip(&architecture.layers) {
-        device_layers.push(upload_layer(ctx, weights, layer.mixer)?);
+        device_layers.push(upload_layer(
+            ctx,
+            weights,
+            layer.mixer,
+            execution.moe_activation,
+        )?);
     }
 
     Ok(Qwen35DeviceWeights {
@@ -261,6 +296,7 @@ pub fn upload_qwen35_device_weights(
         layers: device_layers,
         final_norm,
         lm_head,
+        lm_head_nvfp4_a16,
         mtp: upload_mtp(ctx, mtp)?,
     })
 }
@@ -274,6 +310,20 @@ pub fn load_qwen35_device_weights_from_path(
     config: &Qwen35MoeConfig,
     path: &Path,
 ) -> Result<Qwen35DeviceWeights> {
+    load_qwen35_device_weights_from_path_with_options(
+        ctx,
+        config,
+        path,
+        Qwen35ExecutionOptions::default(),
+    )
+}
+
+pub fn load_qwen35_device_weights_from_path_with_options(
+    ctx: &CudaContext,
+    config: &Qwen35MoeConfig,
+    path: &Path,
+    execution: Qwen35ExecutionOptions,
+) -> Result<Qwen35DeviceWeights> {
     let architecture = Qwen35MoeArchitecture::from_config(config)?;
     let mut loader = Qwen35SafetensorsLoader::open(config, path)?;
 
@@ -282,9 +332,13 @@ pub fn load_qwen35_device_weights_from_path(
         loader.take("model.language_model.embed_tokens.weight")?,
     )?;
     let final_norm = upload_unchanged(ctx, loader.take("model.language_model.norm.weight")?)?;
+    let host_lm_head = loader.take("lm_head.weight")?;
+    let lm_head_nvfp4_a16 = w4a16_lm_head_enabled()
+        .then(|| quantize_and_upload_nvfp4_a16(ctx, &host_lm_head, "lm_head"))
+        .transpose()?;
     let lm_head = transpose_and_upload_bf16(
         ctx,
-        loader.take("lm_head.weight")?,
+        host_lm_head,
         architecture.vocab_size,
         architecture.hidden_size,
         "lm_head",
@@ -293,7 +347,12 @@ pub fn load_qwen35_device_weights_from_path(
     let mut layers = Vec::with_capacity(architecture.layers.len());
     for layer in &architecture.layers {
         let host_layer = load_qwen35_layer(&mut loader, layer, architecture.hidden_size)?;
-        layers.push(upload_layer(ctx, host_layer, layer.mixer)?);
+        layers.push(upload_layer(
+            ctx,
+            host_layer,
+            layer.mixer,
+            execution.moe_activation,
+        )?);
     }
     let mtp = upload_mtp(
         ctx,
@@ -306,6 +365,7 @@ pub fn load_qwen35_device_weights_from_path(
         layers,
         final_norm,
         lm_head,
+        lm_head_nvfp4_a16,
         mtp,
     })
 }
@@ -334,13 +394,14 @@ pub fn load_qwen35_moe_layer_from_path(
         layer.moe.expert_intermediate_size,
         layer.moe.shared_expert_intermediate_size,
     )?;
-    upload_nvfp4_moe(ctx, host)
+    upload_nvfp4_moe(ctx, host, Qwen35MoeActivation::Nvfp4)
 }
 
 fn upload_layer(
     ctx: &CudaContext,
     weights: Qwen35LayerWeights<Tensor>,
     expected_mixer: MixerKind,
+    moe_activation: Qwen35MoeActivation,
 ) -> Result<DeviceLayerWeights> {
     let Qwen35LayerWeights {
         input_layernorm,
@@ -365,7 +426,7 @@ fn upload_layer(
         input_layernorm: upload_unchanged(ctx, input_layernorm)?,
         post_attention_layernorm: upload_unchanged(ctx, post_attention_layernorm)?,
         mixer,
-        moe: upload_nvfp4_moe(ctx, moe)?,
+        moe: upload_nvfp4_moe(ctx, moe, moe_activation)?,
     })
 }
 
@@ -447,6 +508,7 @@ fn upload_gdn(ctx: &CudaContext, weights: GdnWeights<Tensor>) -> Result<DeviceGd
 fn upload_nvfp4_moe(
     ctx: &CudaContext,
     weights: RoutedMoeWeights<Tensor, Nvfp4LinearWeights<Tensor>>,
+    activation: Qwen35MoeActivation,
 ) -> Result<DeviceNvfp4Moe> {
     let RoutedMoeWeights {
         router,
@@ -465,7 +527,7 @@ fn upload_nvfp4_moe(
         up.push(expert.up_proj);
         down.push(expert.down_proj);
     }
-    let routed_experts = if edge_nvfp4_moe_available() {
+    let routed_experts = if activation == Qwen35MoeActivation::Nvfp4 && edge_nvfp4_moe_available() {
         DeviceNvfp4RoutedExperts::Edge(pack_and_upload_edge_nvfp4_experts(ctx, gate, up, down)?)
     } else {
         DeviceNvfp4RoutedExperts::Reference {
@@ -475,6 +537,7 @@ fn upload_nvfp4_moe(
         }
     };
     Ok(DeviceNvfp4Moe {
+        activation,
         router: upload_dense(ctx, router, "MoE router")?,
         routed_experts,
         shared_gate: upload_nvfp4(ctx, shared_expert.gate_proj, "shared expert gate")?,
@@ -650,6 +713,9 @@ fn upload_nvfp4(
         ],
         &format!("{label} block scales"),
     )?;
+    let a16 = w4a16_shared_enabled()
+        .then(|| repack_and_upload_nvfp4_a16(ctx, &weights, label))
+        .transpose()?;
     let weight_scale_2_value = weights.weight_scale_2;
     let packed_weight = upload_unchanged(ctx, weights.packed_weight)?;
     let block_scales = upload_unchanged(ctx, weights.block_scales)?;
@@ -682,6 +748,7 @@ fn upload_nvfp4(
         input_scale: weights.input_scale,
         weight_scale_2: upload_f32(ctx, &[weight_scale_2_value])?,
         weight_scale_2_value,
+        a16,
         input_features: weights.input_features,
         output_features: weights.output_features,
     })
@@ -951,6 +1018,248 @@ fn transpose_and_upload_bf16(
     transfers::to_cuda(&host, ctx.device_id())
 }
 
+fn w4a16_lm_head_enabled() -> bool {
+    std::env::var("APXINF_QWEN35_W4A16_LM_HEAD").ok().as_deref() == Some("1")
+}
+
+fn w4a16_shared_enabled() -> bool {
+    std::env::var("APXINF_QWEN35_W4A16_SHARED").ok().as_deref() == Some("1")
+}
+
+/// Repack checkpoint-native ModelOpt NVFP4 bytes into Edge-LLM's dense
+/// BLACKWELL_N128_K64_V1 order without requantizing either codes or scales.
+fn repack_and_upload_nvfp4_a16(
+    ctx: &CudaContext,
+    weights: &Nvfp4LinearWeights<Tensor>,
+    label: &str,
+) -> Result<DeviceNvfp4A16Linear> {
+    let (n, k) = (weights.output_features, weights.input_features);
+    if !n.is_multiple_of(128) || !k.is_multiple_of(64) {
+        return Err(invalid(format!(
+            "{label} W4A16 geometry must satisfy N%128=0 and K%64=0"
+        )));
+    }
+    validate_cpu_tensor(
+        &weights.packed_weight,
+        DType::E2M1Pair,
+        &[n, k / 2],
+        &format!("{label} packed weight"),
+    )?;
+    validate_cpu_tensor(
+        &weights.block_scales,
+        DType::F8E4M3,
+        &[n, k / NVFP4_BLOCK_SIZE],
+        &format!("{label} block scales"),
+    )?;
+    let source_weight = cpu_bytes(&weights.packed_weight, label)?;
+    let source_scales = cpu_bytes(&weights.block_scales, label)?;
+    let n_tiles = n / 128;
+    let k_tiles = k / 64;
+    let mut qweight = vec![0u8; source_weight.len()];
+    let mut block_scales = vec![0u8; source_scales.len()];
+    for n_tile in 0..n_tiles {
+        for k_tile in 0..k_tiles {
+            for row_in_tile in 0..128 {
+                let row = n_tile * 128 + row_in_tile;
+                let source_q = row * (k / 2) + k_tile * 32;
+                let target_q = ((n_tile * k_tiles + k_tile) * 128 + row_in_tile) * 32;
+                qweight[target_q..target_q + 32]
+                    .copy_from_slice(&source_weight[source_q..source_q + 32]);
+                let source_s = row * (k / NVFP4_BLOCK_SIZE) + k_tile * 4;
+                let target_s = ((n_tile * k_tiles + k_tile) * 128 + row_in_tile) * 4;
+                block_scales[target_s..target_s + 4]
+                    .copy_from_slice(&source_scales[source_s..source_s + 4]);
+            }
+        }
+    }
+    let q_host = Tensor::from_raw(
+        Shape::new(vec![n_tiles, k_tiles, 128, 32]),
+        DType::E2M1Pair,
+        Device::Cpu,
+        qweight,
+    )?;
+    let scale_host = Tensor::from_raw(
+        Shape::new(vec![n_tiles, k_tiles, 128, 4]),
+        DType::F8E4M3,
+        Device::Cpu,
+        block_scales,
+    )?;
+    Ok(DeviceNvfp4A16Linear {
+        qweight: transfers::to_cuda(&q_host, ctx.device_id())?,
+        block_scales: transfers::to_cuda(&scale_host, ctx.device_id())?,
+        global_scale: upload_f32(ctx, &[weights.weight_scale_2])?,
+        input_features: k,
+        output_features: n,
+    })
+}
+
+/// Quantize a checkpoint-native `[N,K]` BF16 matrix exactly as Edge-LLM's
+/// `_quantize_nvfp4_moe_weight`, then directly emit its
+/// `BLACKWELL_N128_K64_V1` tile order.  The two output arrays are partitioned
+/// by N128 tiles so host quantization uses all available cores without locks.
+fn quantize_and_upload_nvfp4_a16(
+    ctx: &CudaContext,
+    tensor: &Tensor,
+    label: &str,
+) -> Result<DeviceNvfp4A16Linear> {
+    if tensor.device() != Device::Cpu || tensor.dtype() != DType::BF16 {
+        return Err(invalid(format!(
+            "{label} NVFP4-A16 source must be CPU BF16"
+        )));
+    }
+    let dims = tensor.shape().dims();
+    if dims.len() != 2 || dims[0] == 0 || dims[1] == 0 || dims[0] % 128 != 0 || dims[1] % 64 != 0 {
+        return Err(invalid(format!(
+            "{label} NVFP4-A16 source must be [N,K] with N%128=0 and K%64=0, got {dims:?}"
+        )));
+    }
+    let (n, k) = (dims[0], dims[1]);
+    let source = tensor.as_bf16()?;
+    let workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(16)
+        .min(n / 128);
+    let chunk = source.len().div_ceil(workers);
+    let amax = std::thread::scope(|scope| {
+        source
+            .chunks(chunk)
+            .map(|values| {
+                scope.spawn(move || {
+                    values
+                        .iter()
+                        .map(|value| value.to_f32().abs())
+                        .fold(0.0f32, f32::max)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().expect("NVFP4-A16 amax worker panicked"))
+            .fold(0.0f32, f32::max)
+    });
+    let global_scale = if amax > 0.0 {
+        amax / (6.0 * 448.0)
+    } else {
+        1.0
+    };
+    let n_tiles = n / 128;
+    let k_tiles = k / 64;
+    let q_bytes_per_n_tile = k_tiles * 128 * 32;
+    let scale_bytes_per_n_tile = k_tiles * 128 * 4;
+    let mut qweight = vec![0u8; n_tiles * q_bytes_per_n_tile];
+    let mut block_scales = vec![0u8; n_tiles * scale_bytes_per_n_tile];
+    let tiles_per_worker = n_tiles.div_ceil(workers);
+    std::thread::scope(|scope| {
+        for (worker, (q_chunk, scale_chunk)) in qweight
+            .chunks_mut(tiles_per_worker * q_bytes_per_n_tile)
+            .zip(block_scales.chunks_mut(tiles_per_worker * scale_bytes_per_n_tile))
+            .enumerate()
+        {
+            let first_n_tile = worker * tiles_per_worker;
+            scope.spawn(move || {
+                let local_n_tiles = q_chunk.len() / q_bytes_per_n_tile;
+                for local_n_tile in 0..local_n_tiles {
+                    let n_tile = first_n_tile + local_n_tile;
+                    for k_tile in 0..k_tiles {
+                        for row_in_tile in 0..128 {
+                            let row = n_tile * 128 + row_in_tile;
+                            let source_tile =
+                                &source[row * k + k_tile * 64..row * k + (k_tile + 1) * 64];
+                            let physical_row =
+                                (local_n_tile * k_tiles + k_tile) * 128 + row_in_tile;
+                            let q_row = &mut q_chunk[physical_row * 32..(physical_row + 1) * 32];
+                            let scale_row =
+                                &mut scale_chunk[physical_row * 4..(physical_row + 1) * 4];
+                            for group in 0..4 {
+                                let values = &source_tile[group * 16..(group + 1) * 16];
+                                let block_amax = values
+                                    .iter()
+                                    .map(|value| value.to_f32().abs())
+                                    .fold(0.0f32, f32::max);
+                                let scale_code =
+                                    encode_e4m3_fast(block_amax / (6.0 * global_scale));
+                                scale_row[group] = scale_code;
+                                let step = ops::decode_e4m3(scale_code) * global_scale;
+                                for pair in 0..8 {
+                                    let low = quantize_e2m1(values[pair * 2].to_f32(), step);
+                                    let high = quantize_e2m1(values[pair * 2 + 1].to_f32(), step);
+                                    q_row[group * 8 + pair] = low | (high << 4);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    let q_host = Tensor::from_raw(
+        Shape::new(vec![n_tiles, k_tiles, 128, 32]),
+        DType::E2M1Pair,
+        Device::Cpu,
+        qweight,
+    )?;
+    let scale_host = Tensor::from_raw(
+        Shape::new(vec![n_tiles, k_tiles, 128, 4]),
+        DType::F8E4M3,
+        Device::Cpu,
+        block_scales,
+    )?;
+    let global_host = Tensor::from_f32(vec![1], &[global_scale])?;
+    Ok(DeviceNvfp4A16Linear {
+        qweight: transfers::to_cuda(&q_host, ctx.device_id())?,
+        block_scales: transfers::to_cuda(&scale_host, ctx.device_id())?,
+        global_scale: transfers::to_cuda(&global_host, ctx.device_id())?,
+        input_features: k,
+        output_features: n,
+    })
+}
+
+fn quantize_e2m1(value: f32, step: f32) -> u8 {
+    if step == 0.0 {
+        return 0;
+    }
+    const BOUNDS: [f32; 7] = [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0];
+    let scaled = (value / step).clamp(-6.0, 6.0);
+    let magnitude = scaled.abs();
+    let code = BOUNDS
+        .iter()
+        .position(|bound| magnitude <= *bound)
+        .unwrap_or(7) as u8;
+    code | if scaled < 0.0 { 0x08 } else { 0 }
+}
+
+/// Fast finite E4M3 RNE encoder equivalent to Edge-LLM/Torch's raw bytes.
+fn encode_e4m3_fast(value: f32) -> u8 {
+    if value.is_nan() {
+        return 0x7f;
+    }
+    let sign = if value.is_sign_negative() { 0x80 } else { 0 };
+    let value = value.abs();
+    if value == 0.0 {
+        return sign;
+    }
+    if !value.is_finite() || value >= 448.0 {
+        return sign | 0x7e;
+    }
+    if value < 2.0f32.powi(-6) {
+        return sign | ((value * 512.0).round_ties_even().min(7.0) as u8);
+    }
+    let bits = value.to_bits();
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127;
+    let normalized = f32::from_bits((bits & 0x007f_ffff) | 0x3f80_0000) - 1.0;
+    let mut exponent_bits = exponent + 7;
+    let mut mantissa = (normalized * 8.0).round_ties_even() as i32;
+    if mantissa == 8 {
+        exponent_bits += 1;
+        mantissa = 0;
+    }
+    if exponent_bits > 15 || (exponent_bits == 15 && mantissa >= 7) {
+        return sign | 0x7e;
+    }
+    sign | ((exponent_bits as u8) << 3) | mantissa as u8
+}
+
 fn transpose_bf16_bytes(
     tensor: Tensor,
     rows: usize,
@@ -1086,5 +1395,27 @@ mod tests {
         assert_eq!(source.as_bf16().unwrap(), values.as_slice());
 
         assert!(validate_cpu_tensor(&source, DType::BF16, &[2, 4], "GDN conv").is_err());
+    }
+
+    #[test]
+    fn fast_e4m3_encoder_matches_cuda_reference_encoder() {
+        for code in 0u8..=0x7e {
+            let value = ops::decode_e4m3(code);
+            assert_eq!(encode_e4m3_fast(value), ops::encode_e4m3(value));
+            let next = ops::decode_e4m3(code.saturating_add(1).min(0x7e));
+            for fraction in [0.25f32, 0.5, 0.75] {
+                let sample = value + (next - value) * fraction;
+                assert_eq!(encode_e4m3_fast(sample), ops::encode_e4m3(sample));
+            }
+        }
+    }
+
+    #[test]
+    fn e2m1_quantizer_uses_edge_searchsorted_boundaries() {
+        assert_eq!(quantize_e2m1(0.25, 1.0), 0);
+        assert_eq!(quantize_e2m1(0.250_001, 1.0), 1);
+        assert_eq!(quantize_e2m1(5.0, 1.0), 6);
+        assert_eq!(quantize_e2m1(5.000_001, 1.0), 7);
+        assert_eq!(quantize_e2m1(-6.0, 1.0), 0x0f);
     }
 }

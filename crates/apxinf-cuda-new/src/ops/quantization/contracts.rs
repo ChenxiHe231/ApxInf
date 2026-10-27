@@ -15,6 +15,8 @@ pub enum QuantizationSemantic {
     CastBf16ToF32,
     /// Shape-preserving F32 to BF16 conversion.
     CastF32ToBf16,
+    /// E4M3 to BF16 with one positive, pre-calibrated dequantization scale.
+    FixedScaleE4m3ToBf16,
     /// Keep the leading columns of a contiguous BF16 matrix.
     SliceColumnsBf16,
     /// BF16 to signed INT8 with one computed F32 scale per row.
@@ -29,6 +31,7 @@ impl QuantizationSemantic {
             Self::CastF16ToBf16 => 2,
             Self::CastBf16ToF32 => 5,
             Self::CastF32ToBf16 => 6,
+            Self::FixedScaleE4m3ToBf16 => 7,
             Self::SliceColumnsBf16 => 3,
             Self::RowwiseI8 => 4,
         }
@@ -45,7 +48,7 @@ pub struct QuantizationArgs<'a> {
     pub out: &'a mut Tensor,
     /// Required for rowwise quantization and otherwise forbidden.
     pub scales: Option<&'a mut Tensor>,
-    /// Used only by [`QuantizationSemantic::FixedScaleE4m3`].
+    /// Used by the two fixed-scale E4M3 conversion semantics.
     pub scale: f32,
 }
 
@@ -132,6 +135,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: QuantizationArgs<'_>) -> Result
             (input_shape[0], input_shape[1], output_shape[1])
         }
         QuantizationSemantic::FixedScaleE4m3
+        | QuantizationSemantic::FixedScaleE4m3ToBf16
         | QuantizationSemantic::CastF16ToBf16
         | QuantizationSemantic::CastBf16ToF32
         | QuantizationSemantic::CastF32ToBf16 => {
@@ -161,6 +165,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: QuantizationArgs<'_>) -> Result
             }
             (args.input.dtype(), DType::F8E4M3)
         }
+        QuantizationSemantic::FixedScaleE4m3ToBf16 => (DType::F8E4M3, DType::BF16),
         QuantizationSemantic::RowwiseE4m3 => {
             if output_cols < input_cols {
                 return Err(invalid("rowwise E4M3 output width cannot shrink input"));
@@ -186,7 +191,10 @@ pub(crate) fn normalize(ctx: &CudaContext, args: QuantizationArgs<'_>) -> Result
     if args.input.dtype() != expected_input || args.out.dtype() != expected_output {
         return Err(invalid("Quantization tensor dtype disagrees with semantic"));
     }
-    if semantic == QuantizationSemantic::FixedScaleE4m3 {
+    if matches!(
+        semantic,
+        QuantizationSemantic::FixedScaleE4m3 | QuantizationSemantic::FixedScaleE4m3ToBf16
+    ) {
         if !(args.scale.is_finite() && args.scale > 0.0) {
             return Err(invalid("fixed E4M3 scale must be finite and positive"));
         }

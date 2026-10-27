@@ -19,6 +19,14 @@ unsafe extern "C" {
         width: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_swiglu_split_bf16(
+        gate: *const c_void,
+        up: *const c_void,
+        output: *mut c_void,
+        rows: i64,
+        width: i64,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_swiglu_bf16_round_product(
         fused_gate_up: *const c_void,
         output: *mut c_void,
@@ -42,6 +50,14 @@ unsafe extern "C" {
         alpha: f32,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_bf16_gemv(
+        activation: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        n: i64,
+        k: i64,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_nvfp4_gemv(
         weight: *const c_void,
         weight_scales: *const c_void,
@@ -51,6 +67,17 @@ unsafe extern "C" {
         n: i64,
         k: i64,
         alpha: f32,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_nvfp4_a16_blackwell_gemv(
+        activation: *const c_void,
+        qweights: *const c_void,
+        block_scales: *const c_void,
+        global_scale: *const c_void,
+        output: *mut c_void,
+        n: i64,
+        k: i64,
+        rows: i64,
         stream: CudaStream,
     ) -> i32;
     pub(crate) fn apxinf_new_add_bf16(

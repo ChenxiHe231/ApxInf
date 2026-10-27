@@ -54,8 +54,8 @@ pub use gemm::{
     GemmBiasResidualArgs, GemmGegluArgs, GemmPolicy, GemmQuantization, ScaleLayout, WeightVersion,
 };
 pub use mlp::{
-    add_into, fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu,
-    swiglu_round_product,
+    add_into, bf16_gemv, fp8_gemv, nvfp4_a16_blackwell_gemv, nvfp4_gemv, quantize_fp8_per_tensor,
+    swiglu, swiglu_round_product, swiglu_split,
 };
 pub use model::{argmax, embedding_gather, vision_position, VisionPositionArgs};
 pub use moe::{

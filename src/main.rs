@@ -4,6 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use apxinf_core::{DType, Device, Tensor};
+use apxinf_model::qwen35moe::{Qwen35KvCacheDType, Qwen35MoeActivation};
 use apxinf_model::{
     AutoModel, DecisionInput, GenerationConfigSource, GenerationOptions, ImageInput, LlmInput,
     LoadOptions, SamplingMode,
@@ -122,6 +123,14 @@ enum Commands {
         /// bandwidth and enables the bf16 fast path. Ignored on CPU.
         #[arg(long, default_value = "fp32")]
         dtype: String,
+
+        /// Qwen3.5-35B-A3B MoE activation precision: nvfp4 (W4A4) or bf16 (W4A16)
+        #[arg(long)]
+        qwen35_moe_activation: Option<Qwen35MoeActivation>,
+
+        /// Qwen3.5-35B-A3B target KV-cache storage: fp8 or bf16
+        #[arg(long)]
+        qwen35_kv_cache: Option<Qwen35KvCacheDType>,
     },
 
     /// Run a decision model and print scored codes
@@ -197,6 +206,14 @@ enum Commands {
         #[arg(long, default_value = "auto")]
         dtype: String,
 
+        /// Qwen3.5-35B-A3B MoE activation precision: nvfp4 (W4A4) or bf16 (W4A16)
+        #[arg(long)]
+        qwen35_moe_activation: Option<Qwen35MoeActivation>,
+
+        /// Qwen3.5-35B-A3B target KV-cache storage: fp8 or bf16
+        #[arg(long)]
+        qwen35_kv_cache: Option<Qwen35KvCacheDType>,
+
         /// Maximum queued requests behind the active batch-one request
         #[arg(long, default_value_t = 16)]
         queue_capacity: usize,
@@ -248,6 +265,8 @@ fn main() {
             system,
             device,
             dtype,
+            qwen35_moe_activation,
+            qwen35_kv_cache,
         } => {
             let device = match parse_device(&device) {
                 Ok(device) => device,
@@ -272,6 +291,8 @@ fn main() {
                 system.as_deref(),
                 device,
                 &dtype,
+                qwen35_moe_activation,
+                qwen35_kv_cache,
                 sample,
                 greedy,
                 temperature,
@@ -330,6 +351,8 @@ fn main() {
             port,
             device,
             dtype,
+            qwen35_moe_activation,
+            qwen35_kv_cache,
             queue_capacity,
             max_input_tokens,
             max_output_tokens,
@@ -373,6 +396,8 @@ fn main() {
                 model_name,
                 model_variant,
                 text_weight_dtype,
+                qwen35_moe_activation,
+                qwen35_kv_cache,
                 assets,
                 ..LoadOptions::default()
             };
@@ -538,6 +563,39 @@ mod device_tests {
         assert_eq!(model_variant.as_deref(), Some("bf16-compiled"));
     }
 
+    #[test]
+    fn parses_qwen35_precision_switches() {
+        let cli = Cli::try_parse_from([
+            "apxinf",
+            "generate",
+            "--model",
+            "/checkpoint",
+            "--prompt",
+            "hello",
+            "--qwen35-moe-activation",
+            "bf16",
+            "--qwen35-kv-cache",
+            "fp8",
+        ])
+        .unwrap();
+        let Commands::Generate {
+            qwen35_moe_activation,
+            qwen35_kv_cache,
+            ..
+        } = cli.command
+        else {
+            panic!("expected generate command");
+        };
+        assert_eq!(
+            qwen35_moe_activation,
+            Some(apxinf_model::qwen35moe::Qwen35MoeActivation::Bf16)
+        );
+        assert_eq!(
+            qwen35_kv_cache,
+            Some(apxinf_model::qwen35moe::Qwen35KvCacheDType::Fp8)
+        );
+    }
+
     #[cfg(feature = "server")]
     #[test]
     fn parses_context_reuse_server_flag() {
@@ -574,6 +632,8 @@ fn run_generate(
     system_prompt: Option<&str>,
     device: Device,
     dtype: &str,
+    qwen35_moe_activation: Option<Qwen35MoeActivation>,
+    qwen35_kv_cache: Option<Qwen35KvCacheDType>,
     sample: bool,
     greedy: bool,
     temperature: Option<f32>,
@@ -676,6 +736,8 @@ fn run_generate(
         model_variant: model_variant.map(str::to_owned),
         assets: asset_map,
         text_weight_dtype,
+        qwen35_moe_activation,
+        qwen35_kv_cache,
         generation_config: GenerationConfigSource::from_cli_value(generation_config),
         generation_overrides,
         ..LoadOptions::default()

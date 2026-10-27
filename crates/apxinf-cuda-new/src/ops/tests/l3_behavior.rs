@@ -128,18 +128,44 @@ fn quantization_rejects_packed_fp4_input() {
         (QuantizationSemantic::CastF16ToBf16, DType::BF16),
         (QuantizationSemantic::CastBf16ToF32, DType::F32),
         (QuantizationSemantic::CastF32ToBf16, DType::BF16),
+        (QuantizationSemantic::FixedScaleE4m3ToBf16, DType::BF16),
         (QuantizationSemantic::SliceColumnsBf16, DType::BF16),
         (QuantizationSemantic::RowwiseI8, DType::I8),
     ] {
         let mut output = zeros_tensor(0, vec![1, 16], dtype);
-        let error = quantization(&ctx, QuantizationArgs::new(semantic, &input, &mut output))
-            .unwrap_err();
+        let error =
+            quantization(&ctx, QuantizationArgs::new(semantic, &input, &mut output)).unwrap_err();
         assert!(
             error.to_string().contains("requires F16 or BF16")
                 || error.to_string().contains("dtype disagrees"),
             "{semantic:?}: {error}"
         );
     }
+}
+
+#[test]
+fn fixed_scale_e4m3_round_trip_supports_fp8_kv_cache() {
+    use apxinf_core::DType;
+
+    let ctx = CudaContext::new(0).unwrap();
+    let source = [0.25, -0.5, 1.0, 2.0];
+    let input = tensor(0, vec![1, source.len()], &source);
+    let mut quantized = zeros_tensor(0, vec![1, source.len()], DType::F8E4M3);
+    let mut quantize =
+        QuantizationArgs::new(QuantizationSemantic::FixedScaleE4m3, &input, &mut quantized);
+    quantize.scale = 0.25;
+    quantization(&ctx, quantize).unwrap();
+
+    let mut output = zeros_tensor(0, vec![1, source.len()], DType::BF16);
+    let mut dequantize = QuantizationArgs::new(
+        QuantizationSemantic::FixedScaleE4m3ToBf16,
+        &quantized,
+        &mut output,
+    );
+    dequantize.scale = 0.25;
+    quantization(&ctx, dequantize).unwrap();
+    ctx.synchronize().unwrap();
+    assert_eq!(values(&output), source);
 }
 
 #[test]
@@ -476,23 +502,24 @@ fn packed_qkv_attention_uses_static_metadata_and_replays_numeric_output() {
                         packed_values.push(match plane {
                             0 => 0.25,
                             1 => 0.5,
-                            _ => (batch_index * 8 + token % 8 + head + dimension % 4) as f32
-                                / 32.0,
+                            _ => (batch_index * 8 + token % 8 + head + dimension % 4) as f32 / 32.0,
                         });
                     }
                 }
             }
             for head in 0..heads {
                 for dimension in 0..head_dim {
-                    expected.push(
-                        ((batch_index * 8 + head + dimension % 4) as f32 + 3.5) / 32.0,
-                    );
+                    expected.push(((batch_index * 8 + head + dimension % 4) as f32 + 3.5) / 32.0);
                 }
             }
         }
     }
     let qkv = f16_tensor(0, vec![batch, tokens, 3, heads, head_dim], &packed_values);
-    let mut out = f16_tensor(0, vec![batch, tokens, heads, head_dim], &vec![0.0; elements]);
+    let mut out = f16_tensor(
+        0,
+        vec![batch, tokens, heads, head_dim],
+        &vec![0.0; elements],
+    );
     let normalized = super::attention_contracts::normalize_packed_qkv(
         &ctx,
         PackedQkvAttentionArgs::new(&qkv, &mut out),
@@ -509,9 +536,15 @@ fn packed_qkv_attention_uses_static_metadata_and_replays_numeric_output() {
         packed_qkv_attention(&ctx, args)
     })
     .unwrap();
-    let eager = crate::transfers::to_cpu(&out).unwrap().to_f32_vec().unwrap();
+    let eager = crate::transfers::to_cpu(&out)
+        .unwrap()
+        .to_f32_vec()
+        .unwrap();
     for (actual, reference) in eager.iter().zip(&expected) {
-        assert!((actual - reference).abs() < 0.002, "{actual} != {reference}");
+        assert!(
+            (actual - reference).abs() < 0.002,
+            "{actual} != {reference}"
+        );
     }
     let graph = crate::capture(&ctx, || {
         with_session(&session, || {
@@ -530,7 +563,10 @@ fn packed_qkv_attention_uses_static_metadata_and_replays_numeric_output() {
         output.copy_from_host(&sentinel).unwrap();
         graph.replay().unwrap();
         ctx.synchronize().unwrap();
-        let replayed = crate::transfers::to_cpu(&out).unwrap().to_f32_vec().unwrap();
+        let replayed = crate::transfers::to_cpu(&out)
+            .unwrap()
+            .to_f32_vec()
+            .unwrap();
         assert_eq!(replayed, eager);
     }
 }

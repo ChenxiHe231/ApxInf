@@ -1,38 +1,40 @@
 //! Concrete base-model full-attention backend for Qwen3.5-35B-A3B.
 //!
-//! The base checkpoint's ten full-attention layers use BF16 projections and
-//! static FP8-E4M3 K/V storage.  MTP attention is intentionally not handled by
-//! this backend: its checkpoint subtree has BF16 K/V and a different cache
-//! contract.
+//! The base checkpoint's ten full-attention layers use BF16 projections. Their
+//! persistent K/V cache is selected at load time: BF16 is consumed directly by
+//! FA2, while FP8-E4M3 is appended with the checkpoint calibration scales and
+//! dequantized into retained BF16 scratch before the same FA2 implementation.
+//! MTP attention has a separate cache contract and is not handled here.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::rc::Rc;
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
-use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext, ExecutionSession};
 
 use super::architecture::AttentionGeometry;
 use super::config::Qwen35MoeConfig;
 use super::decoder::{DecoderPhase, FullAttentionBackend, FullAttentionRequest};
 use super::device_weights::{DeviceAttentionWeights, DeviceDenseLinear};
+use super::execution::Qwen35KvCacheDType;
 use super::runtime_weights::KvCacheScales;
 
 const TEXT_POSITION_CHANNELS: usize = 3;
 const TARGET_HIDDEN_SIZE: usize = 2_048;
 const TARGET_LAYERS: usize = 40;
 const FULL_ATTENTION_INTERVAL: usize = 4;
+const DECODE_PROJECTION_WORKSPACE: usize = 4 * 1024 * 1024;
 
-/// Persistent BF16 cache for one base-model full-attention layer.
-///
-/// Formerly FP8-E4M3; now BF16 so `ops::kv_cache_attention` dispatches to FA2.
-/// The per-tensor FP8 scales that the old scalar kernel consumed are no longer
-/// needed and are kept only for the session contract — `run` does not read them.
+/// Persistent cache for one base-model full-attention layer.
 #[derive(Debug)]
 pub struct Qwen35AttentionCache {
     layer_index: usize,
     geometry: AttentionGeometry,
     capacity: usize,
     scales: KvCacheScales,
+    dtype: Qwen35KvCacheDType,
     key: Tensor,
     value: Tensor,
 }
@@ -50,6 +52,10 @@ impl Qwen35AttentionCache {
         self.scales
     }
 
+    pub fn dtype(&self) -> Qwen35KvCacheDType {
+        self.dtype
+    }
+
     pub fn key(&self) -> &Tensor {
         &self.key
     }
@@ -63,20 +69,56 @@ impl Qwen35AttentionCache {
 ///
 /// Scratch profiles are retained by token count, so ordinary one-token decode
 /// does not allocate projection or attention buffers on every step.
-#[derive(Debug)]
 pub struct Qwen35Fp8AttentionBackend {
     hidden_size: usize,
     rope_theta: f32,
-    scratch: HashMap<(usize, usize), AttentionScratch>,
+    kv_cache_dtype: Qwen35KvCacheDType,
+    scratch: HashMap<(usize, usize, usize), AttentionScratch>,
+    pre_projection_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
+    post_projection_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
+}
+
+struct PreparedExecution {
+    session: ExecutionSession,
+    prepared: Cell<bool>,
+}
+
+impl PreparedExecution {
+    fn new(device: usize) -> Result<Self> {
+        Ok(Self {
+            session: ExecutionSession::with_capacity(DECODE_PROJECTION_WORKSPACE, device)?,
+            prepared: Cell::new(false),
+        })
+    }
+
+    fn run<T>(&self, operation: impl FnOnce() -> Result<T>) -> Result<T> {
+        if self.prepared.get() {
+            self.session.run(operation)
+        } else {
+            let output = self.session.prepare(operation)?;
+            self.prepared.set(true);
+            Ok(output)
+        }
+    }
 }
 
 impl Qwen35Fp8AttentionBackend {
     pub fn new(config: &Qwen35MoeConfig) -> Result<Self> {
+        Self::with_kv_cache(config, Qwen35KvCacheDType::Bf16)
+    }
+
+    pub fn with_kv_cache(
+        config: &Qwen35MoeConfig,
+        kv_cache_dtype: Qwen35KvCacheDType,
+    ) -> Result<Self> {
         config.validate()?;
         Ok(Self {
             hidden_size: TARGET_HIDDEN_SIZE,
             rope_theta: config.text_config.rope_parameters.rope_theta,
+            kv_cache_dtype,
             scratch: HashMap::new(),
+            pre_projection_sessions: HashMap::new(),
+            post_projection_sessions: HashMap::new(),
         })
     }
 
@@ -84,16 +126,39 @@ impl Qwen35Fp8AttentionBackend {
         self.scratch.len()
     }
 
-    fn scratch(&mut self, ctx: &CudaContext, tokens: usize) -> Result<&mut AttentionScratch> {
-        let key = (ctx.device_id(), tokens);
+    fn scratch(
+        &mut self,
+        ctx: &CudaContext,
+        tokens: usize,
+        cache_capacity: usize,
+    ) -> Result<&mut AttentionScratch> {
+        let key = (ctx.device_id(), tokens, cache_capacity);
         if !self.scratch.contains_key(&key) {
-            let profile = AttentionScratch::new(ctx, tokens)?;
+            let profile = AttentionScratch::new(ctx, tokens, cache_capacity, self.kv_cache_dtype)?;
             self.scratch.insert(key, profile);
         }
         Ok(self
             .scratch
             .get_mut(&key)
             .expect("Qwen3.5 attention scratch profile was just inserted"))
+    }
+
+    fn projection_session(
+        sessions: &mut HashMap<(usize, usize), Rc<PreparedExecution>>,
+        ctx: &CudaContext,
+        layer_index: usize,
+        phase: DecoderPhase,
+    ) -> Result<Option<Rc<PreparedExecution>>> {
+        if phase != DecoderPhase::Decode
+            || std::env::var("APXINF_QWEN35_ATTENTION_SESSIONS").as_deref() == Ok("0")
+        {
+            return Ok(None);
+        }
+        let key = (ctx.device_id(), layer_index);
+        if !sessions.contains_key(&key) {
+            sessions.insert(key, Rc::new(PreparedExecution::new(ctx.device_id())?));
+        }
+        Ok(sessions.get(&key).cloned())
     }
 }
 
@@ -115,13 +180,15 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             ops::QWEN35_ATTENTION_KV_HEADS,
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ];
+        let dtype = self.kv_cache_dtype.tensor_dtype();
         Ok(Qwen35AttentionCache {
             layer_index,
             geometry,
             capacity,
             scales,
-            key: zeros(ctx, shape.clone(), DType::BF16)?,
-            value: zeros(ctx, shape, DType::BF16)?,
+            dtype: self.kv_cache_dtype,
+            key: zeros(ctx, shape.clone(), dtype)?,
+            value: zeros(ctx, shape, dtype)?,
         })
     }
 
@@ -148,7 +215,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             return Ok(());
         }
         let rows = positions.end - positions.start;
-        let (byte_offset, byte_len) = cache_byte_range(positions.clone())?;
+        let (byte_offset, byte_len) = cache_byte_range(positions.clone(), source.dtype)?;
         let shape = Shape::new(vec![
             rows,
             ops::QWEN35_ATTENTION_KV_HEADS,
@@ -162,13 +229,13 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
                 .map_err(Error::Cuda)?
                 .view(byte_offset, byte_len)
                 .map_err(Error::Cuda)?
-                .as_tensor(shape.clone(), DType::BF16)
+                .as_tensor(shape.clone(), source.dtype.tensor_dtype())
                 .map_err(Error::Cuda)?;
             let destination_view = CudaBuffer::from_tensor(destination_tensor)
                 .map_err(Error::Cuda)?
                 .view(byte_offset, byte_len)
                 .map_err(Error::Cuda)?
-                .as_tensor(shape.clone(), DType::BF16)
+                .as_tensor(shape.clone(), source.dtype.tensor_dtype())
                 .map_err(Error::Cuda)?;
             transfers::copy_cuda_to_cuda(ctx, &source_view, &destination_view)?;
         }
@@ -183,19 +250,39 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
     ) -> Result<()> {
         let tokens = validate_request(ctx, self.hidden_size, &request, cache)?;
         let rope_theta = self.rope_theta;
-        let scratch = self.scratch(ctx, tokens)?;
+        let pre_projection = Self::projection_session(
+            &mut self.pre_projection_sessions,
+            ctx,
+            request.layer_index,
+            request.phase,
+        )?;
+        let post_projection = Self::projection_session(
+            &mut self.post_projection_sessions,
+            ctx,
+            request.layer_index,
+            request.phase,
+        )?;
+        let scratch = self.scratch(ctx, tokens, cache.capacity)?;
         scratch.ensure_text_positions(request.start_position)?;
 
         // ---- q/k/v projection GEMMs ----
-        for (linear, output) in [
-            (&request.weights.q_proj, &mut scratch.projected_query_gate),
-            (&request.weights.k_proj, &mut scratch.projected_key),
-            (&request.weights.v_proj, &mut scratch.projected_value),
-        ] {
-            ops::gemm(
-                ctx,
-                ops::GemmArgs::new(request.normalized_hidden, &linear.weight, output),
-            )?;
+        let mut project_qkv = || {
+            for (linear, output) in [
+                (&request.weights.q_proj, &mut scratch.projected_query_gate),
+                (&request.weights.k_proj, &mut scratch.projected_key),
+                (&request.weights.v_proj, &mut scratch.projected_value),
+            ] {
+                ops::gemm(
+                    ctx,
+                    ops::GemmArgs::new(request.normalized_hidden, &linear.weight, output),
+                )?;
+            }
+            Ok(())
+        };
+        if let Some(session) = pre_projection {
+            session.run(project_qkv)?;
+        } else {
+            project_qkv()?;
         }
 
         // ---- Decomposed pre/post processing (shared with old scalar path) ----
@@ -279,13 +366,16 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             rope_theta,
         )?;
 
-        // ---- Write K/V to BF16 cache at cache_offset ----
-        let kv_bytes = tokens * ops::QWEN35_ATTENTION_KV_WIDTH * DType::BF16.size_in_bytes();
+        // ---- Append K/V using the selected runtime cache representation ----
+        let cache_dtype = cache.dtype.tensor_dtype();
+        let kv_elements = tokens * ops::QWEN35_ATTENTION_KV_WIDTH;
+        let kv_bytes = kv_elements * cache_dtype.size_in_bytes();
         let cache_offset_bytes =
-            request.start_position * ops::QWEN35_ATTENTION_KV_WIDTH * DType::BF16.size_in_bytes();
-        for (src, dst_tensor) in [
-            (&scratch.projected_key, &cache.key),
-            (&scratch.projected_value, &cache.value),
+            request.start_position * ops::QWEN35_ATTENTION_KV_WIDTH * cache_dtype.size_in_bytes();
+        let scales = cache.scales;
+        for (src, dst_tensor, scale) in [
+            (&scratch.projected_key, &cache.key, scales.key),
+            (&scratch.projected_value, &cache.value, scales.value),
         ] {
             let src_view = CudaBuffer::from_tensor(src)
                 .map_err(Error::Cuda)?
@@ -294,32 +384,82 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
                     DType::BF16,
                 )
                 .map_err(Error::Cuda)?;
-            let dst_view = CudaBuffer::from_tensor(dst_tensor)
+            let mut dst_view = CudaBuffer::from_tensor(dst_tensor)
                 .map_err(Error::Cuda)?
                 .view(cache_offset_bytes, kv_bytes)
                 .map_err(Error::Cuda)?
                 .as_tensor(
                     Shape::new(vec![tokens, ops::QWEN35_ATTENTION_KV_WIDTH]),
-                    DType::BF16,
+                    cache_dtype,
                 )
                 .map_err(Error::Cuda)?;
-            transfers::copy_cuda_to_cuda(ctx, &src_view, &dst_view)?;
+            match cache.dtype {
+                Qwen35KvCacheDType::Bf16 => {
+                    transfers::copy_cuda_to_cuda(ctx, &src_view, &dst_view)?;
+                }
+                Qwen35KvCacheDType::Fp8 => {
+                    let mut args = ops::QuantizationArgs::new(
+                        ops::QuantizationSemantic::FixedScaleE4m3,
+                        &src_view,
+                        &mut dst_view,
+                    );
+                    args.scale = scale;
+                    ops::quantization(ctx, args)?;
+                }
+            }
         }
 
         // ---- FA2 attention over the full prefix ----
         let valid = request.start_position + tokens;
-        let key_prefix = cache_prefix_view(
-            &cache.key,
-            valid,
-            ops::QWEN35_ATTENTION_KV_HEADS,
-            ops::QWEN35_ATTENTION_HEAD_DIM,
-        )?;
-        let value_prefix = cache_prefix_view(
-            &cache.value,
-            valid,
-            ops::QWEN35_ATTENTION_KV_HEADS,
-            ops::QWEN35_ATTENTION_HEAD_DIM,
-        )?;
+        let (key_prefix, value_prefix) = match cache.dtype {
+            Qwen35KvCacheDType::Bf16 => (
+                cache_prefix_view(
+                    &cache.key,
+                    valid,
+                    ops::QWEN35_ATTENTION_KV_HEADS,
+                    ops::QWEN35_ATTENTION_HEAD_DIM,
+                    DType::BF16,
+                )?,
+                cache_prefix_view(
+                    &cache.value,
+                    valid,
+                    ops::QWEN35_ATTENTION_KV_HEADS,
+                    ops::QWEN35_ATTENTION_HEAD_DIM,
+                    DType::BF16,
+                )?,
+            ),
+            Qwen35KvCacheDType::Fp8 => {
+                let key_fp8 = cache_prefix_view(
+                    &cache.key,
+                    valid,
+                    ops::QWEN35_ATTENTION_KV_HEADS,
+                    ops::QWEN35_ATTENTION_HEAD_DIM,
+                    DType::F8E4M3,
+                )?;
+                let value_fp8 = cache_prefix_view(
+                    &cache.value,
+                    valid,
+                    ops::QWEN35_ATTENTION_KV_HEADS,
+                    ops::QWEN35_ATTENTION_HEAD_DIM,
+                    DType::F8E4M3,
+                )?;
+                let mut key_bf16 = scratch.fp8_prefix_view(true, valid)?;
+                let mut value_bf16 = scratch.fp8_prefix_view(false, valid)?;
+                for (input, output, scale) in [
+                    (&key_fp8, &mut key_bf16, scales.key),
+                    (&value_fp8, &mut value_bf16, scales.value),
+                ] {
+                    let mut args = ops::QuantizationArgs::new(
+                        ops::QuantizationSemantic::FixedScaleE4m3ToBf16,
+                        input,
+                        output,
+                    );
+                    args.scale = scale;
+                    ops::quantization(ctx, args)?;
+                }
+                (key_bf16, value_bf16)
+            }
+        };
         let query_fa2 = view(
             &scratch.query,
             vec![
@@ -378,14 +518,21 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             DType::BF16,
         )?;
         let mut output = request.output.clone();
-        ops::gemm(
-            ctx,
-            ops::GemmArgs::new(
-                &attention_output,
-                &request.weights.o_proj.weight,
-                &mut output,
-            ),
-        )
+        let mut project_output = || {
+            ops::gemm(
+                ctx,
+                ops::GemmArgs::new(
+                    &attention_output,
+                    &request.weights.o_proj.weight,
+                    &mut output,
+                ),
+            )
+        };
+        if let Some(session) = post_projection {
+            session.run(project_output)
+        } else {
+            project_output()
+        }
     }
 }
 
@@ -398,13 +545,24 @@ struct AttentionScratch {
     query: Tensor,
     gate: Tensor,
     attention_output: Tensor,
+    fp8_key_bf16: Option<Tensor>,
+    fp8_value_bf16: Option<Tensor>,
     tokens: usize,
     positions_start: Option<usize>,
 }
 
 impl AttentionScratch {
-    fn new(ctx: &CudaContext, tokens: usize) -> Result<Self> {
-        if tokens == 0 || i32::try_from(tokens).is_err() {
+    fn new(
+        ctx: &CudaContext,
+        tokens: usize,
+        cache_capacity: usize,
+        cache_dtype: Qwen35KvCacheDType,
+    ) -> Result<Self> {
+        if tokens == 0
+            || cache_capacity == 0
+            || i32::try_from(tokens).is_err()
+            || i32::try_from(cache_capacity).is_err()
+        {
             return Err(invalid("Qwen3.5 attention profile token count is invalid"));
         }
         let attention_shape = vec![
@@ -412,6 +570,19 @@ impl AttentionScratch {
             ops::QWEN35_ATTENTION_Q_HEADS,
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ];
+        let fp8_cache_shape = vec![
+            cache_capacity,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_HEAD_DIM,
+        ];
+        let (fp8_key_bf16, fp8_value_bf16) = if cache_dtype == Qwen35KvCacheDType::Fp8 {
+            (
+                Some(zeros(ctx, fp8_cache_shape.clone(), DType::BF16)?),
+                Some(zeros(ctx, fp8_cache_shape, DType::BF16)?),
+            )
+        } else {
+            (None, None)
+        };
         Ok(Self {
             projected_query_gate: zeros(
                 ctx,
@@ -432,6 +603,8 @@ impl AttentionScratch {
             query: zeros(ctx, attention_shape.clone(), DType::BF16)?,
             gate: zeros(ctx, attention_shape.clone(), DType::BF16)?,
             attention_output: zeros(ctx, attention_shape, DType::BF16)?,
+            fp8_key_bf16,
+            fp8_value_bf16,
             tokens,
             positions_start: None,
         })
@@ -446,6 +619,22 @@ impl AttentionScratch {
         transfers::copy_cpu_to_cuda(&host, &self.positions)?;
         self.positions_start = Some(start_position);
         Ok(())
+    }
+
+    fn fp8_prefix_view(&self, key: bool, valid: usize) -> Result<Tensor> {
+        let tensor = if key {
+            self.fp8_key_bf16.as_ref()
+        } else {
+            self.fp8_value_bf16.as_ref()
+        }
+        .ok_or_else(|| invalid("Qwen3.5 FP8 cache dequantization scratch is unavailable"))?;
+        cache_prefix_view(
+            tensor,
+            valid,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_HEAD_DIM,
+            DType::BF16,
+        )
     }
 }
 
@@ -475,9 +664,7 @@ fn validate_request(
         .checked_add(tokens)
         .ok_or_else(|| invalid("Qwen3.5 attention position range overflow"))?;
     if end > cache.capacity || i32::try_from(end).is_err() {
-        return Err(invalid(
-            "Qwen3.5 attention append exceeds BF16 cache capacity",
-        ));
+        return Err(invalid("Qwen3.5 attention append exceeds cache capacity"));
     }
     validate_tensor(
         request.normalized_hidden,
@@ -608,9 +795,7 @@ fn validate_geometry(geometry: AttentionGeometry) -> Result<()> {
         && geometry.kv_projection_width == ops::QWEN35_ATTENTION_KV_WIDTH
         && geometry.output_gate;
     if !exact {
-        return Err(invalid(
-            "unsupported Qwen3.5 full-attention geometry for BF16 K/V cache",
-        ));
+        return Err(invalid("unsupported Qwen3.5 full-attention geometry"));
     }
     Ok(())
 }
@@ -637,10 +822,11 @@ fn validate_phase_tokens(phase: DecoderPhase, tokens: usize) -> Result<()> {
 }
 
 fn validate_cache_device(ctx: &CudaContext, cache: &Qwen35AttentionCache) -> Result<()> {
+    let dtype = cache.dtype.tensor_dtype();
     validate_tensor(
         &cache.key,
         ctx,
-        DType::BF16,
+        dtype,
         &[
             cache.capacity,
             ops::QWEN35_ATTENTION_KV_HEADS,
@@ -651,7 +837,7 @@ fn validate_cache_device(ctx: &CudaContext, cache: &Qwen35AttentionCache) -> Res
     validate_tensor(
         &cache.value,
         ctx,
-        DType::BF16,
+        dtype,
         &[
             cache.capacity,
             ops::QWEN35_ATTENTION_KV_HEADS,
@@ -672,35 +858,36 @@ fn validate_cache_pair(
     if source.layer_index != destination.layer_index
         || source.geometry != destination.geometry
         || source.scales != destination.scales
+        || source.dtype != destination.dtype
     {
         return Err(invalid(
-            "Qwen3.5 BF16 cache copy requires matching layer, geometry and metadata",
+            "Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
         ));
     }
     if positions.start > positions.end
         || positions.end > source.capacity
         || positions.end > destination.capacity
     {
-        return Err(invalid("Qwen3.5 BF16 cache copy range is out of bounds"));
+        return Err(invalid("Qwen3.5 cache copy range is out of bounds"));
     }
     Ok(())
 }
 
-fn cache_byte_range(positions: Range<usize>) -> Result<(usize, usize)> {
+fn cache_byte_range(positions: Range<usize>, dtype: Qwen35KvCacheDType) -> Result<(usize, usize)> {
     if positions.start > positions.end {
-        return Err(invalid("Qwen3.5 BF16 cache copy range is reversed"));
+        return Err(invalid("Qwen3.5 cache copy range is reversed"));
     }
     let row_bytes = ops::QWEN35_ATTENTION_KV_HEADS
         .checked_mul(ops::QWEN35_ATTENTION_HEAD_DIM)
-        .and_then(|elements| elements.checked_mul(DType::BF16.size_in_bytes()))
-        .ok_or_else(|| invalid("Qwen3.5 BF16 cache row size overflow"))?;
+        .and_then(|elements| elements.checked_mul(dtype.tensor_dtype().size_in_bytes()))
+        .ok_or_else(|| invalid("Qwen3.5 cache row size overflow"))?;
     let offset = positions
         .start
         .checked_mul(row_bytes)
-        .ok_or_else(|| invalid("Qwen3.5 BF16 cache copy offset overflow"))?;
+        .ok_or_else(|| invalid("Qwen3.5 cache copy offset overflow"))?;
     let len = (positions.end - positions.start)
         .checked_mul(row_bytes)
-        .ok_or_else(|| invalid("Qwen3.5 BF16 cache copy length overflow"))?;
+        .ok_or_else(|| invalid("Qwen3.5 cache copy length overflow"))?;
     Ok((offset, len))
 }
 
@@ -774,13 +961,18 @@ fn cache_prefix_view(
     valid: usize,
     kv_heads: usize,
     head_dim: usize,
+    dtype: DType,
 ) -> Result<Tensor> {
-    let bytes = valid * kv_heads * head_dim * DType::BF16.size_in_bytes();
+    let bytes = valid
+        .checked_mul(kv_heads)
+        .and_then(|elements| elements.checked_mul(head_dim))
+        .and_then(|elements| elements.checked_mul(dtype.size_in_bytes()))
+        .ok_or_else(|| invalid("Qwen3.5 cache prefix size overflow"))?;
     CudaBuffer::from_tensor(cache)
         .map_err(Error::Cuda)?
         .view(0, bytes)
         .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(vec![1, valid, kv_heads, head_dim]), DType::BF16)
+        .as_tensor(Shape::new(vec![1, valid, kv_heads, head_dim]), dtype)
         .map_err(Error::Cuda)
 }
 
@@ -816,8 +1008,13 @@ mod tests {
     fn cache_range_uses_bf16_rows() {
         let row_bytes = 512 * DType::BF16.size_in_bytes();
         assert_eq!(
-            cache_byte_range(4..9).unwrap(),
+            cache_byte_range(4..9, Qwen35KvCacheDType::Bf16).unwrap(),
             (4 * row_bytes, 5 * row_bytes)
+        );
+        let fp8_row_bytes = 512 * DType::F8E4M3.size_in_bytes();
+        assert_eq!(
+            cache_byte_range(4..9, Qwen35KvCacheDType::Fp8).unwrap(),
+            (4 * fp8_row_bytes, 5 * fp8_row_bytes)
         );
     }
 

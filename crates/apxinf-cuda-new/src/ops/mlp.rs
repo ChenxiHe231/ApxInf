@@ -43,7 +43,6 @@ pub fn rms_norm(
         ))
     }
 }
-
 /// `y[r,c] = silu(fused[r,c]) * fused[r,width+c]`
 ///
 /// `fused` is `[rows, 2*width]` with gate first, the layout one fused gate/up
@@ -51,6 +50,34 @@ pub fn rms_norm(
 /// is not interchangeable.
 pub fn swiglu(ctx: &CudaContext, fused: &Tensor, output: &Tensor) -> Result<()> {
     swiglu_impl(ctx, fused, output, false)
+}
+
+/// SwiGLU over independent contiguous `[rows, width]` gate and up matrices.
+///
+/// This preserves [`swiglu`]'s BF16 rounding order while allowing independent
+/// projections to share a scratch allocation without row interleaving.
+pub fn swiglu_split(ctx: &CudaContext, gate: &Tensor, up: &Tensor, output: &Tensor) -> Result<()> {
+    let gate_dims = gate.shape().dims().to_vec();
+    let up_dims = up.shape().dims().to_vec();
+    let output_dims = output.shape().dims().to_vec();
+    if gate_dims.len() != 2 || gate_dims != up_dims || gate_dims != output_dims {
+        return Err(invalid(
+            "split-input SwiGLU requires matching rank-2 tensors",
+        ));
+    }
+    let gate_buffer = tensor_storage(ctx, gate, DType::BF16, &gate_dims)?;
+    let up_buffer = tensor_storage(ctx, up, DType::BF16, &up_dims)?;
+    let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
+    unsafe {
+        status::check(abi::apxinf_swiglu_split_bf16(
+            gate_buffer.ptr(),
+            up_buffer.ptr(),
+            output_buffer.ptr(),
+            output_dims[0] as i64,
+            output_dims[1] as i64,
+            ctx.stream().handle(),
+        ))
+    }
 }
 
 /// Qwen3.5 MTP SwiGLU order: `bf16(silu(bf16(gate)) * bf16(up))`.
@@ -95,7 +122,6 @@ fn swiglu_impl(
         ))
     }
 }
-
 /// `accumulator += addend`, elementwise. Residual connections.
 pub fn add_into(ctx: &CudaContext, addend: &Tensor, accumulator: &Tensor) -> Result<()> {
     let dims = addend.shape().dims().to_vec();
@@ -109,6 +135,44 @@ pub fn add_into(ctx: &CudaContext, addend: &Tensor, accumulator: &Tensor) -> Res
             addend_buffer.ptr(),
             accumulator_buffer.ptr(),
             dims.iter().product::<usize>() as i64,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+/// Single-token BF16 projection with canonical `weight=[K,N]` storage.
+///
+/// The fixed per-column reduction order makes this path bitwise stable across
+/// eager execution and CUDA Graph replay.
+pub fn bf16_gemv(
+    ctx: &CudaContext,
+    activation: &Tensor,
+    weight: &Tensor,
+    output: &Tensor,
+) -> Result<()> {
+    let weight_dims = weight.shape().dims().to_vec();
+    if weight_dims.len() != 2 {
+        return Err(invalid("BF16 GEMV weight must be [K, N]"));
+    }
+    let (k, n) = (weight_dims[0], weight_dims[1]);
+    let activation_dims = activation.shape().dims().to_vec();
+    if activation_dims.iter().product::<usize>() != k {
+        return Err(invalid("BF16 GEMV activation must hold K elements"));
+    }
+    let output_dims = output.shape().dims().to_vec();
+    if output_dims.iter().product::<usize>() != n {
+        return Err(invalid("BF16 GEMV output must hold N elements"));
+    }
+    let activation_buffer = tensor_storage(ctx, activation, DType::BF16, &activation_dims)?;
+    let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &weight_dims)?;
+    let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
+    unsafe {
+        status::check(abi::apxinf_bf16_gemv(
+            activation_buffer.ptr(),
+            weight_buffer.ptr(),
+            output_buffer.ptr(),
+            n as i64,
+            k as i64,
             ctx.stream().handle(),
         ))
     }
@@ -227,10 +291,16 @@ pub fn nvfp4_gemv(
         return Err(invalid("NVFP4 GEMV activation must hold K/2 bytes"));
     }
     let activation_scale_dims = activation_scales.shape().dims().to_vec();
-    let activation_scale_buffer =
-        tensor_storage(ctx, activation_scales, DType::F8E4M3, &activation_scale_dims)?;
+    let activation_scale_buffer = tensor_storage(
+        ctx,
+        activation_scales,
+        DType::F8E4M3,
+        &activation_scale_dims,
+    )?;
     if activation_scale_buffer.len() < k / 16 {
-        return Err(invalid("NVFP4 GEMV activation scales must hold K/16 entries"));
+        return Err(invalid(
+            "NVFP4 GEMV activation scales must hold K/16 entries",
+        ));
     }
     let output_dims = output.shape().dims().to_vec();
     if output_dims.iter().product::<usize>() != n {
@@ -247,6 +317,60 @@ pub fn nvfp4_gemv(
             n as i64,
             k as i64,
             alpha,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+/// TensorRT-Edge-LLM weight-only NVFP4 GEMV for 1, 2, 4, 8, or 16 BF16 rows.
+///
+/// `qweights` and `block_scales` use `BLACKWELL_N128_K64_V1` storage:
+/// `[N/128, K/64, 128, 32]` packed FP4 bytes and
+/// `[N/128, K/64, 128, 4]` raw E4M3 bytes. `global_scale` is one F32 value.
+pub fn nvfp4_a16_blackwell_gemv(
+    ctx: &CudaContext,
+    activation: &Tensor,
+    qweights: &Tensor,
+    block_scales: &Tensor,
+    global_scale: &Tensor,
+    output: &Tensor,
+) -> Result<()> {
+    let q_dims = qweights.shape().dims().to_vec();
+    if q_dims.len() != 4 || q_dims[2..] != [128, 32] {
+        return Err(invalid("NVFP4-A16 qweights must be [N/128, K/64, 128, 32]"));
+    }
+    let (n, k) = (q_dims[0] * 128, q_dims[1] * 64);
+    let scale_dims = block_scales.shape().dims().to_vec();
+    if scale_dims != [q_dims[0], q_dims[1], 128, 4] {
+        return Err(invalid("NVFP4-A16 scales must be [N/128, K/64, 128, 4]"));
+    }
+    let activation_dims = activation.shape().dims().to_vec();
+    if activation_dims.len() != 2 || activation_dims[1] != k {
+        return Err(invalid("NVFP4-A16 activation must be [M,K] BF16"));
+    }
+    let rows = activation_dims[0];
+    if !matches!(rows, 1 | 2 | 4 | 8 | 16) {
+        return Err(invalid("NVFP4-A16 row count must be one of 1,2,4,8,16"));
+    }
+    let output_dims = output.shape().dims().to_vec();
+    if output_dims != [rows, n] {
+        return Err(invalid("NVFP4-A16 output must be [M,N] BF16"));
+    }
+    let activation_buffer = tensor_storage(ctx, activation, DType::BF16, &activation_dims)?;
+    let qweight_buffer = tensor_storage(ctx, qweights, DType::E2M1Pair, &q_dims)?;
+    let scale_buffer = tensor_storage(ctx, block_scales, DType::F8E4M3, &scale_dims)?;
+    let global_buffer = tensor_storage(ctx, global_scale, DType::F32, &[1])?;
+    let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
+    unsafe {
+        status::check(abi::apxinf_nvfp4_a16_blackwell_gemv(
+            activation_buffer.ptr(),
+            qweight_buffer.ptr(),
+            scale_buffer.ptr(),
+            global_buffer.ptr(),
+            output_buffer.ptr(),
+            n as i64,
+            k as i64,
+            rows as i64,
             ctx.stream().handle(),
         ))
     }

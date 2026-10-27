@@ -1,9 +1,11 @@
 //! CUDA routed-MoE primitive against the model-neutral CPU reference.
 
+use std::time::Instant;
+
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda_new::{
     ops, transfers, CudaBuffer, CudaContext, RoutePlan, RoutedMoeCombineArgs, RoutedMoeConfig,
-    RoutedMoeRouteArgs, SharedExpertOutput,
+    RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs, SharedExpertOutput,
 };
 use half::bf16;
 
@@ -127,6 +129,28 @@ fn qwen35_top8_assign_and_shared_combine_match_cpu_reference() {
     let token_weights = read_f32(&expert_weights);
     for (actual, expected) in token_weights.iter().zip(reference.expert_weights()) {
         assert!((actual - expected).abs() < 2e-6, "{actual} != {expected}");
+    }
+    if let Ok(iterations) = std::env::var("APXINF_ROUTE_TOPK_BENCH_ITERS") {
+        let iterations: usize = iterations.parse().unwrap();
+        ctx.synchronize().unwrap();
+        let start = Instant::now();
+        for _ in 0..iterations {
+            ops::routed_moe_route_topk(
+                &ctx,
+                RoutedMoeRouteTopkArgs {
+                    config,
+                    logits: &logits,
+                    expert_ids: &mut expert_ids,
+                    expert_weights: &mut expert_weights,
+                },
+            )
+            .unwrap();
+        }
+        ctx.synchronize().unwrap();
+        println!(
+            "Qwen3.5 route top-k tokens={tokens}: {:?}/iteration",
+            start.elapsed() / iterations as u32
+        );
     }
     let assignments = reference.assignments();
     assert_eq!(

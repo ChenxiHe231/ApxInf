@@ -61,6 +61,19 @@ cudaError_t launch_quantize_bf16_e4m3(
   return cudaGetLastError();
 }
 
+cudaError_t launch_dequantize_e4m3_bf16(
+    const void* input, void* output, int64_t count, float scale,
+    cudaStream_t stream) {
+  if (input == nullptr || output == nullptr || count <= 0 || !(scale > 0.0f))
+    return cudaErrorInvalidValue;
+  int blocks = static_cast<int>((count + 255) / 256);
+  blocks = blocks > 4096 ? 4096 : blocks;
+  dequantize_e4m3_bf16_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_fp8_e4m3*>(input),
+      static_cast<__nv_bfloat16*>(output), count, scale);
+  return cudaGetLastError();
+}
+
 cudaError_t launch_quantize_rows_bf16_e4m3(
     const void* input, void* output, void* scales, int rows,
     int input_cols, int output_cols, cudaStream_t stream) {
@@ -208,7 +221,7 @@ void validate_recorded_alignment(const void* pointer, uint32_t alignment,
 
 void validate_spec(const apxinf_quantization_spec_t& spec) {
   if (spec.version != APXINF_QUANTIZATION_SPEC_VERSION ||
-      spec.semantic > APXINF_QUANTIZATION_SEMANTIC_CAST_F32_BF16 ||
+      spec.semantic > APXINF_QUANTIZATION_SEMANTIC_DEQUANT_E4M3_BF16 ||
       spec.scale_dtype != APXINF_DTYPE_F32 || spec.rows <= 0 ||
       spec.input_cols <= 0 || spec.output_cols <= 0 ||
       spec.rows > INT32_MAX || spec.input_cols > INT32_MAX ||
@@ -268,6 +281,14 @@ void validate_spec(const apxinf_quantization_spec_t& spec) {
                       "invalid F32-to-BF16 cast Spec");
       }
       break;
+    case APXINF_QUANTIZATION_SEMANTIC_DEQUANT_E4M3_BF16:
+      if (spec.input_dtype != APXINF_DTYPE_E4M3 ||
+          spec.output_dtype != APXINF_DTYPE_BF16 ||
+          spec.input_cols != spec.output_cols) {
+        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                      "invalid E4M3-to-BF16 dequantization Spec");
+      }
+      break;
     case APXINF_QUANTIZATION_SEMANTIC_SLICE_BF16:
       if (spec.input_dtype != APXINF_DTYPE_BF16 ||
           spec.output_dtype != APXINF_DTYPE_BF16 ||
@@ -300,7 +321,8 @@ void validate_bindings(const apxinf_quantization_spec_t& spec,
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Quantization scales binding disagrees with semantic");
   }
-  if (spec.semantic == APXINF_QUANTIZATION_SEMANTIC_FIXED_E4M3) {
+  if (spec.semantic == APXINF_QUANTIZATION_SEMANTIC_FIXED_E4M3 ||
+      spec.semantic == APXINF_QUANTIZATION_SEMANTIC_DEQUANT_E4M3_BF16) {
     if (!(bindings.scale > 0.0f) || !std::isfinite(bindings.scale)) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "fixed E4M3 scale must be finite and positive");
@@ -347,6 +369,10 @@ cudaError_t launch(const apxinf_quantization_spec_t& spec,
     case APXINF_QUANTIZATION_SEMANTIC_CAST_F32_BF16:
       return launch_cast_f32_bf16(
           bindings.input, bindings.output, input_count, stream);
+    case APXINF_QUANTIZATION_SEMANTIC_DEQUANT_E4M3_BF16:
+      return launch_dequantize_e4m3_bf16(
+          bindings.input, bindings.output, input_count, bindings.scale,
+          stream);
     case APXINF_QUANTIZATION_SEMANTIC_SLICE_BF16:
       return launch_slice_columns_bf16(bindings.input, bindings.output, rows,
                                        input_cols, output_cols, stream);

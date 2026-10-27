@@ -57,6 +57,12 @@ pub struct LoadOptions {
     /// cache model families use it to reject impossible requests before
     /// allocating device state.
     pub text_kv_capacity: Option<usize>,
+    /// Qwen3.5-35B-A3B-only base-MoE activation precision. `None` selects the
+    /// model default (runtime NVFP4/W4A4). Other model families reject it.
+    pub qwen35_moe_activation: Option<crate::qwen35moe::Qwen35MoeActivation>,
+    /// Qwen3.5-35B-A3B-only target KV-cache storage. `None` selects the model
+    /// default (BF16). Other model families reject it.
+    pub qwen35_kv_cache: Option<crate::qwen35moe::Qwen35KvCacheDType>,
     pub calibration_path: Option<PathBuf>,
     /// For cuda-new, override the recipe directory. None uses the shared
     /// hardware/toolkit tuning directory; legacy JSON records are not loaded.
@@ -393,6 +399,14 @@ impl AutoModel {
                 &detected_model_name
             }
         };
+
+        if !matches!(model_name, "qwen3_5_moe" | "qwen3_5_moe_text")
+            && (options.qwen35_moe_activation.is_some() || options.qwen35_kv_cache.is_some())
+        {
+            return Err(Error::Other(format!(
+                "Qwen3.5 execution precision options are unsupported for model `{model_name}`"
+            )));
+        }
 
         if options.model_variant.is_some() && !supports_model_variant(model_name, device) {
             return Err(Error::Other(format!(

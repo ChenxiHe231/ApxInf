@@ -24,7 +24,6 @@ void check(int status, const char* what) {
                       std::to_string(status));
   }
 }
-
 bool valid_extent(int64_t value) {
   return value > 0 && value <= INT32_MAX;
 }
@@ -62,6 +61,22 @@ extern "C" apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up,
               fused_gate_up, output, static_cast<int>(rows),
               static_cast<int>(width), static_cast<cudaStream_t>(stream)),
           "SwiGLU");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_swiglu_split_bf16(
+    const void* gate, const void* up, void* output, int64_t rows,
+    int64_t width, apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (gate == nullptr || up == nullptr || output == nullptr ||
+        !valid_extent(rows) || !valid_extent(width)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid split-input SwiGLU arguments");
+    }
+    check(apxinf::cuda_new::mlp_ops::swiglu_split_bf16(
+              gate, up, output, static_cast<int>(rows),
+              static_cast<int>(width), static_cast<cudaStream_t>(stream)),
+          "split-input SwiGLU");
   });
 }
 
@@ -110,6 +125,22 @@ extern "C" apxinf_status_t apxinf_quantize_fp8_per_tensor(
   });
 }
 
+extern "C" apxinf_status_t apxinf_bf16_gemv(
+    const void* activation, const void* weight, void* output, int64_t n,
+    int64_t k, apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (activation == nullptr || weight == nullptr || output == nullptr ||
+        !valid_extent(n) || !valid_extent(k)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid BF16 GEMV arguments");
+    }
+    check(apxinf::cuda_new::mlp_ops::bf16_gemv(
+              activation, weight, output, static_cast<int>(n),
+              static_cast<int>(k), static_cast<cudaStream_t>(stream)),
+          "BF16 GEMV");
+  });
+}
+
 extern "C" apxinf_status_t apxinf_fp8_gemv(const void* weight,
                                            const void* activation,
                                            void* output, int64_t n, int64_t k,
@@ -144,5 +175,25 @@ extern "C" apxinf_status_t apxinf_nvfp4_gemv(
               static_cast<int>(n), static_cast<int>(k), alpha,
               static_cast<cudaStream_t>(stream)),
           "NVFP4 GEMV");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_nvfp4_a16_blackwell_gemv(
+    const void* activation, const void* qweights, const void* block_scales,
+    const void* global_scale, void* output, int64_t n, int64_t k, int64_t rows,
+    apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (activation == nullptr || qweights == nullptr ||
+        block_scales == nullptr || global_scale == nullptr ||
+        output == nullptr || !valid_extent(n) || !valid_extent(k) ||
+        !valid_extent(rows) || n % 128 != 0 || k % 64 != 0) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid NVFP4-A16 Blackwell GEMV arguments");
+    }
+    check(apxinf::cuda_new::mlp_ops::nvfp4_a16_blackwell_gemv(
+              activation, qweights, block_scales, global_scale, output,
+              static_cast<int>(n), static_cast<int>(k), static_cast<int>(rows),
+              static_cast<cudaStream_t>(stream)),
+          "NVFP4-A16 Blackwell GEMV");
   });
 }

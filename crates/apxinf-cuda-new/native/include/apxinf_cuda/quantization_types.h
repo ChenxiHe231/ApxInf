@@ -14,6 +14,8 @@
  * CAST_F16_BF16    F16 input -> BF16 output, same shape.
  * CAST_BF16_F32    BF16 input -> F32 output, same shape.
  * CAST_F32_BF16    F32 input -> BF16 output, same shape.
+ * DEQUANT_E4M3_BF16 E4M3 input -> BF16 output, same shape, using
+ *                  bindings.scale as the dequantization multiplier.
  * SLICE_BF16       leading columns of a contiguous BF16 matrix.
  * ROWWISE_I8       BF16 input -> I8 output plus F32 scales [rows].
  */
@@ -25,6 +27,7 @@ typedef enum {
   APXINF_QUANTIZATION_SEMANTIC_ROWWISE_I8 = 4,
   APXINF_QUANTIZATION_SEMANTIC_CAST_BF16_F32 = 5,
   APXINF_QUANTIZATION_SEMANTIC_CAST_F32_BF16 = 6,
+  APXINF_QUANTIZATION_SEMANTIC_DEQUANT_E4M3_BF16 = 7,
 } apxinf_quantization_semantic_t;
 
 #define APXINF_QUANTIZATION_SPEC_VERSION 1u
@@ -49,7 +52,8 @@ typedef struct {
   /* Required only by the two ROWWISE semantics. */
   float* scales;
   apxinf_cuda_stream_t stream;
-  /* Required only by FIXED_E4M3. Numeric values are call bindings rather
-     than recipe identity because they do not affect candidate legality. */
+  /* Required by FIXED_E4M3 and DEQUANT_E4M3_BF16. Numeric values are call
+     bindings rather than recipe identity because they do not affect candidate
+     legality. */
   float scale;
 } apxinf_quantization_bindings_t;

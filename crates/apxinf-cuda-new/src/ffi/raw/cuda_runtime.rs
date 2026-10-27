@@ -14,6 +14,7 @@ pub type cudaEvent_t = *mut c_void;
 
 pub const CUDA_SUCCESS: cudaError_t = 0;
 pub const CUDA_STREAM_NON_BLOCKING: u32 = 1;
+pub const CUDA_EVENT_DISABLE_TIMING: u32 = 2;
 
 #[repr(i32)]
 #[derive(Debug, Clone, Copy)]
@@ -106,8 +107,11 @@ extern "C" {
     pub fn cudaStreamCreateWithFlags(stream: *mut cudaStream_t, flags: u32) -> cudaError_t;
     pub fn cudaStreamDestroy(stream: cudaStream_t) -> cudaError_t;
     pub fn cudaStreamSynchronize(stream: cudaStream_t) -> cudaError_t;
+    pub fn cudaStreamWaitEvent(stream: cudaStream_t, event: cudaEvent_t, flags: u32)
+        -> cudaError_t;
 
     pub fn cudaEventCreate(event: *mut cudaEvent_t) -> cudaError_t;
+    pub fn cudaEventCreateWithFlags(event: *mut cudaEvent_t, flags: u32) -> cudaError_t;
     pub fn cudaEventDestroy(event: cudaEvent_t) -> cudaError_t;
     pub fn cudaEventRecord(event: cudaEvent_t, stream: cudaStream_t) -> cudaError_t;
     pub fn cudaEventSynchronize(event: cudaEvent_t) -> cudaError_t;

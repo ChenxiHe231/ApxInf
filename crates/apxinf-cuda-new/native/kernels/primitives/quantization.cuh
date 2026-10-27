@@ -43,6 +43,16 @@ __global__ void quantize_bf16_e4m3_kernel(
   }
 }
 
+__global__ void dequantize_e4m3_bf16_kernel(
+    const __nv_fp8_e4m3* input, __nv_bfloat16* output, int64_t count,
+    float scale) {
+  int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
+  for (; index < count; index += stride) {
+    output[index] = __float2bfloat16(static_cast<float>(input[index]) * scale);
+  }
+}
+
 __global__ void quantize_rows_bf16_e4m3_kernel(
     const __nv_bfloat16* input, __nv_fp8_e4m3* output, float* scales,
     int rows, int input_cols, int output_cols) {

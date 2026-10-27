@@ -4,6 +4,67 @@ use std::ffi::c_void;
 
 use crate::ffi;
 
+/// Owns a reusable CUDA event for device-side stream dependencies.
+pub struct CudaEvent {
+    handle: ffi::cudaEvent_t,
+    device: usize,
+}
+
+unsafe impl Send for CudaEvent {}
+unsafe impl Sync for CudaEvent {}
+
+impl CudaEvent {
+    /// Create an event without timing storage on `device`.
+    pub fn new(device: usize) -> Result<Self, String> {
+        unsafe {
+            ffi::check_cuda(ffi::cudaSetDevice(device as i32))?;
+        }
+        let mut handle: ffi::cudaEvent_t = std::ptr::null_mut();
+        unsafe {
+            ffi::check_cuda(ffi::cudaEventCreateWithFlags(
+                &mut handle,
+                ffi::CUDA_EVENT_DISABLE_TIMING,
+            ))?;
+        }
+        Ok(Self { handle, device })
+    }
+
+    /// Record the event after all currently queued work on `stream`.
+    pub fn record(&self, stream: &CudaStream) -> Result<(), String> {
+        self.validate_stream(stream)?;
+        stream.with_current_device(|| unsafe {
+            ffi::check_cuda(ffi::cudaEventRecord(self.handle, stream.handle))
+        })
+    }
+
+    fn validate_stream(&self, stream: &CudaStream) -> Result<(), String> {
+        if stream.device != self.device {
+            return Err(format!(
+                "CUDA event is on device {}, but stream is on device {}",
+                self.device, stream.device
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for CudaEvent {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            let previous = unsafe {
+                let mut current = 0;
+                let _ = ffi::cudaGetDevice(&mut current);
+                current
+            };
+            unsafe {
+                let _ = ffi::cudaSetDevice(self.device as i32);
+                let _ = ffi::cudaEventDestroy(self.handle);
+                let _ = ffi::cudaSetDevice(previous);
+            }
+        }
+    }
+}
+
 /// Owns a CUDA stream for async kernel execution.
 pub struct CudaStream {
     handle: ffi::cudaStream_t,
@@ -40,6 +101,15 @@ impl CudaStream {
     pub fn synchronize(&self) -> Result<(), String> {
         self.with_current_device(|| unsafe {
             ffi::check_cuda(ffi::cudaStreamSynchronize(self.handle))
+        })
+    }
+
+    /// Queue a dependency on the latest record of `event` without blocking
+    /// the host thread.
+    pub fn wait_event(&self, event: &CudaEvent) -> Result<(), String> {
+        event.validate_stream(self)?;
+        self.with_current_device(|| unsafe {
+            ffi::check_cuda(ffi::cudaStreamWaitEvent(self.handle, event.handle, 0))
         })
     }
 

@@ -185,18 +185,23 @@ fn load_qwen35_moe(
     let kv_capacity = options
         .text_kv_capacity
         .unwrap_or(crate::qwen35moe::DEFAULT_KV_CAPACITY);
+    let execution = crate::qwen35moe::Qwen35ExecutionOptions {
+        moe_activation: options.qwen35_moe_activation.unwrap_or_default(),
+        kv_cache: options.qwen35_kv_cache.unwrap_or_default(),
+    };
     if kv_capacity == 0 || kv_capacity > config.text_config.max_position_embeddings {
         return Err(Error::Other(format!(
             "Qwen3.5 KV capacity must be in 1..={}, got {kv_capacity}",
             config.text_config.max_position_embeddings
         )));
     }
-    let model = crate::qwen35moe::Qwen35Moe::from_checkpoint_path(
+    let model = crate::qwen35moe::Qwen35Moe::from_checkpoint_path_with_options(
         config,
         path,
         device,
         backend,
         kv_capacity,
+        execution,
     )?;
     Ok(LoadedModel::text(Box::new(model)))
 }

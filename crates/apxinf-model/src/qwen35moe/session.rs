@@ -11,7 +11,7 @@ use apxinf_cuda_new::{transfers, CudaContext};
 use super::architecture::MixerKind;
 use super::decoder::{
     DecoderOutput, DecoderPhase, DecoderScratch, FullAttentionBackend, HiddenSelection,
-    LogitsSelection, Qwen35Decoder,
+    LogitsSelection, Qwen35DecodePhase, Qwen35Decoder,
 };
 use super::device_weights::{DeviceMixerWeights, Qwen35DeviceWeights};
 use super::forward::GdnState;
@@ -115,7 +115,6 @@ pub trait MtpBackend {
         prepared: Self::PreparedCommit,
     );
 }
-
 /// Opaque evidence that the four target rows were
 /// evaluated against a particular committed session epoch. Dropping it aborts
 /// the target half of the speculative transaction.
@@ -180,15 +179,16 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     shadow_attention: Vec<B::Cache>,
     /// Prefix of the inactive cache bank known to equal the committed bank.
     shadow_attention_valid: usize,
-    /// Persistent one-row workspace shared by ordinary decode, scalar target
-    /// verification, and partial-commit replay. Variable-size prefill keeps
-    /// using call-sized temporary scratch.
+    /// Persistent one-row workspace shared by ordinary decode, four-row exact
+    /// target verification, and partial-commit replay. Variable-size prefill
+    /// deliberately keeps using call-sized temporary scratch.
     decode_scratch: DecoderScratch,
-    /// Persistent four-row candidate workspace. It is enabled only for parity
-    /// and performance validation until target-state equivalence is proven on
-    /// the real checkpoint.
+    /// Persistent four-row workspace for the opt-in batched target verifier.
     verify_scratch: DecoderScratch,
-    batched_verify: bool,
+    /// Graph sets follow their physical GDN state banks when transactions
+    /// publish by swapping committed and shadow storage.
+    committed_decode_phases: Option<Vec<Qwen35DecodePhase>>,
+    shadow_decode_phases: Option<Vec<Qwen35DecodePhase>>,
     /// Four staged verification inputs and their device argmax outputs. These
     /// eliminate per-row H2D traffic, allocation and host synchronization.
     verify_token_ids: Tensor,
@@ -279,8 +279,8 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             shadow_attention_valid: 0,
             decode_scratch: decoder.allocate_decode_scratch(ctx)?,
             verify_scratch: decoder.allocate_verify_scratch(ctx)?,
-            batched_verify: std::env::var("APXINF_QWEN35_MTP_BATCH_VERIFY")
-                .is_ok_and(|value| value == "1"),
+            committed_decode_phases: None,
+            shadow_decode_phases: None,
             verify_token_ids,
             verify_predictions,
             capacity,
@@ -288,6 +288,37 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             epoch: 0,
             shadow_generation: 0,
         };
+        if std::env::var("APXINF_QWEN35_CUDA_GRAPHS").as_deref() == Ok("1") {
+            session.committed_decode_phases = Some(decoder.capture_decode_phases(
+                ctx,
+                weights,
+                &session.committed_gdn,
+                &mut session.decode_scratch,
+            )?);
+            session.shadow_decode_phases = Some(decoder.capture_decode_phases(
+                ctx,
+                weights,
+                &session.shadow_gdn,
+                &mut session.decode_scratch,
+            )?);
+            if std::env::var("APXINF_QWEN35_VERIFY_GRAPHS").as_deref() == Ok("1") {
+                decoder.verify_decode_phases(
+                    ctx,
+                    weights,
+                    &session.committed_gdn,
+                    session
+                        .committed_decode_phases
+                        .as_deref()
+                        .expect("committed graphs were captured"),
+                    &session.shadow_gdn,
+                    session
+                        .shadow_decode_phases
+                        .as_deref()
+                        .expect("shadow graphs were captured"),
+                    &mut session.decode_scratch,
+                )?;
+            }
+        }
         session.reset_all_storage(ctx)?;
         ctx.synchronize().map_err(Error::Cuda)?;
         Ok(session)
@@ -639,18 +670,18 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         Ok(output)
     }
 
-    /// Evaluate a target-verification chunk without changing committed state
-    /// or position.
+    /// Evaluate a target-verification chunk one decode row at a time without
+    /// changing committed state or position.
     ///
     /// This is the exact base-model half required by `mtp_schedule`: an MTP
     /// executor can draft three tokens, call this method with
     /// `[pending,d0,d1,d2]`, and derive four target predictions. It is
-    /// The default is the validated scalar path. Setting
-    /// `APXINF_QWEN35_MTP_BATCH_VERIFY=1` at session construction selects the
-    /// persistent four-row prefill candidate for parity/profiling. Pass the
-    /// resulting ticket to [`Self::prepare_target_commit`] with the schedule's
-    /// committed row count; partial acceptance always replays the accepted
-    /// prefix through the scalar path.
+    /// intentionally *not* a batched prefill: the validated MTP contract
+    /// requires each verification row to use the exact scalar decode
+    /// attention provider, reductions, and recurrent-state transition. Pass
+    /// the resulting ticket to [`Self::prepare_target_commit`] with the
+    /// schedule's committed row count; partial acceptance replays that prefix
+    /// through the same scalar path.
     pub fn verify_target_chunk(
         &mut self,
         ctx: &CudaContext,
@@ -673,22 +704,21 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         self.validate_capacity(start_position, token_ids.len())?;
         self.bump_shadow_generation()?;
         self.prepare_shadow_from_committed(ctx)?;
-        self.stage_verify_tokens(token_ids)?;
-        let final_output = if self.batched_verify {
-            let output = decoder.run_verify_reusing_from_block(
+        let final_output = if std::env::var("APXINF_QWEN35_BATCH_VERIFY").as_deref() == Ok("1") {
+            let output = decoder.run_verify_reusing(
                 ctx,
                 weights,
                 &mut self.attention,
                 &mut self.shadow_attention,
                 &self.shadow_gdn,
                 token_ids,
-                &self.verify_token_ids,
                 start_position,
                 &mut self.verify_scratch,
             )?;
             output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, 0)?;
-            output.last_row()?
+            Some(output.into_last_row()?)
         } else {
+            self.stage_verify_tokens(token_ids)?;
             let mut final_output = None;
             for (offset, (&token, (position, phase))) in token_ids
                 .iter()
@@ -705,7 +735,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                 output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, offset)?;
                 final_output = Some(output);
             }
-            final_output.ok_or_else(|| invalid("Qwen3.5 target verification produced no rows"))?
+            final_output
         };
         ctx.synchronize().map_err(Error::Cuda)?;
         let host_predictions = transfers::to_cpu(&self.verify_predictions)?;
@@ -727,7 +757,8 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             start_position,
             inputs: token_ids.to_vec(),
             predictions,
-            final_output,
+            final_output: final_output
+                .ok_or_else(|| invalid("Qwen3.5 target verification produced no rows"))?,
         })
     }
 
@@ -865,6 +896,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                     token_ids,
                     start_position,
                     &mut self.decode_scratch,
+                    self.shadow_decode_phases.as_deref(),
                 )?
             }
             DecoderPhase::Prefill => decoder.run(
@@ -903,6 +935,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             token_offset,
             start_position,
             &mut self.decode_scratch,
+            self.shadow_decode_phases.as_deref(),
         )
     }
 
@@ -981,6 +1014,10 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             .ok_or_else(|| invalid("Qwen3.5 session epoch overflow"))?;
         std::mem::swap(&mut self.committed_gdn, &mut self.shadow_gdn);
         std::mem::swap(&mut self.committed_attention, &mut self.shadow_attention);
+        std::mem::swap(
+            &mut self.committed_decode_phases,
+            &mut self.shadow_decode_phases,
+        );
         self.position = position;
         self.epoch = next_epoch;
         self.shadow_attention_valid = preserved_prefix;
