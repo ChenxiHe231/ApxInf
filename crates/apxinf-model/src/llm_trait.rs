@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 
 use apxinf_core::{
-    Backend, Device, Error, NextTokenLogits, Result, Tensor, TokenSamplingInit, TokenSamplingSpec,
+    Backend, Device, Error, NextTokenLogits, Result, Tensor, TokenSampler, TokenSamplingInit,
+    TokenSamplingSpec,
 };
 use apxinf_loader::ModelConfig;
 use serde::Serialize;
@@ -219,6 +220,14 @@ pub trait LlmTrait {
     /// Backend that owns model tensors and creates the model-neutral sampler.
     fn backend(&self) -> &dyn Backend;
 
+    /// Create the sampler used by the shared generation loop. Most models use
+    /// their general backend. Runtimes that own a separate CUDA context can
+    /// override this hook so sampling stays on the same stream without linking
+    /// an otherwise-unused compatibility backend.
+    fn create_token_sampler(&self, spec: TokenSamplingSpec) -> Result<Box<dyn TokenSampler>> {
+        self.backend().create_token_sampler(spec)
+    }
+
     /// Modalities accepted by [`Self::prefill`]. Text is always supported.
     fn capabilities(&self) -> LlmCapabilities {
         LlmCapabilities::TEXT_ONLY
@@ -384,7 +393,7 @@ where
         vocab_size: model.vocab_size(),
         max_sequence_len: capacity,
     };
-    let mut sampler = model.backend().create_token_sampler(spec)?;
+    let mut sampler = model.create_token_sampler(spec)?;
     sampler.begin(TokenSamplingInit {
         prompt_token_ids: prompt_tokens,
         params: &options.sampling,

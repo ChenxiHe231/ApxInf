@@ -2,8 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use apxinf_core::{DType, Device, Error, Result, Tensor};
+use apxinf_core::{Backend, DType, Device, Error, Result, Tensor};
 
 use crate::accelerator::create_backend_with_recipe_options;
 use crate::builtin::register_builtin_models;
@@ -433,6 +434,20 @@ impl LoadedModel {
 /// Stateless unified frontend. It creates one shared backend, loads weights,
 /// and dispatches by model name with an explicit Metal prefix or CUDA suffix.
 pub struct AutoModel;
+
+fn create_model_backend(model_name: &str, device: Device) -> Result<Arc<dyn Backend>> {
+    // The Qwen3.5 runtime owns its CUDA context and overrides the sampler hook.
+    // In a Qwen-only build the registry still requires a backend-shaped handle,
+    // but no operation is dispatched through it. Full `cuda` builds retain the
+    // legacy backend for compatibility with callers that inspect `backend()`.
+    #[cfg(all(feature = "qwen35-cuda", not(feature = "cuda")))]
+    if matches!(model_name, "qwen3_5_moe" | "qwen3_5_moe_text") && matches!(device, Device::Cuda(_))
+    {
+        return Ok(Arc::new(apxinf_core::CpuBackend));
+    }
+    let _ = model_name;
+    create_backend(device)
+}
 
 impl AutoModel {
     /// Read a Hugging Face `model_type` and return its registry name.

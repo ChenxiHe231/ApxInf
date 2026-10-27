@@ -34,6 +34,7 @@ cuda = ["dep:apxinf-cuda-new"]
 mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "dep:sha2", "dep:apxinf-tokenizer"]
 # Core ML (Apple Neural Engine) stages in Metal families; implies `mlx`.
 coreml = ["mlx", "dep:apxinf-coreml", "apxinf-coreml/native"]
+qwen35-cuda = ["dep:apxinf-cuda-new"]
 # Deprecated alias of `cuda`, kept so existing build commands keep working.
 # It no longer gates anything: `cuda` already pulls in `apxinf-cuda-new`, and
 # the model code that used to hide behind this flag now follows `cuda`.
@@ -91,7 +92,7 @@ required-features = ["cuda"]
 
 [[example]]
 name = "qwen35_mtp_bench"
-required-features = ["cuda"]
+required-features = ["qwen35-cuda"]
 
 [[example]]
 name = "d3_smoke"

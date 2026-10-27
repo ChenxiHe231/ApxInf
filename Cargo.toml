@@ -38,6 +38,7 @@ cuda-no-nvtx = ["dep:apxinf-cuda-new", "apxinf-model/cuda", "apxinf-serving?/cud
 mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "apxinf-model/mlx", "apxinf-serving?/mlx"]
 # Metal plus Core ML stages on the Apple Neural Engine (for example Clef on GPU+ANE).
 coreml = ["mlx", "apxinf-model/coreml"]
+qwen35-cuda = ["apxinf-model/qwen35-cuda"]
 # Deprecated alias of `cuda`, kept so existing build commands keep working.
 # `cuda` already links cuda-new and enables every CUDA model family, Qwen3.8
 # included — see crates/apxinf-model/Cargo.toml.

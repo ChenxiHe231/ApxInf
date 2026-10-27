@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use apxinf_core::{Backend, DType, Device, Error, Result, Shape, Tensor};
+use apxinf_core::{
+    Backend, DType, Device, Error, Result, Shape, Tensor, TokenSampler, TokenSamplingSpec,
+};
 use apxinf_cuda_new::{transfers, CudaBuffer, CudaContext};
 use apxinf_loader::ModelConfig;
 
@@ -639,6 +641,10 @@ impl LlmTrait for Qwen35Moe {
 
     fn backend(&self) -> &dyn Backend {
         &*self.backend
+    }
+
+    fn create_token_sampler(&self, spec: TokenSamplingSpec) -> Result<Box<dyn TokenSampler>> {
+        apxinf_cuda_new::sampling::create_token_sampler(&self.ctx, spec)
     }
 
     fn speculative_generation_stats(&self) -> Option<SpeculativeGenerationStats> {
