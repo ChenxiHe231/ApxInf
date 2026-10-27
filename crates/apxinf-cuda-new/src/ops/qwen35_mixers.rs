@@ -46,6 +46,16 @@ pub struct Qwen35GdnState<'a> {
     pub recurrent: &'a Tensor,
 }
 
+/// Per-token GDN states produced by a short recurrent sequence.
+///
+/// Row `i` contains the state after consuming token `i`. Speculative target
+/// verification uses these checkpoints to publish an accepted prefix without
+/// replaying the target model one token at a time.
+pub struct Qwen35GdnStateCheckpoints<'a> {
+    pub conv: &'a Tensor,
+    pub recurrent: &'a Tensor,
+}
+
 /// Non-projection weights consumed by the GDN core.
 pub struct Qwen35GdnCoreWeights<'a> {
     /// Checkpoint-native BF16 `[8192, 1, 4]` depthwise-convolution weight.
@@ -127,6 +137,9 @@ pub struct Qwen35GdnPrefillArgs<'a> {
     pub b: &'a Tensor,
     pub weights: Qwen35GdnCoreWeights<'a>,
     pub state: Qwen35GdnState<'a>,
+    /// Optional state history. When present, every row is written after the
+    /// corresponding recurrent transition.
+    pub checkpoints: Option<Qwen35GdnStateCheckpoints<'a>>,
     pub scratch: Qwen35GdnPrefillScratch<'a>,
     /// Present on Blackwell, where the chunked prefill kernel exists.
     pub cake: Option<Qwen35GdnCakeScratch<'a>>,
@@ -177,7 +190,11 @@ pub fn qwen35_gdn_prefill(
 ) -> Result<()> {
     validate_prefill(ctx, tokens, args)?;
 
-    if let (0, Some(cake)) = (tokens % QWEN35_GDN_SCAN_CHUNK, args.cake.as_ref()) {
+    if let (0, Some(cake), None) = (
+        tokens % QWEN35_GDN_SCAN_CHUNK,
+        args.cake.as_ref(),
+        args.checkpoints.as_ref(),
+    ) {
         gdn_decay_and_beta_seq(
             ctx,
             args.a,
@@ -333,6 +350,28 @@ pub fn qwen35_gdn_prefill(
             &args.state,
             &scratch,
         )?;
+        if let Some(checkpoints) = args.checkpoints.as_ref() {
+            let conv = row_view(
+                checkpoints.conv,
+                token,
+                QWEN35_GDN_QKV_WIDTH * QWEN35_GDN_CONV_WIDTH,
+                vec![QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_CONV_WIDTH],
+                DType::F32,
+            )?;
+            let recurrent = row_view(
+                checkpoints.recurrent,
+                token,
+                QWEN35_GDN_VALUE_HEADS * QWEN35_GDN_HEAD_DIM * QWEN35_GDN_HEAD_DIM,
+                vec![
+                    QWEN35_GDN_VALUE_HEADS,
+                    QWEN35_GDN_HEAD_DIM,
+                    QWEN35_GDN_HEAD_DIM,
+                ],
+                DType::F32,
+            )?;
+            transfers::copy_cuda_to_cuda(ctx, args.state.conv, &conv)?;
+            transfers::copy_cuda_to_cuda(ctx, args.state.recurrent, &recurrent)?;
+        }
     }
     Ok(())
 }
@@ -481,6 +520,25 @@ fn validate_prefill(
         args.scratch.gated_output,
         &[tokens, QWEN35_GDN_VALUE_WIDTH],
     )?;
+    if let Some(checkpoints) = args.checkpoints.as_ref() {
+        tensor_storage(
+            ctx,
+            checkpoints.conv,
+            DType::F32,
+            &[tokens, QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_CONV_WIDTH],
+        )?;
+        tensor_storage(
+            ctx,
+            checkpoints.recurrent,
+            DType::F32,
+            &[
+                tokens,
+                QWEN35_GDN_VALUE_HEADS,
+                QWEN35_GDN_HEAD_DIM,
+                QWEN35_GDN_HEAD_DIM,
+            ],
+        )?;
+    }
     // The Cake buffers are only read on the chunk-aligned fast path, but
     // validating them up front keeps the "nothing mutates before every tensor
     // is checked" contract that the per-token path also relies on.

@@ -14,7 +14,8 @@ use apxinf_cuda_new::{
 };
 
 use super::device_weights::{
-    DeviceGdnWeights, DeviceNvfp4Moe, DeviceNvfp4RoutedExperts, Qwen35DeviceWeights,
+    DeviceGdnWeights, DeviceNvfp4Moe, DeviceNvfp4RoutedExperts, DeviceStaticFp8Linear,
+    Qwen35DeviceWeights,
 };
 use super::execution::Qwen35MoeActivation;
 
@@ -102,13 +103,11 @@ impl TextBoundaryScratch {
             &[self.hidden_size],
             "final norm",
         )?;
-        validate_tensor(
-            &weights.lm_head,
-            ctx,
-            DType::BF16,
-            &[self.hidden_size, self.vocab_size],
-            "lm_head",
-        )?;
+        if weights.lm_head.input_features != self.hidden_size
+            || weights.lm_head.output_features != self.vocab_size
+        {
+            return Err(invalid("Qwen3.6 lm_head geometry mismatch"));
+        }
         // Qwen3.5's ordinary RMSNorm is zero-centered: the checkpoint stores
         // a delta and the effective affine is `(1 + weight)` in F32 before the
         // BF16 output cast. `ops::mlp::rms_norm` implements that exact rule;
@@ -137,8 +136,9 @@ impl TextBoundaryScratch {
     }
 }
 
-/// Use Edge-LLM's weight-only W4 head for the bandwidth-bound one-row decode
-/// projection, while preserving the BF16 GEMM for multi-row public forward.
+/// Use the checkpoint-native NVFP4 head. The Edge W4A16 kernel is one-row, so
+/// multi-row verification dispatches stable row views without materializing a
+/// BF16 vocabulary matrix.
 pub(crate) fn project_lm_head(
     ctx: &CudaContext,
     weights: &Qwen35DeviceWeights,
@@ -151,19 +151,74 @@ pub(crate) fn project_lm_head(
         .first()
         .copied()
         .ok_or_else(|| invalid("Qwen3.5 lm_head input must be rank 2"))?;
-    if rows == 1 {
-        if let Some(weight) = &weights.lm_head_nvfp4_a16 {
-            return ops::nvfp4_a16_blackwell_gemv(
-                ctx,
-                input,
-                &weight.qweight,
-                &weight.block_scales,
-                &weight.global_scale,
-                output,
-            );
-        }
+    let weight = weights
+        .lm_head
+        .a16
+        .as_ref()
+        .ok_or_else(|| invalid("Qwen3.6 lm_head W4A16 layout is unavailable"))?;
+    let input_row_bytes = weight.input_features * DType::BF16.size_in_bytes();
+    let output_row_bytes = weight.output_features * DType::BF16.size_in_bytes();
+    for row in 0..rows {
+        let input_row = CudaBuffer::from_tensor(input)
+            .map_err(Error::Cuda)?
+            .view(row * input_row_bytes, input_row_bytes)
+            .map_err(Error::Cuda)?
+            .as_tensor(Shape::new(vec![1, weight.input_features]), DType::BF16)
+            .map_err(Error::Cuda)?;
+        let output_row = CudaBuffer::from_tensor(output)
+            .map_err(Error::Cuda)?
+            .view(row * output_row_bytes, output_row_bytes)
+            .map_err(Error::Cuda)?
+            .as_tensor(Shape::new(vec![1, weight.output_features]), DType::BF16)
+            .map_err(Error::Cuda)?;
+        ops::nvfp4_a16_blackwell_gemv(
+            ctx,
+            &input_row,
+            &weight.qweight,
+            &weight.block_scales,
+            &weight.global_scale,
+            &output_row,
+        )?;
     }
-    ops::gemm(ctx, ops::GemmArgs::new(input, &weights.lm_head, output))
+    Ok(())
+}
+
+pub(crate) fn quantize_static_fp8(
+    ctx: &CudaContext,
+    input: &Tensor,
+    quantized: &Tensor,
+    scale: f32,
+) -> Result<()> {
+    ops::quantize_fp8_per_tensor(ctx, input, quantized, scale)
+}
+
+pub(crate) fn project_static_fp8_prequantized(
+    ctx: &CudaContext,
+    weight: &DeviceStaticFp8Linear,
+    quantized: &Tensor,
+    output: &mut Tensor,
+    rows: usize,
+) -> Result<()> {
+    if rows == 1 {
+        ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha)
+    } else {
+        let mut args = ops::GemmArgs::new(quantized, &weight.transposed, output);
+        args.quantization = ops::GemmQuantization::Fp8UnitScale;
+        args.alpha = weight.alpha;
+        ops::gemm(ctx, args)
+    }
+}
+
+pub(crate) fn project_static_fp8(
+    ctx: &CudaContext,
+    weight: &DeviceStaticFp8Linear,
+    input: &Tensor,
+    quantized: &Tensor,
+    output: &mut Tensor,
+    rows: usize,
+) -> Result<()> {
+    quantize_static_fp8(ctx, input, quantized, weight.input_scale)?;
+    project_static_fp8_prequantized(ctx, weight, quantized, output, rows)
 }
 
 /// Stable, capture-compatible scratch for one base routed-MoE invocation.
@@ -1078,6 +1133,78 @@ pub struct GdnState {
     recurrent: Tensor,
 }
 
+/// Four-row target verification checkpoints for one GDN layer.
+#[derive(Debug)]
+pub(super) struct GdnStateCheckpoints {
+    conv: Tensor,
+    recurrent: Tensor,
+    rows: usize,
+}
+
+impl GdnStateCheckpoints {
+    pub(super) fn new(ctx: &CudaContext, rows: usize) -> Result<Self> {
+        if rows == 0 {
+            return Err(invalid("Qwen3.5 GDN checkpoints require at least one row"));
+        }
+        Ok(Self {
+            conv: zeros(
+                ctx,
+                vec![rows, ops::QWEN35_GDN_QKV_WIDTH, ops::QWEN35_GDN_CONV_WIDTH],
+                DType::F32,
+            )?,
+            recurrent: zeros(
+                ctx,
+                vec![
+                    rows,
+                    ops::QWEN35_GDN_VALUE_HEADS,
+                    ops::QWEN35_GDN_HEAD_DIM,
+                    ops::QWEN35_GDN_HEAD_DIM,
+                ],
+                DType::F32,
+            )?,
+            rows,
+        })
+    }
+
+    pub(super) fn copy_row_to(
+        &self,
+        ctx: &CudaContext,
+        row: usize,
+        destination: &GdnState,
+    ) -> Result<()> {
+        if row >= self.rows {
+            return Err(invalid("Qwen3.5 GDN checkpoint row is out of range"));
+        }
+        let conv = tensor_row_view(
+            &self.conv,
+            row,
+            ops::QWEN35_GDN_QKV_WIDTH * ops::QWEN35_GDN_CONV_WIDTH,
+            vec![ops::QWEN35_GDN_QKV_WIDTH, ops::QWEN35_GDN_CONV_WIDTH],
+            DType::F32,
+        )?;
+        let recurrent = tensor_row_view(
+            &self.recurrent,
+            row,
+            ops::QWEN35_GDN_VALUE_HEADS * ops::QWEN35_GDN_HEAD_DIM * ops::QWEN35_GDN_HEAD_DIM,
+            vec![
+                ops::QWEN35_GDN_VALUE_HEADS,
+                ops::QWEN35_GDN_HEAD_DIM,
+                ops::QWEN35_GDN_HEAD_DIM,
+            ],
+            DType::F32,
+        )?;
+        transfers::copy_cuda_to_cuda(ctx, &conv, &destination.conv)?;
+        transfers::copy_cuda_to_cuda(ctx, &recurrent, &destination.recurrent)
+    }
+
+    fn core(&self) -> ops::Qwen35GdnStateCheckpoints<'_> {
+        ops::Qwen35GdnStateCheckpoints {
+            conv: &self.conv,
+            recurrent: &self.recurrent,
+        }
+    }
+}
+
 impl GdnState {
     pub fn new(ctx: &CudaContext) -> Result<Self> {
         Ok(Self {
@@ -1145,6 +1272,9 @@ impl GdnState {
 /// `convolved_qkv`/`core_output`, so those stay regardless.
 #[derive(Debug)]
 pub struct GdnScratch {
+    fp8_qkv_input: Tensor,
+    fp8_z_input: Tensor,
+    fp8_output_input: Tensor,
     projected_qkv: Tensor,
     z: Tensor,
     a: Tensor,
@@ -1181,6 +1311,13 @@ impl GdnScratch {
         ];
         let workspace_bytes = ops::gdn_prefill_workspace_bytes(ops::QWEN35_GDN_VALUE_HEADS, 1);
         Ok(Self {
+            fp8_qkv_input: zeros(ctx, vec![tokens, hidden], DType::F8E4M3)?,
+            fp8_z_input: zeros(ctx, vec![tokens, hidden], DType::F8E4M3)?,
+            fp8_output_input: zeros(
+                ctx,
+                vec![tokens, ops::QWEN35_GDN_VALUE_WIDTH],
+                DType::F8E4M3,
+            )?,
             projected_qkv: zeros(ctx, vec![tokens, ops::QWEN35_GDN_QKV_WIDTH], DType::BF16)?,
             z: zeros(ctx, vec![tokens, ops::QWEN35_GDN_VALUE_WIDTH], DType::BF16)?,
             a: zeros(ctx, vec![tokens, ops::QWEN35_GDN_VALUE_HEADS], DType::BF16)?,
@@ -1222,7 +1359,34 @@ impl GdnScratch {
         state: &GdnState,
         normalized_hidden: &Tensor,
     ) -> Result<()> {
+        self.prefill_impl(ctx, weights, state, normalized_hidden, None)
+    }
+
+    pub(super) fn prefill_with_checkpoints(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceGdnWeights,
+        state: &GdnState,
+        normalized_hidden: &Tensor,
+        checkpoints: &GdnStateCheckpoints,
+    ) -> Result<()> {
+        self.prefill_impl(ctx, weights, state, normalized_hidden, Some(checkpoints))
+    }
+
+    fn prefill_impl(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceGdnWeights,
+        state: &GdnState,
+        normalized_hidden: &Tensor,
+        checkpoints: Option<&GdnStateCheckpoints>,
+    ) -> Result<()> {
         self.validate(ctx, weights, state, normalized_hidden)?;
+        if checkpoints.is_some_and(|checkpoints| checkpoints.rows != self.tokens) {
+            return Err(invalid(
+                "Qwen3.5 GDN checkpoint rows do not match the token profile",
+            ));
+        }
         self.project(ctx, weights, normalized_hidden)?;
         let z = view(
             &self.z,
@@ -1239,6 +1403,7 @@ impl GdnScratch {
                 b: &self.b,
                 weights: core_weights(weights),
                 state: core_state(state),
+                checkpoints: checkpoints.map(GdnStateCheckpoints::core),
                 scratch: ops::Qwen35GdnPrefillScratch {
                     convolved_qkv: &self.convolved_qkv,
                     decay: &self.decay,
@@ -1332,9 +1497,13 @@ impl GdnScratch {
         weights: &DeviceGdnWeights,
         input: &Tensor,
     ) -> Result<()> {
-        ops::gemm(
+        project_static_fp8(
             ctx,
-            ops::GemmArgs::new(input, &weights.in_proj_qkv.weight, &mut self.projected_qkv),
+            &weights.in_proj_qkv,
+            input,
+            &self.fp8_qkv_input,
+            &mut self.projected_qkv,
+            self.tokens,
         )
     }
 
@@ -1346,8 +1515,15 @@ impl GdnScratch {
         weights: &DeviceGdnWeights,
         input: &Tensor,
     ) -> Result<()> {
+        project_static_fp8(
+            ctx,
+            &weights.in_proj_z,
+            input,
+            &self.fp8_z_input,
+            &mut self.z,
+            self.tokens,
+        )?;
         for (weight, output) in [
-            (&weights.in_proj_z.weight, &mut self.z),
             (&weights.in_proj_a.weight, &mut self.a),
             (&weights.in_proj_b.weight, &mut self.b),
         ] {
@@ -1435,9 +1611,13 @@ impl GdnScratch {
             vec![self.tokens, ops::QWEN35_GDN_VALUE_WIDTH],
             DType::BF16,
         )?;
-        ops::gemm(
+        project_static_fp8(
             ctx,
-            ops::GemmArgs::new(&gated_output, &weights.out_proj.weight, &mut self.output),
+            &weights.out_proj,
+            &gated_output,
+            &self.fp8_output_input,
+            &mut self.output,
+            self.tokens,
         )
     }
 
@@ -1469,18 +1649,6 @@ impl GdnScratch {
                 "GDN z projection",
             ),
             (
-                &weights.in_proj_a,
-                self.hidden,
-                ops::QWEN35_GDN_VALUE_HEADS,
-                "GDN a projection",
-            ),
-            (
-                &weights.in_proj_b,
-                self.hidden,
-                ops::QWEN35_GDN_VALUE_HEADS,
-                "GDN b projection",
-            ),
-            (
                 &weights.out_proj,
                 ops::QWEN35_GDN_VALUE_WIDTH,
                 self.hidden,
@@ -1491,7 +1659,37 @@ impl GdnScratch {
             {
                 return Err(invalid(format!("Qwen3.5 {label} metadata mismatch")));
             }
-            validate_linear(&linear.weight, ctx, input_features, output_features, label)?;
+            validate_tensor(
+                &linear.weight,
+                ctx,
+                DType::F8E4M3,
+                &[output_features, input_features],
+                label,
+            )?;
+            validate_tensor(
+                &linear.transposed,
+                ctx,
+                DType::F8E4M3,
+                &[input_features, output_features],
+                label,
+            )?;
+        }
+        for (linear, output_features, label) in [
+            (
+                &weights.in_proj_a,
+                ops::QWEN35_GDN_VALUE_HEADS,
+                "GDN a projection",
+            ),
+            (
+                &weights.in_proj_b,
+                ops::QWEN35_GDN_VALUE_HEADS,
+                "GDN b projection",
+            ),
+        ] {
+            if linear.input_features != self.hidden || linear.output_features != output_features {
+                return Err(invalid(format!("Qwen3.6 {label} metadata mismatch")));
+            }
+            validate_linear(&linear.weight, ctx, self.hidden, output_features, label)?;
         }
         for (tensor, dtype, shape, label) in [
             (
@@ -1618,6 +1816,29 @@ fn view(tensor: &Tensor, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
     CudaBuffer::from_tensor(tensor)
         .map_err(Error::Cuda)?
         .view(0, bytes)
+        .map_err(Error::Cuda)?
+        .as_tensor(Shape::new(shape), dtype)
+        .map_err(Error::Cuda)
+}
+
+fn tensor_row_view(
+    tensor: &Tensor,
+    row: usize,
+    row_elements: usize,
+    shape: Vec<usize>,
+    dtype: DType,
+) -> Result<Tensor> {
+    let element_size = dtype.size_in_bytes();
+    let offset = row
+        .checked_mul(row_elements)
+        .and_then(|elements| elements.checked_mul(element_size))
+        .ok_or_else(|| invalid("Qwen3.5 tensor row offset overflow"))?;
+    let bytes = row_elements
+        .checked_mul(element_size)
+        .ok_or_else(|| invalid("Qwen3.5 tensor row size overflow"))?;
+    CudaBuffer::from_tensor(tensor)
+        .map_err(Error::Cuda)?
+        .view(offset, bytes)
         .map_err(Error::Cuda)?
         .as_tensor(Shape::new(shape), dtype)
         .map_err(Error::Cuda)

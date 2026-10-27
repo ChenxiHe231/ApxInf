@@ -17,8 +17,9 @@ use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext, ExecutionSession}
 use super::architecture::AttentionGeometry;
 use super::config::Qwen35MoeConfig;
 use super::decoder::{DecoderPhase, FullAttentionBackend, FullAttentionRequest};
-use super::device_weights::{DeviceAttentionWeights, DeviceDenseLinear};
+use super::device_weights::{DeviceAttentionWeights, DeviceStaticFp8Linear};
 use super::execution::Qwen35KvCacheDType;
+use super::forward::{project_static_fp8_prequantized, quantize_static_fp8};
 use super::runtime_weights::KvCacheScales;
 
 const TEXT_POSITION_CHANNELS: usize = 3;
@@ -33,7 +34,7 @@ pub struct Qwen35AttentionCache {
     layer_index: usize,
     geometry: AttentionGeometry,
     capacity: usize,
-    scales: KvCacheScales,
+    scales: Option<KvCacheScales>,
     dtype: Qwen35KvCacheDType,
     key: Tensor,
     value: Tensor,
@@ -48,7 +49,7 @@ impl Qwen35AttentionCache {
         self.capacity
     }
 
-    pub fn scales(&self) -> KvCacheScales {
+    pub fn scales(&self) -> Option<KvCacheScales> {
         self.scales
     }
 
@@ -112,6 +113,13 @@ impl Qwen35Fp8AttentionBackend {
         kv_cache_dtype: Qwen35KvCacheDType,
     ) -> Result<Self> {
         config.validate()?;
+        if kv_cache_dtype == Qwen35KvCacheDType::Fp8
+            && config.quantization_config.kv_cache_scheme.is_none()
+        {
+            return Err(invalid(
+                "Qwen3.6 checkpoint has no FP8 KV calibration scales; use BF16 KV cache",
+            ));
+        }
         Ok(Self {
             hidden_size: TARGET_HIDDEN_SIZE,
             rope_theta: config.text_config.rope_parameters.rope_theta,
@@ -171,10 +179,10 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         layer_index: usize,
         geometry: AttentionGeometry,
         capacity: usize,
-        scales: KvCacheScales,
+        scales: Option<KvCacheScales>,
     ) -> Result<Self::Cache> {
         validate_full_attention_layer(layer_index)?;
-        validate_cache_contract(geometry, capacity, scales)?;
+        validate_cache_contract(geometry, capacity, scales, self.kv_cache_dtype)?;
         let shape = vec![
             capacity,
             ops::QWEN35_ATTENTION_KV_HEADS,
@@ -267,14 +275,23 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
 
         // ---- q/k/v projection GEMMs ----
         let mut project_qkv = || {
+            quantize_static_fp8(
+                ctx,
+                request.normalized_hidden,
+                &scratch.fp8_projection_input,
+                request.weights.q_proj.input_scale,
+            )?;
             for (linear, output) in [
                 (&request.weights.q_proj, &mut scratch.projected_query_gate),
                 (&request.weights.k_proj, &mut scratch.projected_key),
                 (&request.weights.v_proj, &mut scratch.projected_value),
             ] {
-                ops::gemm(
+                project_static_fp8_prequantized(
                     ctx,
-                    ops::GemmArgs::new(request.normalized_hidden, &linear.weight, output),
+                    linear,
+                    &scratch.fp8_projection_input,
+                    output,
+                    tokens,
                 )?;
             }
             Ok(())
@@ -373,9 +390,9 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         let cache_offset_bytes =
             request.start_position * ops::QWEN35_ATTENTION_KV_WIDTH * cache_dtype.size_in_bytes();
         let scales = cache.scales;
-        for (src, dst_tensor, scale) in [
-            (&scratch.projected_key, &cache.key, scales.key),
-            (&scratch.projected_value, &cache.value, scales.value),
+        for (src, dst_tensor, key) in [
+            (&scratch.projected_key, &cache.key, true),
+            (&scratch.projected_value, &cache.value, false),
         ] {
             let src_view = CudaBuffer::from_tensor(src)
                 .map_err(Error::Cuda)?
@@ -398,6 +415,12 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
                     transfers::copy_cuda_to_cuda(ctx, &src_view, &dst_view)?;
                 }
                 Qwen35KvCacheDType::Fp8 => {
+                    let scales = scales.ok_or_else(|| {
+                        invalid(
+                            "Qwen3.6 FP8 KV cache requested without checkpoint calibration scales",
+                        )
+                    })?;
+                    let scale = if key { scales.key } else { scales.value };
                     let mut args = ops::QuantizationArgs::new(
                         ops::QuantizationSemantic::FixedScaleE4m3,
                         &src_view,
@@ -445,6 +468,9 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
                 )?;
                 let mut key_bf16 = scratch.fp8_prefix_view(true, valid)?;
                 let mut value_bf16 = scratch.fp8_prefix_view(false, valid)?;
+                let scales = scales.ok_or_else(|| {
+                    invalid("Qwen3.6 FP8 KV cache requested without checkpoint calibration scales")
+                })?;
                 for (input, output, scale) in [
                     (&key_fp8, &mut key_bf16, scales.key),
                     (&value_fp8, &mut value_bf16, scales.value),
@@ -519,13 +545,18 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         )?;
         let mut output = request.output.clone();
         let mut project_output = || {
-            ops::gemm(
+            quantize_static_fp8(
                 ctx,
-                ops::GemmArgs::new(
-                    &attention_output,
-                    &request.weights.o_proj.weight,
-                    &mut output,
-                ),
+                &attention_output,
+                &scratch.fp8_output_input,
+                request.weights.o_proj.input_scale,
+            )?;
+            project_static_fp8_prequantized(
+                ctx,
+                &request.weights.o_proj,
+                &scratch.fp8_output_input,
+                &mut output,
+                tokens,
             )
         };
         if let Some(session) = post_projection {
@@ -538,6 +569,8 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
 
 #[derive(Debug)]
 struct AttentionScratch {
+    fp8_projection_input: Tensor,
+    fp8_output_input: Tensor,
     projected_query_gate: Tensor,
     projected_key: Tensor,
     projected_value: Tensor,
@@ -584,6 +617,15 @@ impl AttentionScratch {
             (None, None)
         };
         Ok(Self {
+            fp8_projection_input: zeros(ctx, vec![tokens, TARGET_HIDDEN_SIZE], DType::F8E4M3)?,
+            fp8_output_input: zeros(
+                ctx,
+                vec![
+                    tokens,
+                    ops::QWEN35_ATTENTION_Q_HEADS * ops::QWEN35_ATTENTION_HEAD_DIM,
+                ],
+                DType::F8E4M3,
+            )?,
             projected_query_gate: zeros(
                 ctx,
                 vec![tokens, ops::QWEN35_ATTENTION_Q_PROJECTION_WIDTH],
@@ -681,12 +723,7 @@ fn validate_request(
         "mixer output",
     )?;
     validate_attention_weights(ctx, request.weights, hidden_size)?;
-    let scales = request
-        .weights
-        .kv_cache_scales
-        .ok_or_else(|| invalid("Qwen3.5 base full attention is missing FP8 K/V scales"))?;
-    validate_scales(scales)?;
-    if scales != cache.scales {
+    if request.weights.kv_cache_scales != cache.scales {
         return Err(invalid(
             "Qwen3.5 attention weights and cache metadata use different K/V scales",
         ));
@@ -696,7 +733,7 @@ fn validate_request(
 
 fn validate_attention_weights(
     ctx: &CudaContext,
-    weights: &DeviceAttentionWeights,
+    weights: &DeviceAttentionWeights<DeviceStaticFp8Linear>,
     hidden_size: usize,
 ) -> Result<()> {
     for (linear, input, output, label) in [
@@ -725,7 +762,7 @@ fn validate_attention_weights(
             "output projection",
         ),
     ] {
-        validate_linear(ctx, linear, input, output, label)?;
+        validate_fp8_linear(ctx, linear, input, output, label)?;
     }
     validate_tensor(
         &weights.q_norm,
@@ -743,9 +780,9 @@ fn validate_attention_weights(
     )
 }
 
-fn validate_linear(
+fn validate_fp8_linear(
     ctx: &CudaContext,
-    linear: &DeviceDenseLinear,
+    linear: &DeviceStaticFp8Linear,
     input_features: usize,
     output_features: usize,
     label: &str,
@@ -759,7 +796,14 @@ fn validate_linear(
     validate_tensor(
         &linear.weight,
         ctx,
-        DType::BF16,
+        DType::F8E4M3,
+        &[output_features, input_features],
+        label,
+    )?;
+    validate_tensor(
+        &linear.transposed,
+        ctx,
+        DType::F8E4M3,
         &[input_features, output_features],
         label,
     )
@@ -768,13 +812,23 @@ fn validate_linear(
 fn validate_cache_contract(
     geometry: AttentionGeometry,
     capacity: usize,
-    scales: KvCacheScales,
+    scales: Option<KvCacheScales>,
+    dtype: Qwen35KvCacheDType,
 ) -> Result<()> {
     validate_geometry(geometry)?;
     if capacity == 0 || i32::try_from(capacity).is_err() {
         return Err(invalid("Qwen3.5 BF16 cache capacity is invalid"));
     }
-    validate_scales(scales)
+    match (dtype, scales) {
+        (Qwen35KvCacheDType::Bf16, None) => Ok(()),
+        (Qwen35KvCacheDType::Fp8, Some(scales)) => validate_scales(scales),
+        (Qwen35KvCacheDType::Fp8, None) => Err(invalid(
+            "Qwen3.6 checkpoint has no FP8 KV calibration scales; use BF16 KV cache",
+        )),
+        (Qwen35KvCacheDType::Bf16, Some(_)) => Err(invalid(
+            "Qwen3.6 BF16 KV cache must not carry fabricated FP8 scales",
+        )),
+    }
 }
 
 fn validate_full_attention_layer(layer_index: usize) -> Result<()> {
@@ -1024,10 +1078,26 @@ mod tests {
             key: 1.0 / 448.0,
             value: 224.0 / 448.0,
         };
-        validate_cache_contract(target_geometry(), 4_096, scales).unwrap();
+        validate_cache_contract(
+            target_geometry(),
+            4_096,
+            Some(scales),
+            Qwen35KvCacheDType::Fp8,
+        )
+        .unwrap();
         let mut wrong = target_geometry();
         wrong.output_gate = false;
-        assert!(validate_cache_contract(wrong, 4_096, scales).is_err());
+        assert!(
+            validate_cache_contract(wrong, 4_096, Some(scales), Qwen35KvCacheDType::Fp8,).is_err()
+        );
+        assert!(
+            validate_cache_contract(target_geometry(), 4_096, None, Qwen35KvCacheDType::Bf16,)
+                .is_ok()
+        );
+        assert!(
+            validate_cache_contract(target_geometry(), 4_096, None, Qwen35KvCacheDType::Fp8,)
+                .is_err()
+        );
 
         // Backend scales are dequant multipliers and are forwarded unchanged.
         let cuda_scales = ops::Qwen35KvCacheScales {

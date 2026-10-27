@@ -1,4 +1,4 @@
-//! Exact configuration contract for `txn545/Qwen3.5-35B-A3B-NVFP4`.
+//! Exact configuration contract for the Thor-U Qwen3.6-35B-A3B-NVFP4 checkpoint.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -6,8 +6,8 @@ use std::path::Path;
 use apxinf_core::{Error, Result};
 use serde::Deserialize;
 
-pub const CHECKPOINT_REPOSITORY: &str = "txn545/Qwen3.5-35B-A3B-NVFP4";
-pub const CHECKPOINT_REVISION: &str = "63ffbd1d5ca18043b67ea5302238afe3929fddb2";
+pub const CHECKPOINT_REPOSITORY: &str = "Qwen3.6-35B-A3B-NVFP4";
+pub const CHECKPOINT_REVISION: &str = "local-thor-u";
 
 const MODEL_TYPE: &str = "qwen3_5_moe";
 const TEXT_MODEL_TYPE: &str = "qwen3_5_moe_text";
@@ -50,6 +50,7 @@ pub struct Qwen35MoeTextConfig {
     pub linear_value_head_dim: usize,
     pub mamba_ssm_dtype: String,
     pub max_position_embeddings: usize,
+    #[serde(default)]
     pub mlp_only_layers: Vec<usize>,
     pub model_type: String,
     pub moe_intermediate_size: usize,
@@ -84,7 +85,8 @@ pub struct RopeConfig {
 pub struct ModelOptNvfp4Config {
     pub config_groups: HashMap<String, QuantizationGroup>,
     pub ignore: Vec<String>,
-    pub kv_cache_scheme: QuantizedTensor,
+    #[serde(default)]
+    pub kv_cache_scheme: Option<QuantizedTensor>,
     pub quant_algo: String,
     pub quant_method: String,
 }
@@ -140,7 +142,7 @@ impl Qwen35MoeTextConfig {
         let exact_geometry = !self.attention_bias
             && self.attention_dropout == 0.0
             && self.attn_output_gate
-            && self.bos_token_id.is_none()
+            && self.bos_token_id == Some(248_044)
             && self.dtype == "bfloat16"
             && self.eos_token_id == 248_044
             && self.full_attention_interval == 4
@@ -229,16 +231,27 @@ impl Qwen35MoeTextConfig {
 
 impl ModelOptNvfp4Config {
     fn validate(&self, text: &Qwen35MoeTextConfig) -> Result<()> {
-        if self.quant_method != "modelopt" || self.quant_algo != "NVFP4" {
-            return Err(invalid("Qwen3.5 MoE requires the ModelOpt NVFP4 format"));
-        }
-        if self.config_groups.len() != 1 {
+        if self.quant_method != "modelopt" || self.quant_algo != "MIXED_PRECISION" {
             return Err(invalid(
-                "Qwen3.5 MoE requires exactly one quantization group",
+                "Qwen3.6 MoE requires the ModelOpt MIXED_PRECISION format",
             ));
         }
-        let Some(group) = self.config_groups.get("group_0") else {
-            return Err(invalid("Qwen3.5 MoE is missing quantization group_0"));
+        if self.config_groups.len() != 2 {
+            return Err(invalid(
+                "Qwen3.6 MoE requires the FP8 mixer and NVFP4 linear groups",
+            ));
+        }
+        let Some(fp8_group) = self.config_groups.get("group_0") else {
+            return Err(invalid("Qwen3.6 MoE is missing FP8 group_0"));
+        };
+        let Some(nvfp4_group) = self.config_groups.get("group_1") else {
+            return Err(invalid("Qwen3.6 MoE is missing NVFP4 group_1"));
+        };
+        let fp8 = |tensor: &QuantizedTensor| {
+            !tensor.dynamic
+                && tensor.num_bits == 8
+                && tensor.kind == "float"
+                && tensor.group_size.is_none()
         };
         let nvfp4 = |tensor: &QuantizedTensor| {
             !tensor.dynamic
@@ -246,26 +259,32 @@ impl ModelOptNvfp4Config {
                 && tensor.kind == "float"
                 && tensor.group_size == Some(16)
         };
-        if group.targets.as_slice() != ["Linear"]
-            || !nvfp4(&group.input_activations)
-            || !nvfp4(&group.weights)
+        if !fp8(&fp8_group.input_activations)
+            || !fp8(&fp8_group.weights)
+            || !nvfp4(&nvfp4_group.input_activations)
+            || !nvfp4(&nvfp4_group.weights)
         {
             return Err(invalid(
-                "Qwen3.5 MoE NVFP4 group must target static float4 Linear tensors in blocks of 16",
+                "Qwen3.6 MoE quantization groups have an unsupported numeric contract",
             ));
         }
-        if self.kv_cache_scheme.dynamic
-            || self.kv_cache_scheme.num_bits != 8
-            || self.kv_cache_scheme.kind != "float"
-            || self.kv_cache_scheme.group_size.is_some()
+        if fp8_group.targets.iter().cloned().collect::<HashSet<_>>() != expected_fp8_modules(text)
+            || nvfp4_group.targets.iter().cloned().collect::<HashSet<_>>()
+                != expected_nvfp4_modules(text)
         {
             return Err(invalid(
-                "Qwen3.5 MoE requires a static float8 KV-cache scheme",
+                "Qwen3.6 MoE quantization targets do not match the mixer/MoE contract",
             ));
         }
-
+        if self.kv_cache_scheme.is_some() {
+            return Err(invalid(
+                "Qwen3.6 checkpoint must not advertise unavailable FP8 KV-cache scales",
+            ));
+        }
         let actual: HashSet<_> = self.ignore.iter().cloned().collect();
-        if actual.len() != self.ignore.len() || actual != expected_ignored_modules(text) {
+        if actual.len() != self.ignore.len()
+            || actual != HashSet::from(["mtp.layers.0*".to_owned(), "mtp*".to_owned()])
+        {
             return Err(invalid(
                 "Qwen3.5 MoE quantization ignore list does not match the text/MTP precision contract",
             ));
@@ -274,23 +293,36 @@ impl ModelOptNvfp4Config {
     }
 }
 
-fn expected_ignored_modules(text: &Qwen35MoeTextConfig) -> HashSet<String> {
-    let mut ignored = HashSet::from([
-        "lm_head".to_owned(),
-        "model.visual*".to_owned(),
-        "mtp.layers.0*".to_owned(),
-    ]);
+fn expected_fp8_modules(text: &Qwen35MoeTextConfig) -> HashSet<String> {
+    let mut targets = HashSet::new();
     for (index, layer_type) in text.layer_types.iter().enumerate() {
-        let mixer = match layer_type {
-            LayerType::LinearAttention => "linear_attn",
-            LayerType::FullAttention => "self_attn",
-        };
-        ignored.insert(format!("model.language_model.layers.{index}.{mixer}*"));
-        ignored.insert(format!(
-            "model.language_model.layers.{index}.mlp.shared_expert_gate"
-        ));
+        let prefix = format!("model.language_model.layers.{index}");
+        match layer_type {
+            LayerType::LinearAttention => {
+                for projection in ["in_proj_qkv", "in_proj_z", "out_proj"] {
+                    targets.insert(format!("{prefix}.linear_attn.{projection}"));
+                }
+            }
+            LayerType::FullAttention => {
+                for projection in ["q_proj", "k_proj", "v_proj", "o_proj"] {
+                    targets.insert(format!("{prefix}.self_attn.{projection}"));
+                }
+            }
+        }
     }
-    ignored
+    targets
+}
+
+fn expected_nvfp4_modules(text: &Qwen35MoeTextConfig) -> HashSet<String> {
+    let mut targets = HashSet::from(["lm_head".to_owned()]);
+    for index in 0..text.num_hidden_layers {
+        let prefix = format!("model.language_model.layers.{index}.mlp");
+        targets.insert(format!("{prefix}.experts"));
+        for projection in ["gate_proj", "up_proj", "down_proj"] {
+            targets.insert(format!("{prefix}.shared_expert.{projection}"));
+        }
+    }
+    targets
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -311,27 +343,41 @@ pub(crate) mod tests {
                 }
             })
             .collect();
-        let mut ignore = vec![
-            "lm_head".to_owned(),
-            "model.visual*".to_owned(),
-            "mtp.layers.0*".to_owned(),
-        ];
+        let mut fp8_targets = Vec::new();
+        let mut nvfp4_targets = vec!["lm_head".to_owned()];
         for (index, layer_type) in layer_types.iter().enumerate() {
-            let mixer = if *layer_type == "full_attention" {
-                "self_attn"
+            let layer = format!("model.language_model.layers.{index}");
+            let projections: &[&str] = if *layer_type == "full_attention" {
+                &[
+                    "self_attn.q_proj",
+                    "self_attn.k_proj",
+                    "self_attn.v_proj",
+                    "self_attn.o_proj",
+                ]
             } else {
-                "linear_attn"
+                &[
+                    "linear_attn.in_proj_qkv",
+                    "linear_attn.in_proj_z",
+                    "linear_attn.out_proj",
+                ]
             };
-            ignore.push(format!("model.language_model.layers.{index}.{mixer}*"));
-            ignore.push(format!(
-                "model.language_model.layers.{index}.mlp.shared_expert_gate"
-            ));
+            fp8_targets.extend(
+                projections
+                    .iter()
+                    .map(|projection| format!("{layer}.{projection}")),
+            );
+            let mlp = format!("{layer}.mlp");
+            nvfp4_targets.push(format!("{mlp}.experts"));
+            nvfp4_targets.extend(
+                ["gate_proj", "up_proj", "down_proj"]
+                    .map(|projection| format!("{mlp}.shared_expert.{projection}")),
+            );
         }
         let text_config = serde_json::json!({
                 "attention_bias": false,
                 "attention_dropout": 0.0,
                 "attn_output_gate": true,
-                "bos_token_id": null,
+                "bos_token_id": 248044,
                 "dtype": "bfloat16",
                 "eos_token_id": 248044,
                 "full_attention_interval": 4,
@@ -376,17 +422,25 @@ pub(crate) mod tests {
                 "config_groups": {
                     "group_0": {
                         "input_activations": {
+                            "dynamic": false, "num_bits": 8, "type": "float"
+                        },
+                        "targets": fp8_targets,
+                        "weights": {
+                            "dynamic": false, "num_bits": 8, "type": "float"
+                        }
+                    },
+                    "group_1": {
+                        "input_activations": {
                             "dynamic": false, "num_bits": 4, "type": "float", "group_size": 16
                         },
-                        "targets": ["Linear"],
+                        "targets": nvfp4_targets,
                         "weights": {
                             "dynamic": false, "num_bits": 4, "type": "float", "group_size": 16
                         }
                     }
                 },
-                "ignore": ignore,
-                "kv_cache_scheme": {"dynamic": false, "num_bits": 8, "type": "float"},
-                "quant_algo": "NVFP4",
+                "ignore": ["mtp.layers.0*", "mtp*"],
+                "quant_algo": "MIXED_PRECISION",
                 "quant_method": "modelopt"
         });
         serde_json::json!({
@@ -420,7 +474,7 @@ pub(crate) mod tests {
         assert_eq!(text.kv_projection_width(), 512);
         assert_eq!(text.gdn_qkv_width(), 8_192);
         assert_eq!(text.gdn_z_width(), 4_096);
-        assert_eq!(config.quantization_config.ignore.len(), 83);
+        assert_eq!(config.quantization_config.ignore.len(), 2);
     }
 
     #[test]
@@ -461,7 +515,8 @@ pub(crate) mod tests {
         assert!(Qwen35MoeConfig::from_json(&ignored.to_string()).is_err());
 
         let mut kv = valid_value();
-        kv["quantization_config"]["kv_cache_scheme"]["num_bits"] = serde_json::json!(16);
+        kv["quantization_config"]["kv_cache_scheme"] =
+            serde_json::json!({"dynamic": false, "num_bits": 8, "type": "float"});
         assert!(Qwen35MoeConfig::from_json(&kv.to_string()).is_err());
     }
 }

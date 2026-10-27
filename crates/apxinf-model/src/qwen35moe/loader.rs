@@ -14,9 +14,10 @@ use super::architecture::{
 };
 use super::config::Qwen35MoeConfig;
 use super::runtime_weights::{
-    AttentionWeights, DenseLinearWeights, GdnWeights, KvCacheScales, MixerWeights,
-    Nvfp4LinearWeights, Qwen35LayerWeights, Qwen35MtpLayerWeights, Qwen35MtpWeights,
-    Qwen35RuntimeWeights, Qwen35TensorSource, RoutedMoeWeights, SwiGluExpertWeights,
+    AttentionWeights, DenseLinearWeights, DenseMoeWeights, GdnWeights, MixerWeights,
+    Nvfp4LinearWeights, PackedDenseExperts, Qwen35LayerWeights, Qwen35MtpLayerWeights,
+    Qwen35MtpWeights, Qwen35RuntimeWeights, Qwen35TensorSource, RoutedMoeWeights,
+    StaticFp8LinearWeights, SwiGluExpertWeights,
 };
 use super::weights::{
     expected_text_and_mtp_weights, is_visual_weight, CheckpointDType, WeightSpec,
@@ -42,7 +43,8 @@ pub fn load_qwen35_runtime_weights(
     }
 
     let final_norm = loader.take("model.language_model.norm.weight")?;
-    let lm_head = loader.take("lm_head.weight")?;
+    let lm_head =
+        load_nvfp4_linear_for_device(&mut loader, "lm_head", hidden, architecture.vocab_size)?;
     let mtp = load_qwen35_mtp(&mut loader, &architecture, hidden)?;
     let weights = Qwen35RuntimeWeights {
         embedding,
@@ -332,12 +334,11 @@ pub(super) fn load_qwen35_layer<L: ManifestAccess>(
         loader.take(&format!("{prefix}.post_attention_layernorm.weight"))?;
     let mixer = match layer.mixer {
         MixerKind::Gdn(geometry) => MixerWeights::Gdn(load_gdn(loader, &prefix, hidden, geometry)?),
-        MixerKind::FullAttention(geometry) => MixerWeights::FullAttention(load_attention(
+        MixerKind::FullAttention(geometry) => MixerWeights::FullAttention(load_fp8_attention(
             loader,
             &format!("{prefix}.self_attn"),
             hidden,
             geometry,
-            true,
         )?),
     };
     let moe = load_nvfp4_moe(
@@ -371,12 +372,11 @@ pub(super) fn load_qwen35_mtp<L: ManifestAccess>(
             input_layernorm: loader.take(&format!("{mtp_prefix}.input_layernorm.weight"))?,
             post_attention_layernorm: loader
                 .take(&format!("{mtp_prefix}.post_attention_layernorm.weight"))?,
-            attention: load_attention(
+            attention: load_dense_attention(
                 loader,
                 &format!("{mtp_prefix}.self_attn"),
                 hidden,
                 architecture.mtp.attention,
-                false,
             )?,
             moe: load_dense_moe(
                 loader,
@@ -403,7 +403,7 @@ fn load_dense_linear<L: ManifestAccess>(
     })
 }
 
-fn load_nvfp4_linear<L: ManifestAccess>(
+pub(super) fn load_nvfp4_linear_for_device<L: ManifestAccess>(
     loader: &mut L,
     prefix: &str,
     input_features: usize,
@@ -421,12 +421,28 @@ fn load_nvfp4_linear<L: ManifestAccess>(
     Ok(weights)
 }
 
-fn load_attention<L: ManifestAccess>(
+fn load_fp8_linear<L: ManifestAccess>(
+    loader: &mut L,
+    prefix: &str,
+    input_features: usize,
+    output_features: usize,
+) -> Result<StaticFp8LinearWeights<Tensor>> {
+    let weights = StaticFp8LinearWeights {
+        weight: loader.take(&format!("{prefix}.weight"))?,
+        input_scale: loader.scalar(&format!("{prefix}.input_scale"))?,
+        weight_scale: loader.scalar(&format!("{prefix}.weight_scale"))?,
+        input_features,
+        output_features,
+    };
+    weights.validate()?;
+    Ok(weights)
+}
+
+fn load_dense_attention<L: ManifestAccess>(
     loader: &mut L,
     prefix: &str,
     hidden: usize,
     geometry: AttentionGeometry,
-    include_kv_cache_scales: bool,
 ) -> Result<AttentionWeights<Tensor>> {
     Ok(AttentionWeights {
         q_proj: load_dense_linear(
@@ -455,13 +471,54 @@ fn load_attention<L: ManifestAccess>(
         )?,
         q_norm: loader.take(&format!("{prefix}.q_norm.weight"))?,
         k_norm: loader.take(&format!("{prefix}.k_norm.weight"))?,
-        kv_cache_scales: if include_kv_cache_scales {
-            let key_amax = loader.scalar(&format!("{prefix}.k_proj.k_scale"))?;
-            let value_amax = loader.scalar(&format!("{prefix}.v_proj.v_scale"))?;
-            Some(KvCacheScales::from_checkpoint_amax(key_amax, value_amax)?)
-        } else {
-            None
-        },
+        kv_cache_scales: None,
+    })
+}
+
+fn load_fp8_attention<L: ManifestAccess>(
+    loader: &mut L,
+    prefix: &str,
+    hidden: usize,
+    geometry: AttentionGeometry,
+) -> Result<AttentionWeights<Tensor, StaticFp8LinearWeights<Tensor>>> {
+    let q_proj = load_fp8_linear(
+        loader,
+        &format!("{prefix}.q_proj"),
+        hidden,
+        geometry.query_projection_width,
+    )?;
+    let k_proj = load_fp8_linear(
+        loader,
+        &format!("{prefix}.k_proj"),
+        hidden,
+        geometry.kv_projection_width,
+    )?;
+    let v_proj = load_fp8_linear(
+        loader,
+        &format!("{prefix}.v_proj"),
+        hidden,
+        geometry.kv_projection_width,
+    )?;
+    if q_proj.input_scale.to_bits() != k_proj.input_scale.to_bits()
+        || q_proj.input_scale.to_bits() != v_proj.input_scale.to_bits()
+    {
+        return Err(invalid(format!(
+            "Qwen3.6 attention `{prefix}` Q/K/V input scales differ"
+        )));
+    }
+    Ok(AttentionWeights {
+        q_proj,
+        k_proj,
+        v_proj,
+        o_proj: load_fp8_linear(
+            loader,
+            &format!("{prefix}.o_proj"),
+            geometry.query_projection_width / 2,
+            hidden,
+        )?,
+        q_norm: loader.take(&format!("{prefix}.q_norm.weight"))?,
+        k_norm: loader.take(&format!("{prefix}.k_norm.weight"))?,
+        kv_cache_scales: None,
     })
 }
 
@@ -472,6 +529,23 @@ fn load_gdn<L: ManifestAccess>(
     geometry: GdnGeometry,
 ) -> Result<GdnWeights<Tensor>> {
     let prefix = format!("{layer_prefix}.linear_attn");
+    let in_proj_qkv = load_fp8_linear(
+        loader,
+        &format!("{prefix}.in_proj_qkv"),
+        hidden,
+        geometry.qkv_width,
+    )?;
+    let in_proj_z = load_fp8_linear(
+        loader,
+        &format!("{prefix}.in_proj_z"),
+        hidden,
+        geometry.z_width,
+    )?;
+    if in_proj_qkv.input_scale.to_bits() != in_proj_z.input_scale.to_bits() {
+        return Err(invalid(format!(
+            "Qwen3.6 GDN `{prefix}` QKV/Z input scales differ"
+        )));
+    }
     Ok(GdnWeights {
         a_log: loader.take(&format!("{prefix}.A_log"))?,
         conv1d: loader.take(&format!("{prefix}.conv1d.weight"))?,
@@ -488,20 +562,10 @@ fn load_gdn<L: ManifestAccess>(
             hidden,
             geometry.value_heads,
         )?,
-        in_proj_qkv: load_dense_linear(
-            loader,
-            &format!("{prefix}.in_proj_qkv"),
-            hidden,
-            geometry.qkv_width,
-        )?,
-        in_proj_z: load_dense_linear(
-            loader,
-            &format!("{prefix}.in_proj_z"),
-            hidden,
-            geometry.z_width,
-        )?,
+        in_proj_qkv,
+        in_proj_z,
         norm: loader.take(&format!("{prefix}.norm.weight"))?,
-        out_proj: load_dense_linear(
+        out_proj: load_fp8_linear(
             loader,
             &format!("{prefix}.out_proj"),
             geometry.z_width,
@@ -517,9 +581,24 @@ fn load_nvfp4_expert<L: ManifestAccess>(
     intermediate: usize,
 ) -> Result<SwiGluExpertWeights<Nvfp4LinearWeights<Tensor>>> {
     Ok(SwiGluExpertWeights {
-        gate_proj: load_nvfp4_linear(loader, &format!("{prefix}.gate_proj"), hidden, intermediate)?,
-        up_proj: load_nvfp4_linear(loader, &format!("{prefix}.up_proj"), hidden, intermediate)?,
-        down_proj: load_nvfp4_linear(loader, &format!("{prefix}.down_proj"), intermediate, hidden)?,
+        gate_proj: load_nvfp4_linear_for_device(
+            loader,
+            &format!("{prefix}.gate_proj"),
+            hidden,
+            intermediate,
+        )?,
+        up_proj: load_nvfp4_linear_for_device(
+            loader,
+            &format!("{prefix}.up_proj"),
+            hidden,
+            intermediate,
+        )?,
+        down_proj: load_nvfp4_linear_for_device(
+            loader,
+            &format!("{prefix}.down_proj"),
+            intermediate,
+            hidden,
+        )?,
     })
 }
 
@@ -578,19 +657,16 @@ fn load_dense_moe<L: ManifestAccess>(
     experts: usize,
     expert_intermediate: usize,
     shared_intermediate: usize,
-) -> Result<RoutedMoeWeights<Tensor, DenseLinearWeights<Tensor>>> {
-    let mut expert_weights = Vec::with_capacity(experts);
-    for expert in 0..experts {
-        expert_weights.push(load_dense_expert(
-            loader,
-            &format!("{prefix}.experts.{expert}"),
-            hidden,
-            expert_intermediate,
-        )?);
-    }
-    Ok(RoutedMoeWeights {
+) -> Result<DenseMoeWeights<Tensor>> {
+    Ok(DenseMoeWeights {
         router: load_dense_linear(loader, &format!("{prefix}.gate"), hidden, experts)?,
-        experts: expert_weights,
+        routed_experts: PackedDenseExperts {
+            gate_up_proj: loader.take(&format!("{prefix}.experts.gate_up_proj"))?,
+            down_proj: loader.take(&format!("{prefix}.experts.down_proj"))?,
+            experts,
+            hidden_size: hidden,
+            intermediate_size: expert_intermediate,
+        },
         shared_expert: load_dense_expert(
             loader,
             &format!("{prefix}.shared_expert"),
@@ -693,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_kv_amax_uses_projection_names_and_edge_dequant_semantics() {
+    fn mtp_dense_attention_omits_unavailable_kv_scales() {
         let prefix = "model.language_model.layers.3.self_attn";
         let geometry = AttentionGeometry {
             query_heads: 16,
@@ -712,7 +788,6 @@ mod tests {
             geometry.query_projection_width,
             geometry.kv_projection_width,
             geometry.head_dim,
-            true,
         );
         let mut remaining_specs = specs
             .iter()
@@ -721,31 +796,15 @@ mod tests {
             .collect::<HashMap<_, _>>();
         let mut tensors = HashMap::new();
         for spec in specs {
-            let tensor = match spec.dtype {
-                CheckpointDType::Bf16 => Tensor::zeros(spec.shape.clone(), DType::BF16),
-                CheckpointDType::F32 => {
-                    let value = if spec.name.ends_with("k_proj.k_scale") {
-                        1.0
-                    } else {
-                        224.0
-                    };
-                    Tensor::from_f32(spec.shape.clone(), &[value]).unwrap()
-                }
-                _ => unreachable!(),
-            };
+            let tensor = Tensor::zeros(spec.shape.clone(), DType::BF16);
             tensors.insert(spec.name, tensor);
         }
-        assert!(remaining_specs.contains_key(&format!("{prefix}.k_proj.k_scale")));
-        assert!(remaining_specs.contains_key(&format!("{prefix}.v_proj.v_scale")));
-        assert!(!remaining_specs.contains_key(&format!("{prefix}.k_scale")));
         let mut loader = ManifestLoader {
             source: HostTensorSource { tensors },
             remaining_specs: std::mem::take(&mut remaining_specs),
         };
-        let attention = load_attention(&mut loader, prefix, 2_048, geometry, true).unwrap();
-        let scales = attention.kv_cache_scales.unwrap();
-        assert_eq!(scales.key, 1.0 / 448.0);
-        assert_eq!(scales.value, 0.5);
+        let attention = load_dense_attention(&mut loader, prefix, 2_048, geometry).unwrap();
+        assert!(attention.kv_cache_scales.is_none());
         loader.finish().unwrap();
     }
 }

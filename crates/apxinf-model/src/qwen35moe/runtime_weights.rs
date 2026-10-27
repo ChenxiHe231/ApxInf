@@ -49,6 +49,43 @@ pub struct Nvfp4LinearWeights<T> {
     pub output_features: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct StaticFp8LinearWeights<T> {
+    pub weight: T,
+    pub input_scale: f32,
+    pub weight_scale: f32,
+    pub input_features: usize,
+    pub output_features: usize,
+}
+
+impl<T> LinearWeightGeometry for StaticFp8LinearWeights<T> {
+    fn input_features(&self) -> usize {
+        self.input_features
+    }
+
+    fn output_features(&self) -> usize {
+        self.output_features
+    }
+}
+
+impl<T> StaticFp8LinearWeights<T> {
+    pub fn validate(&self) -> Result<()> {
+        if self.input_features == 0 || self.output_features == 0 {
+            return Err(invalid("Qwen3.6 FP8 linear dimensions must be non-zero"));
+        }
+        if !self.input_scale.is_finite()
+            || self.input_scale <= 0.0
+            || !self.weight_scale.is_finite()
+            || self.weight_scale <= 0.0
+        {
+            return Err(invalid(
+                "Qwen3.6 FP8 per-tensor scales must be finite and positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl<T> LinearWeightGeometry for Nvfp4LinearWeights<T> {
     fn input_features(&self) -> usize {
         self.input_features
@@ -95,6 +132,54 @@ pub struct RoutedMoeWeights<T, L> {
     pub experts: Vec<SwiGluExpertWeights<L>>,
     pub shared_expert: SwiGluExpertWeights<L>,
     pub shared_expert_gate: DenseLinearWeights<T>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PackedDenseExperts<T> {
+    pub gate_up_proj: T,
+    pub down_proj: T,
+    pub experts: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct DenseMoeWeights<T> {
+    pub router: DenseLinearWeights<T>,
+    pub routed_experts: PackedDenseExperts<T>,
+    pub shared_expert: SwiGluExpertWeights<DenseLinearWeights<T>>,
+    pub shared_expert_gate: DenseLinearWeights<T>,
+}
+
+impl<T> DenseMoeWeights<T> {
+    fn validate(
+        &self,
+        hidden: usize,
+        experts: usize,
+        expert_intermediate: usize,
+        shared_intermediate: usize,
+    ) -> Result<()> {
+        validate_linear(&self.router, hidden, experts, "MTP router")?;
+        let packed = &self.routed_experts;
+        if packed.experts != experts
+            || packed.hidden_size != hidden
+            || packed.intermediate_size != expert_intermediate
+        {
+            return Err(invalid("Qwen3.6 packed MTP expert geometry mismatch"));
+        }
+        validate_expert(
+            &self.shared_expert,
+            hidden,
+            shared_intermediate,
+            "MTP shared expert",
+        )?;
+        validate_linear(
+            &self.shared_expert_gate,
+            hidden,
+            1,
+            "MTP shared expert gate",
+        )
+    }
 }
 
 impl<T, L: LinearWeightGeometry> RoutedMoeWeights<T, L> {
@@ -168,11 +253,11 @@ impl KvCacheScales {
 }
 
 #[derive(Clone, Debug)]
-pub struct AttentionWeights<T> {
-    pub q_proj: DenseLinearWeights<T>,
-    pub k_proj: DenseLinearWeights<T>,
-    pub v_proj: DenseLinearWeights<T>,
-    pub o_proj: DenseLinearWeights<T>,
+pub struct AttentionWeights<T, L = DenseLinearWeights<T>> {
+    pub q_proj: L,
+    pub k_proj: L,
+    pub v_proj: L,
+    pub o_proj: L,
     pub q_norm: T,
     pub k_norm: T,
     /// Present for base full-attention layers; absent for the BF16 MTP subtree.
@@ -186,16 +271,16 @@ pub struct GdnWeights<T> {
     pub dt_bias: T,
     pub in_proj_a: DenseLinearWeights<T>,
     pub in_proj_b: DenseLinearWeights<T>,
-    pub in_proj_qkv: DenseLinearWeights<T>,
-    pub in_proj_z: DenseLinearWeights<T>,
+    pub in_proj_qkv: StaticFp8LinearWeights<T>,
+    pub in_proj_z: StaticFp8LinearWeights<T>,
     pub norm: T,
-    pub out_proj: DenseLinearWeights<T>,
+    pub out_proj: StaticFp8LinearWeights<T>,
 }
 
 #[derive(Clone, Debug)]
 pub enum MixerWeights<T> {
     Gdn(GdnWeights<T>),
-    FullAttention(AttentionWeights<T>),
+    FullAttention(AttentionWeights<T, StaticFp8LinearWeights<T>>),
 }
 
 #[derive(Clone, Debug)]
@@ -211,7 +296,7 @@ pub struct Qwen35MtpLayerWeights<T> {
     pub input_layernorm: T,
     pub post_attention_layernorm: T,
     pub attention: AttentionWeights<T>,
-    pub moe: RoutedMoeWeights<T, DenseLinearWeights<T>>,
+    pub moe: DenseMoeWeights<T>,
 }
 
 #[derive(Clone, Debug)]
@@ -228,7 +313,7 @@ pub struct Qwen35RuntimeWeights<T> {
     pub embedding: T,
     pub layers: Vec<Qwen35LayerWeights<T>>,
     pub final_norm: T,
-    pub lm_head: T,
+    pub lm_head: Nvfp4LinearWeights<T>,
     pub mtp: Qwen35MtpWeights<T>,
 }
 
@@ -275,9 +360,16 @@ impl<T> Qwen35RuntimeWeights<T> {
                         architecture.hidden_size,
                         "GDN out_proj",
                     )?;
+                    weights.in_proj_qkv.validate()?;
+                    weights.in_proj_z.validate()?;
+                    weights.out_proj.validate()?;
                 }
                 (MixerWeights::FullAttention(weights), MixerKind::FullAttention(geometry)) => {
-                    validate_attention(weights, architecture.hidden_size, geometry, true)?;
+                    validate_attention(weights, architecture.hidden_size, geometry, false)?;
+                    weights.q_proj.validate()?;
+                    weights.k_proj.validate()?;
+                    weights.v_proj.validate()?;
+                    weights.o_proj.validate()?;
                 }
                 _ => {
                     return Err(invalid(
@@ -309,6 +401,13 @@ impl<T> Qwen35RuntimeWeights<T> {
             architecture.hidden_size,
             "MTP fc",
         )?;
+        validate_linear(
+            &self.lm_head,
+            architecture.hidden_size,
+            architecture.vocab_size,
+            "lm_head",
+        )?;
+        self.lm_head.validate()?;
         validate_attention(
             &self.mtp.layer.attention,
             architecture.hidden_size,
@@ -324,8 +423,8 @@ impl<T> Qwen35RuntimeWeights<T> {
     }
 }
 
-fn validate_attention<T>(
-    weights: &AttentionWeights<T>,
+fn validate_attention<T, L: LinearWeightGeometry>(
+    weights: &AttentionWeights<T, L>,
     hidden: usize,
     geometry: super::architecture::AttentionGeometry,
     requires_kv_scales: bool,

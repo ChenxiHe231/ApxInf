@@ -61,8 +61,10 @@ a cold build uses at most two native workers. Do not raise either job limit on
 Thor-U even when more CPU cores are idle.
 
 The checkpoint directory name is not used for dispatch. Its `config.json`
-must identify `qwen3_5_moe` / `qwen3_5_moe_text` and contain the complete
-NVFP4 text and MTP tensors.
+must identify `qwen3_5_moe` / `qwen3_5_moe_text` and use ModelOpt
+`MIXED_PRECISION`: static FP8 main-model attention/GDN projections, NVFP4
+MoE and `lm_head`, and BF16 MTP tensors. The old all-NVFP4/BF16-mixer
+`txn545/Qwen3.5-35B-A3B-NVFP4` layout is incompatible.
 
 ## 2. Build
 
@@ -84,7 +86,7 @@ cargo build --release -p apxinf-model \
 
 Always use `qwen35-cuda` for this model. The broader `cuda` feature enables all
 CUDA model families and intentionally links the legacy `apxinf-cuda` runtime;
-it is not required by Qwen3.5. A completely empty target directory must still
+it is not required by Qwen3.6. A completely empty target directory must still
 compile `apxinf-cuda-new` once. Later builds reuse native objects across Cargo
 examples, checks and tests, so do not run `cargo clean` during normal iteration.
 
@@ -133,33 +135,16 @@ Each output line is JSON. Summary records include median/P95 TTFT, prefill
 tokens/s, generation tokens/s and MTP acceptance counters. Iteration records
 also include an FNV-1a token digest for repeatability checks.
 
-## 4. Compare all runtime precision choices
+## 4. Supported runtime precision choices
 
-The checkpoint weights remain static NVFP4 in every run. These switches only
-select runtime activation and KV-cache behavior:
+The checkpoint does not contain `kv_cache_scheme`, `k_scale`, or `v_scale`.
+Use BF16 KV cache for correctness. A request for FP8 KV cache must fail rather
+than fabricate a scale and silently change model accuracy.
 
 | Arguments | MoE execution | KV-cache storage |
 | --- | --- | --- |
 | `nvfp4` + `bf16` | W4A4, runtime NVFP4 activations | BF16 |
-| `nvfp4` + `fp8` | W4A4, runtime NVFP4 activations | FP8-E4M3 |
 | `bf16` + `bf16` | W4A16, BF16 activations | BF16 |
-| `bf16` + `fp8` | W4A16, BF16 activations | FP8-E4M3 |
-
-Run the four combinations with identical prompt/output settings:
-
-```bash
-BENCH="$CARGO_TARGET_DIR/debug/examples/qwen35_mtp_bench"
-
-for moe in nvfp4 bf16; do
-  for kv in bf16 fp8; do
-    "$BENCH" "$QWEN35_CHECKPOINT" \
-      --device 0 --max-new 256 --warmups 2 --repeats 5 --mode both \
-      --qwen35-moe-activation "$moe" \
-      --qwen35-kv-cache "$kv" \
-      | tee "qwen35-4096x256-${moe}-${kv}.jsonl"
-  done
-done
-```
 
 Do not compare runs with different `--mode`, warmup count, repeat count, power
 mode or thermal state.
@@ -181,14 +166,13 @@ Run deterministic greedy generation:
   --device cuda:0 \
   --dtype bf16 \
   --qwen35-moe-activation nvfp4 \
-  --qwen35-kv-cache fp8 \
+  --qwen35-kv-cache bf16 \
   --greedy \
   --max-tokens 256 \
   --prompt "Explain the main trade-off between latency and numerical precision."
 ```
 
-Change the two Qwen3.5 precision flags independently to select any row in the
-table above.
+Use only a supported row from the table above.
 
 ## 6. OpenAI-compatible server
 
@@ -200,11 +184,11 @@ cargo build --features qwen35-cuda,server
 "$CARGO_TARGET_DIR/debug/apxinf" serve \
   --model "$QWEN35_CHECKPOINT" \
   --model-name qwen3_5_moe \
-  --served-model-name qwen3.5-35b-a3b \
+  --served-model-name qwen3.6-35b-a3b \
   --device cuda:0 \
   --dtype bf16 \
   --qwen35-moe-activation nvfp4 \
-  --qwen35-kv-cache fp8 \
+  --qwen35-kv-cache bf16 \
   --host 0.0.0.0 \
   --port 8000 \
   --max-input-tokens 4096 \
@@ -217,7 +201,7 @@ Test it from another shell:
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5-35b-a3b",
+    "model": "qwen3.6-35b-a3b",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_tokens": 64,
     "temperature": 0
@@ -237,5 +221,5 @@ cargo test -p apxinf-model \
 ```
 
 The focused model test currently runs 23 tests. Compiler warnings from other
-model families do not indicate a Qwen3.5 test failure; use the final test
+model families do not indicate a Qwen3.6 test failure; use the final test
 summary and process exit code as the result.

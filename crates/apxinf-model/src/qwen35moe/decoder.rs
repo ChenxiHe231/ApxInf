@@ -17,9 +17,10 @@ use std::rc::Rc;
 use super::architecture::{AttentionGeometry, MixerKind, Qwen35MoeArchitecture};
 use super::config::Qwen35MoeConfig;
 use super::device_weights::{
-    DeviceAttentionWeights, DeviceLayerWeights, DeviceMixerWeights, Qwen35DeviceWeights,
+    DeviceAttentionWeights, DeviceLayerWeights, DeviceMixerWeights, DeviceStaticFp8Linear,
+    Qwen35DeviceWeights,
 };
-use super::forward::{project_lm_head, BaseMoeScratch, GdnScratch, GdnState};
+use super::forward::{project_lm_head, BaseMoeScratch, GdnScratch, GdnState, GdnStateCheckpoints};
 use super::runtime_weights::KvCacheScales;
 
 const DECODE_PHASE_WORKSPACE: usize = 4 * 1024 * 1024;
@@ -148,9 +149,7 @@ pub enum DecoderPhase {
 pub enum LogitsSelection {
     /// Only the final row, used by ordinary prefill and decode.
     Last,
-    /// Every row, for callers that explicitly need a dense logits matrix.
-    /// Canonical MTP verification does not use this mode: it invokes four
-    /// separate one-row decode calls so every row follows scalar reductions.
+    /// Every row, used by the fixed four-row MTP target verifier.
     All,
 }
 
@@ -167,7 +166,7 @@ pub struct FullAttentionRequest<'a> {
     pub phase: DecoderPhase,
     pub start_position: usize,
     pub geometry: AttentionGeometry,
-    pub weights: &'a DeviceAttentionWeights,
+    pub weights: &'a DeviceAttentionWeights<DeviceStaticFp8Linear>,
     pub normalized_hidden: &'a Tensor,
     pub output: &'a Tensor,
 }
@@ -188,7 +187,7 @@ pub trait FullAttentionBackend {
         layer_index: usize,
         geometry: AttentionGeometry,
         capacity: usize,
-        scales: KvCacheScales,
+        scales: Option<KvCacheScales>,
     ) -> Result<Self::Cache>;
 
     fn reset_cache(&mut self, ctx: &CudaContext, cache: &mut Self::Cache) -> Result<()>;
@@ -244,8 +243,21 @@ impl DecoderOutput {
     /// publish the state after its final row through the ordinary scalar
     /// commit contract.
     pub fn into_last_row(self) -> Result<Self> {
+        let row = self
+            .rows
+            .checked_sub(1)
+            .ok_or_else(|| invalid("Qwen3.5 decoder output has no final row"))?;
+        self.into_row(row)
+    }
+
+    /// Retain one logits/hidden row as stable views of this output's owned
+    /// storage. The selected row is also the state boundary committed by MTP.
+    pub fn into_row(self, row: usize) -> Result<Self> {
         if self.rows == 0 || self.hidden_rows == 0 {
-            return Err(invalid("Qwen3.5 decoder output has no final row"));
+            return Err(invalid("Qwen3.5 decoder output has no rows"));
+        }
+        if row >= self.rows || row >= self.hidden_rows {
+            return Err(invalid("Qwen3.5 decoder output row is out of range"));
         }
         let vocab = self
             .logits
@@ -261,19 +273,22 @@ impl DecoderOutput {
             .get(1)
             .copied()
             .ok_or_else(|| invalid("Qwen3.5 hidden states must be rank-2"))?;
-        let logits = row_view(&self.logits, self.rows - 1, vocab)?;
-        let hidden_states = row_view(&self.hidden_states, self.hidden_rows - 1, hidden)?;
+        let logits = row_view(&self.logits, row, vocab)?;
+        let hidden_states = row_view(&self.hidden_states, row, hidden)?;
         let start_position = self
-            .end_position
-            .checked_sub(1)
-            .ok_or_else(|| invalid("Qwen3.5 final output position underflow"))?;
+            .start_position
+            .checked_add(row)
+            .ok_or_else(|| invalid("Qwen3.5 output row position overflow"))?;
+        let end_position = start_position
+            .checked_add(1)
+            .ok_or_else(|| invalid("Qwen3.5 output row end position overflow"))?;
         Ok(Self {
             logits,
             rows: 1,
             hidden_states,
             hidden_rows: 1,
             start_position,
-            end_position: self.end_position,
+            end_position,
         })
     }
 
@@ -424,6 +439,7 @@ impl Qwen35Decoder {
             attention,
             attention_caches,
             gdn_states,
+            None,
             token_ids,
             start_position,
             phase,
@@ -434,9 +450,9 @@ impl Qwen35Decoder {
         )
     }
 
-    /// Allocate the one-row scratch bank reused by session decode and exact
-    /// scalar MTP verification. It is intentionally separate from variable
-    /// prompt scratch so a large prefill does not permanently pin its buffers.
+    /// Allocate the one-row scratch bank reused by ordinary session decode.
+    /// It is intentionally separate from variable prompt and MTP verification
+    /// scratch so a large call does not permanently pin its buffers.
     pub(super) fn allocate_decode_scratch(&self, ctx: &CudaContext) -> Result<DecoderScratch> {
         let moe = self.architecture.layers[0].moe;
         DecoderScratch::new(
@@ -475,6 +491,7 @@ impl Qwen35Decoder {
         attention: &mut B,
         attention_caches: &mut [B::Cache],
         gdn_states: &[GdnState],
+        gdn_checkpoints: &[GdnStateCheckpoints],
         token_ids: &[u32],
         start_position: usize,
         scratch: &mut DecoderScratch,
@@ -487,6 +504,9 @@ impl Qwen35Decoder {
             start_position,
             DecoderPhase::Prefill,
         )?;
+        if gdn_checkpoints.len() != gdn_states.len() {
+            return Err(invalid("Qwen3.5 GDN checkpoint count mismatch"));
+        }
         scratch.validate_contract(
             token_ids.len(),
             self.architecture.hidden_size,
@@ -500,6 +520,7 @@ impl Qwen35Decoder {
             attention,
             attention_caches,
             gdn_states,
+            Some(gdn_checkpoints),
             token_ids,
             start_position,
             DecoderPhase::Prefill,
@@ -772,57 +793,8 @@ impl Qwen35Decoder {
             attention,
             attention_caches,
             gdn_states,
+            None,
             token_ids,
-            start_position,
-            DecoderPhase::Decode,
-            LogitsSelection::Last,
-            HiddenSelection::Last,
-            scratch,
-            decode_phases,
-        )
-    }
-
-    /// Same exact scalar decode path as [`Self::run_decode_reusing`], but the
-    /// token is selected from a device-resident I32 block. Verification stages
-    /// its four host IDs once, then uses ordered D2D copies so a nonblocking
-    /// CUDA stream never races a default-stream H2D overwrite.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn run_decode_reusing_from_block<B: FullAttentionBackend>(
-        &self,
-        ctx: &CudaContext,
-        weights: &Qwen35DeviceWeights,
-        attention: &mut B,
-        attention_caches: &mut [B::Cache],
-        gdn_states: &[GdnState],
-        token_id: u32,
-        token_block: &Tensor,
-        token_offset: usize,
-        start_position: usize,
-        scratch: &mut DecoderScratch,
-        decode_phases: Option<&[Qwen35DecodePhase]>,
-    ) -> Result<DecoderOutput> {
-        self.validate_weights(weights)?;
-        self.validate_call(
-            attention_caches.len(),
-            gdn_states.len(),
-            &[token_id],
-            start_position,
-            DecoderPhase::Decode,
-        )?;
-        scratch.validate_contract(
-            1,
-            self.architecture.hidden_size,
-            self.architecture.vocab_size,
-            LogitsSelection::Last,
-            HiddenSelection::Last,
-        )?;
-        scratch.stage_device_token(ctx, token_block, token_offset)?;
-        self.run_after_token_ids(
-            ctx,
-            weights,
-            attention,
-            attention_caches,
-            gdn_states,
             start_position,
             DecoderPhase::Decode,
             LogitsSelection::Last,
@@ -840,6 +812,7 @@ impl Qwen35Decoder {
         attention: &mut B,
         attention_caches: &mut [B::Cache],
         gdn_states: &[GdnState],
+        gdn_checkpoints: Option<&[GdnStateCheckpoints]>,
         token_ids: &[u32],
         start_position: usize,
         phase: DecoderPhase,
@@ -855,6 +828,7 @@ impl Qwen35Decoder {
             attention,
             attention_caches,
             gdn_states,
+            gdn_checkpoints,
             start_position,
             phase,
             logits_selection,
@@ -872,6 +846,7 @@ impl Qwen35Decoder {
         attention: &mut B,
         attention_caches: &mut [B::Cache],
         gdn_states: &[GdnState],
+        gdn_checkpoints: Option<&[GdnStateCheckpoints]>,
         start_position: usize,
         phase: DecoderPhase,
         logits_selection: LogitsSelection,
@@ -912,6 +887,7 @@ impl Qwen35Decoder {
             match (&layer.mixer, &resident.mixer) {
                 (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) => {
                     let state = &gdn_states[gdn_index];
+                    let checkpoints = gdn_checkpoints.map(|all| &all[gdn_index]);
                     if let Some(phases) = decode_phases.filter(|_| graph_gdn) {
                         if parallel_gdn {
                             qwen35_rms_norm(
@@ -1027,10 +1003,26 @@ impl Qwen35Decoder {
                         )
                         .map_err(|error| layer_error(layer.index, "input RMSNorm", error))?;
                         match phase {
-                            DecoderPhase::Prefill => scratch
-                                .gdn
-                                .prefill(ctx, gdn, state, &scratch.normalized)
-                                .map_err(|error| layer_error(layer.index, "GDN prefill", error))?,
+                            DecoderPhase::Prefill => match checkpoints {
+                                Some(checkpoints) => scratch
+                                    .gdn
+                                    .prefill_with_checkpoints(
+                                        ctx,
+                                        gdn,
+                                        state,
+                                        &scratch.normalized,
+                                        checkpoints,
+                                    )
+                                    .map_err(|error| {
+                                        layer_error(layer.index, "GDN checkpointed prefill", error)
+                                    })?,
+                                None => scratch
+                                    .gdn
+                                    .prefill(ctx, gdn, state, &scratch.normalized)
+                                    .map_err(|error| {
+                                    layer_error(layer.index, "GDN prefill", error)
+                                })?,
+                            },
                             DecoderPhase::Decode => scratch
                                 .gdn
                                 .decode(ctx, gdn, state, &scratch.normalized)
@@ -1236,26 +1228,6 @@ impl DecoderScratch {
         transfers::copy_cpu_to_cuda(&host, &self.token_ids)
     }
 
-    fn stage_device_token(
-        &self,
-        ctx: &CudaContext,
-        token_block: &Tensor,
-        offset: usize,
-    ) -> Result<()> {
-        let dims = token_block.shape().dims();
-        if token_block.device() != Device::Cuda(ctx.device_id())
-            || token_block.dtype() != DType::I32
-            || dims.len() != 1
-            || offset >= dims[0]
-        {
-            return Err(invalid(
-                "Qwen3.5 verification tokens must be a non-empty CUDA I32 vector",
-            ));
-        }
-        let source = element_view(token_block, offset)?;
-        transfers::copy_cuda_to_cuda(ctx, &source, &self.token_ids)
-    }
-
     fn embed(&self, ctx: &CudaContext, embedding: &Tensor) -> Result<()> {
         validate_tensor(
             embedding,
@@ -1282,13 +1254,11 @@ impl DecoderScratch {
             &[self.hidden_size],
             "final norm",
         )?;
-        validate_tensor(
-            &weights.lm_head,
-            ctx,
-            DType::BF16,
-            &[self.hidden_size, self.vocab_size],
-            "lm_head",
-        )?;
+        if weights.lm_head.input_features != self.hidden_size
+            || weights.lm_head.output_features != self.vocab_size
+        {
+            return Err(invalid("Qwen3.6 lm_head geometry mismatch"));
+        }
         let source = match hidden_selection {
             HiddenSelection::All => self.hidden.clone(),
             HiddenSelection::Last => row_view(&self.hidden, self.tokens - 1, self.hidden_size)?,

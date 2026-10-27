@@ -88,6 +88,7 @@ pub use qwen35_attention::{
 };
 pub use qwen35_mixers::{
     qwen35_gdn_decode, qwen35_gdn_prefill, Qwen35GdnCakeScratch, Qwen35GdnCoreWeights,
+    Qwen35GdnStateCheckpoints,
     Qwen35GdnDecodeArgs, Qwen35GdnDecodeScratch, Qwen35GdnPrefillArgs, Qwen35GdnPrefillScratch,
     Qwen35GdnState, QWEN35_GDN_CONV_WIDTH, QWEN35_GDN_EPSILON, QWEN35_GDN_HEAD_DIM,
     QWEN35_GDN_KEY_HEADS, QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_Q_WIDTH, QWEN35_GDN_SCAN_CHUNK,
