@@ -1,0 +1,15 @@
+{"engine": "trt", "case": "overhead", "http_floor_s": 0.1063}
+{"engine": "trt", "case": "coldA", "prompt_tokens": 2015, "ttft_s": 0.7066, "prefill_tok_s": 2851.9}
+{"engine": "trt", "case": "coldA", "prompt_tokens": 4087, "ttft_s": 1.3307, "prefill_tok_s": 3071.4}
+{"engine": "trt", "case": "coldA", "prompt_tokens": 8157, "ttft_s": 2.5761, "prefill_tok_s": 3166.4}
+{"engine": "trt", "case": "coldA", "prompt_tokens": 16371, "ttft_s": 5.2326, "prefill_tok_s": 3128.6}
+{"engine": "trt", "case": "decodeC", "prompt_tokens": 4087, "max_new": 512, "ttft_s": 1.2627, "decode_tok_s": 72.04}
+{"engine": "trt", "case": "decodeC", "prompt_tokens": 8157, "max_new": 512, "ttft_s": 2.4735, "decode_tok_s": 64.53}
+{"engine": "trt", "case": "decodeC", "prompt_tokens": 16371, "max_new": 512, "ttft_s": 5.0458, "decode_tok_s": 60.42}
+{"engine": "trt", "case": "decodeC", "prompt_tokens": 32762, "max_new": 512, "ttft_s": 10.6139, "decode_tok_s": 56.18}
+{"engine": "trt", "case": "decodeC", "prompt_tokens": 49116, "max_new": 512, "ttft_s": 16.8112, "decode_tok_s": 43.38}
+{"engine": "trt", "case": "ctxprefillB", "prefix_tokens": 4096, "input_tokens": 4096, "total_prompt_tokens": 8157, "context_reuse": false, "ttft_s": 2.5766, "incremental_prefill_tok_s": 1589.7, "note": "engine reports context_reuse=False: full re-prefill of prefix+input"}
+{"engine": "trt", "case": "ctxprefillB", "prefix_tokens": 8192, "input_tokens": 4096, "total_prompt_tokens": 12264, "context_reuse": false, "ttft_s": 3.8843, "incremental_prefill_tok_s": 1054.5, "note": "engine reports context_reuse=False: full re-prefill of prefix+input"}
+{"engine": "trt", "case": "ctxprefillB", "prefix_tokens": 16384, "input_tokens": 4096, "total_prompt_tokens": 20478, "context_reuse": false, "ttft_s": 6.6131, "incremental_prefill_tok_s": 619.4, "note": "engine reports context_reuse=False: full re-prefill of prefix+input"}
+{"engine": "trt", "case": "ctxprefillB", "prefix_tokens": 32768, "input_tokens": 4096, "total_prompt_tokens": 36832, "context_reuse": false, "ttft_s": 12.5461, "incremental_prefill_tok_s": 326.5, "note": "engine reports context_reuse=False: full re-prefill of prefix+input"}
+{"engine": "trt", "case": "ctxprefillB", "prefix_tokens": 49152, "input_tokens": 4096, "total_prompt_tokens": 53223, "context_reuse": false, "ttft_s": 19.1912, "incremental_prefill_tok_s": 213.4, "note": "engine reports context_reuse=False: full re-prefill of prefix+input"}

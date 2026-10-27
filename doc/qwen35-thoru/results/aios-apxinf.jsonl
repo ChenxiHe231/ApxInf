@@ -1,0 +1,11 @@
+{"engine": "apxinf", "case": "coldA", "prompt_tokens": 2048, "max_new": 2, "ttft_ms": 468.117685, "prefill_tok_s": 4374.968230478197, "decode_tok_s": 50.77478256207115, "divergent_repeats": 0, "error": null}
+{"engine": "apxinf", "case": "coldA", "prompt_tokens": 4096, "max_new": 2, "ttft_ms": 858.186036, "prefill_tok_s": 4772.8578981445935, "decode_tok_s": 48.61280209392839, "divergent_repeats": 1, "error": null}
+{"engine": "apxinf", "case": "coldA", "prompt_tokens": 8192, "max_new": 2, "ttft_ms": 1725.662009, "prefill_tok_s": 4747.163672419933, "decode_tok_s": 43.56066249146429, "divergent_repeats": 0, "error": null}
+{"engine": "apxinf", "case": "coldA", "prompt_tokens": 16384, "max_new": 2, "ttft_ms": 3760.037953, "prefill_tok_s": 4357.402825396428, "decode_tok_s": 36.29476078594998, "divergent_repeats": 0, "error": null}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 4096, "max_new": 512, "ttft_ms": 855.081416, "prefill_tok_s": 4790.187136987199, "decode_tok_s": 50.343911074065794, "divergent_repeats": 3, "error": null}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 8192, "max_new": 512, "ttft_ms": 1729.926046, "prefill_tok_s": 4735.462547050407, "decode_tok_s": 46.524158588722834, "divergent_repeats": 3, "error": null}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 16384, "max_new": 512, "ttft_ms": 3764.266795, "prefill_tok_s": 4352.50764418785, "decode_tok_s": 40.24730782932348, "divergent_repeats": 3, "error": null}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 32768, "max_new": 512, "ttft_ms": null, "prefill_tok_s": null, "decode_tok_s": null, "divergent_repeats": null, "error": "run failed"}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 49152, "max_new": 512, "ttft_ms": null, "prefill_tok_s": null, "decode_tok_s": null, "divergent_repeats": null, "error": "run failed"}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 32768, "max_new": 128, "ttft_ms": 9132.548304, "prefill_tok_s": 1617.8675289684143, "decode_tok_s": 0.12542234987793294, "note": "output length reduced to limit per-key attention autotune cost"}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 49152, "max_new": 128, "ttft_ms": null, "prefill_tok_s": null, "decode_tok_s": null, "note": "output length reduced to limit per-key attention autotune cost"}

@@ -1,0 +1,5 @@
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 4096, "max_new": 512, "ttft_ms": 854.819907, "prefill_tok_s": 4791.652565012153, "decode_tok_s": 53.51371007805702}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 8192, "max_new": 512, "ttft_ms": 1729.363611, "prefill_tok_s": 4737.002645304302, "decode_tok_s": 48.65656930711737}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 16384, "max_new": 512, "ttft_ms": 3763.740684, "prefill_tok_s": 4353.116055431198, "decode_tok_s": 42.13117544591639}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 32768, "max_new": 512, "ttft_ms": 9130.103239, "prefill_tok_s": 3589.006514190195, "decode_tok_s": 32.80634406929619}
+{"engine": "apxinf", "case": "decodeC", "prompt_tokens": 49152, "max_new": 512, "ttft_ms": 16206.077136, "prefill_tok_s": 3032.936323054658, "decode_tok_s": 27.124921409255958}
