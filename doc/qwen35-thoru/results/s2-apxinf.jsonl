@@ -1,0 +1,12 @@
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D4K-I4K", "kv_tokens": 4096, "input_tokens": 4096, "ttft_ms": 953.14, "incremental_prefill_tok_s": 4313.1, "cold_first_ttft_ms": 2071.64, "n_warm": 2}
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D8K-I4K", "kv_tokens": 8192, "input_tokens": 4096, "ttft_ms": 1058.99, "incremental_prefill_tok_s": 3868.3, "cold_first_ttft_ms": 3243.02, "n_warm": 2}
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D16K-I4K", "kv_tokens": 16384, "input_tokens": 4096, "ttft_ms": 1276.51, "incremental_prefill_tok_s": 3215.3, "cold_first_ttft_ms": 5827.25, "n_warm": 2}
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D24K-I4K", "kv_tokens": 24576, "input_tokens": 4096, "ttft_ms": 1495.88, "incremental_prefill_tok_s": 2743.5, "cold_first_ttft_ms": 17531.73, "n_warm": 2}
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D32K-I4K", "kv_tokens": 32768, "input_tokens": 4096, "ttft_ms": 1716.59, "incremental_prefill_tok_s": 2387.4, "cold_first_ttft_ms": 12290.01, "n_warm": 2}
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D48K-I4K", "kv_tokens": 49152, "input_tokens": 4096, "ttft_ms": 2155.23, "incremental_prefill_tok_s": 1900.7, "cold_first_ttft_ms": 20466.74, "n_warm": 2}
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D4K-I8K", "kv_tokens": 4096, "input_tokens": 8192, "ttft_ms": 1945.1, "incremental_prefill_tok_s": 4221.7, "cold_first_ttft_ms": 3447.43, "n_warm": 2}
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D8K-I8K", "kv_tokens": 8192, "input_tokens": 8192, "ttft_ms": 2157.71, "incremental_prefill_tok_s": 3799.6, "cold_first_ttft_ms": 4807.44, "n_warm": 2}
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D16K-I8K", "kv_tokens": 16384, "input_tokens": 8192, "ttft_ms": 2593.97, "incremental_prefill_tok_s": 3166.0, "cold_first_ttft_ms": 7905.95, "n_warm": 2}
+{"engine": "apxinf", "case": "s2-ctx-prefill", "label": "D24K-I8K", "kv_tokens": 24576, "input_tokens": 8192, "ttft_ms": 3023.7, "incremental_prefill_tok_s": 2713.1, "cold_first_ttft_ms": 11406.93, "n_warm": 2}
+{"engine":"apxinf","case":"s2-ctx-prefill","label":"D32K-I8K","kv_tokens":32768,"input_tokens":8192,"ttft_ms":3449.82,"incremental_prefill_tok_s":2374.6,"cold_first_ttft_ms":15355.60,"n_warm":2}
+{"engine":"apxinf","case":"s2-ctx-prefill","label":"D48K-I8K","kv_tokens":49152,"input_tokens":8192,"ttft_ms":4322.26,"incremental_prefill_tok_s":1895.3,"cold_first_ttft_ms":24528.83,"n_warm":2}

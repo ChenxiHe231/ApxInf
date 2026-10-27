@@ -27,3 +27,7 @@ target-p92i/
 *.log
 *.out
 /*.jsonl
+
+# Personal shell snippet for the build/run env; the real thing is
+# documented in doc/qwen35-thoru/README.md section 1.
+env.sh
