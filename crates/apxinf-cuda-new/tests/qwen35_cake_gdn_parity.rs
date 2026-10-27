@@ -175,6 +175,7 @@ fn cake_matches_chunk_scan_at_qwen35_head_ratio() {
         (2 * CHUNK, false),
         (1024, false),
         (2048, false),
+        (4096, false),
         (1024, true),
     ] {
         let (q, k, v, g, beta, q_raw, k_raw) = make_inputs(seq);
