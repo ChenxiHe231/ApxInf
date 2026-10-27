@@ -181,6 +181,10 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     shadow_attention: Vec<B::Cache>,
     /// Prefix of the inactive cache bank known to equal the committed bank.
     shadow_attention_valid: usize,
+    /// Skip the per-step transactional shadow copy for non-speculative decode.
+    /// Set by the coordinator: off while a speculative round can be rejected,
+    /// on for plain scalar decode. See `decode`.
+    decode_in_place: bool,
     /// Persistent one-row workspace for ordinary decode. Variable-size prefill
     /// deliberately keeps using call-sized temporary scratch.
     decode_scratch: DecoderScratch,
@@ -274,6 +278,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             committed_attention,
             shadow_attention,
             shadow_attention_valid: 0,
+            decode_in_place: false,
             decode_scratch: decoder.allocate_decode_scratch(ctx)?,
             verify_scratch: decoder.allocate_verify_scratch(ctx)?,
             committed_decode_phases: None,
@@ -646,7 +651,50 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         let start_position = self.position;
         self.validate_capacity(start_position, 1)?;
         self.bump_shadow_generation()?;
+        // APXINF_QWEN35_DECODE_TIMING=1 splits a decode step into the
+        // transactional shadow copy and the forward itself. Each half is
+        // bracketed by a synchronize, so the figures are attributable but the
+        // total is inflated relative to real throughput.
+        let timing = std::env::var_os("APXINF_QWEN35_DECODE_TIMING").is_some();
+        if timing {
+            ctx.synchronize().map_err(Error::Cuda)?;
+        }
+        let at = std::time::Instant::now();
+        // Scalar decode commits unconditionally: there is no rejected-token
+        // path, so the shadow bank it runs into is published every time. The
+        // copy that seeds it therefore duplicates all thirty GDN recurrent
+        // states on every token to produce a bank that is immediately made
+        // committed. Measured at 0.844 ms of a 19.42 ms step, which is 4.3%
+        // spent reproducing state the step already owns.
+        //
+        // `decode_in_place` instead runs on the committed banks and only
+        // advances the position. The success path is identical. What it gives
+        // up is the rollback guarantee: a failure mid-forward leaves the
+        // committed GDN state partially advanced, so the session is finished
+        // rather than merely erroring. The caller records that through
+        // `reset_error`, which already exists for exactly this. Speculation
+        // keeps the transactional path, because there a verified round can be
+        // rejected and the pre-round state must survive.
+        if self.decode_in_place {
+            let output = self.run_committed_decode(ctx, decoder, weights, token_id, start_position)?;
+            if timing {
+                ctx.synchronize().map_err(Error::Cuda)?;
+                eprintln!("[decode] shadow 0.000 ms (in place)");
+                eprintln!("[decode] forward {:.3} ms", at.elapsed().as_secs_f64() * 1e3);
+            }
+            self.position = output.end_position;
+            self.shadow_attention_valid = self.shadow_attention_valid.min(self.position);
+            return Ok(output);
+        }
         self.prepare_shadow_from_committed(ctx)?;
+        if timing {
+            ctx.synchronize().map_err(Error::Cuda)?;
+            eprintln!(
+                "[decode] shadow {:.3} ms",
+                at.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        let at = std::time::Instant::now();
         let output = self.run_shadow(
             ctx,
             decoder,
@@ -657,6 +705,10 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             LogitsSelection::Last,
             HiddenSelection::Last,
         )?;
+        if timing {
+            ctx.synchronize().map_err(Error::Cuda)?;
+            eprintln!("[decode] forward {:.3} ms", at.elapsed().as_secs_f64() * 1e3);
+        }
         self.publish_shadow(output.end_position, start_position)?;
         Ok(output)
     }
@@ -791,6 +843,12 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         Ok(prepared.output)
     }
 
+    /// Choose between in-place and transactional decode. Speculation must keep
+    /// the transactional path so a rejected round can be rolled back.
+    pub fn set_decode_in_place(&mut self, enabled: bool) {
+        self.decode_in_place = enabled;
+    }
+
     /// Clear the sequence. Reset is also transactional with respect to the
     /// visible position: only shadow storage is cleared, and it becomes
     /// committed after every reset and the stream synchronize succeeds.
@@ -822,6 +880,30 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             phase,
             logits_selection,
             hidden_selection,
+        )?;
+        ctx.synchronize().map_err(Error::Cuda)?;
+        Ok(output)
+    }
+
+    /// Run one decode row directly on the committed banks. See `decode`.
+    fn run_committed_decode(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+        token_id: u32,
+        start_position: usize,
+    ) -> Result<DecoderOutput> {
+        let output = decoder.run_decode_reusing(
+            ctx,
+            weights,
+            &mut self.attention,
+            &mut self.committed_attention,
+            &self.committed_gdn,
+            &[token_id],
+            start_position,
+            &mut self.decode_scratch,
+            self.committed_decode_phases.as_deref(),
         )?;
         ctx.synchronize().map_err(Error::Cuda)?;
         Ok(output)

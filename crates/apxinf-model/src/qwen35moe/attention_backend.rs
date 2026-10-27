@@ -77,6 +77,16 @@ pub struct Qwen35Fp8AttentionBackend {
     scratch: HashMap<(usize, usize, usize), AttentionScratch>,
     pre_projection_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
     post_projection_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
+    /// The attention call sits between the two projection sessions, so it ran
+    /// outside every session and `execute` then issued a full ctx.synchronize()
+    /// after each enqueue, plus another when the prepared Execution dropped.
+    /// That is two device synchronizes per attention layer per token.
+    ///
+    /// Caching it needs a stable ExecutionKey, which only became true after
+    /// two other changes: the tuning key stopped moving with the live prefix,
+    /// and in-place decode stopped alternating KV banks every step. With
+    /// either of those missing this misses on every call and fails capture.
+    attention_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
 }
 
 struct PreparedExecution {
@@ -127,6 +137,7 @@ impl Qwen35Fp8AttentionBackend {
             scratch: HashMap::new(),
             pre_projection_sessions: HashMap::new(),
             post_projection_sessions: HashMap::new(),
+            attention_sessions: HashMap::new(),
         })
     }
 
@@ -266,6 +277,12 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         )?;
         let post_projection = Self::projection_session(
             &mut self.post_projection_sessions,
+            ctx,
+            request.layer_index,
+            request.phase,
+        )?;
+        let attention_session = Self::projection_session(
+            &mut self.attention_sessions,
             ctx,
             request.layer_index,
             request.phase,
@@ -513,15 +530,10 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         fa2_args.query_start = request.start_position;
         fa2_args.scale = scale;
         fa2_args.policy.allow_fallback = false;
-        // Deliberately not wrapped in an ExecutionSession. Caching the prepared
-        // Execution would remove the per-call ctx.synchronize() that
-        // attention::execution::execute performs outside a session, but it also
-        // makes graph capture fail with "Attention execution cache miss during
-        // capture": capture requires the exact ExecutionKey to be present
-        // already, and this call is not warmed before capture_decode_phases
-        // runs. Graph capture is worth far more here (50.4 vs 23.0 tok/s), so
-        // the synchronize stays until a pre-capture warmup exists.
-        ops::kv_cache_attention(ctx, fa2_args)?;
+        match attention_session {
+            Some(session) => session.run(|| ops::kv_cache_attention(ctx, fa2_args))?,
+            None => ops::kv_cache_attention(ctx, fa2_args)?,
+        }
 
         // ---- Output gate (sigmoid, not silu) ----
         let gate_2d = view(
