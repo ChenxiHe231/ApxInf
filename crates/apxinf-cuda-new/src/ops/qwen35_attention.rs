@@ -1,9 +1,9 @@
 //! Exact batch-one full-attention core for Qwen3.5-35B-A3B.
 //!
-//! This module starts at the three BF16 projection outputs and ends at the
-//! gated BF16 input to `o_proj`.  It owns the base model's static FP8-E4M3
-//! K/V cache contract.  MTP attention is deliberately separate because the
-//! checkpoint's MTP subtree has BF16 K/V and no K/V calibration tensors.
+//! This module contains the legacy static-scale FP8 reference path plus the
+//! dynamic cache path used by the Qwen3.5 backend. Dynamic K/V scales cover one
+//! token and one KV head; decode consumes FP8 directly, while prefill may expand
+//! the valid prefix for the existing FA2 kernel. MTP attention remains separate.
 
 use apxinf_core::{DType, Error, Result, Tensor};
 
@@ -283,6 +283,225 @@ pub fn qwen35_attention_fp8(
     crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
     unsafe {
         status::check(abi::apxinf_qwen35_attention_fp8(
+            ctx.runtime(),
+            &spec,
+            &bindings,
+        ))
+    }
+}
+
+/// Dynamic FP8 payload and scale storage for one full-attention layer.
+///
+/// Each FP32 scale covers exactly one token, one KV head and all 256 head
+/// dimensions. K and V use independent scales.
+pub struct Qwen35DynamicFp8KvCache<'a> {
+    pub key: &'a Tensor,
+    pub value: &'a Tensor,
+    pub key_scales: &'a Tensor,
+    pub value_scales: &'a Tensor,
+}
+
+pub struct Qwen35DynamicDecodeScratch<'a> {
+    pub partial_max: &'a Tensor,
+    pub partial_sum: &'a Tensor,
+    pub partial_output: &'a Tensor,
+}
+
+pub const QWEN35_DECODE_SPLIT_TOKENS: usize = abi::DECODE_SPLIT_TOKENS;
+
+pub fn qwen35_dynamic_decode_max_splits(capacity: usize) -> Result<usize> {
+    if capacity == 0 || i32::try_from(capacity).is_err() {
+        return Err(invalid("Qwen3.5 dynamic decode capacity is invalid"));
+    }
+    Ok(capacity.div_ceil(QWEN35_DECODE_SPLIT_TOKENS))
+}
+
+fn dynamic_cache_storage(
+    ctx: &CudaContext,
+    cache: Qwen35DynamicFp8KvCache<'_>,
+) -> Result<(usize, CudaBuffer, CudaBuffer, CudaBuffer, CudaBuffer)> {
+    let shape = cache.key.shape().dims();
+    if shape.len() != 3
+        || shape[0] == 0
+        || shape[1..] != [QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM]
+        || cache.value.shape().dims() != shape
+    {
+        return Err(invalid(
+            "Qwen3.5 dynamic FP8 K/V caches must match [capacity,2,256]",
+        ));
+    }
+    let capacity = shape[0];
+    let key = tensor_storage(ctx, cache.key, DType::F8E4M3, shape)?;
+    let value = tensor_storage(ctx, cache.value, DType::F8E4M3, shape)?;
+    let scale_shape = [capacity, QWEN35_ATTENTION_KV_HEADS];
+    let key_scales = tensor_storage(ctx, cache.key_scales, DType::F32, &scale_shape)?;
+    let value_scales = tensor_storage(ctx, cache.value_scales, DType::F32, &scale_shape)?;
+    Ok((capacity, key, value, key_scales, value_scales))
+}
+
+/// Compute one FP32 absmax scale per token and KV head, quantize post-RoPE K
+/// and projected V to E4M3, and append payloads plus scales to the cache.
+pub fn qwen35_dynamic_kv_append(
+    ctx: &CudaContext,
+    tokens: usize,
+    cache_offset: usize,
+    key: &Tensor,
+    value: &Tensor,
+    cache: Qwen35DynamicFp8KvCache<'_>,
+) -> Result<()> {
+    if tokens == 0 || i32::try_from(tokens).is_err() {
+        return Err(invalid("Qwen3.5 dynamic KV append token count is invalid"));
+    }
+    let (capacity, key_cache, value_cache, key_scales, value_scales) =
+        dynamic_cache_storage(ctx, cache)?;
+    let end = cache_offset
+        .checked_add(tokens)
+        .ok_or_else(|| invalid("Qwen3.5 dynamic KV append range overflow"))?;
+    if end > capacity || i32::try_from(cache_offset).is_err() {
+        return Err(invalid("Qwen3.5 dynamic KV append exceeds capacity"));
+    }
+    let input_shape = [tokens, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM];
+    let key = tensor_storage(ctx, key, DType::BF16, &input_shape)?;
+    let value = tensor_storage(ctx, value, DType::BF16, &input_shape)?;
+    let spec = abi::DynamicKvSpec {
+        version: abi::DYNAMIC_KV_SPEC_VERSION,
+        tokens: tokens as u32,
+        cache_offset: cache_offset as u32,
+        cache_capacity: capacity as u32,
+    };
+    let bindings = abi::DynamicKvBindings {
+        key: key.ptr(),
+        value: value.ptr(),
+        key_cache: key_cache.ptr(),
+        value_cache: value_cache.ptr(),
+        key_scales: key_scales.ptr(),
+        value_scales: value_scales.ptr(),
+        stream: ctx.stream().handle(),
+    };
+    crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
+    unsafe {
+        status::check(abi::apxinf_qwen35_dynamic_kv_append(
+            ctx.runtime(),
+            &spec,
+            &bindings,
+        ))
+    }
+}
+
+/// Decode one query row directly from dynamic E4M3 K/V. Cache values are
+/// converted only in registers/shared memory; no BF16 cache is materialized.
+pub fn qwen35_dynamic_decode_attention(
+    ctx: &CudaContext,
+    valid_tokens: usize,
+    query: &Tensor,
+    cache: Qwen35DynamicFp8KvCache<'_>,
+    scratch: Qwen35DynamicDecodeScratch<'_>,
+    output: &Tensor,
+) -> Result<()> {
+    let (capacity, key_cache, value_cache, key_scales, value_scales) =
+        dynamic_cache_storage(ctx, cache)?;
+    if valid_tokens == 0 || valid_tokens > capacity || i32::try_from(valid_tokens).is_err() {
+        return Err(invalid("Qwen3.5 dynamic decode valid length is invalid"));
+    }
+    let query_shape = [1, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_HEAD_DIM];
+    let query = tensor_storage(ctx, query, DType::BF16, &query_shape)?;
+    let output = tensor_storage(ctx, output, DType::BF16, &query_shape)?;
+    let partial_shape = scratch.partial_max.shape().dims();
+    if partial_shape.len() != 2
+        || partial_shape[0] != QWEN35_ATTENTION_Q_HEADS
+        || partial_shape[1] == 0
+        || scratch.partial_sum.shape().dims() != partial_shape
+    {
+        return Err(invalid(
+            "Qwen3.5 dynamic decode partial statistics must match [16,max_splits]",
+        ));
+    }
+    let max_splits = partial_shape[1];
+    if qwen35_dynamic_decode_max_splits(capacity)? > max_splits
+        || i32::try_from(max_splits).is_err()
+    {
+        return Err(invalid(
+            "Qwen3.5 dynamic decode workspace does not cover cache capacity",
+        ));
+    }
+    let partial_max = tensor_storage(ctx, scratch.partial_max, DType::F32, partial_shape)?;
+    let partial_sum = tensor_storage(ctx, scratch.partial_sum, DType::F32, partial_shape)?;
+    let partial_output = tensor_storage(
+        ctx,
+        scratch.partial_output,
+        DType::F32,
+        &[
+            QWEN35_ATTENTION_Q_HEADS,
+            max_splits,
+            QWEN35_ATTENTION_HEAD_DIM,
+        ],
+    )?;
+    let spec = abi::DynamicDecodeSpec {
+        version: abi::DYNAMIC_DECODE_SPEC_VERSION,
+        valid_tokens: valid_tokens as u32,
+        cache_capacity: capacity as u32,
+        max_splits: max_splits as u32,
+    };
+    let bindings = abi::DynamicDecodeBindings {
+        query: query.ptr(),
+        key_cache: key_cache.ptr(),
+        value_cache: value_cache.ptr(),
+        key_scales: key_scales.ptr(),
+        value_scales: value_scales.ptr(),
+        partial_max: partial_max.ptr(),
+        partial_sum: partial_sum.ptr(),
+        partial_output: partial_output.ptr(),
+        output: output.ptr(),
+        stream: ctx.stream().handle(),
+    };
+    crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
+    unsafe {
+        status::check(abi::apxinf_qwen35_dynamic_decode_attention(
+            ctx.runtime(),
+            &spec,
+            &bindings,
+        ))
+    }
+}
+
+/// Expand the valid dynamic FP8 prefix into BF16 buffers for prefill FA2.
+pub fn qwen35_dynamic_kv_dequant(
+    ctx: &CudaContext,
+    valid_tokens: usize,
+    cache: Qwen35DynamicFp8KvCache<'_>,
+    key: &Tensor,
+    value: &Tensor,
+) -> Result<()> {
+    let (capacity, key_cache, value_cache, key_scales, value_scales) =
+        dynamic_cache_storage(ctx, cache)?;
+    if valid_tokens == 0 || valid_tokens > capacity || i32::try_from(valid_tokens).is_err() {
+        return Err(invalid("Qwen3.5 dynamic dequant valid length is invalid"));
+    }
+    let output_shape = [
+        1,
+        valid_tokens,
+        QWEN35_ATTENTION_KV_HEADS,
+        QWEN35_ATTENTION_HEAD_DIM,
+    ];
+    let key = tensor_storage(ctx, key, DType::BF16, &output_shape)?;
+    let value = tensor_storage(ctx, value, DType::BF16, &output_shape)?;
+    let spec = abi::DynamicDequantSpec {
+        version: abi::DYNAMIC_KV_SPEC_VERSION,
+        valid_tokens: valid_tokens as u32,
+        cache_capacity: capacity as u32,
+    };
+    let bindings = abi::DynamicDequantBindings {
+        key_cache: key_cache.ptr(),
+        value_cache: value_cache.ptr(),
+        key_scales: key_scales.ptr(),
+        value_scales: value_scales.ptr(),
+        key: key.ptr(),
+        value: value.ptr(),
+        stream: ctx.stream().handle(),
+    };
+    crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
+    unsafe {
+        status::check(abi::apxinf_qwen35_dynamic_kv_dequant(
             ctx.runtime(),
             &spec,
             &bindings,

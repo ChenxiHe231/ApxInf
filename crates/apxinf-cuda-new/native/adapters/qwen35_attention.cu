@@ -1,8 +1,9 @@
 // Copyright 2026 ApxInf contributors.
 //
-// Exact Qwen3.5-35B-A3B full-attention core for batch size one.  The cache is
-// genuinely E4M3: BF16 K/V are divided by their calibrated dequant scales on
-// write and E4M3 codes are multiplied by those scales on read.
+// Exact Qwen3.5-35B-A3B full-attention kernels for batch size one.  The legacy
+// entry point retains static-scale E4M3 semantics.  The production path stores
+// post-RoPE K and projected V with dynamic per-token-per-KV-head scales, then
+// decodes directly from FP8 without materializing a BF16 cache.
 
 #include "../include/apxinf_cuda/qwen35_attention.h"
 #include "../framework/runtime_internal.h"
@@ -39,6 +40,9 @@ __device__ float warp_sum(float value) {
   }
   return value;
 }
+constexpr int kDecodeSplitTokens = APXINF_QWEN35_DECODE_SPLIT_TOKENS;
+constexpr float kFp8Max = 448.0F;
+constexpr float kMinDynamicScale = 1.0e-12F;
 
 __device__ float block_sum(float value, float* partial) {
   for (int offset = 16; offset > 0; offset >>= 1) {
@@ -57,6 +61,27 @@ __device__ float block_sum(float value, float* partial) {
   __syncthreads();
   return partial[0];
 }
+
+__device__ float block_max(float value, float* partial) {
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    value = fmaxf(value, __shfl_down_sync(0xffffffffU, value, offset));
+  }
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  if (lane == 0) partial[warp] = value;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    float maximum = 0.0F;
+#pragma unroll
+    for (int index = 0; index < kWarps; ++index) {
+      maximum = fmaxf(maximum, partial[index]);
+    }
+    partial[0] = maximum;
+  }
+  __syncthreads();
+  return partial[0];
+}
+
 __device__ float rotary_value(const float* normalized, int dim, int token,
                               int tokens, const int32_t* positions,
                               float theta) {
@@ -555,6 +580,194 @@ __global__ void attention_combine_kernel(
   }
 }
 
+__global__ void dynamic_kv_append_kernel(
+    const __nv_bfloat16* __restrict__ key,
+    const __nv_bfloat16* __restrict__ value,
+    __nv_fp8_e4m3* __restrict__ key_cache,
+    __nv_fp8_e4m3* __restrict__ value_cache,
+    float* __restrict__ key_scales, float* __restrict__ value_scales,
+    int tokens, int cache_offset) {
+  const int token = blockIdx.x;
+  const int head = blockIdx.y;
+  const int dim = threadIdx.x;
+  if (token >= tokens || head >= kKvHeads || dim >= kHeadDim) return;
+
+  __shared__ float partial[kWarps];
+  __shared__ float key_values[kHeadDim];
+  __shared__ float value_values[kHeadDim];
+  const int64_t source =
+      (static_cast<int64_t>(token) * kKvHeads + head) * kHeadDim + dim;
+  const float key_value = __bfloat162float(key[source]);
+  const float value_value = __bfloat162float(value[source]);
+  key_values[dim] = key_value;
+  value_values[dim] = value_value;
+
+  const float key_absmax = block_max(fabsf(key_value), partial);
+  const float value_absmax = block_max(fabsf(value_value), partial);
+  const float key_scale = fmaxf(key_absmax / kFp8Max, kMinDynamicScale);
+  const float value_scale = fmaxf(value_absmax / kFp8Max, kMinDynamicScale);
+  const int64_t scale_index =
+      static_cast<int64_t>(cache_offset + token) * kKvHeads + head;
+  if (dim == 0) {
+    key_scales[scale_index] = key_scale;
+    value_scales[scale_index] = value_scale;
+  }
+  const int64_t cache_index = scale_index * kHeadDim + dim;
+  key_cache[cache_index] = __nv_fp8_e4m3(key_values[dim] / key_scale);
+  value_cache[cache_index] =
+      __nv_fp8_e4m3(value_values[dim] / value_scale);
+}
+
+// One CTA owns one KV head and one 256-token split.  Its eight warps own the
+// eight GQA query heads sharing that KV head.  K/V are loaded once into shared
+// memory and reused by all eight query heads, avoiding eight redundant global
+// cache reads.
+__global__ void dynamic_decode_split_kernel(
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_fp8_e4m3* __restrict__ key_cache,
+    const __nv_fp8_e4m3* __restrict__ value_cache,
+    const float* __restrict__ key_scales,
+    const float* __restrict__ value_scales,
+    float* __restrict__ partial_max, float* __restrict__ partial_sum,
+    float* __restrict__ partial_output, int valid_tokens, int max_splits) {
+  const int split = blockIdx.x;
+  const int kv_head = blockIdx.y;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int query_head = kv_head * kQueriesPerKvHead + warp;
+  const int begin = split * kDecodeSplitTokens;
+  const int end = min(begin + kDecodeSplitTokens, valid_tokens);
+  if (begin >= end || kv_head >= kKvHeads || warp >= kQueriesPerKvHead) return;
+
+  __shared__ float shared_key[kHeadDim];
+  __shared__ float shared_value[kHeadDim];
+  __shared__ float shared_key_scale;
+  __shared__ float shared_value_scale;
+
+  float q[8];
+  float accumulator[8];
+#pragma unroll
+  for (int item = 0; item < 8; ++item) {
+    const int dim = lane + item * 32;
+    q[item] = __bfloat162float(query[query_head * kHeadDim + dim]);
+    accumulator[item] = 0.0F;
+  }
+  float running_max = -CUDART_INF_F;
+  float running_sum = 0.0F;
+
+  for (int position = begin; position < end; ++position) {
+    const int dim = threadIdx.x;
+    const int64_t base =
+        (static_cast<int64_t>(position) * kKvHeads + kv_head) * kHeadDim;
+    shared_key[dim] = static_cast<float>(key_cache[base + dim]);
+    shared_value[dim] = static_cast<float>(value_cache[base + dim]);
+    if (dim == 0) {
+      const int64_t scale_index =
+          static_cast<int64_t>(position) * kKvHeads + kv_head;
+      shared_key_scale = key_scales[scale_index];
+      shared_value_scale = value_scales[scale_index];
+    }
+    __syncthreads();
+
+    float dot = 0.0F;
+#pragma unroll
+    for (int item = 0; item < 8; ++item) {
+      const int query_dim = lane + item * 32;
+      dot += q[item] * shared_key[query_dim];
+    }
+    dot = warp_sum(dot);
+
+    float old_weight = 0.0F;
+    float new_weight = 0.0F;
+    if (lane == 0) {
+      const float score = dot * shared_key_scale * 0.0625F;
+      const float next_max = fmaxf(running_max, score);
+      old_weight = __expf(running_max - next_max);
+      new_weight = __expf(score - next_max);
+      running_sum = running_sum * old_weight + new_weight;
+      running_max = next_max;
+    }
+    old_weight = __shfl_sync(0xffffffffU, old_weight, 0);
+    new_weight = __shfl_sync(0xffffffffU, new_weight, 0);
+    const float weighted_value_scale = new_weight * shared_value_scale;
+#pragma unroll
+    for (int item = 0; item < 8; ++item) {
+      const int output_dim = lane + item * 32;
+      accumulator[item] = accumulator[item] * old_weight +
+                          shared_value[output_dim] * weighted_value_scale;
+    }
+    __syncthreads();
+  }
+
+  const int64_t partial_index =
+      static_cast<int64_t>(query_head) * max_splits + split;
+  if (lane == 0) {
+    partial_max[partial_index] = running_max;
+    partial_sum[partial_index] = running_sum;
+  }
+#pragma unroll
+  for (int item = 0; item < 8; ++item) {
+    const int dim = lane + item * 32;
+    partial_output[partial_index * kHeadDim + dim] = accumulator[item];
+  }
+}
+
+__global__ void dynamic_decode_reduce_kernel(
+    const float* __restrict__ partial_max,
+    const float* __restrict__ partial_sum,
+    const float* __restrict__ partial_output,
+    __nv_bfloat16* __restrict__ output, int num_splits, int max_splits) {
+  const int query_head = blockIdx.x;
+  const int dim = threadIdx.x;
+  if (query_head >= kQHeads || dim >= kHeadDim) return;
+
+  __shared__ float global_max;
+  __shared__ float denominator;
+  if (dim == 0) {
+    float maximum = -CUDART_INF_F;
+    for (int split = 0; split < num_splits; ++split) {
+      const int64_t index =
+          static_cast<int64_t>(query_head) * max_splits + split;
+      maximum = fmaxf(maximum, partial_max[index]);
+    }
+    float sum = 0.0F;
+    for (int split = 0; split < num_splits; ++split) {
+      const int64_t index =
+          static_cast<int64_t>(query_head) * max_splits + split;
+      sum += partial_sum[index] * __expf(partial_max[index] - maximum);
+    }
+    global_max = maximum;
+    denominator = sum;
+  }
+  __syncthreads();
+
+  float value = 0.0F;
+  for (int split = 0; split < num_splits; ++split) {
+    const int64_t index =
+        static_cast<int64_t>(query_head) * max_splits + split;
+    const float weight = __expf(partial_max[index] - global_max);
+    value += partial_output[index * kHeadDim + dim] * weight;
+  }
+  output[query_head * kHeadDim + dim] =
+      __float2bfloat16(value / denominator);
+}
+
+__global__ void dynamic_kv_dequant_kernel(
+    const __nv_fp8_e4m3* __restrict__ key_cache,
+    const __nv_fp8_e4m3* __restrict__ value_cache,
+    const float* __restrict__ key_scales,
+    const float* __restrict__ value_scales,
+    __nv_bfloat16* __restrict__ key, __nv_bfloat16* __restrict__ value,
+    int elements) {
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= elements) return;
+  const int scale_index = index / kHeadDim;
+  key[index] = __float2bfloat16(static_cast<float>(key_cache[index]) *
+                               key_scales[scale_index]);
+  value[index] = __float2bfloat16(static_cast<float>(value_cache[index]) *
+                                 value_scales[scale_index]);
+}
+
 bool valid_spec(const apxinf_qwen35_attention_spec_t& spec) {
   return spec.version == APXINF_QWEN35_ATTENTION_SPEC_VERSION &&
          spec.tokens > 0 && spec.tokens <= INT_MAX &&
@@ -578,6 +791,56 @@ bool valid_bindings(const apxinf_qwen35_attention_bindings_t& bindings) {
          bindings.gate != nullptr && bindings.output != nullptr &&
          bindings.scores != nullptr && bindings.partial_output != nullptr &&
          bindings.partial_stats != nullptr;
+}
+
+bool valid_dynamic_kv_spec(const apxinf_qwen35_dynamic_kv_spec_t& spec) {
+  return spec.version == APXINF_QWEN35_DYNAMIC_KV_SPEC_VERSION &&
+         spec.tokens > 0 && spec.tokens <= INT_MAX &&
+         spec.cache_capacity > 0 && spec.cache_capacity <= INT_MAX &&
+         spec.cache_offset <= INT_MAX &&
+         static_cast<uint64_t>(spec.cache_offset) + spec.tokens <=
+             spec.cache_capacity;
+}
+
+bool valid_dynamic_kv_bindings(
+    const apxinf_qwen35_dynamic_kv_bindings_t& bindings) {
+  return bindings.key != nullptr && bindings.value != nullptr &&
+         bindings.key_cache != nullptr && bindings.value_cache != nullptr &&
+         bindings.key_scales != nullptr && bindings.value_scales != nullptr;
+}
+
+bool valid_dynamic_decode_spec(
+    const apxinf_qwen35_dynamic_decode_spec_t& spec) {
+  const uint64_t splits =
+      (static_cast<uint64_t>(spec.valid_tokens) + kDecodeSplitTokens - 1) /
+      kDecodeSplitTokens;
+  return spec.version == APXINF_QWEN35_DYNAMIC_DECODE_SPEC_VERSION &&
+         spec.valid_tokens > 0 && spec.valid_tokens <= spec.cache_capacity &&
+         spec.cache_capacity <= INT_MAX && spec.max_splits > 0 &&
+         spec.max_splits <= INT_MAX && splits <= spec.max_splits;
+}
+
+bool valid_dynamic_decode_bindings(
+    const apxinf_qwen35_dynamic_decode_bindings_t& bindings) {
+  return bindings.query != nullptr && bindings.key_cache != nullptr &&
+         bindings.value_cache != nullptr && bindings.key_scales != nullptr &&
+         bindings.value_scales != nullptr && bindings.partial_max != nullptr &&
+         bindings.partial_sum != nullptr && bindings.partial_output != nullptr &&
+         bindings.output != nullptr;
+}
+
+bool valid_dynamic_dequant_spec(
+    const apxinf_qwen35_dynamic_dequant_spec_t& spec) {
+  return spec.version == APXINF_QWEN35_DYNAMIC_KV_SPEC_VERSION &&
+         spec.valid_tokens > 0 && spec.valid_tokens <= spec.cache_capacity &&
+         spec.cache_capacity <= INT_MAX;
+}
+
+bool valid_dynamic_dequant_bindings(
+    const apxinf_qwen35_dynamic_dequant_bindings_t& bindings) {
+  return bindings.key_cache != nullptr && bindings.value_cache != nullptr &&
+         bindings.key_scales != nullptr && bindings.value_scales != nullptr &&
+         bindings.key != nullptr && bindings.value != nullptr;
 }
 
 }  // namespace
@@ -660,6 +923,93 @@ extern "C" apxinf_status_t apxinf_qwen35_attention_fp8(
         static_cast<const float*>(bindings->partial_stats),
         static_cast<__nv_bfloat16*>(bindings->output), spec->tokens,
         splits, value_scale);
+    apxinf::framework::check_cuda(cudaGetLastError());
+  });
+}
+
+extern "C" apxinf_status_t apxinf_qwen35_dynamic_kv_append(
+    apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_kv_spec_t* spec,
+    const apxinf_qwen35_dynamic_kv_bindings_t* bindings) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr ||
+        !valid_dynamic_kv_spec(*spec) ||
+        !valid_dynamic_kv_bindings(*bindings)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid Qwen3.5 dynamic KV append arguments");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    auto stream = static_cast<cudaStream_t>(bindings->stream);
+    const dim3 grid(spec->tokens, kKvHeads);
+    dynamic_kv_append_kernel<<<grid, kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(bindings->key),
+        static_cast<const __nv_bfloat16*>(bindings->value),
+        static_cast<__nv_fp8_e4m3*>(bindings->key_cache),
+        static_cast<__nv_fp8_e4m3*>(bindings->value_cache),
+        static_cast<float*>(bindings->key_scales),
+        static_cast<float*>(bindings->value_scales), spec->tokens,
+        spec->cache_offset);
+    apxinf::framework::check_cuda(cudaGetLastError());
+  });
+}
+
+extern "C" apxinf_status_t apxinf_qwen35_dynamic_decode_attention(
+    apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_decode_spec_t* spec,
+    const apxinf_qwen35_dynamic_decode_bindings_t* bindings) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr ||
+        !valid_dynamic_decode_spec(*spec) ||
+        !valid_dynamic_decode_bindings(*bindings)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid Qwen3.5 dynamic FP8 decode arguments");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    auto stream = static_cast<cudaStream_t>(bindings->stream);
+    const int num_splits =
+        (spec->valid_tokens + kDecodeSplitTokens - 1) / kDecodeSplitTokens;
+    const dim3 split_grid(num_splits, kKvHeads);
+    dynamic_decode_split_kernel<<<split_grid, kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(bindings->query),
+        static_cast<const __nv_fp8_e4m3*>(bindings->key_cache),
+        static_cast<const __nv_fp8_e4m3*>(bindings->value_cache),
+        static_cast<const float*>(bindings->key_scales),
+        static_cast<const float*>(bindings->value_scales),
+        static_cast<float*>(bindings->partial_max),
+        static_cast<float*>(bindings->partial_sum),
+        static_cast<float*>(bindings->partial_output), spec->valid_tokens,
+        spec->max_splits);
+    apxinf::framework::check_cuda(cudaGetLastError());
+    dynamic_decode_reduce_kernel<<<kQHeads, kThreads, 0, stream>>>(
+        static_cast<const float*>(bindings->partial_max),
+        static_cast<const float*>(bindings->partial_sum),
+        static_cast<const float*>(bindings->partial_output),
+        static_cast<__nv_bfloat16*>(bindings->output), num_splits,
+        spec->max_splits);
+    apxinf::framework::check_cuda(cudaGetLastError());
+  });
+}
+
+extern "C" apxinf_status_t apxinf_qwen35_dynamic_kv_dequant(
+    apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_dequant_spec_t* spec,
+    const apxinf_qwen35_dynamic_dequant_bindings_t* bindings) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr ||
+        !valid_dynamic_dequant_spec(*spec) ||
+        !valid_dynamic_dequant_bindings(*bindings)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid Qwen3.5 dynamic KV dequant arguments");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    auto stream = static_cast<cudaStream_t>(bindings->stream);
+    const int elements = spec->valid_tokens * kKvHeads * kHeadDim;
+    constexpr int threads = 256;
+    const int blocks = (elements + threads - 1) / threads;
+    dynamic_kv_dequant_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const __nv_fp8_e4m3*>(bindings->key_cache),
+        static_cast<const __nv_fp8_e4m3*>(bindings->value_cache),
+        static_cast<const float*>(bindings->key_scales),
+        static_cast<const float*>(bindings->value_scales),
+        static_cast<__nv_bfloat16*>(bindings->key),
+        static_cast<__nv_bfloat16*>(bindings->value), elements);
     apxinf::framework::check_cuda(cudaGetLastError());
   });
 }

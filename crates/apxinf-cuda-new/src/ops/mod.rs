@@ -99,20 +99,21 @@ pub use quantization::{
 pub use rope::apply_vision_2d as rope_apply_vision_2d;
 pub use qwen35_attention::{
     decode_e4m3, encode_e4m3, qwen35_attention_fp8, qwen35_attention_reference,
-    Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput, Qwen35AttentionScratch,
+    qwen35_dynamic_decode_attention, qwen35_dynamic_decode_max_splits, qwen35_dynamic_kv_append,
+    qwen35_dynamic_kv_dequant, Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput,
+    Qwen35AttentionScratch, Qwen35DynamicDecodeScratch, Qwen35DynamicFp8KvCache,
     Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales, FP8_E4M3_MAX_FINITE,
     QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_KV_WIDTH,
     QWEN35_ATTENTION_MAX_SPLITS, QWEN35_ATTENTION_Q_HEADS,
     QWEN35_ATTENTION_Q_PROJECTION_WIDTH, QWEN35_ATTENTION_RMS_EPSILON,
-    QWEN35_ATTENTION_ROTARY_DIM, QWEN35_KV_CACHE_BLOCK_TOKENS,
+    QWEN35_ATTENTION_ROTARY_DIM, QWEN35_KV_CACHE_BLOCK_TOKENS, QWEN35_DECODE_SPLIT_TOKENS,
 };
 pub use qwen35_mixers::{
     qwen35_gdn_decode, qwen35_gdn_prefill, Qwen35GdnCakeScratch, Qwen35GdnCoreWeights,
-    Qwen35GdnStateCheckpoints,
     Qwen35GdnDecodeArgs, Qwen35GdnDecodeScratch, Qwen35GdnPrefillArgs, Qwen35GdnPrefillScratch,
-    Qwen35GdnState, QWEN35_GDN_CONV_WIDTH, QWEN35_GDN_EPSILON, QWEN35_GDN_HEAD_DIM,
-    QWEN35_GDN_KEY_HEADS, QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_Q_WIDTH, QWEN35_GDN_SCAN_CHUNK,
-    QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_VALUE_WIDTH,
+    Qwen35GdnState, Qwen35GdnStateCheckpoints, QWEN35_GDN_CONV_WIDTH, QWEN35_GDN_EPSILON,
+    QWEN35_GDN_HEAD_DIM, QWEN35_GDN_KEY_HEADS, QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_Q_WIDTH,
+    QWEN35_GDN_SCAN_CHUNK, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_VALUE_WIDTH,
 };
 pub use qwen35_mtp::{
     qwen35_mtp_moe, qwen35_mtp_moe_reference, Qwen35MtpMoeArgs, Qwen35MtpMoeScratch,

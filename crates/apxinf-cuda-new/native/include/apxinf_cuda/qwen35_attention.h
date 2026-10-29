@@ -14,6 +14,25 @@ apxinf_status_t apxinf_qwen35_attention_fp8(
     apxinf_runtime_t runtime, const apxinf_qwen35_attention_spec_t* spec,
     const apxinf_qwen35_attention_bindings_t* bindings);
 
+/* Quantize post-RoPE K and projected V with one online scale per token and KV
+   head, then append both payloads and scales to their persistent caches. */
+apxinf_status_t apxinf_qwen35_dynamic_kv_append(
+    apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_kv_spec_t* spec,
+    const apxinf_qwen35_dynamic_kv_bindings_t* bindings);
+
+/* Decode one BF16 query row directly from dynamic FP8 K/V.  The kernel never
+   materializes a BF16 cache; it converts each cache tile in registers and
+   combines split-KV partial softmax states in FP32. */
+apxinf_status_t apxinf_qwen35_dynamic_decode_attention(
+    apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_decode_spec_t* spec,
+    const apxinf_qwen35_dynamic_decode_bindings_t* bindings);
+
+/* Prefill compatibility path: expand only the valid dynamic FP8 prefix into
+   caller-owned BF16 buffers for the existing FA2 context kernel. */
+apxinf_status_t apxinf_qwen35_dynamic_kv_dequant(
+    apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_dequant_spec_t* spec,
+    const apxinf_qwen35_dynamic_dequant_bindings_t* bindings);
+
 #ifdef __cplusplus
 }
 #endif
