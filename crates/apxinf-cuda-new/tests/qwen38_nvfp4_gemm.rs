@@ -9,7 +9,7 @@
 //! ```text
 //! APXINF_QWEN38_CHECKPOINT=/path/to/Qwen3.8-27B-NVFP4 \
 //!   bash crates/apxinf-cuda-new/test-new.sh \
-//!     test -p apxinf-cuda --test qwen38_nvfp4_gemm -- --ignored --nocapture
+//!     test -p apxinf-cuda-new --test qwen38_nvfp4_gemm -- --ignored --nocapture
 //! ```
 
 use std::collections::HashMap;
@@ -167,7 +167,7 @@ fn real_gate_proj_weight_runs_through_the_nvfp4_gemm() {
         .unwrap()
         .as_tensor(Shape::new(vec![m, rows]), DType::BF16)
         .unwrap();
-    let args = ops::GemmArgs::block_quantized(
+    let mut args = ops::GemmArgs::block_quantized(
         &activation,
         &activation_scales,
         &weight,
@@ -176,6 +176,11 @@ fn real_gate_proj_weight_runs_through_the_nvfp4_gemm() {
         alpha,
         &mut out,
     );
+    // The public Qwen3.8 CLI does not enable online tuning. A packed NVFP4
+    // recipe miss must therefore use a supported format-specific baseline
+    // rather than failing because the generic cuBLAS fallback rejects FP4.
+    args.policy.online_tune = false;
+    args.policy.cache_dir = Some(String::new());
     ops::gemm(&ctx, args).unwrap();
     ctx.synchronize().unwrap();
 

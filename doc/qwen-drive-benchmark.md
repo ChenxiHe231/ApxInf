@@ -167,7 +167,7 @@ calls, invalid masks and logical-length switching. Portable checks:
 PYTHONPATH=python/apxinf python -m pytest \
   python/apxinf/tests/test_qwen_drive_policy.py \
   python/apxinf/tests/test_qwen_drive_padding.py
-cargo test --release -p apxinf-cuda-new --lib
+cargo test --release -p apxinf-cuda-new --lib -- --test-threads=1
 cargo test --release -p apxinf-model --features cuda --lib capture_rejects_changed_phase_extent_or_count
 bash scripts/check_model_family_boundaries.sh
 ```

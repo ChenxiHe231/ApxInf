@@ -285,25 +285,71 @@ const apxinf::gemm::Implementation* find_implementation(const Recipe& recipe,
 std::unique_ptr<Execution> fallback(
     const apxinf::gemm::Spec& spec, const apxinf_gemm_policy_t& policy,
     const apxinf_gemm_bindings_t& bindings, int device) {
-  for (const auto& implementation :
-       apxinf::gemm::registry(spec.semantic)) {
-    if (!implementation.fallback ||
-        !apxinf::gemm::supports_device(implementation, device) ||
-        !implementation.supports(spec) ||
-        (policy.graph_safe && !implementation.graph_safe) ||
-        (policy.deterministic && !implementation.deterministic)) {
-      continue;
-    }
-    std::vector<int> configurations;
-    implementation.enumerate_configs(spec, configurations);
-    for (int configuration : configurations) {
-      try {
-        return apxinf::gemm::prepare(
-            implementation, configuration, spec, policy, bindings, device);
-      } catch (const Failure&) {
-        cudaGetLastError();
+  constexpr uint32_t kProviderCublasLt = 2;
+  constexpr uint32_t kProviderCutlass = 3;
+  const auto& implementations = apxinf::gemm::registry(spec.semantic);
+  auto prepare_first_supported = [&](bool designated_only,
+                                     uint32_t provider_id)
+      -> std::unique_ptr<Execution> {
+    for (const auto& implementation : implementations) {
+      if ((designated_only && !implementation.fallback) ||
+          (!designated_only && implementation.fallback) ||
+          (provider_id != 0 && implementation.provider_id != provider_id) ||
+          !apxinf::gemm::supports_device(implementation, device) ||
+          !implementation.supports(spec) ||
+          (policy.graph_safe && !implementation.graph_safe) ||
+          (policy.deterministic && !implementation.deterministic)) {
+        continue;
+      }
+      std::vector<int> configurations;
+      implementation.enumerate_configs(spec, configurations);
+      for (int configuration : configurations) {
+        try {
+          return apxinf::gemm::prepare(
+              implementation, configuration, spec, policy, bindings, device);
+        } catch (const Failure&) {
+          cudaGetLastError();
+        }
       }
     }
+    return nullptr;
+  };
+
+  // Dynamic row/channel quantization needs the provider that consumes its
+  // scale tensors in the mainloop/epilogue.  The generic cuBLAS baseline is
+  // correct but several times slower, which makes a missing recipe a silent
+  // model-level regression.
+  // The validated Orin W8A8 baseline is cuBLASLt.  The fixed-shape CUTLASS
+  // implementations remain regular candidates (and may be restored from an
+  // exact recipe), but choosing them merely because a recipe is absent changes
+  // GR00T's accumulated action numerics beyond its migration reference gate.
+  if (spec.quantization == APXINF_GEMM_QUANT_W8A8_ROW_CHANNEL) {
+    if (auto execution =
+            prepare_first_supported(false, kProviderCublasLt)) {
+      return execution;
+    }
+  }
+
+  const bool prefer_cutlass =
+      spec.quantization == APXINF_GEMM_QUANT_FP8_ROW_CHANNEL ||
+      spec.quantization == APXINF_GEMM_QUANT_NVFP4_BLOCK;
+  if (prefer_cutlass) {
+    if (auto execution =
+            prepare_first_supported(false, kProviderCutlass)) {
+      return execution;
+    }
+  }
+
+  if (auto execution = prepare_first_supported(true, 0)) {
+    return execution;
+  }
+  // The designated cuBLAS baseline deliberately rejects packed formats such
+  // as NVFP4. A recipe miss must still be runnable with online tuning disabled,
+  // so use the first graph-safe candidate/configuration that supports the Spec
+  // as the format-specific baseline. This performs no timing and persists no
+  // recipe; normal warmup/autotune remains responsible for choosing the winner.
+  if (auto execution = prepare_first_supported(false, 0)) {
+    return execution;
   }
   throw Failure(APXINF_STATUS_UNSUPPORTED,
                 "no GEMM fallback satisfies the Spec and Policy");

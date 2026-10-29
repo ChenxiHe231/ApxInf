@@ -524,11 +524,26 @@ on purpose."
     let (out_cos, out_rel) = cosine_rel_l2(&got_out, &ref_out);
     println!("core_attn_out (l0_16): cosine {out_cos:.6}  relL2 {out_rel:.5}");
 
-    // --- final state: both the current contract and the squeezed reference use
-    //     [v_heads, k_dim, v_dim].
+    // --- final state: the official torch snapshot is [v_heads, k_dim, v_dim],
+    //     while cuda-new deliberately keeps [v_heads, v_dim, k_dim] so the
+    //     prefill result can be consumed directly by recurrent decode.  The
+    //     shipped Qwen3.8 dimensions are square, so comparing the two flat
+    //     buffers without this transpose silently compares different cells.
     let state = read_f32(&pf_state);
-    let (_s_shape, ref_state) = load_npy_f32(&format!("{dir}/l0_15_recurrent_state_final.npy"));
-    let (st_cos, st_rel) = cosine_rel_l2(&state, &ref_state);
+    let (s_shape, ref_state) = load_npy_f32(&format!("{dir}/l0_15_recurrent_state_final.npy"));
+    assert!(
+        s_shape.as_slice() == [v_heads, dim, dim] || s_shape.as_slice() == [1, v_heads, dim, dim],
+        "unexpected recurrent-state reference shape: {s_shape:?}"
+    );
+    let mut ref_state_vk = vec![0.0f32; ref_state.len()];
+    for h in 0..v_heads {
+        for k in 0..dim {
+            for v in 0..dim {
+                ref_state_vk[(h * dim + v) * dim + k] = ref_state[(h * dim + k) * dim + v];
+            }
+        }
+    }
+    let (st_cos, st_rel) = cosine_rel_l2(&state, &ref_state_vk);
     println!("recurrent_state_final (l0_15): cosine {st_cos:.6}  relL2 {st_rel:.5}");
 
     assert!(

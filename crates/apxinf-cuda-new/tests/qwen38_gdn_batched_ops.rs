@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! bash crates/apxinf-cuda-new/test-new.sh \
-//!   test -p apxinf-cuda --test qwen38_gdn_batched_ops -- --ignored --nocapture
+//!   test -p apxinf-cuda-new --test qwen38_gdn_batched_ops -- --ignored --nocapture
 //! ```
 
 use apxinf_core::{DType, Shape, Tensor};

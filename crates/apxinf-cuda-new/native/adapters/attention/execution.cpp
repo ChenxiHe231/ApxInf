@@ -204,25 +204,45 @@ const apxinf::attention::Implementation* find_implementation(
 std::unique_ptr<Execution> fallback(
     const Spec& spec, const apxinf_attention_policy_t& policy,
     const apxinf_attention_bindings_t& bindings, int device) {
-  for (const auto& implementation :
-       apxinf::attention::registry(spec.semantic)) {
-    if (!implementation.fallback ||
-        !apxinf::attention::supports_device(implementation, device) ||
-        !implementation.supports(spec) ||
-        (policy.graph_safe && !implementation.graph_safe) ||
-        (policy.deterministic && !implementation.deterministic)) {
-      continue;
-    }
-    std::vector<int> configurations;
-    implementation.enumerate_configs(spec, configurations);
-    for (int configuration : configurations) {
-      try {
-        return apxinf::attention::prepare(
-            implementation, configuration, spec, policy, bindings, device);
-      } catch (const Failure&) {
-        cudaGetLastError();
+  constexpr uint32_t kProviderFa2 = 2;
+  const auto& implementations = apxinf::attention::registry(spec.semantic);
+  auto prepare_first_supported = [&](uint32_t provider_id,
+                                     bool exclude_provider)
+      -> std::unique_ptr<Execution> {
+    for (const auto& implementation : implementations) {
+      if ((provider_id != 0 &&
+           (implementation.provider_id == provider_id) == exclude_provider) ||
+          !apxinf::attention::supports_device(implementation, device) ||
+          !implementation.supports(spec) ||
+          (policy.graph_safe && !implementation.graph_safe) ||
+          (policy.deterministic && !implementation.deterministic)) {
+        continue;
+      }
+      std::vector<int> configurations;
+      implementation.enumerate_configs(spec, configurations);
+      for (int configuration : configurations) {
+        try {
+          return apxinf::attention::prepare(
+              implementation, configuration, spec, policy, bindings, device);
+        } catch (const Failure&) {
+          cudaGetLastError();
+        }
       }
     }
+    return nullptr;
+  };
+
+  // FA2 is the portable, production-scale no-timing baseline.  Trying an
+  // exact specialization first made a clean PI0.5 run materially slower than
+  // the tuned recipe even though FA2 was the winner for the same Spec.
+  if (auto execution = prepare_first_supported(kProviderFa2, false)) {
+    return execution;
+  }
+  // Continue with the remaining specializations and finally the portable
+  // cuBLAS/custom implementations. Preparation neither benchmarks candidates
+  // nor persists a recipe.
+  if (auto execution = prepare_first_supported(kProviderFa2, true)) {
+    return execution;
   }
   throw Failure(APXINF_STATUS_UNSUPPORTED,
                 "no Attention fallback satisfies the Spec and Policy");

@@ -11,7 +11,7 @@
 //! ```text
 //! APXINF_QWEN38_CHECKPOINT=/path/to/Qwen3.8-27B-NVFP4 \
 //!   bash crates/apxinf-cuda-new/test-new.sh \
-//!     test -p apxinf-cuda --test qwen38_mlp_layer -- --ignored --nocapture
+//!     test -p apxinf-cuda-new --test qwen38_mlp_layer -- --ignored --nocapture
 //! ```
 
 use std::collections::HashMap;

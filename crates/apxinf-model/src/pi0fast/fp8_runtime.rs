@@ -129,7 +129,12 @@ pub struct Pi0FastFp8Runtime {
     /// Maps the pruned LM-head columns back to global token ids; see
     /// [`super::action_head_remap`].
     lm_head_remap: Tensor,
-    arena: Mutex<Option<ExecutionSession>>,
+    arena: Mutex<Option<ArenaState>>,
+}
+
+struct ArenaState {
+    token_count: usize,
+    session: ExecutionSession,
 }
 
 impl Pi0FastFp8Runtime {
@@ -179,16 +184,16 @@ impl Pi0FastFp8Runtime {
             .arena
             .lock()
             .map_err(|_| Error::Other("π0-FAST FP8 arena mutex is poisoned".into()))?;
-        if arena
-            .as_ref()
-            .is_none_or(|workspace| workspace.capacity() < capacity)
-        {
-            *arena = Some(ExecutionSession::with_capacity(
-                capacity,
-                self.ctx().device_id(),
-            )?);
+        if arena.as_ref().is_none_or(|state| {
+            state.token_count != token_count || state.session.capacity() < capacity
+        }) {
+            *arena = Some(ArenaState {
+                token_count,
+                session: ExecutionSession::with_capacity(capacity, self.ctx().device_id())?,
+            });
         }
-        ops::prepare_with_session(arena.as_ref().expect("arena is populated above"), operation)
+        let state = arena.as_ref().expect("arena is populated above");
+        ops::prepare_with_session(&state.session, operation)
     }
 
     pub fn max_sequence(&self, token_count: usize) -> usize {
@@ -331,7 +336,9 @@ impl Pi0FastFp8Runtime {
         }
 
         let mut bytes = vec![0u8; produced * step_bytes];
-        tokens.copy_to_host(&mut bytes).map_err(Error::Cuda)?;
+        tokens
+            .copy_to_host_on(&mut bytes, self.ctx().stream())
+            .map_err(Error::Cuda)?;
         Ok(bytes
             .chunks_exact(4)
             .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))

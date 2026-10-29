@@ -875,10 +875,20 @@ fn gpu_e2e_persisted_recipe_restores_in_new_process() {
 fn gpu_e2e_default_cache_and_autotune_switches() {
     const CHILD_PHASE: &str = "APXINF_DEFAULT_RECIPE_CHILD";
     if let Ok(phase) = std::env::var(CHILD_PHASE) {
-        let allow_tune = !matches!(phase.as_str(), "cold" | "restore" | "override-restore");
-        let ctx = CudaContext::new_with_autotune(0, allow_tune).unwrap();
+        let allow_tune = !matches!(
+            phase.as_str(),
+            "cold" | "restore" | "override-restore" | "context-restore"
+        );
+        let context_cache = matches!(phase.as_str(), "context-override" | "context-restore")
+            .then(|| "context-recipes".to_owned());
+        let has_context_cache = context_cache.is_some();
+        let ctx = CudaContext::new_with_recipe_options(0, allow_tune, context_cache).unwrap();
         let default_dir = std::path::Path::new(ctx.default_cache_dir());
-        assert!(default_dir.starts_with("configs/tuning/nvidia"));
+        if !has_context_cache {
+            assert!(default_dir.starts_with("configs/tuning/nvidia"));
+        } else {
+            assert_eq!(default_dir, std::path::Path::new("context-recipes"));
+        }
         if phase == "cold" {
             std::fs::create_dir_all(default_dir).unwrap();
             std::fs::write(default_dir.join("tactics.json"), "not a recipe database").unwrap();
@@ -893,7 +903,7 @@ fn gpu_e2e_default_cache_and_autotune_switches() {
         let online_tune = phase != "policy-off";
         let expected = match phase.as_str() {
             "cold" | "policy-off" => "source=fallback",
-            "restore" | "warm-enabled" | "override-restore" => "source=recipe",
+            "restore" | "warm-enabled" | "override-restore" | "context-restore" => "source=recipe",
             _ => "source=tuned",
         };
         let input = tensor(0, vec![4, 8], &[0.5; 32]);
@@ -970,7 +980,9 @@ fn gpu_e2e_default_cache_and_autotune_switches() {
         ("warm-enabled", 2),
         ("override", 4),
         ("override-restore", 4),
-        ("no-persistence", 4),
+        ("context-override", 6),
+        ("context-restore", 6),
+        ("no-persistence", 6),
     ] {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -1133,7 +1145,17 @@ fn scaled_fp8_and_w8a8_use_the_canonical_kn_weight_contract() {
         &mut int8_out,
     );
     int8_args.policy.online_tune = false;
-    gemm(&ctx, int8_args).unwrap();
+    int8_args.policy.cache_dir = Some(String::new());
+    let normalized =
+        super::contracts::normalize(&ctx, int8_args, super::contracts::Semantic::Gemm, None)
+            .unwrap();
+    let execution = super::execution::prepare(&ctx, normalized).unwrap();
+    assert!(execution
+        .summary()
+        .starts_with("cublasLt+custom-epilogue config=0 "));
+    assert!(execution.summary().contains("source=fallback"));
+    execution.enqueue().unwrap();
+    ctx.synchronize().unwrap();
     let int8_values = values(&int8_out);
     assert!(int8_values[..n].iter().all(|&value| value == 16.0));
     assert!(int8_values[n..].iter().all(|&value| value == 8.0));

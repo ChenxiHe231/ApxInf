@@ -2,8 +2,9 @@
 
 use apxinf_core::{Error, KvCache, Result, Tensor};
 use std::any::Any;
+use std::sync::Arc;
 
-use crate::{ops, CudaBuffer, CudaContext};
+use crate::{ops, CudaBuffer, CudaContext, CudaStream};
 
 /// KV cache stored in CUDA buffers.
 ///
@@ -18,11 +19,12 @@ pub struct CudaKvCache {
     head_dim: usize,
     max_seq_len: usize,
     seq_len: usize,
+    stream: Arc<CudaStream>,
 }
 
 impl CudaKvCache {
     pub(crate) fn new(
-        device_id: usize,
+        ctx: &CudaContext,
         n_layers: usize,
         n_kv_heads: usize,
         head_dim: usize,
@@ -34,11 +36,18 @@ impl CudaKvCache {
             .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| Error::Other("KV cache allocation size overflow".into()))?;
 
+        let device_id = ctx.device_id();
         let k_buffers = (0..n_layers)
-            .map(|_| CudaBuffer::alloc_zeros(layer_bytes, device_id).map_err(Error::Cuda))
+            .map(|_| {
+                CudaBuffer::alloc_zeros_async(layer_bytes, device_id, ctx.stream())
+                    .map_err(Error::Cuda)
+            })
             .collect::<Result<Vec<_>>>()?;
         let v_buffers = (0..n_layers)
-            .map(|_| CudaBuffer::alloc_zeros(layer_bytes, device_id).map_err(Error::Cuda))
+            .map(|_| {
+                CudaBuffer::alloc_zeros_async(layer_bytes, device_id, ctx.stream())
+                    .map_err(Error::Cuda)
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             k_buffers,
@@ -47,6 +56,7 @@ impl CudaKvCache {
             head_dim,
             max_seq_len,
             seq_len: 0,
+            stream: ctx.shared_stream(),
         })
     }
 
@@ -119,7 +129,7 @@ impl KvCache for CudaKvCache {
         // Captured decode graphs retain these addresses. Zero in place rather
         // than replacing the allocations.
         for buffer in self.k_buffers.iter().chain(&self.v_buffers) {
-            buffer.zero().map_err(Error::Cuda)?;
+            buffer.zero_async(&self.stream).map_err(Error::Cuda)?;
         }
         self.seq_len = 0;
         Ok(())
@@ -153,7 +163,7 @@ mod tests {
         let bf16_values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].map(bf16::from_f32);
         let bf16_host = Tensor::from_bf16(Shape::new(vec![2, 2, 2]), &bf16_values).unwrap();
         let bf16_input = crate::transfers::to_cuda(&bf16_host, 0).unwrap();
-        let bf16_cache = CudaKvCache::new(0, 1, 2, 2, 3).unwrap();
+        let bf16_cache = CudaKvCache::new(&ctx, 1, 2, 2, 3).unwrap();
         bf16_cache
             .append(&ctx, 0, &bf16_input, &bf16_input, 2)
             .unwrap();
@@ -175,7 +185,7 @@ mod tests {
         let f32_values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let f32_host = Tensor::from_f32(Shape::new(vec![2, 2, 2]), &f32_values).unwrap();
         let f32_input = crate::transfers::to_cuda(&f32_host, 0).unwrap();
-        let f32_cache = CudaKvCache::new(0, 1, 2, 2, 3).unwrap();
+        let f32_cache = CudaKvCache::new(&ctx, 1, 2, 2, 3).unwrap();
         f32_cache
             .append(&ctx, 0, &f32_input, &f32_input, 2)
             .unwrap();
@@ -195,7 +205,7 @@ mod tests {
             Tensor::from_f32(Shape::new(vec![2, 2]), &[9.0, 10.0, 11.0, 12.0]).unwrap();
         let decode_input = crate::transfers::to_cuda(&decode_host, 0).unwrap();
         let decode_input = CudaBuffer::from_tensor(&decode_input).unwrap();
-        let decode_cache = CudaKvCache::new(0, 1, 2, 2, 3).unwrap();
+        let decode_cache = CudaKvCache::new(&ctx, 1, 2, 2, 3).unwrap();
         let position = crate::HostMappedBuffer::alloc(4, 0).unwrap();
         position.write_u32(1).unwrap();
         ops::cache::append_at(

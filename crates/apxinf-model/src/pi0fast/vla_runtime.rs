@@ -123,7 +123,9 @@ impl Pi0FastVlaRuntime {
         let bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_ne_bytes()).collect();
         let buffer =
             CudaBuffer::alloc(bytes.len(), self.backend.device_id()).map_err(Error::Cuda)?;
-        buffer.copy_from_host(&bytes).map_err(Error::Cuda)?;
+        buffer
+            .copy_from_host_on(&bytes, self.backend.context().stream())
+            .map_err(Error::Cuda)?;
         Ok(buffer)
     }
 
@@ -149,7 +151,9 @@ impl Pi0FastVlaRuntime {
                     .to_device(&Tensor::zeros(self.patch_shape().to_vec(), DType::F32))?;
                 let images = CudaBuffer::alloc(bytes.len(), self.backend.device_id())
                     .map_err(Error::Cuda)?;
-                images.copy_from_host(bytes).map_err(Error::Cuda)?;
+                images
+                    .copy_from_host_on(bytes, self.backend.context().stream())
+                    .map_err(Error::Cuda)?;
                 ops::preprocess::preprocess(
                     self.backend.context(),
                     ops::preprocess::PreprocessArgs {

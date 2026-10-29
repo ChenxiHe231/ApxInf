@@ -154,7 +154,11 @@ fn tensor_storage(
         return Err(invalid("Pointwise tensor device/dtype mismatch"));
     }
     if tensor.shape().numel() != elements {
-        return Err(invalid("Pointwise tensor element count mismatch"));
+        return Err(invalid(format!(
+            "Pointwise tensor element count mismatch: expected {elements}, got {} for shape {:?}",
+            tensor.shape().numel(),
+            tensor.shape().dims()
+        )));
     }
     let expected = elements
         .checked_mul(dtype.size_in_bytes())
@@ -313,7 +317,9 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
     let (bias, bias_alignment) = match args.bias {
         Some(tensor) => {
             let bias_elements = if matches!(semantic, PointwiseSemantic::SwigluRowwiseE4m3) {
-                input_cols
+                logical_cols
+                    .checked_mul(2)
+                    .ok_or_else(|| invalid("Pointwise SwiGLU bias size overflow"))?
             } else {
                 cols
             };

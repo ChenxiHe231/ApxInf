@@ -273,6 +273,10 @@ pub(crate) fn normalize(ctx: &CudaContext, args: KvCacheAttentionArgs<'_>) -> Re
         scale: args.scale,
         output_scale: 1.0,
     };
+    let mut policy = args.policy;
+    if policy.cache_dir.is_none() {
+        policy.cache_dir = ctx.recipe_cache_dir().map(str::to_owned);
+    }
     Ok(Normalized {
         spec: abi::Spec {
             version: abi::SPEC_VERSION,
@@ -309,7 +313,7 @@ pub(crate) fn normalize(ctx: &CudaContext, args: KvCacheAttentionArgs<'_>) -> Re
             dynamic_decode: u32::from(dynamic_decode),
             numerics: args.numerics as u32,
         },
-        policy: args.policy,
+        policy,
         bindings,
         storage: vec![q, k, v, out],
         resources,

@@ -20,7 +20,7 @@
 //!
 //! ```text
 //! bash crates/apxinf-cuda-new/test-new.sh \
-//!   test -p apxinf-cuda --test qwen38_flashinfer_gdn -- --include-ignored --nocapture
+//!   test -p apxinf-cuda-new --test qwen38_flashinfer_gdn -- --include-ignored --nocapture
 //! ```
 
 use apxinf_core::{DType, Shape, Tensor};

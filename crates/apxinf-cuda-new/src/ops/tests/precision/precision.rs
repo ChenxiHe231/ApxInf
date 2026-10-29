@@ -223,7 +223,7 @@ fn attention_sm100_fmha_candidate_matches_reference() {
 }
 
 #[test]
-fn attention_f16_vision_uses_fa2_and_matches_reference() {
+fn attention_f16_vision_recipe_miss_uses_fa2_and_matches_reference() {
     let ctx = CudaContext::new(0).unwrap();
     let (batch, tokens, heads, head_dim) = (1, 256, 16, 72);
     let elements = batch * tokens * heads * head_dim;
@@ -233,7 +233,8 @@ fn attention_f16_vision_uses_fa2_and_matches_reference() {
     let value = f16_tensor(0, shape.clone(), &vec![1.0; elements]);
     let mut out = zeros_tensor(0, shape, DType::F16);
     let mut args = AttentionArgs::new(&query, &key, &value, &mut out);
-    args.policy.allow_fallback = false;
+    args.policy.online_tune = false;
+    args.policy.cache_dir = Some(String::new());
     args.policy.graph_safe = true;
     let normalized = super::attention_contracts::normalize(&ctx, args).unwrap();
     super::attention_execution::validate_candidates(&ctx, &normalized, &vec![1.0; elements])

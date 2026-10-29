@@ -70,6 +70,7 @@ pub struct CudaContext {
     caps: CudaDeviceCaps,
     cublas: crate::cublas::CublasHandle,
     library_versions: CudaLibraryVersions,
+    recipe_cache_dir: Option<String>,
 }
 
 impl CudaContext {
@@ -83,6 +84,18 @@ impl CudaContext {
     /// Tuning requires both this permission and the operator policy's
     /// `online_tune`. Disabling it still permits reuse of persisted recipes.
     pub fn new_with_autotune(device_id: usize, allow_online_tune: bool) -> Result<Self, String> {
+        Self::new_with_recipe_options(device_id, allow_online_tune, None)
+    }
+
+    /// Create a context with model-load recipe policy.
+    ///
+    /// An explicit directory becomes the default for GEMM and Attention when
+    /// an individual operation does not provide a narrower override.
+    pub fn new_with_recipe_options(
+        device_id: usize,
+        allow_online_tune: bool,
+        recipe_cache_dir: Option<String>,
+    ) -> Result<Self, String> {
         let device = i32::try_from(device_id)
             .map_err(|_| format!("CUDA device id {device_id} does not fit in i32"))?;
         unsafe {
@@ -101,24 +114,29 @@ impl CudaContext {
             )
             .map_err(|error| error.to_string())?;
         }
-        let caps = match CudaDeviceCaps::query(runtime) {
-            Ok(caps) => caps,
+        let initialized = (|| {
+            let caps = CudaDeviceCaps::query(runtime)?;
+            let cublas = crate::cublas::CublasHandle::new()?;
+            cublas.set_stream(&stream)?;
+            let library_versions = CudaLibraryVersions::query(&cublas)?;
+            Ok::<_, String>((caps, cublas, library_versions))
+        })();
+        let (caps, cublas, library_versions) = match initialized {
+            Ok(initialized) => initialized,
             Err(error) => {
                 unsafe { crate::ffi::abi::runtime::apxinf_runtime_destroy(runtime) };
                 return Err(error);
             }
         };
 
-        let cublas = crate::cublas::CublasHandle::new()?;
-        cublas.set_stream(&stream)?;
-
         Ok(Self {
             device_id,
             stream,
             runtime,
             caps,
-            library_versions: CudaLibraryVersions::query(&cublas)?,
+            library_versions,
             cublas,
+            recipe_cache_dir,
         })
     }
 
@@ -128,6 +146,9 @@ impl CudaContext {
     /// Default recipe directory, relative to the process working directory.
     /// An explicit operator `cache_dir` overrides this hardware/toolkit path.
     pub fn default_cache_dir(&self) -> &str {
+        if let Some(directory) = self.recipe_cache_dir.as_deref() {
+            return directory;
+        }
         unsafe {
             std::ffi::CStr::from_ptr(crate::ffi::abi::runtime::apxinf_runtime_default_cache_dir(
                 self.runtime,
@@ -135,6 +156,9 @@ impl CudaContext {
         }
         .to_str()
         .expect("native default cache directory is ASCII")
+    }
+    pub(crate) fn recipe_cache_dir(&self) -> Option<&str> {
+        self.recipe_cache_dir.as_deref()
     }
     pub fn stream(&self) -> &CudaStream {
         &self.stream

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use apxinf_core::{DType, Device, Error, Result, Tensor};
 
-use crate::accelerator::create_backend;
+use crate::accelerator::create_backend_with_recipe_options;
 use crate::builtin::register_builtin_models;
 use crate::d3::{DecisionInput, DecisionOutput, DecisionRuntime};
 use crate::generation_config::{
@@ -417,7 +417,13 @@ impl AutoModel {
                 })?
         };
         // Resolve admission before touching a device or loading checkpoint data.
-        let backend = create_backend(device)?;
+        #[cfg(feature = "cuda")]
+        let backend = {
+            let recipe = cuda_recipe_options(options)?;
+            create_backend_with_recipe_options(device, recipe.online_tune, recipe.cache_dir)?
+        };
+        #[cfg(not(feature = "cuda"))]
+        let backend = create_backend_with_recipe_options(device, options.autotune, None)?;
         let mut loaded = factory(path, device, backend, options)?;
         if let LoadedModel::Text {
             generation_defaults,
@@ -447,7 +453,7 @@ pub(crate) fn cuda_recipe_options(options: &LoadOptions) -> Result<CudaRecipeOpt
     let cache_dir = options
         .tuning_path
         .as_deref()
-        .map(exact_recipe_directory)
+        .and_then(|path| (!is_source_hardware_tactics(path)).then(|| exact_recipe_directory(path)))
         .map(|path| {
             path.to_str().map(str::to_owned).ok_or_else(|| {
                 Error::Other(format!(
@@ -461,6 +467,28 @@ pub(crate) fn cuda_recipe_options(options: &LoadOptions) -> Result<CudaRecipeOpt
         cache_dir,
         online_tune: options.autotune,
     })
+}
+
+#[cfg(any(feature = "cuda", test))]
+fn is_source_hardware_tactics(path: &Path) -> bool {
+    if path.file_name().and_then(|name| name.to_str()) != Some("tactics.json") {
+        return false;
+    }
+    let Some(device_directory) = path.parent() else {
+        return false;
+    };
+    let Some(vendor_directory) = device_directory.parent() else {
+        return false;
+    };
+    let Some(tuning_directory) = vendor_directory.parent() else {
+        return false;
+    };
+    let Some(configs_directory) = tuning_directory.parent() else {
+        return false;
+    };
+    vendor_directory.file_name().and_then(|name| name.to_str()) == Some("nvidia")
+        && tuning_directory.file_name().and_then(|name| name.to_str()) == Some("tuning")
+        && configs_directory.file_name().and_then(|name| name.to_str()) == Some("configs")
 }
 
 #[cfg(any(feature = "cuda", test))]
@@ -529,6 +557,26 @@ mod tests {
         assert!(recipe.online_tune);
         options.autotune = false;
         assert!(!cuda_recipe_options(&options).unwrap().online_tune);
+    }
+
+    #[test]
+    fn source_hardware_tactics_defer_to_the_native_toolkit_directory() {
+        let options = LoadOptions {
+            tuning_path: Some(PathBuf::from(
+                "/checkout/configs/tuning/nvidia/thor-sm110/tactics.json",
+            )),
+            ..LoadOptions::default()
+        };
+        assert_eq!(cuda_recipe_options(&options).unwrap().cache_dir, None);
+
+        let options = LoadOptions {
+            tuning_path: Some(PathBuf::from("/checkpoint/tactics.json")),
+            ..LoadOptions::default()
+        };
+        assert_eq!(
+            cuda_recipe_options(&options).unwrap().cache_dir.as_deref(),
+            Some("/checkpoint/tactics.recipes")
+        );
     }
 
     #[test]

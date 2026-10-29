@@ -117,6 +117,29 @@ impl CudaBuffer {
         }
     }
 
+    /// Copy host data after earlier work on `stream`, and do not return until
+    /// the pageable host slice is no longer needed by CUDA.
+    pub fn copy_from_host_on(&self, src: &[u8], stream: &crate::CudaStream) -> Result<(), String> {
+        assert!(src.len() <= self.len, "source exceeds buffer size");
+        if stream.device() != self.device {
+            return Err(format!(
+                "CUDA buffer is on device {}, but copy stream targets device {}",
+                self.device,
+                stream.device()
+            ));
+        }
+        stream.with_current_device(|| unsafe {
+            ffi::check_cuda(ffi::cudaMemcpyAsync(
+                self.ptr,
+                src.as_ptr() as *const c_void,
+                src.len(),
+                ffi::cudaMemcpyKind::cudaMemcpyHostToDevice,
+                stream.handle(),
+            ))?;
+            ffi::check_cuda(ffi::cudaStreamSynchronize(stream.handle()))
+        })
+    }
+
     /// Copy data from this device buffer to host.
     pub fn copy_to_host(&self, dst: &mut [u8]) -> Result<(), String> {
         assert!(dst.len() <= self.len, "destination exceeds buffer size");
@@ -128,6 +151,33 @@ impl CudaBuffer {
                 ffi::cudaMemcpyKind::cudaMemcpyDeviceToHost,
             ))
         }
+    }
+
+    /// Copy device data after earlier work on `stream`, and do not return
+    /// until `dst` contains the completed result.
+    pub fn copy_to_host_on(
+        &self,
+        dst: &mut [u8],
+        stream: &crate::CudaStream,
+    ) -> Result<(), String> {
+        assert!(dst.len() <= self.len, "destination exceeds buffer size");
+        if stream.device() != self.device {
+            return Err(format!(
+                "CUDA buffer is on device {}, but copy stream targets device {}",
+                self.device,
+                stream.device()
+            ));
+        }
+        stream.with_current_device(|| unsafe {
+            ffi::check_cuda(ffi::cudaMemcpyAsync(
+                dst.as_mut_ptr() as *mut c_void,
+                self.ptr,
+                dst.len(),
+                ffi::cudaMemcpyKind::cudaMemcpyDeviceToHost,
+                stream.handle(),
+            ))?;
+            ffi::check_cuda(ffi::cudaStreamSynchronize(stream.handle()))
+        })
     }
 
     /// Zero-fill the buffer on device, without a host staging allocation.
@@ -512,5 +562,23 @@ impl Drop for HostMappedBuffer {
             let _ = ffi::cudaSetDevice(self.device as i32);
             let _ = ffi::cudaFreeHost(self.host_ptr);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_ordered_host_copies_observe_prior_work() {
+        let _guard = crate::CUDA_TEST_LOCK.lock().unwrap();
+        let ctx = crate::CudaContext::new(0).unwrap();
+        let buffer = CudaBuffer::alloc(4096, 0).unwrap();
+        let input = vec![0x5a; buffer.len()];
+        buffer.copy_from_host_on(&input, ctx.stream()).unwrap();
+        buffer.zero_async(ctx.stream()).unwrap();
+        let mut output = vec![0xff; buffer.len()];
+        buffer.copy_to_host_on(&mut output, ctx.stream()).unwrap();
+        assert_eq!(output, vec![0; buffer.len()]);
     }
 }

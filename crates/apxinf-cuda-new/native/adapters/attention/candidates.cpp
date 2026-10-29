@@ -61,6 +61,11 @@ void one_configuration(const Spec&, std::vector<int>& configurations) {
 }
 
 #if defined(APXINF_ATTENTION_FA2)
+bool fa2_head_dim_supported(const Spec& spec) {
+  return spec.head_dim > 0 && spec.head_dim <= 256 &&
+         spec.head_dim % 8 == 0;
+}
+
 int multiprocessor_count() {
   int device = 0;
   if (cudaGetDevice(&device) != cudaSuccess) return 0;
@@ -149,10 +154,10 @@ bool supports_fa2(const Spec& spec) {
        (spec.mask == APXINF_ATTENTION_MASK_NONE ||
         spec.query_start == spec.key_tokens - spec.query_tokens));
   const bool bf16_supported =
-      spec.dtype == APXINF_DTYPE_BF16 && spec.head_dim <= 256;
+      spec.dtype == APXINF_DTYPE_BF16 && fa2_head_dim_supported(spec);
   const bool f16_supported = spec.dtype == APXINF_DTYPE_F16 &&
                              spec.mask == APXINF_ATTENTION_MASK_NONE &&
-                             spec.head_dim <= 256;
+                             fa2_head_dim_supported(spec);
   const bool supported = layout_supported &&
                          spec.qkv_layout ==
                              APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
@@ -171,7 +176,8 @@ bool supports_fa2_segmented(const Spec& spec) {
          (spec.dtype == APXINF_DTYPE_BF16 ||
           spec.dtype == APXINF_DTYPE_F16) &&
          spec.output_dtype == spec.dtype && spec.batch == 1 &&
-         spec.query_heads == spec.kv_heads && spec.head_dim <= 256 &&
+         spec.query_heads == spec.kv_heads &&
+         fa2_head_dim_supported(spec) &&
          spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE;
 }
 

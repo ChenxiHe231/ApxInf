@@ -37,7 +37,7 @@ fn element_count(tensor: &Tensor, what: &str) -> Result<i64> {
     i64::try_from(numel).map_err(|_| invalid(format!("{what} element count exceeds i64")))
 }
 
-/// `output[i] = activation(input[i])`, elementwise, BF16 in and out.
+/// `output[i] = activation(input[i])`, elementwise, F32 or BF16 in and out.
 ///
 /// `output` and `input` must be distinct buffers with equal shapes; the
 /// operator is out-of-place by contract, matching the trait it backs.
@@ -55,16 +55,35 @@ pub fn activation(
         return Err(invalid("activation requires gelu_tanh or silu"));
     }
     let count = element_count(input, "activation")?;
-    let input_buffer = tensor_storage(ctx, input, DType::BF16, &dims)?;
-    let output_buffer = tensor_storage(ctx, output, DType::BF16, &dims)?;
-    unsafe {
-        status::check(abi::apxinf_elementwise_activation_bf16(
-            input_buffer.ptr(),
-            output_buffer.ptr(),
-            count,
-            activation.code(),
-            ctx.stream().handle(),
-        ))
+    if output.dtype() != input.dtype() {
+        return Err(invalid("activation input/output dtype mismatch"));
+    }
+    let dtype = input.dtype();
+    let input_buffer = tensor_storage(ctx, input, dtype, &dims)?;
+    let output_buffer = tensor_storage(ctx, output, dtype, &dims)?;
+    match dtype {
+        DType::BF16 => unsafe {
+            status::check(abi::apxinf_elementwise_activation_bf16(
+                input_buffer.ptr(),
+                output_buffer.ptr(),
+                count,
+                activation.code(),
+                ctx.stream().handle(),
+            ))
+        },
+        DType::F32 if activation == ElementwiseActivation::Silu => unsafe {
+            check_cuda(
+                crate::ffi::abi::activation::apxinf_activation_fixed_decode_silu_f32(
+                    input_buffer.ptr(),
+                    output_buffer.ptr(),
+                    u32::try_from(count)
+                        .map_err(|_| invalid("activation element count exceeds u32"))?,
+                    ctx.stream().handle(),
+                ),
+            )
+        },
+        DType::F32 => Err(invalid("F32 activation currently supports SiLU")),
+        _ => Err(invalid("activation currently supports F32 and BF16")),
     }
 }
 
@@ -189,7 +208,16 @@ pub fn scale(ctx: &CudaContext, input: &Tensor, output: &Tensor, factor: f32) ->
                 ctx.stream().handle(),
             ))
         },
-        _ => Err(invalid("scale currently supports F16 and BF16")),
+        DType::F32 => unsafe {
+            check_cuda(abi::apxinf_elementwise_fixed_decode_scale_f32(
+                input_buffer.ptr(),
+                output_buffer.ptr(),
+                u32::try_from(count).map_err(|_| invalid("scale element count exceeds u32"))?,
+                factor,
+                ctx.stream().handle(),
+            ))
+        },
+        _ => Err(invalid("scale currently supports F32, F16, and BF16")),
     }
 }
 

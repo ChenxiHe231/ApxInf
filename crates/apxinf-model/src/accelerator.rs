@@ -2,19 +2,37 @@
 
 use std::sync::Arc;
 
-use apxinf_core::{Backend, Device, Result};
-#[cfg(not(all(feature = "cuda", feature = "hip", feature = "mlx", target_os = "macos", target_arch = "aarch64")))]
+#[cfg(not(all(
+    feature = "cuda",
+    feature = "hip",
+    feature = "mlx",
+    target_os = "macos",
+    target_arch = "aarch64"
+)))]
 use apxinf_core::Error;
+use apxinf_core::{Backend, Device, Result};
 
 pub(crate) fn create_backend(device: Device) -> Result<Arc<dyn Backend>> {
+    create_backend_with_recipe_options(device, true, None)
+}
+
+pub(crate) fn create_backend_with_recipe_options(
+    device: Device,
+    allow_online_tune: bool,
+    recipe_cache_dir: Option<String>,
+) -> Result<Arc<dyn Backend>> {
     match device {
         Device::Cpu => Ok(Arc::new(apxinf_core::CpuBackend)),
         #[cfg(all(feature = "mlx", target_os = "macos", target_arch = "aarch64"))]
         Device::Metal(id) => Ok(Arc::new(apxinf_mlx::MlxBackend::new(id)?)),
         #[cfg(not(all(feature = "mlx", target_os = "macos", target_arch = "aarch64")))]
-        Device::Metal(_) => Err(Error::Other("MLX support not compiled in; enable the mlx feature".into())),
+        Device::Metal(_) => Err(Error::Other(
+            "MLX support not compiled in; enable the mlx feature".into(),
+        )),
         #[cfg(feature = "cuda")]
-        Device::Cuda(_) => create_cuda_new_backend(device),
+        Device::Cuda(_) => {
+            create_cuda_new_backend_with_recipe_options(device, allow_online_tune, recipe_cache_dir)
+        }
         #[cfg(not(feature = "cuda"))]
         Device::Cuda(_) => Err(Error::Other("CUDA support not compiled in".into())),
         #[cfg(feature = "hip")]
@@ -49,13 +67,23 @@ pub(crate) mod hip {
 /// legacy one, so those families need no code change to switch runtimes: the
 /// model composes unchanged and only the concrete backend differs.
 #[cfg(feature = "cuda")]
-pub(crate) fn create_cuda_new_backend(device: Device) -> Result<Arc<dyn Backend>> {
+pub(crate) fn create_cuda_new_backend_with_recipe_options(
+    device: Device,
+    allow_online_tune: bool,
+    recipe_cache_dir: Option<String>,
+) -> Result<Arc<dyn Backend>> {
     let Device::Cuda(id) = device else {
         return Err(Error::Other(
             "the cuda-new backend requires a CUDA device".into(),
         ));
     };
-    Ok(Arc::new(apxinf_cuda_new::CudaNewBackend::new(id)?))
+    Ok(Arc::new(
+        apxinf_cuda_new::CudaNewBackend::new_with_recipe_options(
+            id,
+            allow_online_tune,
+            recipe_cache_dir,
+        )?,
+    ))
 }
 
 /// Recover the concrete cuda-new backend from an `Arc<dyn Backend>`.
@@ -81,9 +109,7 @@ pub(crate) fn downcast_cuda_new_arc(
 /// (allocation-free decode workspace + CUDA Graph capture); this is their
 /// intentional seam to the concrete backend.
 #[cfg(feature = "cuda")]
-pub(crate) fn downcast_cuda_new(
-    backend: &dyn Backend,
-) -> Option<&apxinf_cuda_new::CudaNewBackend> {
+pub(crate) fn downcast_cuda_new(backend: &dyn Backend) -> Option<&apxinf_cuda_new::CudaNewBackend> {
     backend
         .as_any()
         .downcast_ref::<apxinf_cuda_new::CudaNewBackend>()

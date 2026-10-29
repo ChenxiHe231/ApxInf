@@ -24,9 +24,14 @@ pub fn embedding_gather(
         return Err(invalid("embedding output width must match the table"));
     }
     let tokens = output_dims[0];
-    tensor_storage(ctx, table, DType::BF16, &table_dims)?;
+    if !matches!(table.dtype(), DType::F32 | DType::BF16) || output.dtype() != table.dtype() {
+        return Err(invalid(
+            "embedding gather currently requires matching F32 or BF16 table/output",
+        ));
+    }
+    tensor_storage(ctx, table, table.dtype(), &table_dims)?;
     let id_buffer = tensor_storage(ctx, ids, DType::I32, &[tokens])?;
-    tensor_storage(ctx, output, DType::BF16, &output_dims)?;
+    tensor_storage(ctx, output, table.dtype(), &output_dims)?;
     let mut output = output.clone();
     let mut args = GatherArgs::new(GatherSemantic::EmbeddingLookup, table, &mut output);
     args.ids = Some(&id_buffer);

@@ -16,7 +16,7 @@
 //! ```text
 //! APXINF_QWEN38_CHECKPOINT=/path/to/Qwen3.8-27B-NVFP4 \
 //!   bash crates/apxinf-cuda-new/test-new.sh \
-//!     test -p apxinf-cuda --test qwen38_end_to_end --release \
+//!     test -p apxinf-cuda-new --test qwen38_end_to_end --release \
 //!     -- --ignored --nocapture
 //! ```
 
@@ -4775,7 +4775,7 @@ fn teacher_forcing_logits() {
 //   APXINF_QWEN38_PROMPT="The capital of France is" \
 //   APXINF_QWEN38_MAX_NEW=32 \
 //     bash crates/apxinf-cuda-new/test-new.sh \
-//       test -p apxinf-cuda --test qwen38_end_to_end --release \
+//       test -p apxinf-cuda-new --test qwen38_end_to_end --release \
 //       -- --ignored generate_from_a_real_prompt --nocapture
 // -------------------------------------------------------------------------
 #[test]

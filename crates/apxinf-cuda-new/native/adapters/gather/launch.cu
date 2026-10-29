@@ -24,12 +24,13 @@ bool may_have_bias(uint32_t semantic) {
 }
 
 void validate_spec(const apxinf_gather_spec_t& spec) {
-  // F32 is accepted only for RGB preprocessing: the pi0-fast vision tower
-  // keeps its patch pipeline in F32 until the first projection.
+  // F32 is accepted for RGB preprocessing and the portable backend's default
+  // embedding path.
   const bool dtype_ok =
       spec.dtype == APXINF_DTYPE_F16 || spec.dtype == APXINF_DTYPE_BF16 ||
       (spec.dtype == APXINF_DTYPE_F32 &&
-       spec.semantic == APXINF_GATHER_SEMANTIC_RGB_TO_PATCHES);
+       (spec.semantic == APXINF_GATHER_SEMANTIC_RGB_TO_PATCHES ||
+        spec.semantic == APXINF_GATHER_SEMANTIC_EMBEDDING_LOOKUP));
   if (spec.version != APXINF_GATHER_SPEC_VERSION ||
       spec.semantic > APXINF_GATHER_SEMANTIC_REPLACE_ROWS ||
       !dtype_ok ||
@@ -58,12 +59,6 @@ void validate_spec(const apxinf_gather_spec_t& spec) {
       spec.embedding_scale != APXINF_GATHER_EMBEDDING_SCALE_NONE) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Gather semantic does not take embedding scale");
-  }
-  if (spec.semantic == APXINF_GATHER_SEMANTIC_EMBEDDING_LOOKUP &&
-      spec.embedding_scale == APXINF_GATHER_EMBEDDING_SCALE_NONE &&
-      spec.dtype != APXINF_DTYPE_BF16) {
-    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
-                  "unscaled embedding lookup requires BF16");
   }
   if (spec.semantic == APXINF_GATHER_SEMANTIC_BIAS_POSITION &&
       (spec.tokens_per_view == 0 ||
@@ -160,12 +155,19 @@ cudaError_t launch(const apxinf_gather_spec_t& spec,
   switch (spec.semantic) {
     case APXINF_GATHER_SEMANTIC_EMBEDDING_LOOKUP:
       if (spec.embedding_scale == APXINF_GATHER_EMBEDDING_SCALE_NONE) {
-        return static_cast<cudaError_t>(
-            apxinf::cuda_new::gather::embedding_gather(
-                input, reinterpret_cast<const int32_t*>(bindings.ids), output,
-                rows, cols, static_cast<int>(spec.vocab_size), stream));
+        if (spec.dtype == APXINF_DTYPE_BF16) {
+          return static_cast<cudaError_t>(
+              apxinf::cuda_new::gather::embedding_gather(
+                  input, reinterpret_cast<const int32_t*>(bindings.ids),
+                  output, rows, cols, static_cast<int>(spec.vocab_size),
+                  stream));
+        }
+        kernels::embedding_lookup<T, false><<<grid, kThreads, 0, stream>>>(
+            input, bindings.ids, output, rows, cols,
+            static_cast<int>(spec.vocab_size));
+        break;
       }
-      kernels::embedding_lookup<T><<<grid, kThreads, 0, stream>>>(
+      kernels::embedding_lookup<T, true><<<grid, kThreads, 0, stream>>>(
           input, bindings.ids, output, rows, cols,
           static_cast<int>(spec.vocab_size));
       break;

@@ -819,17 +819,11 @@ pub(crate) fn decode_step_inner(
 /// position 0, empty state) so a PyTorch reference can be compared tensor by
 /// tensor. Writes raw little-endian f32 files under devlocal/qwen38-nvfp4/apxdump.
 fn gemm_cache_dir() -> Option<String> {
-    Some(
-        std::env::var("APXINF_QWEN38_GEMM_TUNE_CACHE")
-            .unwrap_or_else(|_| "/tmp/apxinf-qwen38-gemm-recipes".to_string()),
-    )
+    std::env::var("APXINF_QWEN38_GEMM_TUNE_CACHE").ok()
 }
 
 fn attention_cache_dir() -> Option<String> {
-    Some(
-        std::env::var("APXINF_QWEN38_TUNE_CACHE")
-            .unwrap_or_else(|_| "/tmp/apxinf-qwen38-attention-recipes".to_string()),
-    )
+    std::env::var("APXINF_QWEN38_TUNE_CACHE").ok()
 }
 
 /// q, k and v live in one [10240] projection: 16*128 q, then 16*128 k, then

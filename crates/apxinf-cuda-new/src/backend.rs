@@ -41,6 +41,17 @@ impl CudaNewBackend {
         Ok(Self::from_context(std::sync::Arc::new(ctx)))
     }
 
+    pub fn new_with_recipe_options(
+        device_id: usize,
+        allow_online_tune: bool,
+        recipe_cache_dir: Option<String>,
+    ) -> Result<Self> {
+        let ctx =
+            CudaContext::new_with_recipe_options(device_id, allow_online_tune, recipe_cache_dir)
+                .map_err(Error::Cuda)?;
+        Ok(Self::from_context(std::sync::Arc::new(ctx)))
+    }
+
     /// Construct a backend around an existing context.
     ///
     /// This is reserved for execution paths that intentionally share one
@@ -113,14 +124,18 @@ impl Backend for CudaNewBackend {
         let output = self
             .ctx
             .allocate_output(input.shape().clone(), input.dtype())?;
-        ops::norm::norm(&self.ctx, ops::NormArgs::rms(input, weight, &output, eps))?;
+        let mut args = ops::NormArgs::rms(input, weight, &output, eps);
+        if input.dtype() == DType::F32 {
+            args.numerics = ops::NormNumerics::StableDecode;
+        }
+        ops::norm::norm(&self.ctx, args)?;
         Ok(output)
     }
 
     fn silu(&self, input: &Tensor) -> Result<Tensor> {
         let output = self
             .ctx
-            .allocate_output(input.shape().clone(), DType::BF16)?;
+            .allocate_output(input.shape().clone(), input.dtype())?;
         ops::elementwise_activation(&self.ctx, input, &output, ops::ElementwiseActivation::Silu)?;
         Ok(output)
     }
@@ -133,7 +148,7 @@ impl Backend for CudaNewBackend {
 
     fn mul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let dims = a.shape().clone();
-        let output = self.ctx.allocate_output(dims, DType::BF16)?;
+        let output = self.ctx.allocate_output(dims, a.dtype())?;
         ops::elementwise_mul(&self.ctx, a, b, &output)?;
         Ok(output)
     }
@@ -312,14 +327,16 @@ impl Backend for CudaNewBackend {
         let width = table.shape().dims()[1];
         let output = self
             .ctx
-            .allocate_output(Shape::new(vec![ids.len(), width]), DType::BF16)?;
+            .allocate_output(Shape::new(vec![ids.len(), width]), table.dtype())?;
         let ids_i32: Vec<u8> = ids
             .iter()
             .flat_map(|&id| (id as i32).to_ne_bytes())
             .collect();
         let ids_buffer =
             crate::CudaBuffer::alloc(ids_i32.len(), self.ctx.device_id()).map_err(Error::Cuda)?;
-        ids_buffer.copy_from_host(&ids_i32).map_err(Error::Cuda)?;
+        ids_buffer
+            .copy_from_host_on(&ids_i32, self.ctx.stream())
+            .map_err(Error::Cuda)?;
         let ids_tensor = ids_buffer
             .as_tensor(Shape::new(vec![ids.len()]), DType::I32)
             .map_err(Error::Cuda)?;
@@ -381,14 +398,8 @@ impl Backend for CudaNewBackend {
         max_seq_len: usize,
     ) -> Box<dyn KvCache> {
         Box::new(
-            CudaKvCache::new(
-                self.ctx.device_id(),
-                n_layers,
-                n_kv_heads,
-                head_dim,
-                max_seq_len,
-            )
-            .expect("KV cache allocation"),
+            CudaKvCache::new(&self.ctx, n_layers, n_kv_heads, head_dim, max_seq_len)
+                .expect("KV cache allocation"),
         )
     }
 
@@ -528,6 +539,73 @@ mod tests {
             .map(|(actual, expected)| (actual - expected).abs())
             .fold(0.0f32, f32::max);
         assert!(max_error < 1e-5, "F32 SDPA max error: {max_error}");
+    }
+
+    #[test]
+    fn portable_backend_preserves_f32_for_default_llama_ops() {
+        let _guard = crate::CUDA_TEST_LOCK.lock().unwrap();
+        let backend = CudaNewBackend::new(0).unwrap();
+        let input = Tensor::from_f32(Shape::new(vec![1, 4]), &[1.0, -1.0, 2.0, -2.0]).unwrap();
+        let weight = Tensor::from_f32(Shape::new(vec![4]), &[1.0, 1.0, 1.0, 1.0]).unwrap();
+        let table =
+            Tensor::from_f32(Shape::new(vec![3, 2]), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let identity = Tensor::from_f32(
+            Shape::new(vec![4, 4]),
+            &[
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+            ],
+        )
+        .unwrap();
+        let input = backend.to_device(&input).unwrap();
+        let weight = backend.to_device(&weight).unwrap();
+        let table = backend.to_device(&table).unwrap();
+        let identity = backend.to_device(&identity).unwrap();
+
+        let silu = backend.silu(&input).unwrap();
+        let product = backend.mul(&input, &input).unwrap();
+        let scaled = backend.scale(&input, 0.5).unwrap();
+        let normalized = backend.rms_norm(&input, &weight, 1e-5).unwrap();
+        let embedded = backend.embedding(&table, &[2, 0]).unwrap();
+        let projected = backend.matmul(&input, &identity).unwrap();
+        let rotated = backend
+            .rope(&input.reshape(vec![1, 1, 4]).unwrap(), 1, 4, 10_000.0, 1)
+            .unwrap();
+        backend.synchronize().unwrap();
+
+        for tensor in [
+            &silu,
+            &product,
+            &scaled,
+            &normalized,
+            &embedded,
+            &projected,
+            &rotated,
+        ] {
+            assert_eq!(tensor.dtype(), DType::F32);
+        }
+        assert_eq!(
+            backend.to_cpu(&product).unwrap().to_f32_vec().unwrap(),
+            [1.0, 1.0, 4.0, 4.0]
+        );
+        assert_eq!(
+            backend.to_cpu(&scaled).unwrap().to_f32_vec().unwrap(),
+            [0.5, -0.5, 1.0, -1.0]
+        );
+        assert_eq!(
+            backend.to_cpu(&embedded).unwrap().to_f32_vec().unwrap(),
+            [5.0, 6.0, 1.0, 2.0]
+        );
+        assert_eq!(
+            backend.to_cpu(&projected).unwrap().to_f32_vec().unwrap(),
+            [1.0, -1.0, 2.0, -2.0]
+        );
+        assert!(backend
+            .to_cpu(&rotated)
+            .unwrap()
+            .to_f32_vec()
+            .unwrap()
+            .iter()
+            .all(|value| value.is_finite()));
     }
 
     #[test]

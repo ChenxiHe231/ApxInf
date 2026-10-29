@@ -16,7 +16,7 @@
 //! ```text
 //! APXINF_QWEN38_CHECKPOINT=/path/to/Qwen3.8-27B-NVFP4 \
 //!   bash crates/apxinf-cuda-new/test-new.sh \
-//!     test -p apxinf-cuda --release --test qwen38_layer_compare \
+//!     test -p apxinf-cuda-new --release --test qwen38_layer_compare \
 //!     -- --ignored --nocapture --test-threads=1
 //! ```
 

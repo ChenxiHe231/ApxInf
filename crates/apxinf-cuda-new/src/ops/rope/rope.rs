@@ -36,7 +36,7 @@ pub(super) fn apply_tensor(
         || head_dim % 2 != 0
         || !(theta.is_finite() && theta > 0.0)
         || input.dtype() != output.dtype()
-        || !matches!(input.dtype(), DType::F16 | DType::BF16)
+        || !matches!(input.dtype(), DType::F32 | DType::F16 | DType::BF16)
     {
         return Err(Error::Other(
             "standalone RoPE shape, dtype, or theta mismatch".into(),
@@ -123,6 +123,7 @@ pub(super) fn apply_tensor(
         version: abi::SPEC_VERSION,
         semantic: abi::SEMANTIC_APPLY,
         dtype: match input.dtype() {
+            DType::F32 => 0,
             DType::F16 => 1,
             DType::BF16 => 2,
             _ => unreachable!("validated standalone RoPE dtype"),
@@ -218,7 +219,7 @@ pub fn apply_batched(
             "batched RoPE requires even non-zero dims".into(),
         ));
     }
-    let output = ctx.allocate_output(input.shape().clone(), DType::BF16)?;
+    let output = ctx.allocate_output(input.shape().clone(), input.dtype())?;
     apply_tensor(
         ctx,
         input,

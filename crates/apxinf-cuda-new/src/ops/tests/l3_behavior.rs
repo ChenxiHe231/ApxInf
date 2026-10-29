@@ -1122,6 +1122,24 @@ fn pointwise_exact_gelu_runs_on_all_bf16_vector_paths() {
 }
 
 #[test]
+fn rowwise_swiglu_accepts_logical_bias_with_padded_projection() {
+    let ctx = CudaContext::new(0).unwrap();
+    let gate_up = tensor(0, vec![1, 12], &[1.0; 12]);
+    // The GEMM projection is physically padded to 12 columns, but the
+    // checkpoint bias describes only the logical gate/up pair (2 * 5).
+    let bias = tensor(0, vec![10], &[0.0; 10]);
+    let quantized =
+        crate::ops::pointwise::swiglu_quantize_rows(&ctx, &gate_up, Some(&bias), 5, 8).unwrap();
+    ctx.synchronize().unwrap();
+
+    assert_eq!(quantized.values.shape().dims(), [1, 8]);
+    assert!(f32_values(&quantized.scales)[0].is_finite());
+    let output = raw_bytes(&quantized.values);
+    assert!(output[..5].iter().any(|value| *value != 0));
+    assert_eq!(&output[5..], &[0, 0, 0]);
+}
+
+#[test]
 fn quantization_rejects_packed_fp4_input() {
     use apxinf_core::DType;
 
@@ -1448,6 +1466,32 @@ fn standalone_rope_semantics_share_the_family_dispatch_and_replay() {
     graph.replay().unwrap();
     ctx.synchronize().unwrap();
     assert_eq!(raw_bytes(captured.as_ref().unwrap()), raw_bytes(&eager));
+}
+
+#[test]
+fn rope_half_split_f16_matches_fp32_reference() {
+    let ctx = CudaContext::new(0).unwrap();
+    let input_values = [0.25, -0.5, 0.75, -1.0, 0.125, 0.375, -0.625, 0.875];
+    let input = f16_tensor(0, vec![2, 1, 4], &input_values);
+    let output = rope::apply_half_split(&ctx, &input, 1, 4, 10_000.0, 3).unwrap();
+    ctx.synchronize().unwrap();
+
+    let mut expected = Vec::with_capacity(input_values.len());
+    for (token, values) in input_values.chunks_exact(4).enumerate() {
+        let position = (token + 3) as f32;
+        let mut rotated = [0.0; 4];
+        for index in 0..2 {
+            let angle = position / 10_000.0_f32.powf((2 * index) as f32 / 4.0);
+            let (sin, cos) = angle.sin_cos();
+            rotated[index] = values[index] * cos - values[index + 2] * sin;
+            rotated[index + 2] = values[index] * sin + values[index + 2] * cos;
+        }
+        expected.extend(rotated);
+    }
+
+    for (actual, expected) in f16_values(&output).iter().zip(expected) {
+        assert!((actual - expected).abs() <= 2e-3, "{actual} != {expected}");
+    }
 }
 
 #[test]
@@ -2837,6 +2881,14 @@ fn segmented_attention_prepares_before_capture_and_replays_from_cache() {
         segmented_attention(&ctx, args)
     })
     .unwrap();
+    with_session(&session, || {
+        let mut args =
+            SegmentedAttentionArgs::new(&query, &key, &value, &mut out, &offsets, &host_offsets);
+        args.policy.online_tune = false;
+        segmented_attention(&ctx, args)
+    })
+    .unwrap();
+    ctx.synchronize().unwrap();
     let expected = values(&out);
 
     let graph = crate::capture(&ctx, || {

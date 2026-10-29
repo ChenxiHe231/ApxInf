@@ -154,9 +154,14 @@ bool valid_contract_fields(const apxinf_rope_spec_t& spec) {
 }
 
 void validate_spec(const apxinf_rope_spec_t& spec) {
+  const bool dtype_ok =
+      spec.dtype == APXINF_DTYPE_F16 || spec.dtype == APXINF_DTYPE_BF16 ||
+      (spec.dtype == APXINF_DTYPE_F32 &&
+       spec.semantic == APXINF_ROPE_SEMANTIC_APPLY &&
+       spec.rotation_source == APXINF_ROPE_ROTATION_POSITION_OFFSET);
   if (spec.version != APXINF_ROPE_SPEC_VERSION ||
       spec.semantic > APXINF_ROPE_SEMANTIC_APPLY ||
-      (spec.dtype != APXINF_DTYPE_F16 && spec.dtype != APXINF_DTYPE_BF16) ||
+      !dtype_ok ||
       spec.has_bias > 1 || spec.tokens <= 0 || spec.tokens > INT32_MAX ||
       spec.q_heads == 0 || spec.kv_heads == 0 || spec.head_dim == 0 ||
       spec.q_heads > INT32_MAX || spec.kv_heads > INT32_MAX ||
@@ -514,6 +519,14 @@ cudaError_t launch_apply(const apxinf_rope_spec_t& spec,
           bindings.qkv, bindings.q, spec.head_dim, spec.q_heads,
           static_cast<uint32_t>(spec.tokens), bindings.theta,
           static_cast<uint32_t>(bindings.position_offset), stream);
+    }
+    if (spec.dtype == APXINF_DTYPE_F32) {
+      rope_batched_f32_kernel<<<grid, block, 0, stream>>>(
+          static_cast<const float*>(bindings.qkv),
+          static_cast<float*>(bindings.q), spec.head_dim, spec.q_heads,
+          static_cast<uint32_t>(spec.tokens), bindings.theta,
+          static_cast<uint32_t>(bindings.position_offset));
+      return cudaGetLastError();
     }
     rope_batched_bf16_kernel<<<grid, block, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(bindings.qkv),

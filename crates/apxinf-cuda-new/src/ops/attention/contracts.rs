@@ -313,6 +313,10 @@ fn normalize_separate(
         scale: args.scale,
         output_scale: args.output_scale,
     };
+    let mut policy = args.policy;
+    if policy.cache_dir.is_none() {
+        policy.cache_dir = ctx.recipe_cache_dir().map(str::to_owned);
+    }
     Ok(Normalized {
         spec: abi::Spec {
             version: abi::SPEC_VERSION,
@@ -345,7 +349,7 @@ fn normalize_separate(
             dynamic_decode: 0,
             numerics: args.numerics as u32,
         },
-        policy: args.policy,
+        policy,
         bindings,
         storage: vec![q, k, v, out],
         resources: Vec::new(),
@@ -425,6 +429,10 @@ fn normalize_packed_qkv(
         scale: args.scale,
         output_scale: 1.0,
     };
+    let mut policy = args.policy;
+    if policy.cache_dir.is_none() {
+        policy.cache_dir = ctx.recipe_cache_dir().map(str::to_owned);
+    }
     Ok(Normalized {
         spec: abi::Spec {
             version: abi::SPEC_VERSION,
@@ -453,7 +461,7 @@ fn normalize_packed_qkv(
             dynamic_decode: 0,
             numerics: args.numerics as u32,
         },
-        policy: args.policy,
+        policy,
         bindings,
         storage: vec![qkv, key, value, out],
         resources: Vec::new(),

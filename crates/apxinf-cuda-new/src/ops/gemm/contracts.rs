@@ -710,6 +710,10 @@ fn normalize_fused<'a>(
     }
     storage.push(output_buffer);
 
+    let mut policy = args.policy.clone();
+    if policy.cache_dir.is_none() {
+        policy.cache_dir = ctx.recipe_cache_dir().map(str::to_owned);
+    }
     Ok(Normalized {
         spec: abi::Spec {
             version: 9,
@@ -747,7 +751,7 @@ fn normalize_fused<'a>(
             alpha_is_unit: u32::from(args.alpha == 1.0),
             output_scale_is_unit: u32::from(args.output_scale == 1.0),
         },
-        policy: args.policy,
+        policy,
         bindings,
         storage,
     })

@@ -89,7 +89,7 @@ pub(super) fn action_head_remap(
     let buffer = backend::DeviceBuffer::alloc(bytes.len(), ctx.device_id())
         .map_err(apxinf_core::Error::Cuda)?;
     buffer
-        .copy_from_host(&bytes)
+        .copy_from_host_on(&bytes, ctx.stream())
         .map_err(apxinf_core::Error::Cuda)?;
     buffer
         .as_tensor(

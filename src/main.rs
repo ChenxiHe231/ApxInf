@@ -1028,7 +1028,7 @@ fn cuda_test() {
     let b_gpu = transfers::to_cuda(&b, 0).unwrap();
     let c_gpu = ops::gemm::matmul(&ctx, &a_gpu, &b_gpu).unwrap();
     let c_cpu = transfers::to_cpu(&c_gpu).unwrap();
-    println!("[CUDA] matmul (bf16): {:?}", c_cpu.as_f32().unwrap());
+    println!("[CUDA] matmul (bf16): {:?}", c_cpu.to_f32_vec().unwrap());
 
     // SiLU
     let x = Tensor::from_bf16(vec![1, 4], &to_bf16(&[1.0, -1.0, 0.0, 2.0])).unwrap();
@@ -1038,7 +1038,7 @@ fn cuda_test() {
         .unwrap();
     ops::elementwise_activation(&ctx, &x_gpu, &silu_gpu, ops::ElementwiseActivation::Silu).unwrap();
     let silu_cpu = transfers::to_cpu(&silu_gpu).unwrap();
-    println!("[CUDA] silu: {:?}", silu_cpu.as_f32().unwrap());
+    println!("[CUDA] silu: {:?}", silu_cpu.to_f32_vec().unwrap());
 
     // Add
     let a2 = Tensor::from_bf16(vec![1, 4], &to_bf16(&[1.0, 2.0, 3.0, 4.0])).unwrap();
@@ -1050,23 +1050,23 @@ fn cuda_test() {
         .unwrap();
     ops::elementwise::add(&ctx, &a2_gpu, &b2_gpu, &add_gpu).unwrap();
     let add_cpu = transfers::to_cpu(&add_gpu).unwrap();
-    println!("[CUDA] add: {:?}", add_cpu.as_f32().unwrap());
+    println!("[CUDA] add: {:?}", add_cpu.to_f32_vec().unwrap());
 
     // RMSNorm
     let input = Tensor::from_bf16(vec![1, 4], &to_bf16(&[1.0, 2.0, 3.0, 4.0])).unwrap();
     let weight = Tensor::from_bf16(vec![4], &to_bf16(&[1.0, 1.0, 1.0, 1.0])).unwrap();
     let input_gpu = transfers::to_cuda(&input, 0).unwrap();
     let weight_gpu = transfers::to_cuda(&weight, 0).unwrap();
-    let mut norm_gpu = ctx
+    let norm_gpu = ctx
         .allocate_output(input_gpu.shape().clone(), input_gpu.dtype())
         .unwrap();
-    ops::rms_norm(
+    ops::norm::norm(
         &ctx,
-        ops::RmsNormArgs::new(&input_gpu, &weight_gpu, &mut norm_gpu, 1e-5),
+        ops::NormArgs::rms(&input_gpu, &weight_gpu, &norm_gpu, 1e-5),
     )
     .unwrap();
     let norm_cpu = transfers::to_cpu(&norm_gpu).unwrap();
-    println!("[CUDA] rms_norm: {:?}", norm_cpu.as_f32().unwrap());
+    println!("[CUDA] rms_norm: {:?}", norm_cpu.to_f32_vec().unwrap());
 
     println!("[CUDA] All kernel tests completed.");
 }

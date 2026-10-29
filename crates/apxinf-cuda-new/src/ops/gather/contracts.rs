@@ -152,9 +152,16 @@ fn dtype_code(dtype: DType, semantic: GatherSemantic) -> Result<u32> {
     match dtype {
         DType::F16 => Ok(1),
         DType::BF16 => Ok(2),
-        // F32 output is accepted only for RGB preprocessing: pi0-fast keeps
-        // its patch pipeline in F32 until the first projection.
-        DType::F32 if semantic == GatherSemantic::RgbToPatches => Ok(0),
+        // F32 is used by RGB preprocessing and the portable backend's default
+        // embedding path.
+        DType::F32
+            if matches!(
+                semantic,
+                GatherSemantic::RgbToPatches | GatherSemantic::EmbeddingLookup
+            ) =>
+        {
+            Ok(0)
+        }
         _ => Err(invalid("Gather currently supports F16 and BF16")),
     }
 }
@@ -218,12 +225,6 @@ pub(crate) fn normalize(ctx: &CudaContext, args: GatherArgs<'_>) -> Result<Norma
         return Err(invalid(
             "embedding scale is valid only for embedding lookup",
         ));
-    }
-    if semantic == GatherSemantic::EmbeddingLookup
-        && args.embedding_scale == EmbeddingScale::None
-        && dtype != DType::BF16
-    {
-        return Err(invalid("unscaled embedding lookup currently requires BF16"));
     }
     match semantic {
         GatherSemantic::EmbeddingLookup => {
