@@ -13,6 +13,9 @@
 namespace {
 
 constexpr int kThreads = 256;
+constexpr uint32_t kFastTopKMaximum = 32;
+constexpr uint32_t kFastTopKBlocks = 128;
+constexpr uint32_t kFastTopKItemsPerThread = 8;
 
 template <typename T>
 cudaError_t launch_prepare(
@@ -92,6 +95,36 @@ extern "C" cudaError_t apxinf_cuda_new_sample_token(
     if (status != cudaSuccess) return status;
     apxinf_cuda_new_argmax_stage2_kernel<<<1, kThreads, 0, stream>>>(
         partial_values, partial_tokens, partial_count, counts, output);
+    return cudaGetLastError();
+  }
+
+  // The released Qwen3.6 policy uses top_k=20.  Avoid sorting and scanning the
+  // complete 248,320-token vocabulary for that common path.  The two-stage
+  // reduction reads each logit once and is exact, including lower-token-ID tie
+  // breaks.  Larger inputs stay on the general radix-sort implementation.
+  if (selection != 0 && top_k > 0 && top_k <= kFastTopKMaximum &&
+      vocab_size <= std::min(partial_count, kFastTopKBlocks) * kThreads *
+                        kFastTopKItemsPerThread) {
+    if (sorted_logits == nullptr || sorted_tokens == nullptr ||
+        partial_values == nullptr || partial_tokens == nullptr)
+      return cudaErrorInvalidValue;
+    const uint32_t candidate_count = std::min(top_k, vocab_size);
+    const uint32_t topk_partial_count =
+        std::min(partial_count, kFastTopKBlocks);
+    apxinf_cuda_new_topk_blocks_kernel<<<topk_partial_count, kThreads, 0,
+                                         stream>>>(
+        adjusted, vocab_size, candidate_count, sorted_logits, sorted_tokens);
+    status = cudaGetLastError();
+    if (status != cudaSuccess) return status;
+    const uint32_t block_candidate_count =
+        topk_partial_count * candidate_count;
+    apxinf_cuda_new_topk_merge_kernel<<<1, kThreads, 0, stream>>>(
+        sorted_logits, sorted_tokens, block_candidate_count, candidate_count);
+    status = cudaGetLastError();
+    if (status != cudaSuccess) return status;
+    apxinf_cuda_new_select_small_topk_kernel<<<1, 1, 0, stream>>>(
+        sorted_logits, sorted_tokens, candidate_count, top_p, return_logprob, seed,
+        sequence, draw, counts, output);
     return cudaGetLastError();
   }
 

@@ -8,7 +8,7 @@ use apxinf_core::{
 use crate::buffer::CudaBuffer;
 use crate::ffi;
 use crate::ffi::raw::sampling as sampling_ffi;
-use crate::CudaContext;
+use crate::{CudaContext, HostMappedBuffer};
 
 const OUTPUT_BYTES: usize = 16;
 
@@ -38,7 +38,7 @@ struct CudaTokenSampler {
     partial_count: usize,
     sort_workspace: CudaBuffer,
     scan_workspace: CudaBuffer,
-    output: CudaBuffer,
+    output: HostMappedBuffer,
     params: Option<TokenSamplingParams>,
     sequence_len: usize,
     rng: RngKey,
@@ -85,7 +85,7 @@ impl CudaTokenSampler {
             partial_count,
             sort_workspace: alloc(sort_bytes)?,
             scan_workspace: alloc(scan_bytes)?,
-            output: alloc(OUTPUT_BYTES)?,
+            output: HostMappedBuffer::alloc(OUTPUT_BYTES, device_id).map_err(Error::Cuda)?,
             params: None,
             sequence_len: 0,
             rng: RngKey::default(),
@@ -225,7 +225,7 @@ impl TokenSampler for CudaTokenSampler {
                 self.sort_workspace.len(),
                 self.scan_workspace.ptr(),
                 self.scan_workspace.len(),
-                self.output.ptr(),
+                self.output.address().ptr(),
                 self.stream.handle(),
             )
         };
