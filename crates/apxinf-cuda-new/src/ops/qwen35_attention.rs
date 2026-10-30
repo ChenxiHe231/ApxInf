@@ -21,6 +21,7 @@ pub const QWEN35_ATTENTION_KV_WIDTH: usize =
     QWEN35_ATTENTION_KV_HEADS * QWEN35_ATTENTION_HEAD_DIM;
 pub const QWEN35_ATTENTION_RMS_EPSILON: f32 = 1.0e-6;
 pub const FP8_E4M3_MAX_FINITE: f32 = 448.0;
+pub const QWEN35_KV_CACHE_BLOCK_TOKENS: usize = 128;
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
@@ -52,9 +53,9 @@ impl Qwen35KvCacheScales {
 
 /// Persistent state for one of the ten base full-attention layers.
 pub struct Qwen35Fp8KvCache<'a> {
-    /// F8E4M3 `[capacity, 2, 256]`, token-major.
+    /// F8E4M3 `[blocks, 128, 2, 256]`, token-major within each page.
     pub key: &'a Tensor,
-    /// F8E4M3 `[capacity, 2, 256]`, token-major.
+    /// F8E4M3 `[blocks, 128, 2, 256]`, token-major within each page.
     pub value: &'a Tensor,
 }
 
@@ -109,16 +110,19 @@ pub fn qwen35_attention_fp8(
     }
     args.scales.validate()?;
     let cache_shape = args.cache.key.shape().dims();
-    if cache_shape.len() != 3
-        || cache_shape[1..] != [QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM]
+    if cache_shape.len() != 4
+        || cache_shape[1] != QWEN35_KV_CACHE_BLOCK_TOKENS
+        || cache_shape[2..] != [QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM]
         || cache_shape[0] == 0
         || cache_shape != args.cache.value.shape().dims()
     {
         return Err(invalid(
-            "Qwen3.5 FP8 K/V caches must match [capacity, 2, 256]",
+            "Qwen3.5 FP8 K/V caches must match [blocks, 128, 2, 256]",
         ));
     }
-    let capacity = cache_shape[0];
+    let capacity = cache_shape[0]
+        .checked_mul(QWEN35_KV_CACHE_BLOCK_TOKENS)
+        .ok_or_else(|| invalid("Qwen3.5 attention cache capacity overflow"))?;
     let end = args
         .cache_offset
         .checked_add(tokens)
@@ -165,13 +169,23 @@ pub fn qwen35_attention_fp8(
         ctx,
         args.cache.key,
         DType::F8E4M3,
-        &[capacity, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM],
+        &[
+            cache_shape[0],
+            QWEN35_KV_CACHE_BLOCK_TOKENS,
+            QWEN35_ATTENTION_KV_HEADS,
+            QWEN35_ATTENTION_HEAD_DIM,
+        ],
     )?;
     let value_cache = tensor_storage(
         ctx,
         args.cache.value,
         DType::F8E4M3,
-        &[capacity, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM],
+        &[
+            cache_shape[0],
+            QWEN35_KV_CACHE_BLOCK_TOKENS,
+            QWEN35_ATTENTION_KV_HEADS,
+            QWEN35_ATTENTION_HEAD_DIM,
+        ],
     )?;
     let attention_shape = [tokens, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_HEAD_DIM];
     let query = tensor_storage(ctx, args.scratch.query, DType::BF16, &attention_shape)?;

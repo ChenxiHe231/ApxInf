@@ -12,6 +12,16 @@ fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Tensor {
         .as_tensor(Shape::new(shape), dtype)
         .unwrap()
 }
+
+fn fp8_cache_shape(capacity: usize) -> Vec<usize> {
+    let blocks = capacity.div_ceil(ops::QWEN35_KV_CACHE_BLOCK_TOKENS);
+    vec![
+        blocks,
+        ops::QWEN35_KV_CACHE_BLOCK_TOKENS,
+        ops::QWEN35_ATTENTION_KV_HEADS,
+        ops::QWEN35_ATTENTION_HEAD_DIM,
+    ]
+}
 fn bf16_fixture(shape: Vec<usize>, period: usize, divisor: f32) -> (Tensor, Vec<f32>) {
     let values = (0..shape.iter().product::<usize>())
         .map(|index| bf16::from_f32(((index % period) as f32 - (period / 2) as f32) / divisor))
@@ -190,12 +200,12 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
     let positions = transfers::to_cuda(&positions_cpu, 0).unwrap();
     let key_cache = zeros(
         &ctx,
-        vec![capacity, ops::QWEN35_ATTENTION_KV_HEADS, ops::QWEN35_ATTENTION_HEAD_DIM],
+        fp8_cache_shape(capacity),
         DType::F8E4M3,
     );
     let value_cache = zeros(
         &ctx,
-        vec![capacity, ops::QWEN35_ATTENTION_KV_HEADS, ops::QWEN35_ATTENTION_HEAD_DIM],
+        fp8_cache_shape(capacity),
         DType::F8E4M3,
     );
     let attention_shape = vec![
@@ -257,18 +267,19 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
     })
     .unwrap();
 
+    let logical_elements = capacity * ops::QWEN35_ATTENTION_KV_WIDTH;
     assert_eq!(
-        transfers::to_cpu(&key_cache)
+        &transfers::to_cpu(&key_cache)
             .unwrap()
             .as_f8_e4m3()
-            .unwrap(),
+            .unwrap()[..logical_elements],
         reference_key_cache
     );
     assert_eq!(
-        transfers::to_cpu(&value_cache)
+        &transfers::to_cpu(&value_cache)
             .unwrap()
             .as_f8_e4m3()
-            .unwrap(),
+            .unwrap()[..logical_elements],
         reference_value_cache
     );
     let actual = transfers::to_cpu(&output)
@@ -287,7 +298,7 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
     // bypassing the checkpoint's FP8 calibration.
     let fake_bf16_key_cache = zeros(
         &ctx,
-        vec![capacity, ops::QWEN35_ATTENTION_KV_HEADS, ops::QWEN35_ATTENTION_HEAD_DIM],
+        fp8_cache_shape(capacity),
         DType::BF16,
     );
     assert!(ops::qwen35_attention_fp8(
@@ -356,20 +367,12 @@ fn qwen35_decode_is_bit_exact_across_critical_kv_lengths() {
 
         let monolithic_key_cache = zeros(
             &ctx,
-            vec![
-                capacity,
-                ops::QWEN35_ATTENTION_KV_HEADS,
-                ops::QWEN35_ATTENTION_HEAD_DIM,
-            ],
+            fp8_cache_shape(capacity),
             DType::F8E4M3,
         );
         let monolithic_value_cache = zeros(
             &ctx,
-            vec![
-                capacity,
-                ops::QWEN35_ATTENTION_KV_HEADS,
-                ops::QWEN35_ATTENTION_HEAD_DIM,
-            ],
+            fp8_cache_shape(capacity),
             DType::F8E4M3,
         );
         let monolithic_output = run_attention(
@@ -389,20 +392,12 @@ fn qwen35_decode_is_bit_exact_across_critical_kv_lengths() {
 
         let split_key_cache = zeros(
             &ctx,
-            vec![
-                capacity,
-                ops::QWEN35_ATTENTION_KV_HEADS,
-                ops::QWEN35_ATTENTION_HEAD_DIM,
-            ],
+            fp8_cache_shape(capacity),
             DType::F8E4M3,
         );
         let split_value_cache = zeros(
             &ctx,
-            vec![
-                capacity,
-                ops::QWEN35_ATTENTION_KV_HEADS,
-                ops::QWEN35_ATTENTION_HEAD_DIM,
-            ],
+            fp8_cache_shape(capacity),
             DType::F8E4M3,
         );
         let q_prefix = prefix_tokens * ops::QWEN35_ATTENTION_Q_PROJECTION_WIDTH;
