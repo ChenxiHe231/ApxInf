@@ -27,13 +27,20 @@ const TARGET_HIDDEN_SIZE: usize = 2_048;
 const TARGET_LAYERS: usize = 40;
 const FULL_ATTENTION_INTERVAL: usize = 4;
 const DECODE_PROJECTION_WORKSPACE: usize = 4 * 1024 * 1024;
+/// Match TensorRT-LLM's engine configuration (`tokens_per_block=128`).
+/// Quantization remains one static K scale and one static V scale per layer;
+/// this constant is physical cache page granularity, not a scale group size.
+pub const QWEN35_KV_CACHE_BLOCK_TOKENS: usize = 128;
 
 /// Persistent cache for one base-model full-attention layer.
 #[derive(Debug)]
 pub struct Qwen35AttentionCache {
     layer_index: usize,
     geometry: AttentionGeometry,
+    /// Logical token capacity admitted by the session.
     capacity: usize,
+    /// Physical pages backing the logical token range.
+    blocks: usize,
     scales: Option<KvCacheScales>,
     dtype: Qwen35KvCacheDType,
     key: Tensor,
@@ -47,6 +54,14 @@ impl Qwen35AttentionCache {
 
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    pub fn block_tokens(&self) -> usize {
+        QWEN35_KV_CACHE_BLOCK_TOKENS
+    }
+
+    pub fn blocks(&self) -> usize {
+        self.blocks
     }
 
     pub fn scales(&self) -> Option<KvCacheScales> {
@@ -187,8 +202,10 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
     ) -> Result<Self::Cache> {
         validate_full_attention_layer(layer_index)?;
         validate_cache_contract(geometry, capacity, scales, self.kv_cache_dtype)?;
+        let (blocks, _physical_capacity) = cache_block_geometry(capacity)?;
         let shape = vec![
-            capacity,
+            blocks,
+            QWEN35_KV_CACHE_BLOCK_TOKENS,
             ops::QWEN35_ATTENTION_KV_HEADS,
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ];
@@ -197,6 +214,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             layer_index,
             geometry,
             capacity,
+            blocks,
             scales,
             dtype: self.kv_cache_dtype,
             key: zeros(ctx, shape.clone(), dtype)?,
@@ -888,12 +906,17 @@ fn validate_phase_tokens(phase: DecoderPhase, tokens: usize) -> Result<()> {
 
 fn validate_cache_device(ctx: &CudaContext, cache: &Qwen35AttentionCache) -> Result<()> {
     let dtype = cache.dtype.tensor_dtype();
+    let (blocks, _) = cache_block_geometry(cache.capacity)?;
+    if cache.blocks != blocks {
+        return Err(invalid("Qwen3.5 cache block count does not match capacity"));
+    }
     validate_tensor(
         &cache.key,
         ctx,
         dtype,
         &[
-            cache.capacity,
+            cache.blocks,
+            QWEN35_KV_CACHE_BLOCK_TOKENS,
             ops::QWEN35_ATTENTION_KV_HEADS,
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ],
@@ -904,7 +927,8 @@ fn validate_cache_device(ctx: &CudaContext, cache: &Qwen35AttentionCache) -> Res
         ctx,
         dtype,
         &[
-            cache.capacity,
+            cache.blocks,
+            QWEN35_KV_CACHE_BLOCK_TOKENS,
             ops::QWEN35_ATTENTION_KV_HEADS,
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ],
@@ -922,6 +946,8 @@ fn validate_cache_pair(
     validate_cache_device(ctx, destination)?;
     if source.layer_index != destination.layer_index
         || source.geometry != destination.geometry
+        || source.capacity != destination.capacity
+        || source.blocks != destination.blocks
         || source.scales != destination.scales
         || source.dtype != destination.dtype
     {
@@ -936,6 +962,20 @@ fn validate_cache_pair(
         return Err(invalid("Qwen3.5 cache copy range is out of bounds"));
     }
     Ok(())
+}
+
+fn cache_block_geometry(capacity: usize) -> Result<(usize, usize)> {
+    if capacity == 0 {
+        return Err(invalid("Qwen3.5 cache capacity must be non-zero"));
+    }
+    let blocks = capacity
+        .checked_add(QWEN35_KV_CACHE_BLOCK_TOKENS - 1)
+        .ok_or_else(|| invalid("Qwen3.5 cache block rounding overflow"))?
+        / QWEN35_KV_CACHE_BLOCK_TOKENS;
+    let physical_capacity = blocks
+        .checked_mul(QWEN35_KV_CACHE_BLOCK_TOKENS)
+        .ok_or_else(|| invalid("Qwen3.5 physical cache capacity overflow"))?;
+    Ok((blocks, physical_capacity))
 }
 
 fn cache_byte_range(positions: Range<usize>, dtype: Qwen35KvCacheDType) -> Result<(usize, usize)> {
@@ -1019,8 +1059,9 @@ fn view(tensor: &Tensor, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
         .map_err(Error::Cuda)
 }
 
-/// View of the first `valid` rows of a `[capacity, kv_heads, head_dim]` cache
-/// tensor, shaped `[1, valid, kv_heads, head_dim]` for `ops::kv_cache_attention`.
+/// View of the first `valid` rows of a physically contiguous
+/// `[blocks, 128, kv_heads, head_dim]` cache, flattened to
+/// `[1, valid, kv_heads, head_dim]` for `ops::kv_cache_attention`.
 fn cache_prefix_view(
     cache: &Tensor,
     valid: usize,
@@ -1081,6 +1122,16 @@ mod tests {
             cache_byte_range(4..9, Qwen35KvCacheDType::Fp8).unwrap(),
             (4 * fp8_row_bytes, 5 * fp8_row_bytes)
         );
+    }
+
+    #[test]
+    fn cache_capacity_rounds_to_128_token_physical_blocks() {
+        assert_eq!(QWEN35_KV_CACHE_BLOCK_TOKENS, 128);
+        assert_eq!(cache_block_geometry(1).unwrap(), (1, 128));
+        assert_eq!(cache_block_geometry(128).unwrap(), (1, 128));
+        assert_eq!(cache_block_geometry(129).unwrap(), (2, 256));
+        assert_eq!(cache_block_geometry(20_003).unwrap(), (157, 20_096));
+        assert!(cache_block_geometry(0).is_err());
     }
 
     #[test]
