@@ -165,6 +165,38 @@ Each output line is JSON. Summary records include median/P95 TTFT, prefill
 tokens/s, generation tokens/s and MTP acceptance counters. Iteration records
 also include an FNV-1a token digest for repeatability checks.
 
+### Tune once before measuring or serving
+
+Recipe misses trigger measured online tuning and must never be included in a
+performance result. Build the context benchmark and run one short explicit
+`--autotune` pass before starting the server. Match `--kv-capacity` to the
+server admission capacity (`max_input_tokens + max_output_tokens + 3`) and use
+an input length representative of the deployment. For the AIOS 20K/4096
+configuration and its roughly 13K static prefix:
+
+```bash
+cargo build --release -p apxinf-model \
+  --features qwen35-cuda \
+  --example qwen35_context_bench
+
+APXINF_QWEN35_CUDA_GRAPHS=1 \
+APXINF_QWEN35_GRAPH_GDN=full \
+"$CARGO_TARGET_DIR/release/examples/qwen35_context_bench" \
+  "$QWEN35_CHECKPOINT" \
+  --autotune \
+  --prefix-tokens 0 \
+  --input-tokens 13312 \
+  --kv-capacity 24099 \
+  --max-new 2 \
+  --warmups 1 \
+  --repeats 1 \
+  --mode scalar
+```
+
+Run this command from the repository root. A later server run reuses the
+persisted recipe and must not create a new file in the tuning directory during
+the measured request.
+
 ## 4. Supported runtime precision choices
 
 The checkpoint does not contain `kv_cache_scheme`, `k_scale`, or `v_scale`.
@@ -209,9 +241,11 @@ Use only a supported row from the table above.
 Build and start the server without enabling the legacy CUDA runtime:
 
 ```bash
-cargo build --features qwen35-cuda,server
+cargo build --release --features qwen35-cuda,server
 
-"$CARGO_TARGET_DIR/debug/apxinf" serve \
+APXINF_QWEN35_CUDA_GRAPHS=1 \
+APXINF_QWEN35_GRAPH_GDN=full \
+"$CARGO_TARGET_DIR/release/apxinf" serve \
   --model "$QWEN35_CHECKPOINT" \
   --model-name qwen3_5_moe \
   --served-model-name qwen3.6-35b-a3b \
@@ -221,8 +255,9 @@ cargo build --features qwen35-cuda,server
   --qwen35-kv-cache bf16 \
   --host 0.0.0.0 \
   --port 8000 \
-  --max-input-tokens 4096 \
-  --max-output-tokens 256
+  --max-input-tokens 20000 \
+  --max-output-tokens 4096 \
+  --enable-context-reuse
 ```
 
 Test it from another shell:
