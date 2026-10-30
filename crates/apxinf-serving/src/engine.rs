@@ -297,6 +297,16 @@ impl ChatEngine for ApxInfChatEngine {
             }
         }
         let completion_tokens = output.profile.output_tokens();
+        eprintln!(
+            "request profile: prompt_tokens={} reused_prompt_tokens={} completion_tokens={} ttft_ms={:?} tpot_ms={:?} generation_tps={:?} total_latency_ms={:?}",
+            output.profile.input_tokens(),
+            output.profile.reused_input_tokens(),
+            completion_tokens,
+            output.profile.ttft_ms(),
+            output.profile.tpot_ms(),
+            output.profile.generation_tps(),
+            output.profile.total_latency_ms(),
+        );
         Ok(EngineOutput {
             text,
             prompt_tokens: output.profile.input_tokens(),
