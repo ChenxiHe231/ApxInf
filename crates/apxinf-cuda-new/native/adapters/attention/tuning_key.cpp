@@ -39,6 +39,25 @@ TuningKeys tuning_keys(const Spec& spec,
   // There is no compatible fallback key; a miss runs the full autotuner.
   const bool stable =
       spec.numerics == APXINF_ATTENTION_NUMERICS_STABLE;
+  // Single-token causal KV decode keeps an exact execution Spec/binding so FA2
+  // remains eligible, but shares its measured recipe within a 4K live-length
+  // bucket. The provider/configuration is restored against each exact Spec.
+  // This avoids an autotune on every generated token without forcing the
+  // capacity-shaped dynamic-decode contract onto providers that cannot read
+  // device-side length metadata.
+  const bool live_kv_decode =
+      !stable && spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+      spec.dynamic_decode == 0 && spec.batch == 1 &&
+      spec.query_tokens == 1 && spec.mask == APXINF_ATTENTION_MASK_CAUSAL &&
+      spec.query_start == spec.key_tokens - 1;
+  constexpr int64_t kDecodeBucketTokens = 4096;
+  const int64_t decode_bucket =
+      live_kv_decode
+          ? ((spec.key_tokens + kDecodeBucketTokens - 1) /
+             kDecodeBucketTokens) *
+                kDecodeBucketTokens
+          : 0;
+
   std::ostringstream key;
   key << (stable ? "attention-recipe-v8|ns|" : "attention-recipe-v7|ns|")
       << APXINF_ATTENTION_BUILD_ID << '|'
@@ -51,14 +70,20 @@ TuningKeys tuning_keys(const Spec& spec,
       // Flexible numerics retains the pre-v5 normalized suffix. The build
       // fingerprint still invalidates recipes when candidate code changes.
       << "|op|" << spec.version << '|' << spec.semantic << '|'
-      << spec.qkv_layout << '|' << spec.dtype << '|' << spec.output_dtype << '|'
-      << spec.mask << '|'
-      << spec.batch << '|' << spec.query_tokens << '|' << spec.key_tokens << '|'
-      << spec.key_capacity << '|' << spec.query_heads << '|' << spec.kv_heads
+      << spec.qkv_layout << '|' << spec.dtype << '|' << spec.output_dtype << '|' << spec.mask << '|'
+      << spec.batch << '|' << spec.query_tokens << '|';
+  if (live_kv_decode) {
+    key << "decode-bucket-4096|" << decode_bucket << '|' << decode_bucket << '|';
+  } else {
+    key << spec.key_tokens << '|' << spec.key_capacity << '|';
+  }
+  key << spec.query_heads << '|' << spec.kv_heads
       << '|' << spec.head_dim << '|';
   key << spec.dynamic_decode << '|';
   if (stable) key << spec.numerics << '|';
-  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+  if (live_kv_decode) {
+    key << "decode-live|";
+  } else if (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
       spec.dynamic_decode != 0) {
     key << "decode-meta|";
   } else {
