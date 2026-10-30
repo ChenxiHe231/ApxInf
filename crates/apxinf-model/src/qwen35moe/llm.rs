@@ -459,6 +459,17 @@ impl Qwen35Moe {
         // Match ordinary non-speculative generation: every scalar step is
         // committed, so no rollback shadow is required.
         self.runtime.target_mut().set_decode_in_place(true);
+        // Reuse the compact device result. Allocating and freeing a CUDA
+        // tensor for every argmax makes the benchmark measure the allocator
+        // (seconds per token under the inference HugeTLB split), not decode.
+        let next_token = CudaBuffer::alloc_zeros_async(
+            std::mem::size_of::<i32>(),
+            self.ctx.device_id(),
+            self.ctx.stream(),
+        )
+        .map_err(Error::Cuda)?
+        .as_tensor(Shape::new(vec![1]), DType::I32)
+        .map_err(Error::Cuda)?;
         let mut tokens = Vec::with_capacity(max_new_tokens);
         tokens.push(first_token);
         while tokens.len() < max_new_tokens {
@@ -467,10 +478,13 @@ impl Qwen35Moe {
                 self.runtime
                     .target_mut()
                     .decode(&self.ctx, &self.decoder, &self.weights, input)?;
-            let next = output
-                .greedy_token_ids(&self.ctx)?
-                .into_iter()
-                .next()
+            output.enqueue_greedy_token_ids(&self.ctx, &next_token, 0)?;
+            self.ctx.synchronize().map_err(Error::Cuda)?;
+            let next = transfers::to_cpu(&next_token)?
+                .as_i32()?
+                .first()
+                .copied()
+                .and_then(|token| u32::try_from(token).ok())
                 .ok_or_else(|| Error::Other("Qwen3.5 scalar decode returned no token".into()))?;
             tokens.push(next);
         }
