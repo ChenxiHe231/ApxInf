@@ -186,6 +186,133 @@ __global__ void apxinf_cuda_new_argmax_stage2_kernel(
   }
 }
 
+__device__ __forceinline__ uint64_t apxinf_topk_sort_key(float value,
+                                                          uint32_t token) {
+  const uint32_t bits = __float_as_uint(value);
+  const uint32_t ordered =
+      bits ^ (static_cast<uint32_t>(-static_cast<int32_t>(bits >> 31)) |
+              0x80000000U);
+  return (static_cast<uint64_t>(ordered) << 32) |
+         static_cast<uint64_t>(UINT32_MAX - token);
+}
+
+__device__ __forceinline__ float apxinf_topk_key_value(uint64_t key) {
+  const uint32_t ordered = static_cast<uint32_t>(key >> 32);
+  const uint32_t mask = ((ordered >> 31) - 1U) | 0x80000000U;
+  return __uint_as_float(ordered ^ mask);
+}
+
+// Exact small-top-k selection without sorting the complete vocabulary. Stage
+// one radix-sorts independent 2,048-token tiles and emits only their best K.
+// Stage two sorts at most 4,096 block candidates in-place. The composite key
+// makes lower token IDs win exact logit ties, matching scalar argmax.
+__global__ void apxinf_cuda_new_topk_blocks_kernel(
+    const float* logits, uint32_t vocab_size, uint32_t candidate_count,
+    float* block_values, uint32_t* block_tokens) {
+  constexpr uint32_t kItemsPerThread = 8;
+  using BlockSort = cub::BlockRadixSort<uint64_t, 256, kItemsPerThread, uint32_t>;
+  __shared__ typename BlockSort::TempStorage sort_storage;
+  uint64_t local_keys[kItemsPerThread];
+  uint32_t local_tokens[kItemsPerThread];
+#pragma unroll
+  for (uint32_t item = 0; item < kItemsPerThread; ++item) {
+    const uint32_t token = blockIdx.x * blockDim.x + threadIdx.x +
+                           item * blockDim.x * gridDim.x;
+    local_tokens[item] = token < vocab_size ? token : UINT32_MAX;
+    const float value = token < vocab_size ? logits[token] : -CUDART_INF_F;
+    local_keys[item] = apxinf_topk_sort_key(value, local_tokens[item]);
+  }
+  BlockSort(sort_storage).SortDescending(local_keys, local_tokens);
+#pragma unroll
+  for (uint32_t item = 0; item < kItemsPerThread; ++item) {
+    const uint32_t rank = threadIdx.x * kItemsPerThread + item;
+    if (rank < candidate_count) {
+      const uint32_t token = local_tokens[item];
+      const uint32_t output_index = blockIdx.x * candidate_count + rank;
+      block_values[output_index] =
+          token < vocab_size ? logits[token] : -CUDART_INF_F;
+      block_tokens[output_index] = token;
+    }
+  }
+}
+
+__global__ void apxinf_cuda_new_topk_merge_kernel(
+    float* candidate_values, uint32_t* candidate_tokens,
+    uint32_t input_count, uint32_t candidate_count) {
+  constexpr uint32_t kItemsPerThread = 16;
+  using BlockSort = cub::BlockRadixSort<uint64_t, 256, kItemsPerThread, uint32_t>;
+  __shared__ typename BlockSort::TempStorage sort_storage;
+  uint64_t local_keys[kItemsPerThread];
+  uint32_t local_tokens[kItemsPerThread];
+#pragma unroll
+  for (uint32_t item = 0; item < kItemsPerThread; ++item) {
+    const uint32_t index = threadIdx.x + item * blockDim.x;
+    const uint32_t token =
+        index < input_count ? candidate_tokens[index] : UINT32_MAX;
+    const float value =
+        index < input_count ? candidate_values[index] : -CUDART_INF_F;
+    local_tokens[item] = token;
+    local_keys[item] = apxinf_topk_sort_key(value, token);
+  }
+  BlockSort(sort_storage).SortDescending(local_keys, local_tokens);
+#pragma unroll
+  for (uint32_t item = 0; item < kItemsPerThread; ++item) {
+    const uint32_t rank = threadIdx.x * kItemsPerThread + item;
+    if (rank < candidate_count) {
+      const uint32_t token = local_tokens[item];
+      candidate_values[rank] = apxinf_topk_key_value(local_keys[item]);
+      candidate_tokens[rank] = token;
+    }
+  }
+}
+
+__device__ __forceinline__ uint32_t apxinf_lower_bound_cdf(
+    const float* cdf, uint32_t count, float target);
+
+__global__ void apxinf_cuda_new_select_small_topk_kernel(
+    const float* selected_logits, const uint32_t* selected_tokens,
+    uint32_t candidate_count, float top_p, uint32_t return_logprob,
+    uint64_t seed, uint64_t sequence, uint64_t draw, uint32_t* counts,
+    ApxInfSamplingOutput* output) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  constexpr uint32_t kMaximumTopK = 32;
+  float weights[kMaximumTopK];
+  float cdf[kMaximumTopK];
+  const float maximum = selected_logits[0];
+  float total = 0.0f;
+  for (uint32_t index = 0; index < candidate_count; ++index) {
+    const float value = selected_logits[index];
+    const float weight = isfinite(maximum) && isfinite(value)
+                             ? expf(value - maximum)
+                             : 0.0f;
+    weights[index] = weight;
+    total += weight;
+    cdf[index] = total;
+  }
+  if (!(total > 0.0f) || !isfinite(total)) {
+    output->token_id = 0;
+    output->status = 2;
+    output->logprob = CUDART_NAN_F;
+    output->reserved = 0;
+    return;
+  }
+  const uint32_t nucleus_end =
+      apxinf_lower_bound_cdf(cdf, candidate_count, top_p * total);
+  const float nucleus_total = cdf[nucleus_end];
+  const uint4 words = apxinf_rng_words(seed, sequence, draw, 0);
+  const float target = apxinf_unit_open(words.x) * nucleus_total;
+  const uint32_t selected_position =
+      apxinf_lower_bound_cdf(cdf, nucleus_end + 1, target);
+  const uint32_t token = selected_tokens[selected_position];
+  output->token_id = token;
+  output->status = 0;
+  output->logprob = return_logprob != 0
+                        ? logf(weights[selected_position] / nucleus_total)
+                        : CUDART_NAN_F;
+  output->reserved = 0;
+  atomicAdd(&counts[token], 1U);
+}
+
 __global__ void apxinf_cuda_new_softmax_weights_kernel(
     const float* sorted_logits, float* weights, uint32_t vocab_size,
     uint32_t candidate_limit) {
