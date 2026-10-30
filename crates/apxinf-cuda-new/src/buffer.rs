@@ -356,25 +356,6 @@ impl HostMappedBuffer {
         Ok(())
     }
 
-    /// Read GPU-produced bytes after the caller has synchronized the stream
-    /// that wrote this mapped allocation.
-    pub fn copy_to_host(&self, destination: &mut [u8]) -> Result<(), String> {
-        if destination.len() > self.len {
-            return Err(format!(
-                "mapped buffer is {} bytes, need {}",
-                self.len,
-                destination.len()
-            ));
-        }
-        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
-        unsafe {
-            for (index, value) in destination.iter_mut().enumerate() {
-                *value = std::ptr::read_volatile((self.host_ptr as *const u8).add(index));
-            }
-        }
-        Ok(())
-    }
-
     pub fn address_at(&self, byte_offset: usize, len: usize) -> Result<CudaDeviceAddress, String> {
         let end = byte_offset
             .checked_add(len)
