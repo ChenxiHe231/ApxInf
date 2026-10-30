@@ -7,10 +7,13 @@ use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext};
 use half::bf16;
 
 fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Tensor {
-    CudaBuffer::alloc_zeros(shape.iter().product::<usize>() * dtype.size_in_bytes(), ctx.device_id())
-        .unwrap()
-        .as_tensor(Shape::new(shape), dtype)
-        .unwrap()
+    CudaBuffer::alloc_zeros(
+        shape.iter().product::<usize>() * dtype.size_in_bytes(),
+        ctx.device_id(),
+    )
+    .unwrap()
+    .as_tensor(Shape::new(shape), dtype)
+    .unwrap()
 }
 
 fn fp8_cache_shape(capacity: usize) -> Vec<usize> {
@@ -33,10 +36,8 @@ fn bf16_fixture(shape: Vec<usize>, period: usize, divisor: f32) -> (Tensor, Vec<
 fn patterned_bf16(length: usize, multiplier: usize, period: usize, divisor: f32) -> Vec<f32> {
     (0..length)
         .map(|index| {
-            bf16::from_f32(
-                ((index * multiplier % period) as f32 - (period / 2) as f32) / divisor,
-            )
-            .to_f32()
+            bf16::from_f32(((index * multiplier % period) as f32 - (period / 2) as f32) / divisor)
+                .to_f32()
         })
         .collect()
 }
@@ -53,7 +54,10 @@ fn positions(start: usize, tokens: usize) -> Vec<i32> {
 }
 
 fn bf16_tensor(values: &[f32], shape: Vec<usize>) -> Tensor {
-    let values = values.iter().map(|value| bf16::from_f32(*value)).collect::<Vec<_>>();
+    let values = values
+        .iter()
+        .map(|value| bf16::from_f32(*value))
+        .collect::<Vec<_>>();
     Tensor::from_bf16(shape, &values).unwrap()
 }
 
@@ -81,10 +85,7 @@ fn run_attention(
     )
     .unwrap();
     let projected_key = transfers::to_cuda(
-        &bf16_tensor(
-            projected_key,
-            vec![tokens, ops::QWEN35_ATTENTION_KV_WIDTH],
-        ),
+        &bf16_tensor(projected_key, vec![tokens, ops::QWEN35_ATTENTION_KV_WIDTH]),
         0,
     )
     .unwrap();
@@ -119,6 +120,34 @@ fn run_attention(
     let query = zeros(ctx, attention_shape.clone(), DType::BF16);
     let gate = zeros(ctx, attention_shape.clone(), DType::BF16);
     let output = zeros(ctx, attention_shape, DType::BF16);
+    let capacity = key_cache.shape().dims()[0] * ops::QWEN35_KV_CACHE_BLOCK_TOKENS;
+    let scores = zeros(
+        ctx,
+        vec![tokens, ops::QWEN35_ATTENTION_Q_HEADS, capacity],
+        DType::F32,
+    );
+    let partial_output = zeros(
+        ctx,
+        vec![
+            tokens,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_MAX_SPLITS,
+            ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_HEAD_DIM,
+        ],
+        DType::F32,
+    );
+    let partial_stats = zeros(
+        ctx,
+        vec![
+            tokens,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_MAX_SPLITS,
+            ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS,
+            2,
+        ],
+        DType::F32,
+    );
     ops::qwen35_attention_fp8(
         ctx,
         tokens,
@@ -137,6 +166,9 @@ fn run_attention(
                 query: &query,
                 gate: &gate,
                 output: &output,
+                scores: &scores,
+                partial_output: &partial_output,
+                partial_stats: &partial_stats,
             },
             cache_offset,
             scales,
@@ -186,9 +218,14 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
     let norm_values = (0..ops::QWEN35_ATTENTION_HEAD_DIM)
         .map(|index| bf16::from_f32(((index % 11) as f32 - 5.0) / 64.0))
         .collect::<Vec<_>>();
-    let norm_reference = norm_values.iter().map(|value| value.to_f32()).collect::<Vec<_>>();
-    let query_norm_cpu = Tensor::from_bf16(vec![ops::QWEN35_ATTENTION_HEAD_DIM], &norm_values).unwrap();
-    let key_norm_cpu = Tensor::from_bf16(vec![ops::QWEN35_ATTENTION_HEAD_DIM], &norm_values).unwrap();
+    let norm_reference = norm_values
+        .iter()
+        .map(|value| value.to_f32())
+        .collect::<Vec<_>>();
+    let query_norm_cpu =
+        Tensor::from_bf16(vec![ops::QWEN35_ATTENTION_HEAD_DIM], &norm_values).unwrap();
+    let key_norm_cpu =
+        Tensor::from_bf16(vec![ops::QWEN35_ATTENTION_HEAD_DIM], &norm_values).unwrap();
     let positions_values = [0i32, 1, 0, 3, 0, 5];
     let positions_cpu = Tensor::from_i32(vec![3, tokens], &positions_values).unwrap();
 
@@ -198,16 +235,8 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
     let query_norm = transfers::to_cuda(&query_norm_cpu, 0).unwrap();
     let key_norm = transfers::to_cuda(&key_norm_cpu, 0).unwrap();
     let positions = transfers::to_cuda(&positions_cpu, 0).unwrap();
-    let key_cache = zeros(
-        &ctx,
-        fp8_cache_shape(capacity),
-        DType::F8E4M3,
-    );
-    let value_cache = zeros(
-        &ctx,
-        fp8_cache_shape(capacity),
-        DType::F8E4M3,
-    );
+    let key_cache = zeros(&ctx, fp8_cache_shape(capacity), DType::F8E4M3);
+    let value_cache = zeros(&ctx, fp8_cache_shape(capacity), DType::F8E4M3);
     let attention_shape = vec![
         tokens,
         ops::QWEN35_ATTENTION_Q_HEADS,
@@ -216,6 +245,34 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
     let query = zeros(&ctx, attention_shape.clone(), DType::BF16);
     let gate = zeros(&ctx, attention_shape.clone(), DType::BF16);
     let output = zeros(&ctx, attention_shape, DType::BF16);
+    let physical_capacity = fp8_cache_shape(capacity)[0] * ops::QWEN35_KV_CACHE_BLOCK_TOKENS;
+    let scores = zeros(
+        &ctx,
+        vec![tokens, ops::QWEN35_ATTENTION_Q_HEADS, physical_capacity],
+        DType::F32,
+    );
+    let partial_output = zeros(
+        &ctx,
+        vec![
+            tokens,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_MAX_SPLITS,
+            ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_HEAD_DIM,
+        ],
+        DType::F32,
+    );
+    let partial_stats = zeros(
+        &ctx,
+        vec![
+            tokens,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_MAX_SPLITS,
+            ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS,
+            2,
+        ],
+        DType::F32,
+    );
     let scales = ops::Qwen35KvCacheScales {
         key: 8.0 / ops::FP8_E4M3_MAX_FINITE,
         value: 8.0 / ops::FP8_E4M3_MAX_FINITE,
@@ -239,6 +296,9 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
                 query: &query,
                 gate: &gate,
                 output: &output,
+                scores: &scores,
+                partial_output: &partial_output,
+                partial_stats: &partial_stats,
             },
             cache_offset: 0,
             scales,
@@ -269,10 +329,7 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
 
     let logical_elements = capacity * ops::QWEN35_ATTENTION_KV_WIDTH;
     assert_eq!(
-        &transfers::to_cpu(&key_cache)
-            .unwrap()
-            .as_f8_e4m3()
-            .unwrap()[..logical_elements],
+        &transfers::to_cpu(&key_cache).unwrap().as_f8_e4m3().unwrap()[..logical_elements],
         reference_key_cache
     );
     assert_eq!(
@@ -296,11 +353,7 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
     // A BF16 buffer with the same logical shape is not a fallback cache.  The
     // public contract must reject it rather than silently doubling memory and
     // bypassing the checkpoint's FP8 calibration.
-    let fake_bf16_key_cache = zeros(
-        &ctx,
-        fp8_cache_shape(capacity),
-        DType::BF16,
-    );
+    let fake_bf16_key_cache = zeros(&ctx, fp8_cache_shape(capacity), DType::BF16);
     assert!(ops::qwen35_attention_fp8(
         &ctx,
         tokens,
@@ -319,6 +372,9 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
                 query: &query,
                 gate: &gate,
                 output: &output,
+                scores: &scores,
+                partial_output: &partial_output,
+                partial_stats: &partial_stats,
             },
             cache_offset: 0,
             scales,
@@ -346,35 +402,20 @@ fn qwen35_decode_is_bit_exact_across_critical_kv_lengths() {
     for prefix_tokens in [1023usize] {
         let total_tokens = prefix_tokens + 1;
         let capacity = total_tokens + 1;
+        let physical_capacity = fp8_cache_shape(capacity)[0] * ops::QWEN35_KV_CACHE_BLOCK_TOKENS;
         let projected_query_gate = patterned_bf16(
             total_tokens * ops::QWEN35_ATTENTION_Q_PROJECTION_WIDTH,
             17,
             101,
             37.0,
         );
-        let projected_key = patterned_bf16(
-            total_tokens * ops::QWEN35_ATTENTION_KV_WIDTH,
-            13,
-            83,
-            31.0,
-        );
-        let projected_value = patterned_bf16(
-            total_tokens * ops::QWEN35_ATTENTION_KV_WIDTH,
-            19,
-            79,
-            29.0,
-        );
+        let projected_key =
+            patterned_bf16(total_tokens * ops::QWEN35_ATTENTION_KV_WIDTH, 13, 83, 31.0);
+        let projected_value =
+            patterned_bf16(total_tokens * ops::QWEN35_ATTENTION_KV_WIDTH, 19, 79, 29.0);
 
-        let monolithic_key_cache = zeros(
-            &ctx,
-            fp8_cache_shape(capacity),
-            DType::F8E4M3,
-        );
-        let monolithic_value_cache = zeros(
-            &ctx,
-            fp8_cache_shape(capacity),
-            DType::F8E4M3,
-        );
+        let monolithic_key_cache = zeros(&ctx, fp8_cache_shape(capacity), DType::F8E4M3);
+        let monolithic_value_cache = zeros(&ctx, fp8_cache_shape(capacity), DType::F8E4M3);
         let monolithic_output = run_attention(
             &ctx,
             total_tokens,
@@ -390,16 +431,8 @@ fn qwen35_decode_is_bit_exact_across_critical_kv_lengths() {
             scales,
         );
 
-        let split_key_cache = zeros(
-            &ctx,
-            fp8_cache_shape(capacity),
-            DType::F8E4M3,
-        );
-        let split_value_cache = zeros(
-            &ctx,
-            fp8_cache_shape(capacity),
-            DType::F8E4M3,
-        );
+        let split_key_cache = zeros(&ctx, fp8_cache_shape(capacity), DType::F8E4M3);
+        let split_value_cache = zeros(&ctx, fp8_cache_shape(capacity), DType::F8E4M3);
         let q_prefix = prefix_tokens * ops::QWEN35_ATTENTION_Q_PROJECTION_WIDTH;
         let kv_prefix = prefix_tokens * ops::QWEN35_ATTENTION_KV_WIDTH;
         let _prefix_output = run_attention(
@@ -461,7 +494,7 @@ fn qwen35_decode_is_bit_exact_across_critical_kv_lengths() {
         let reference = ops::qwen35_attention_reference(ops::Qwen35AttentionReferenceArgs {
             tokens: 1,
             cache_offset: prefix_tokens,
-            cache_capacity: capacity,
+            cache_capacity: physical_capacity,
             projected_query_gate: &projected_query_gate[q_prefix..],
             projected_key: &projected_key[kv_prefix..],
             projected_value: &projected_value[kv_prefix..],

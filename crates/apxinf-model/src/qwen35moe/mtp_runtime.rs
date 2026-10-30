@@ -2,11 +2,11 @@
 //!
 //! This is deliberately not the Qwen3.8 dense-MLP proposer. The checkpoint's
 //! one MTP layer is BF16 and contains the same 256-expert/top-8 routed MoE as
-//! the target architecture. Its K/V cache is BF16 as well; base-model FP8 KV
-//! calibration values never enter this path.
+//! the target architecture. Its persistent K/V cache follows TensorRT Edge's
+//! static unit-scale E4M3 contract and the same 128-token paging as the target.
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
-use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext, ExecutionSession};
 
 use super::architecture::AttentionGeometry;
 use super::config::Qwen35MoeConfig;
@@ -27,7 +27,9 @@ const EXPERTS: usize = ops::QWEN35_MTP_EXPERTS;
 const TOP_K: usize = ops::QWEN35_MTP_TOP_K;
 const INTERMEDIATE: usize = ops::QWEN35_MTP_INTERMEDIATE;
 const MTP_PREFILL_CHUNK: usize = 2_048;
-pub const QWEN35_MTP_KV_DTYPE: DType = DType::BF16;
+const MTP_DRAFT_WORKSPACE: usize = 4 * 1024 * 1024;
+pub const QWEN35_MTP_KV_DTYPE: DType = DType::F8E4M3;
+const MTP_KV_SCALE: f32 = 1.0;
 
 /// Logical/physical MTP position contract.
 ///
@@ -87,17 +89,17 @@ impl MtpPositionContract {
             || self.cache_rows.checked_add(1) != Some(self.logical_position)
         {
             return Err(invalid(
-                "Qwen3.5 MTP logical position must equal BF16 KV rows plus one",
+                "Qwen3.5 MTP logical position must equal FP8 KV rows plus one",
             ));
         }
         if self.cache_rows > capacity {
-            return Err(invalid("Qwen3.5 MTP BF16 KV cache exceeds capacity"));
+            return Err(invalid("Qwen3.5 MTP FP8 KV cache exceeds capacity"));
         }
         Ok(())
     }
 }
 
-/// One transactional BF16 MTP KV bank.
+/// One transactional static-FP8 MTP KV bank.
 #[derive(Debug)]
 pub struct Qwen35MtpState {
     key: Tensor,
@@ -136,7 +138,7 @@ struct PendingDraft {
 }
 
 /// Complete native proposer backend. All large tensors remain on CUDA. Draft
-/// argmax runs on device and only the three compact I32 proposal IDs cross to
+/// argmax runs on device and only the compact I32 proposal IDs cross to
 /// the host once the sequential chain has finished.
 pub struct Qwen35MtpRuntime {
     geometry: AttentionGeometry,
@@ -176,9 +178,21 @@ impl Qwen35MtpRuntime {
         })
     }
 
-    fn ensure_scratch(&mut self, ctx: &CudaContext) -> Result<&mut MtpScratch> {
+    fn ensure_scratch(
+        &mut self,
+        ctx: &CudaContext,
+        cache_capacity: usize,
+    ) -> Result<&mut MtpScratch> {
         if self.scratch.is_none() {
-            self.scratch = Some(MtpScratch::new(ctx, self.geometry)?);
+            self.scratch = Some(MtpScratch::new(ctx, self.geometry, cache_capacity)?);
+        } else if self
+            .scratch
+            .as_ref()
+            .is_some_and(|scratch| scratch.cache_capacity != cache_capacity)
+        {
+            return Err(invalid(
+                "Qwen3.5 MTP scratch/cache capacity changed after initialization",
+            ));
         }
         Ok(self.scratch.as_mut().expect("MTP scratch was initialized"))
     }
@@ -221,16 +235,31 @@ impl MtpBackend for Qwen35MtpRuntime {
         if capacity == 0 {
             return Err(invalid("Qwen3.5 MTP cache capacity must be non-zero"));
         }
-        self.ensure_scratch(ctx)?;
+        let capacity = capacity
+            .checked_add(ops::QWEN35_KV_CACHE_BLOCK_TOKENS - 1)
+            .map(|value| value / ops::QWEN35_KV_CACHE_BLOCK_TOKENS)
+            .and_then(|blocks| blocks.checked_mul(ops::QWEN35_KV_CACHE_BLOCK_TOKENS))
+            .ok_or_else(|| invalid("Qwen3.5 MTP cache capacity overflow"))?;
+        let blocks = capacity / ops::QWEN35_KV_CACHE_BLOCK_TOKENS;
         Ok(Qwen35MtpState {
             key: zeros(
                 ctx,
-                vec![capacity, self.geometry.kv_heads, self.geometry.head_dim],
+                vec![
+                    blocks,
+                    ops::QWEN35_KV_CACHE_BLOCK_TOKENS,
+                    self.geometry.kv_heads,
+                    self.geometry.head_dim,
+                ],
                 QWEN35_MTP_KV_DTYPE,
             )?,
             value: zeros(
                 ctx,
-                vec![capacity, self.geometry.kv_heads, self.geometry.head_dim],
+                vec![
+                    blocks,
+                    ops::QWEN35_KV_CACHE_BLOCK_TOKENS,
+                    self.geometry.kv_heads,
+                    self.geometry.head_dim,
+                ],
                 QWEN35_MTP_KV_DTYPE,
             )?,
             capacity,
@@ -538,14 +567,14 @@ impl MtpBackend for Qwen35MtpRuntime {
             .checked_add(QWEN35_MTP_DRAFT_STEPS)
             .ok_or_else(|| invalid("Qwen3.5 MTP draft capacity overflow"))?;
         if required_rows > committed.capacity {
-            return Err(invalid("Qwen3.5 MTP draft exceeds BF16 KV capacity"));
+            return Err(invalid("Qwen3.5 MTP draft exceeds FP8 KV capacity"));
         }
         self.copy_state(ctx, committed, shadow)?;
 
         let geometry = self.geometry;
         let eps = self.rms_norm_eps;
         let theta = self.rope_theta;
-        let scratch = self.ensure_scratch(ctx)?;
+        let scratch = self.ensure_scratch(ctx, committed.capacity)?;
         write_i32(&scratch.token, pending)?;
         let draft_positions = (0..QWEN35_MTP_DRAFT_STEPS)
             .map(|depth| {
@@ -553,35 +582,51 @@ impl MtpBackend for Qwen35MtpRuntime {
                     .map_err(|_| invalid("Qwen3.5 MTP RoPE position exceeds i32"))
             })
             .collect::<Result<Vec<_>>>()?;
+        let draft_positions = draft_positions
+            .into_iter()
+            .flat_map(|position| [position; 3])
+            .collect::<Vec<_>>();
         let draft_positions = transfers::to_cuda(
-            &Tensor::from_i32(vec![QWEN35_MTP_DRAFT_STEPS], &draft_positions)?,
+            &Tensor::from_i32(vec![QWEN35_MTP_DRAFT_STEPS, 3], &draft_positions)?,
             ctx.device_id(),
         )?;
-        let mut base_hidden = target_hidden.clone();
-        for depth in 0..QWEN35_MTP_DRAFT_STEPS {
-            let token_input = scratch.token.clone();
-            let rope_position = element_view(&draft_positions, depth)?;
-            forward_one(
-                ctx,
-                weights,
-                shadow,
-                scratch,
-                geometry,
-                eps,
-                theta,
-                &base_hidden,
-                &token_input,
-                &rope_position,
-                start.physical_row_for_draft(depth)?,
-                depth,
-                true,
-            )?;
-            let proposal_slot = element_view(&scratch.proposals, depth)?;
-            transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &proposal_slot)?;
-            if depth + 1 < QWEN35_MTP_DRAFT_STEPS {
-                transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &scratch.token)?;
-                base_hidden = scratch.final_hidden.clone();
-            }
+        // GEMM normally synchronizes after every eager execution so temporary
+        // native resources cannot be destroyed while still in flight. Draft
+        // uses fixed scratch addresses for all three sequential steps, so one
+        // persistent execution session can retain those resources and leave
+        // the chain asynchronous until the compact proposal readback below.
+        let draft_session = scratch.draft_session.clone();
+        if scratch.draft_session_prepared {
+            draft_session.run(|| {
+                run_draft_chain(
+                    ctx,
+                    weights,
+                    shadow,
+                    scratch,
+                    geometry,
+                    eps,
+                    theta,
+                    target_hidden,
+                    &draft_positions,
+                    start,
+                )
+            })?;
+        } else {
+            draft_session.prepare(|| {
+                run_draft_chain(
+                    ctx,
+                    weights,
+                    shadow,
+                    scratch,
+                    geometry,
+                    eps,
+                    theta,
+                    target_hidden,
+                    &draft_positions,
+                    start,
+                )
+            })?;
+            scratch.draft_session_prepared = true;
         }
         ctx.synchronize().map_err(Error::Cuda)?;
         let host = transfers::to_cpu(&scratch.proposals)?;
@@ -653,9 +698,9 @@ impl MtpBackend for Qwen35MtpRuntime {
             let geometry = self.geometry;
             let eps = self.rms_norm_eps;
             let theta = self.rope_theta;
-            let scratch = self.ensure_scratch(ctx)?;
+            let scratch = self.ensure_scratch(ctx, shadow.capacity)?;
             transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &scratch.token)?;
-            write_i32(
+            write_text_position(
                 &scratch.position,
                 u32::try_from(
                     pending
@@ -687,7 +732,9 @@ impl MtpBackend for Qwen35MtpRuntime {
                 false,
             )?;
         } else if committed_rows > QWEN35_MTP_DRAFT_STEPS {
-            return Err(invalid("Qwen3.5 MTP four-row commit needs materialization"));
+            return Err(invalid(
+                "Qwen3.5 MTP full verifier commit needs materialization",
+            ));
         }
         ctx.synchronize().map_err(Error::Cuda)?;
         let position = pending.start.after_commit(committed_rows)?;
@@ -786,7 +833,7 @@ pub struct Qwen35MtpCoordinator<B: FullAttentionBackend, M: MtpBackend> {
 
 /// Device-resident checkpoint for an MTP-ready text prefix.
 ///
-/// Target attention/GDN state and the draft layer's BF16 KV state are kept
+/// Target attention/GDN state and the draft layer's static-FP8 KV state are kept
 /// together so restoring a prefix cannot create target/draft position drift.
 pub struct Qwen35ContextSnapshot<C, S> {
     target: Qwen35SessionSnapshot<C>,
@@ -898,7 +945,7 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         Ok(())
     }
 
-    /// Clear target and both BF16 MTP cache banks and discard all generation
+    /// Clear target and both FP8 MTP cache banks and discard all generation
     /// bookkeeping. No old pending token or hidden row survives the reset.
     pub fn reset(&mut self, ctx: &CudaContext) -> Result<()> {
         self.target.reset(ctx)?;
@@ -1039,7 +1086,7 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         })
     }
 
-    /// Execute draft(3) -> canonical scalar target verify(4) -> schedule ->
+    /// Execute draft(2) -> canonical scalar target verify(3) -> schedule ->
     /// target/MTP prepare -> dual publish. All device work and the schedule's
     /// fallible transition are completed before either visible state changes.
     pub fn run_greedy_round(
@@ -1076,7 +1123,10 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         let timing = std::env::var_os("APXINF_QWEN35_MTP_TIMING").is_some();
         let mark = |label: &str, at: std::time::Instant| {
             if timing {
-                eprintln!("[mtp-round] {label} {:.3} ms", at.elapsed().as_secs_f64() * 1e3);
+                eprintln!(
+                    "[mtp-round] {label} {:.3} ms",
+                    at.elapsed().as_secs_f64() * 1e3
+                );
             }
         };
         if timing {
@@ -1170,6 +1220,8 @@ struct MtpPrefillScratch {
     joined: Tensor,
     hidden: Tensor,
     normalized: Tensor,
+    projected_key: Tensor,
+    projected_value: Tensor,
 }
 
 impl MtpPrefillScratch {
@@ -1186,6 +1238,16 @@ impl MtpPrefillScratch {
             joined: zeros(ctx, vec![max_tokens, 2 * HIDDEN], DType::BF16)?,
             hidden: zeros(ctx, vec![max_tokens, HIDDEN], DType::BF16)?,
             normalized: zeros(ctx, vec![max_tokens, HIDDEN], DType::BF16)?,
+            projected_key: zeros(
+                ctx,
+                vec![max_tokens, ops::QWEN35_ATTENTION_KV_WIDTH],
+                DType::BF16,
+            )?,
+            projected_value: zeros(
+                ctx,
+                vec![max_tokens, ops::QWEN35_ATTENTION_KV_WIDTH],
+                DType::BF16,
+            )?,
         })
     }
 }
@@ -1252,6 +1314,39 @@ fn prefill_kv_chunk(
     ops::mlp::rms_norm(ctx, &hidden, &mtp.layer.input_layernorm, &normalized, eps)?;
 
     let attention = &mtp.layer.attention;
+    let mut key_flat = rows_view(
+        &scratch.projected_key,
+        0,
+        rows,
+        geometry.kv_heads * geometry.head_dim,
+    )?;
+    let mut value_flat = rows_view(
+        &scratch.projected_value,
+        0,
+        rows,
+        geometry.kv_heads * geometry.head_dim,
+    )?;
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(&normalized, &attention.k_proj.weight, &mut key_flat),
+    )?;
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(&normalized, &attention.v_proj.weight, &mut value_flat),
+    )?;
+    let key_heads = reshape(
+        &key_flat,
+        vec![rows * geometry.kv_heads, geometry.head_dim],
+        DType::BF16,
+    )?;
+    ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, eps)?;
+    let key_heads = reshape(
+        &key_flat,
+        vec![rows, geometry.kv_heads, geometry.head_dim],
+        DType::BF16,
+    )?;
+    ops::partial_rope(ctx, &key_heads, positions, geometry.rotary_dim, rope_theta)?;
+
     let key_slot = cache_rows_view(
         &state.key,
         cache_row,
@@ -1266,42 +1361,24 @@ fn prefill_kv_chunk(
         geometry.kv_heads,
         geometry.head_dim,
     )?;
-    let mut key_flat = reshape(
+    let key_slot = reshape(
         &key_slot,
         vec![rows, geometry.kv_heads * geometry.head_dim],
-        DType::BF16,
+        QWEN35_MTP_KV_DTYPE,
     )?;
-    let mut value_flat = reshape(
+    let value_slot = reshape(
         &value_slot,
         vec![rows, geometry.kv_heads * geometry.head_dim],
-        DType::BF16,
+        QWEN35_MTP_KV_DTYPE,
     )?;
-    ops::gemm(
-        ctx,
-        ops::GemmArgs::new(&normalized, &attention.k_proj.weight, &mut key_flat),
-    )?;
-    ops::gemm(
-        ctx,
-        ops::GemmArgs::new(&normalized, &attention.v_proj.weight, &mut value_flat),
-    )?;
-    let key_heads = reshape(
-        &key_slot,
-        vec![rows * geometry.kv_heads, geometry.head_dim],
-        DType::BF16,
-    )?;
-    ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, eps)?;
-    ops::partial_rope(ctx, &key_slot, positions, geometry.rotary_dim, rope_theta)
+    ops::quantize_fp8_per_tensor(ctx, &key_flat, &key_slot, MTP_KV_SCALE)?;
+    ops::quantize_fp8_per_tensor(ctx, &value_flat, &value_slot, MTP_KV_SCALE)
 }
 
 struct MtpScratch {
-    /// Device-resident `[valid_key_tokens, query_start]` for the draft layer
-    /// attention, created on first use because the cache capacity is only
-    /// known then. Without it the draft attention Spec carries the live
-    /// prefix, so every draft step is a fresh tuning key and a full autotune:
-    /// measured at 2055 ms for the three draft forwards of one round, against
-    /// 20 ms for an entire 40-layer scalar decode step.
-    decode_meta: Option<ops::KvCacheDecodeMeta>,
+    cache_capacity: usize,
     token: Tensor,
+    /// Three identical T/H/W positions for text-only MTP rows.
     position: Tensor,
     embedding: Tensor,
     norm_embedding: Tensor,
@@ -1310,9 +1387,14 @@ struct MtpScratch {
     hidden: Tensor,
     normalized: Tensor,
     q_fused: Tensor,
+    projected_key: Tensor,
+    projected_value: Tensor,
     query: Tensor,
     query_gate: Tensor,
     attention_out: Tensor,
+    attention_scores: Tensor,
+    attention_partial_output: Tensor,
+    attention_partial_stats: Tensor,
     projected: Tensor,
     moe_out: Tensor,
     final_hidden: Tensor,
@@ -1328,14 +1410,19 @@ struct MtpScratch {
     shared_output: Tensor,
     shared_gate_logit: Tensor,
     edge_workspace: Option<CudaBuffer>,
+    draft_session: ExecutionSession,
+    draft_session_prepared: bool,
 }
 
 impl MtpScratch {
-    fn new(ctx: &CudaContext, geometry: AttentionGeometry) -> Result<Self> {
+    fn new(ctx: &CudaContext, geometry: AttentionGeometry, cache_capacity: usize) -> Result<Self> {
+        if cache_capacity == 0 || cache_capacity % ops::QWEN35_KV_CACHE_BLOCK_TOKENS != 0 {
+            return Err(invalid("Qwen3.5 MTP scratch capacity is not page aligned"));
+        }
         Ok(Self {
-            decode_meta: None,
+            cache_capacity,
             token: zeros(ctx, vec![1], DType::I32)?,
-            position: zeros(ctx, vec![1], DType::I32)?,
+            position: zeros(ctx, vec![3, 1], DType::I32)?,
             embedding: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             norm_embedding: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             norm_hidden: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
@@ -1343,6 +1430,8 @@ impl MtpScratch {
             hidden: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             normalized: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             q_fused: zeros(ctx, vec![1, geometry.query_projection_width], DType::BF16)?,
+            projected_key: zeros(ctx, vec![1, geometry.kv_projection_width], DType::BF16)?,
+            projected_value: zeros(ctx, vec![1, geometry.kv_projection_width], DType::BF16)?,
             query: zeros(
                 ctx,
                 vec![1, geometry.query_heads, geometry.head_dim],
@@ -1357,6 +1446,33 @@ impl MtpScratch {
                 ctx,
                 vec![1, geometry.query_heads * geometry.head_dim],
                 DType::BF16,
+            )?,
+            attention_scores: zeros(
+                ctx,
+                vec![1, geometry.query_heads, cache_capacity],
+                DType::F32,
+            )?,
+            attention_partial_output: zeros(
+                ctx,
+                vec![
+                    1,
+                    geometry.kv_heads,
+                    ops::QWEN35_ATTENTION_MAX_SPLITS,
+                    geometry.query_heads / geometry.kv_heads,
+                    geometry.head_dim,
+                ],
+                DType::F32,
+            )?,
+            attention_partial_stats: zeros(
+                ctx,
+                vec![
+                    1,
+                    geometry.kv_heads,
+                    ops::QWEN35_ATTENTION_MAX_SPLITS,
+                    geometry.query_heads / geometry.kv_heads,
+                    2,
+                ],
+                DType::F32,
             )?,
             projected: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             moe_out: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
@@ -1382,8 +1498,53 @@ impl MtpScratch {
                     CudaBuffer::alloc(bytes, ctx.device_id()).map_err(Error::Cuda)
                 })
                 .transpose()?,
+            draft_session: ExecutionSession::with_capacity(MTP_DRAFT_WORKSPACE, ctx.device_id())?,
+            draft_session_prepared: false,
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_draft_chain(
+    ctx: &CudaContext,
+    weights: &Qwen35DeviceWeights,
+    state: &mut Qwen35MtpState,
+    scratch: &mut MtpScratch,
+    geometry: AttentionGeometry,
+    eps: f32,
+    rope_theta: f32,
+    target_hidden: &Tensor,
+    draft_positions: &Tensor,
+    start: MtpPositionContract,
+) -> Result<()> {
+    let mut base_hidden = target_hidden.clone();
+    for depth in 0..QWEN35_MTP_DRAFT_STEPS {
+        let token_input = scratch.token.clone();
+        let rope_position = rows_view(draft_positions, depth, 1, 3)?;
+        let rope_position = reshape(&rope_position, vec![3, 1], DType::I32)?;
+        forward_one(
+            ctx,
+            weights,
+            state,
+            scratch,
+            geometry,
+            eps,
+            rope_theta,
+            &base_hidden,
+            &token_input,
+            &rope_position,
+            start.physical_row_for_draft(depth)?,
+            depth,
+            true,
+        )?;
+        let proposal_slot = element_view(&scratch.proposals, depth)?;
+        transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &proposal_slot)?;
+        if depth + 1 < QWEN35_MTP_DRAFT_STEPS {
+            transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &scratch.token)?;
+            base_hidden = scratch.final_hidden.clone();
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1442,38 +1603,14 @@ fn forward_one(
         ctx,
         ops::GemmArgs::new(&scratch.normalized, &attention.q_proj.weight, &mut q_fused),
     )?;
-    let q_fused_heads = reshape(
-        &scratch.q_fused,
-        vec![1, geometry.query_heads, 2 * geometry.head_dim],
-        DType::BF16,
-    )?;
-    ops::split_query_and_gate(ctx, &q_fused_heads, &scratch.query, &scratch.query_gate)?;
-
-    let key_slot = cache_row_view(&state.key, cache_row, geometry.kv_heads, geometry.head_dim)?;
-    let value_slot = cache_row_view(
-        &state.value,
-        cache_row,
-        geometry.kv_heads,
-        geometry.head_dim,
-    )?;
-    let key_flat = reshape(
-        &key_slot,
-        vec![1, geometry.kv_heads * geometry.head_dim],
-        DType::BF16,
-    )?;
-    let value_flat = reshape(
-        &value_slot,
-        vec![1, geometry.kv_heads * geometry.head_dim],
-        DType::BF16,
-    )?;
-    let mut key_flat_out = key_flat.clone();
-    let mut value_flat_out = value_flat.clone();
+    let mut projected_key = scratch.projected_key.clone();
+    let mut projected_value = scratch.projected_value.clone();
     ops::gemm(
         ctx,
         ops::GemmArgs::new(
             &scratch.normalized,
             &attention.k_proj.weight,
-            &mut key_flat_out,
+            &mut projected_key,
         ),
     )?;
     ops::gemm(
@@ -1481,74 +1618,44 @@ fn forward_one(
         ops::GemmArgs::new(
             &scratch.normalized,
             &attention.v_proj.weight,
-            &mut value_flat_out,
+            &mut projected_value,
         ),
     )?;
-    let query_heads = reshape(
-        &scratch.query,
-        vec![geometry.query_heads, geometry.head_dim],
-        DType::BF16,
-    )?;
-    let key_heads = reshape(
-        &key_slot,
-        vec![geometry.kv_heads, geometry.head_dim],
-        DType::BF16,
-    )?;
-    ops::head_rms_norm(ctx, &query_heads, &attention.q_norm, eps)?;
-    ops::head_rms_norm(ctx, &key_heads, &attention.k_norm, eps)?;
-    ops::partial_rope(
-        ctx,
-        &scratch.query,
-        position,
-        geometry.rotary_dim,
-        rope_theta,
-    )?;
-    ops::partial_rope(ctx, &key_slot, position, geometry.rotary_dim, rope_theta)?;
-
-    let valid = cache_row + 1;
-    // Capacity-shaped views plus a device-resident length, so one tuned Recipe
-    // serves every draft step. Rows past `valid` are never read: each split
-    // clamps to the device length. Needs `valid >= 1`, which holds since
-    // `valid = cache_row + 1`.
-    if scratch.decode_meta.is_none() {
-        scratch.decode_meta = Some(ops::KvCacheDecodeMeta::new(
-            ctx.device_id(),
-            state.capacity,
-        )?);
-    }
-    let keys = cache_prefix_view(&state.key, state.capacity, geometry.kv_heads, geometry.head_dim)?;
-    let values =
-        cache_prefix_view(&state.value, state.capacity, geometry.kv_heads, geometry.head_dim)?;
-    let query = reshape(
-        &scratch.query,
-        vec![1, 1, geometry.query_heads, geometry.head_dim],
-        DType::BF16,
-    )?;
-    let mut attention_out = reshape(
+    let attention_out = reshape(
         &scratch.attention_out,
-        vec![1, 1, geometry.query_heads, geometry.head_dim],
+        vec![1, geometry.query_heads, geometry.head_dim],
         DType::BF16,
     )?;
-    let meta = scratch
-        .decode_meta
-        .clone()
-        .ok_or_else(|| invalid("Qwen3.5 MTP decode metadata was not initialized"))?;
-    meta.update(valid, cache_row)?;
-    let mut args = ops::KvCacheAttentionArgs::new(&query, &keys, &values, &mut attention_out)
-        .with_decode_meta(&meta);
-    args.valid_key_tokens = valid;
-    args.query_start = cache_row;
-    // The draft attention previously fell back silently to the naive custom
-    // kernel on any failure; that path timed 47.79 ms against 0.209 ms for the
-    // split-KV winner on the decode shape.
-    args.policy.allow_fallback = false;
-    ops::kv_cache_attention(ctx, args)?;
-    let gate = reshape(
-        &scratch.query_gate,
-        vec![1, geometry.query_heads * geometry.head_dim],
-        DType::BF16,
+    ops::qwen35_attention_fp8(
+        ctx,
+        1,
+        ops::Qwen35Fp8AttentionArgs {
+            projected_query_gate: &scratch.q_fused,
+            projected_key: &scratch.projected_key,
+            projected_value: &scratch.projected_value,
+            query_norm: &attention.q_norm,
+            key_norm: &attention.k_norm,
+            positions: position,
+            cache: ops::Qwen35Fp8KvCache {
+                key: &state.key,
+                value: &state.value,
+            },
+            scratch: ops::Qwen35AttentionScratch {
+                query: &scratch.query,
+                gate: &scratch.query_gate,
+                output: &attention_out,
+                scores: &scratch.attention_scores,
+                partial_output: &scratch.attention_partial_output,
+                partial_stats: &scratch.attention_partial_stats,
+            },
+            cache_offset: cache_row,
+            scales: ops::Qwen35KvCacheScales {
+                key: MTP_KV_SCALE,
+                value: MTP_KV_SCALE,
+            },
+            rope_theta,
+        },
     )?;
-    ops::apply_output_gate(ctx, &scratch.attention_out, &gate)?;
     let mut projected = scratch.projected.clone();
     ops::gemm(
         ctx,
@@ -1954,7 +2061,17 @@ fn validate_state_storage(
     state: &Qwen35MtpState,
     geometry: AttentionGeometry,
 ) -> Result<()> {
-    let shape = [state.capacity, geometry.kv_heads, geometry.head_dim];
+    if state.capacity == 0 || state.capacity % ops::QWEN35_KV_CACHE_BLOCK_TOKENS != 0 {
+        return Err(invalid(
+            "Qwen3.5 MTP FP8 cache capacity is not page aligned",
+        ));
+    }
+    let shape = [
+        state.capacity / ops::QWEN35_KV_CACHE_BLOCK_TOKENS,
+        ops::QWEN35_KV_CACHE_BLOCK_TOKENS,
+        geometry.kv_heads,
+        geometry.head_dim,
+    ];
     validate_tensor(
         &state.key,
         ctx,
@@ -2001,6 +2118,13 @@ fn write_i32(destination: &Tensor, value: u32) -> Result<()> {
     let value = i32::try_from(value)
         .map_err(|_| invalid(format!("Qwen3.5 MTP value {value} exceeds i32")))?;
     let host = Tensor::from_i32(vec![1], &[value])?;
+    transfers::copy_cpu_to_cuda(&host, destination)
+}
+
+fn write_text_position(destination: &Tensor, value: u32) -> Result<()> {
+    let value = i32::try_from(value)
+        .map_err(|_| invalid(format!("Qwen3.5 MTP position {value} exceeds i32")))?;
+    let host = Tensor::from_i32(vec![3, 1], &[value, value, value])?;
     transfers::copy_cpu_to_cuda(&host, destination)
 }
 
@@ -2082,10 +2206,6 @@ fn element_view(tensor: &Tensor, index: usize) -> Result<Tensor> {
         .map_err(Error::Cuda)
 }
 
-fn cache_row_view(cache: &Tensor, row: usize, heads: usize, head_dim: usize) -> Result<Tensor> {
-    cache_rows_view(cache, row, 1, heads, head_dim)
-}
-
 fn cache_rows_view(
     cache: &Tensor,
     row: usize,
@@ -2100,7 +2220,7 @@ fn cache_rows_view(
         .checked_mul(head_dim)
         .ok_or_else(|| invalid("Qwen3.5 MTP cache row overflow"))?;
     let row_bytes = row_elements
-        .checked_mul(DType::BF16.size_in_bytes())
+        .checked_mul(cache.dtype().size_in_bytes())
         .ok_or_else(|| invalid("Qwen3.5 MTP cache bytes overflow"))?;
     let bytes = rows
         .checked_mul(row_bytes)
@@ -2113,7 +2233,7 @@ fn cache_rows_view(
             bytes,
         )
         .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(vec![rows, heads, head_dim]), DType::BF16)
+        .as_tensor(Shape::new(vec![rows, heads, head_dim]), cache.dtype())
         .map_err(Error::Cuda)
 }
 
@@ -2121,13 +2241,13 @@ fn cache_prefix_view(cache: &Tensor, rows: usize, heads: usize, head_dim: usize)
     let bytes = rows
         .checked_mul(heads)
         .and_then(|n| n.checked_mul(head_dim))
-        .and_then(|n| n.checked_mul(DType::BF16.size_in_bytes()))
+        .and_then(|n| n.checked_mul(cache.dtype().size_in_bytes()))
         .ok_or_else(|| invalid("Qwen3.5 MTP cache prefix overflow"))?;
     CudaBuffer::from_tensor(cache)
         .map_err(Error::Cuda)?
         .view(0, bytes)
         .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(vec![1, rows, heads, head_dim]), DType::BF16)
+        .as_tensor(Shape::new(vec![1, rows, heads, head_dim]), cache.dtype())
         .map_err(Error::Cuda)
 }
 
@@ -2145,14 +2265,16 @@ mod tests {
 
     #[test]
     fn prompt_shift_keeps_logical_and_physical_positions_distinct() {
-        assert_eq!(QWEN35_MTP_KV_DTYPE, DType::BF16);
+        assert_eq!(QWEN35_MTP_KV_DTYPE, DType::F8E4M3);
+        assert_eq!(MTP_KV_SCALE, 1.0);
         let state = MtpPositionContract::after_prompt(4_096).unwrap();
         assert_eq!(state.logical_position, 4_096);
         assert_eq!(state.cache_rows, 4_095);
         assert_eq!(state.physical_row_for_draft(0).unwrap(), 4_095);
         assert_eq!(state.rope_position_for_draft(0).unwrap(), 4_096);
-        assert_eq!(state.physical_row_for_draft(2).unwrap(), 4_097);
-        assert_eq!(state.rope_position_for_draft(2).unwrap(), 4_098);
+        let last = QWEN35_MTP_DRAFT_STEPS - 1;
+        assert_eq!(state.physical_row_for_draft(last).unwrap(), 4_096);
+        assert_eq!(state.rope_position_for_draft(last).unwrap(), 4_097);
     }
 
     #[test]
@@ -2171,7 +2293,7 @@ mod tests {
     #[test]
     fn partial_and_full_commits_preserve_position_invariant() {
         let start = MtpPositionContract::after_prompt(17).unwrap();
-        for committed in 1..=4 {
+        for committed in 1..=QWEN35_MTP_DRAFT_STEPS + 1 {
             let next = start.after_commit(committed).unwrap();
             assert_eq!(next.logical_position, 17 + committed);
             assert_eq!(next.cache_rows, 16 + committed);
@@ -2180,11 +2302,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_prompt_and_fourth_draft_are_rejected() {
+    fn empty_prompt_and_out_of_range_draft_are_rejected() {
         assert!(MtpPositionContract::after_prompt(0).is_err());
         let state = MtpPositionContract::after_prompt(1).unwrap();
-        assert!(state.physical_row_for_draft(3).is_err());
-        assert!(state.rope_position_for_draft(3).is_err());
+        assert!(state
+            .physical_row_for_draft(QWEN35_MTP_DRAFT_STEPS)
+            .is_err());
+        assert!(state
+            .rope_position_for_draft(QWEN35_MTP_DRAFT_STEPS)
+            .is_err());
     }
 
     #[test]

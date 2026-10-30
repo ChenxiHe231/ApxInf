@@ -7,11 +7,12 @@
 /* Exact Qwen3.5-35B-A3B full-attention geometry.  This is intentionally not
    a generic attention descriptor: accepting another geometry here would make
    it too easy to run a plausible but wrong cache layout. */
-#define APXINF_QWEN35_ATTENTION_SPEC_VERSION 1u
+#define APXINF_QWEN35_ATTENTION_SPEC_VERSION 2u
 #define APXINF_QWEN35_Q_HEADS 16u
 #define APXINF_QWEN35_KV_HEADS 2u
 #define APXINF_QWEN35_HEAD_DIM 256u
 #define APXINF_QWEN35_ROTARY_DIM 64u
+#define APXINF_QWEN35_ATTENTION_MAX_SPLITS 32u
 
 typedef struct {
   uint32_t version;
@@ -45,6 +46,12 @@ typedef struct {
   void* query;
   void* gate;
   void* output;
+  /* FP32 split attention scores [T,16,capacity]. */
+  void* scores;
+  /* FP32 split-KV accumulation [T,2,32,8,256]. */
+  void* partial_output;
+  /* FP32 split maximum/denominator pairs [T,2,32,8,2]. */
+  void* partial_stats;
   apxinf_cuda_stream_t stream;
 } apxinf_qwen35_attention_bindings_t;
 

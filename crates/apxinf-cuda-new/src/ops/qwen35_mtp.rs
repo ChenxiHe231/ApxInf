@@ -19,7 +19,7 @@ pub const QWEN35_MTP_HIDDEN: usize = 2_048;
 pub const QWEN35_MTP_INTERMEDIATE: usize = 512;
 pub const QWEN35_MTP_VOCAB_SIZE: usize = 248_320;
 pub const QWEN35_MTP_LAYERS: usize = 1;
-pub const QWEN35_MTP_DRAFT_STEPS: usize = 3;
+pub const QWEN35_MTP_DRAFT_STEPS: usize = 2;
 
 /// Transactional identity of one MTP proposal execution.
 ///
@@ -117,7 +117,10 @@ pub struct Qwen35MtpMoeArgs<'a> {
 pub fn qwen35_mtp_moe(ctx: &CudaContext, args: Qwen35MtpMoeArgs<'_>) -> Result<()> {
     let normalized = normalize(ctx, args)?;
     let _storage = &normalized.storage;
-    crate::workspace::validate_capture_target(ctx.device_id(), normalized.bindings.stream as usize)?;
+    crate::workspace::validate_capture_target(
+        ctx.device_id(),
+        normalized.bindings.stream as usize,
+    )?;
     unsafe {
         status::check(abi::apxinf_qwen35_mtp_moe(
             ctx.runtime(),
@@ -218,12 +221,7 @@ fn normalize(ctx: &CudaContext, args: Qwen35MtpMoeArgs<'_>) -> Result<Normalized
             DType::BF16,
             &[QWEN35_MTP_HIDDEN, 1],
         )?,
-        tensor_storage(
-            ctx,
-            router_logits,
-            DType::BF16,
-            &[1, QWEN35_MTP_EXPERTS],
-        )?,
+        tensor_storage(ctx, router_logits, DType::BF16, &[1, QWEN35_MTP_EXPERTS])?,
         tensor_storage(ctx, expert_ids, DType::I32, &[QWEN35_MTP_TOP_K])?,
         tensor_storage(ctx, expert_weights, DType::F32, &[QWEN35_MTP_TOP_K])?,
         tensor_storage(
@@ -244,19 +242,9 @@ fn normalize(ctx: &CudaContext, args: Qwen35MtpMoeArgs<'_>) -> Result<Normalized
             DType::BF16,
             &[1, QWEN35_MTP_INTERMEDIATE],
         )?,
-        tensor_storage(
-            ctx,
-            shared_output,
-            DType::BF16,
-            &[1, QWEN35_MTP_HIDDEN],
-        )?,
+        tensor_storage(ctx, shared_output, DType::BF16, &[1, QWEN35_MTP_HIDDEN])?,
         tensor_storage(ctx, shared_gate_logit, DType::BF16, &[1])?,
-        tensor_storage(
-            ctx,
-            args.output,
-            DType::BF16,
-            &[1, QWEN35_MTP_HIDDEN],
-        )?,
+        tensor_storage(ctx, args.output, DType::BF16, &[1, QWEN35_MTP_HIDDEN])?,
     ];
 
     let bindings = abi::MtpMoeBindings {
@@ -388,8 +376,7 @@ pub fn qwen35_mtp_moe_reference<W: Qwen35MtpReferenceWeights>(
     for feature in 0..QWEN35_MTP_HIDDEN {
         let mut value = 0.0f32;
         for route in 0..QWEN35_MTP_TOP_K {
-            value += expert_weights[route]
-                * route_output[route * QWEN35_MTP_HIDDEN + feature];
+            value += expert_weights[route] * route_output[route * QWEN35_MTP_HIDDEN + feature];
         }
         value += shared_scale * shared_output[feature];
         output[feature] = round_bf16(value);
@@ -403,12 +390,7 @@ pub fn qwen35_mtp_moe_reference<W: Qwen35MtpReferenceWeights>(
     })
 }
 
-fn route_reference(
-    logits: &[f32],
-) -> (
-    [u32; QWEN35_MTP_TOP_K],
-    [f32; QWEN35_MTP_TOP_K],
-) {
+fn route_reference(logits: &[f32]) -> ([u32; QWEN35_MTP_TOP_K], [f32; QWEN35_MTP_TOP_K]) {
     let maximum = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let denominator: f32 = logits.iter().map(|value| (*value - maximum).exp()).sum();
     let mut ranking = logits.iter().copied().enumerate().collect::<Vec<_>>();
@@ -499,14 +481,30 @@ mod tests {
     struct ZeroWeights;
 
     impl Qwen35MtpReferenceWeights for ZeroWeights {
-        fn router(&self, _: usize, _: usize) -> f32 { 0.0 }
-        fn expert_gate(&self, _: usize, _: usize, _: usize) -> f32 { 0.0 }
-        fn expert_up(&self, _: usize, _: usize, _: usize) -> f32 { 0.0 }
-        fn expert_down(&self, _: usize, _: usize, _: usize) -> f32 { 0.0 }
-        fn shared_gate(&self, _: usize, _: usize) -> f32 { 0.0 }
-        fn shared_up(&self, _: usize, _: usize) -> f32 { 0.0 }
-        fn shared_down(&self, _: usize, _: usize) -> f32 { 0.0 }
-        fn shared_expert_gate(&self, _: usize) -> f32 { 0.0 }
+        fn router(&self, _: usize, _: usize) -> f32 {
+            0.0
+        }
+        fn expert_gate(&self, _: usize, _: usize, _: usize) -> f32 {
+            0.0
+        }
+        fn expert_up(&self, _: usize, _: usize, _: usize) -> f32 {
+            0.0
+        }
+        fn expert_down(&self, _: usize, _: usize, _: usize) -> f32 {
+            0.0
+        }
+        fn shared_gate(&self, _: usize, _: usize) -> f32 {
+            0.0
+        }
+        fn shared_up(&self, _: usize, _: usize) -> f32 {
+            0.0
+        }
+        fn shared_down(&self, _: usize, _: usize) -> f32 {
+            0.0
+        }
+        fn shared_expert_gate(&self, _: usize) -> f32 {
+            0.0
+        }
     }
 
     #[test]
@@ -537,11 +535,8 @@ mod tests {
 
     #[test]
     fn exact_reference_uses_stable_top8_and_bf16_zero_path() {
-        let reference = qwen35_mtp_moe_reference(
-            &vec![0.0; QWEN35_MTP_HIDDEN],
-            &ZeroWeights,
-        )
-        .unwrap();
+        let reference =
+            qwen35_mtp_moe_reference(&vec![0.0; QWEN35_MTP_HIDDEN], &ZeroWeights).unwrap();
         assert_eq!(reference.expert_ids, [0, 1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(reference.expert_weights, [0.125; QWEN35_MTP_TOP_K]);
         assert!(reference.router_logits.iter().all(|value| *value == 0.0));

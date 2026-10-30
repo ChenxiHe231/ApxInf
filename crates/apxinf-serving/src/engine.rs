@@ -89,12 +89,12 @@ impl ApxInfChatEngine {
             .max_input_tokens
             .checked_add(config.default_max_tokens)
             .ok_or_else(|| ApiError::unavailable("configured sequence capacity overflows usize"))?;
-        // Qwen3.5 MTP verifies a fixed four-row target window before applying
-        // output-budget truncation. Three lookahead slots let the last round
+        // Qwen3.5 MTP verifies a fixed three-row target window before applying
+        // output-budget truncation. Two lookahead slots let the last round
         // remain speculative; other text runtimes simply retain a tiny unused
         // tail in their fixed cache.
         let required_capacity = admitted_tokens
-            .checked_add(3)
+            .checked_add(2)
             .ok_or_else(|| ApiError::unavailable("configured MTP lookahead overflows usize"))?;
         match config.load_options.text_kv_capacity {
             Some(capacity) if capacity < required_capacity => {

@@ -23,7 +23,7 @@ const PROMPT_TOKENS: usize = 4_096;
 const DEFAULT_OUTPUT_TOKENS: usize = 256;
 const DEFAULT_WARMUPS: usize = 2;
 const DEFAULT_REPEATS: usize = 5;
-const MTP_LOOKAHEAD: usize = 3;
+const MTP_LOOKAHEAD: usize = 2;
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -150,7 +150,10 @@ struct ModeResult {
 /// expected on the NVFP4 MoE path and is reported, not treated as failure.
 fn note_divergence(summary: &mut Value, divergent_repeats: usize) {
     if let Some(map) = summary.as_object_mut() {
-        map.insert("divergent_repeats".to_string(), Value::from(divergent_repeats));
+        map.insert(
+            "divergent_repeats".to_string(),
+            Value::from(divergent_repeats),
+        );
     }
 }
 
@@ -390,8 +393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let warmups = arg_value(&args, "--warmups", DEFAULT_WARMUPS);
     let repeats = arg_value(&args, "--repeats", DEFAULT_REPEATS);
     // The NVFP4 MoE expert combine is not bit-reproducible; see run_mode.
-    let allow_repeat_divergence =
-        args.iter().any(|arg| arg == "--allow-repeat-divergence");
+    let allow_repeat_divergence = args.iter().any(|arg| arg == "--allow-repeat-divergence");
     let benchmark_mode = BenchmarkMode::parse(&args)?;
     let moe_activation = precision_arg::<Qwen35MoeActivation>(&args, "--qwen35-moe-activation")?;
     let kv_cache = precision_arg::<Qwen35KvCacheDType>(&args, "--qwen35-kv-cache")?;
