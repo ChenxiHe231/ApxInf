@@ -35,7 +35,7 @@ use super::mtp_runtime::{
     MtpGreedyPolicy, Qwen35ContextSnapshot, Qwen35MtpCoordinator, Qwen35MtpRuntime, Qwen35MtpState,
 };
 use super::mtp_schedule::QWEN35_MTP_DRAFT_STEPS;
-use super::session::Qwen35Session;
+use super::session::{Qwen35Session, Qwen35SessionSnapshot};
 
 /// Default cache admission for direct `AutoModel` callers. OpenAI serving
 /// supplies its prompt/output admission plus MTP lookahead through
@@ -43,10 +43,17 @@ use super::session::Qwen35Session;
 pub const DEFAULT_KV_CAPACITY: usize = 8_192;
 
 type ContextSnapshot = Qwen35ContextSnapshot<Qwen35AttentionCache, Qwen35MtpState>;
+type ScalarContextSnapshot = Qwen35SessionSnapshot<Qwen35AttentionCache>;
 
 struct SystemPrefixCache {
     tokens: Vec<u32>,
     snapshot: ContextSnapshot,
+    capacity: usize,
+}
+
+struct ScalarSystemPrefixCache {
+    tokens: Vec<u32>,
+    snapshot: ScalarContextSnapshot,
     capacity: usize,
 }
 
@@ -65,6 +72,7 @@ pub struct Qwen35Moe {
     reset_error: Option<String>,
     context_reuse_enabled: bool,
     system_prefix_cache: Option<SystemPrefixCache>,
+    scalar_system_prefix_cache: Option<ScalarSystemPrefixCache>,
     last_reused_tokens: usize,
     /// Reused destination for decode logits. This used to be a fresh
     /// cudaMalloc plus memset per decode step, freed on drop; on a HugeTLB
@@ -193,6 +201,7 @@ impl Qwen35Moe {
             reset_error: None,
             context_reuse_enabled: false,
             system_prefix_cache: None,
+            scalar_system_prefix_cache: None,
             last_reused_tokens: 0,
             decode_logits_cache: RefCell::new(None),
         })
@@ -207,8 +216,100 @@ impl Qwen35Moe {
         self.context_reuse_enabled = enabled;
         if !enabled {
             self.system_prefix_cache = None;
+            self.scalar_system_prefix_cache = None;
         }
         Ok(())
+    }
+
+    /// Sampling requests use the scalar target runtime rather than the MTP
+    /// coordinator. Keep a target-only checkpoint for that path so a non-zero
+    /// temperature from AIOS does not silently disable system-prefix reuse.
+    fn prefill_scalar_with_system_reuse(
+        &mut self,
+        prompt: &[u32],
+        reusable_prefix_tokens: usize,
+    ) -> Result<Tensor> {
+        self.last_reused_tokens = 0;
+        if reusable_prefix_tokens > prompt.len() {
+            return Err(Error::Other(format!(
+                "reusable system prefix has {reusable_prefix_tokens} tokens, but prompt has {}",
+                prompt.len()
+            )));
+        }
+        if !self.context_reuse_enabled
+            || reusable_prefix_tokens == 0
+            || reusable_prefix_tokens == prompt.len()
+        {
+            return Ok(self
+                .runtime
+                .target_mut()
+                .prefill(&self.ctx, &self.decoder, &self.weights, prompt)?
+                .logits);
+        }
+
+        let mut cache = match self
+            .scalar_system_prefix_cache
+            .take()
+            .filter(|cache| cache.capacity >= reusable_prefix_tokens)
+        {
+            Some(cache) => cache,
+            None => ScalarSystemPrefixCache {
+                tokens: Vec::new(),
+                snapshot: self.runtime.target_mut().allocate_snapshot(
+                    &self.ctx,
+                    &self.decoder,
+                    &self.weights,
+                    reusable_prefix_tokens,
+                )?,
+                capacity: reusable_prefix_tokens,
+            },
+        };
+        let result = (|| {
+            let hit = cache.tokens.len() == reusable_prefix_tokens
+                && prompt.get(..reusable_prefix_tokens) == Some(cache.tokens.as_slice());
+            if hit {
+                self.runtime
+                    .target_mut()
+                    .restore_snapshot(&self.ctx, &cache.snapshot)?;
+                self.last_reused_tokens = reusable_prefix_tokens;
+            } else {
+                self.runtime.reset(&self.ctx)?;
+                self.runtime.target_mut().prefill(
+                    &self.ctx,
+                    &self.decoder,
+                    &self.weights,
+                    &prompt[..reusable_prefix_tokens],
+                )?;
+                cache.tokens.clear();
+                self.runtime
+                    .target_mut()
+                    .capture_snapshot(&self.ctx, &mut cache.snapshot)?;
+                cache
+                    .tokens
+                    .extend_from_slice(&prompt[..reusable_prefix_tokens]);
+                eprintln!(
+                    "scalar system prefix cache miss: prepared {reusable_prefix_tokens} prompt tokens"
+                );
+            }
+
+            let output = self.runtime.target_mut().append_prefill(
+                &self.ctx,
+                &self.decoder,
+                &self.weights,
+                &prompt[reusable_prefix_tokens..],
+            )?;
+            if self.last_reused_tokens > 0 {
+                eprintln!(
+                    "scalar system prefix cache hit: reused {} of {} prompt tokens; evaluated {}",
+                    self.last_reused_tokens,
+                    prompt.len(),
+                    prompt.len() - self.last_reused_tokens
+                );
+            }
+            Ok(output.logits)
+        })();
+        self.scalar_system_prefix_cache = Some(cache);
+        result
     }
 
     /// Prepare an MTP request while retaining only the caller-designated
@@ -698,6 +799,10 @@ impl LlmTrait for Qwen35Moe {
         })
     }
 
+    fn reused_input_tokens(&self) -> usize {
+        self.last_reused_tokens
+    }
+
     fn set_context_reuse(&mut self, enabled: bool) -> Result<()> {
         self.configure_context_reuse(enabled)
     }
@@ -714,11 +819,7 @@ impl LlmTrait for Qwen35Moe {
                 "Qwen3.5 session reset failed before inference: {error}"
             )));
         }
-        Ok(self
-            .runtime
-            .target_mut()
-            .prefill(&self.ctx, &self.decoder, &self.weights, input.token_ids)?
-            .logits)
+        self.prefill_scalar_with_system_reuse(input.token_ids, input.reusable_prefix_tokens)
     }
 
     fn reset(&mut self) {

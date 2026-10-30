@@ -247,6 +247,14 @@ pub trait LlmTrait {
         None
     }
 
+    /// Number of prompt tokens restored by the most recent request-level
+    /// prefill instead of being evaluated again. The shared sampling loop uses
+    /// this hook because reuse is implemented inside the model-specific
+    /// [`Self::prefill`] call.
+    fn reused_input_tokens(&self) -> usize {
+        0
+    }
+
     /// Enable or disable caller-scoped prefix reuse. The caller marks the
     /// reusable leading span on each [`LlmInput`]; implementations must reject
     /// enablement when they cannot preserve every piece of model state needed
@@ -433,7 +441,11 @@ where
         profile.run_unprofiled(|| on_token(current));
     }
 
-    profile.finalize(prompt_tokens.len(), generated.len());
+    profile.finalize_with_reuse(
+        prompt_tokens.len(),
+        generated.len(),
+        model.reused_input_tokens(),
+    );
     Ok(GenerationOutput {
         tokens: generated,
         profile,
