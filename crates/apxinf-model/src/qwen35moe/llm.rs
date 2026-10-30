@@ -5,7 +5,7 @@
 //! and cache allocations remain resident on CUDA.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -41,6 +41,7 @@ use super::session::{Qwen35Session, Qwen35SessionSnapshot};
 /// supplies its prompt/output admission plus MTP lookahead through
 /// `LoadOptions::text_kv_capacity` instead of relying on this default.
 pub const DEFAULT_KV_CAPACITY: usize = 8_192;
+const SCALAR_PREFIX_CACHE_ENTRIES: usize = 4;
 
 type ContextSnapshot = Qwen35ContextSnapshot<Qwen35AttentionCache, Qwen35MtpState>;
 type ScalarContextSnapshot = Qwen35SessionSnapshot<Qwen35AttentionCache>;
@@ -72,7 +73,11 @@ pub struct Qwen35Moe {
     reset_error: Option<String>,
     context_reuse_enabled: bool,
     system_prefix_cache: Option<SystemPrefixCache>,
-    scalar_system_prefix_cache: Option<ScalarSystemPrefixCache>,
+    /// Sampling-only prefix snapshots in most-recently-used order. AIOS tool
+    /// bindings can render different system prefixes; retaining a small,
+    /// bounded set prevents those bindings from evicting one another on every
+    /// request without allowing device memory to grow without limit.
+    scalar_system_prefix_caches: VecDeque<ScalarSystemPrefixCache>,
     last_reused_tokens: usize,
     /// Reused destination for decode logits. This used to be a fresh
     /// cudaMalloc plus memset per decode step, freed on drop; on a HugeTLB
@@ -225,7 +230,7 @@ impl Qwen35Moe {
             reset_error: None,
             context_reuse_enabled: false,
             system_prefix_cache: None,
-            scalar_system_prefix_cache: None,
+            scalar_system_prefix_caches: VecDeque::new(),
             last_reused_tokens: 0,
             decode_logits_cache: RefCell::new(None),
         })
@@ -240,7 +245,7 @@ impl Qwen35Moe {
         self.context_reuse_enabled = enabled;
         if !enabled {
             self.system_prefix_cache = None;
-            self.scalar_system_prefix_cache = None;
+            self.scalar_system_prefix_caches.clear();
         }
         Ok(())
     }
@@ -271,27 +276,42 @@ impl Qwen35Moe {
                 .logits);
         }
 
-        let mut cache = match self
-            .scalar_system_prefix_cache
-            .take()
-            .filter(|cache| cache.capacity >= reusable_prefix_tokens)
-        {
-            Some(cache) => cache,
-            None => ScalarSystemPrefixCache {
-                tokens: Vec::new(),
-                snapshot: self.runtime.target_mut().allocate_snapshot(
-                    &self.ctx,
-                    &self.decoder,
-                    &self.weights,
-                    reusable_prefix_tokens,
-                )?,
-                capacity: reusable_prefix_tokens,
-            },
+        let prefix = &prompt[..reusable_prefix_tokens];
+        let hit_index = self
+            .scalar_system_prefix_caches
+            .iter()
+            .position(|cache| cache.tokens.as_slice() == prefix);
+        let mut cache = if let Some(index) = hit_index {
+            self.scalar_system_prefix_caches
+                .remove(index)
+                .expect("located sampling prefix cache entry exists")
+        } else {
+            let reusable = if self.scalar_system_prefix_caches.len()
+                >= SCALAR_PREFIX_CACHE_ENTRIES
+            {
+                self.scalar_system_prefix_caches.pop_back()
+            } else {
+                None
+            };
+            match reusable.filter(|cache| cache.capacity >= reusable_prefix_tokens) {
+                Some(mut cache) => {
+                    cache.tokens.clear();
+                    cache
+                }
+                None => ScalarSystemPrefixCache {
+                    tokens: Vec::new(),
+                    snapshot: self.runtime.target_mut().allocate_snapshot(
+                        &self.ctx,
+                        &self.decoder,
+                        &self.weights,
+                        reusable_prefix_tokens,
+                    )?,
+                    capacity: reusable_prefix_tokens,
+                },
+            }
         };
         let result = (|| {
-            let hit = cache.tokens.len() == reusable_prefix_tokens
-                && prompt.get(..reusable_prefix_tokens) == Some(cache.tokens.as_slice());
-            if hit {
+            if hit_index.is_some() {
                 self.runtime
                     .target_mut()
                     .restore_snapshot(&self.ctx, &cache.snapshot)?;
@@ -310,7 +330,7 @@ impl Qwen35Moe {
                     .capture_snapshot(&self.ctx, &mut cache.snapshot)?;
                 cache
                     .tokens
-                    .extend_from_slice(&prompt[..reusable_prefix_tokens]);
+                    .extend_from_slice(prefix);
                 eprintln!(
                     "scalar system prefix cache miss: prepared {reusable_prefix_tokens} prompt tokens"
                 );
@@ -332,7 +352,7 @@ impl Qwen35Moe {
             }
             Ok(output.logits)
         })();
-        self.scalar_system_prefix_cache = Some(cache);
+        self.scalar_system_prefix_caches.push_front(cache);
         result
     }
 
