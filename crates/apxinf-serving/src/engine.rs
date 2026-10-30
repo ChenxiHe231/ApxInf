@@ -21,6 +21,7 @@ pub struct EngineRequest {
     pub enable_thinking: bool,
     pub max_tokens: usize,
     pub temperature: Option<f32>,
+    pub top_k: Option<i64>,
     pub top_p: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
@@ -240,7 +241,7 @@ impl ChatEngine for ApxInfChatEngine {
                 }
             }),
             temperature: request.temperature,
-            top_k: None,
+            top_k: request.top_k,
             top_p: request.top_p,
             repetition_penalty: None,
             frequency_penalty: request.frequency_penalty,

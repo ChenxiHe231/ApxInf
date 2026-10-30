@@ -16,6 +16,7 @@ pub struct ChatCompletionRequest {
     pub max_tokens: Option<usize>,
     pub max_completion_tokens: Option<usize>,
     pub temperature: Option<f32>,
+    pub top_k: Option<i64>,
     pub top_p: Option<f32>,
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
