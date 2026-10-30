@@ -286,8 +286,7 @@ impl Qwen35Moe {
                 .remove(index)
                 .expect("located sampling prefix cache entry exists")
         } else {
-            let reusable = if self.scalar_system_prefix_caches.len()
-                >= SCALAR_PREFIX_CACHE_ENTRIES
+            let reusable = if self.scalar_system_prefix_caches.len() >= SCALAR_PREFIX_CACHE_ENTRIES
             {
                 self.scalar_system_prefix_caches.pop_back()
             } else {
@@ -328,9 +327,7 @@ impl Qwen35Moe {
                 self.runtime
                     .target_mut()
                     .capture_snapshot(&self.ctx, &mut cache.snapshot)?;
-                cache
-                    .tokens
-                    .extend_from_slice(prefix);
+                cache.tokens.extend_from_slice(prefix);
                 eprintln!(
                     "scalar system prefix cache miss: prepared {reusable_prefix_tokens} prompt tokens"
                 );
