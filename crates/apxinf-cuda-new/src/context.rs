@@ -1,5 +1,7 @@
 //! CUDA device and stream context.
 
+use std::ffi::CString;
+use std::path::Path;
 use std::sync::Arc;
 
 use apxinf_core::{DType, Error, Result as CoreResult, Shape, Tensor};
@@ -87,6 +89,12 @@ impl CudaContext {
         Self::new_with_recipe_options(device_id, allow_online_tune, None)
     }
 
+    /// Create a context with an explicit persistent recipe directory.
+    pub fn new_with_options(device_id: usize, allow_online_tune: bool, cache_dir: Option<&Path>) -> Result<Self, String> {
+        let cache_dir = cache_dir.map(|path| path.to_str().map(str::to_owned).ok_or_else(|| "CUDA tuning directory is not valid UTF-8".to_owned())).transpose()?;
+        Self::new_with_recipe_options(device_id, allow_online_tune, cache_dir)
+    }
+
     /// Create a context with model-load recipe policy.
     ///
     /// An explicit directory becomes the default for GEMM and Attention when
@@ -96,6 +104,8 @@ impl CudaContext {
         allow_online_tune: bool,
         recipe_cache_dir: Option<String>,
     ) -> Result<Self, String> {
+        let cache_dir = recipe_cache_dir.as_deref().map(CString::new).transpose()
+            .map_err(|_| "CUDA tuning directory contains a NUL byte".to_owned())?;
         let device = i32::try_from(device_id)
             .map_err(|_| format!("CUDA device id {device_id} does not fit in i32"))?;
         unsafe {
@@ -113,6 +123,18 @@ impl CudaContext {
                 ),
             )
             .map_err(|error| error.to_string())?;
+        }
+        if let Some(cache_dir) = cache_dir {
+            let status = unsafe {
+                crate::ffi::abi::runtime::apxinf_runtime_set_default_cache_dir(
+                    runtime,
+                    cache_dir.as_ptr(),
+                )
+            };
+            if let Err(error) = crate::ffi::abi::status::check(status) {
+                unsafe { crate::ffi::abi::runtime::apxinf_runtime_destroy(runtime) };
+                return Err(error.to_string());
+            }
         }
         let initialized = (|| {
             let caps = CudaDeviceCaps::query(runtime)?;
@@ -143,8 +165,8 @@ impl CudaContext {
     pub fn device_id(&self) -> usize {
         self.device_id
     }
-    /// Default recipe directory, relative to the process working directory.
-    /// An explicit operator `cache_dir` overrides this hardware/toolkit path.
+    /// Default recipe directory. Without an explicit runtime override this is
+    /// relative to the process working directory; operator policy may override it.
     pub fn default_cache_dir(&self) -> &str {
         if let Some(directory) = self.recipe_cache_dir.as_deref() {
             return directory;

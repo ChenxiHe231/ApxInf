@@ -19,6 +19,10 @@ unsafe extern "C" {
         allow_online_tune: u32,
         runtime: *mut Runtime,
     ) -> i32;
+    pub(crate) fn apxinf_runtime_set_default_cache_dir(
+        runtime: Runtime,
+        cache_dir: *const c_char,
+    ) -> i32;
     pub(crate) fn apxinf_runtime_default_cache_dir(runtime: Runtime) -> *const c_char;
     pub(crate) fn apxinf_runtime_device_info(runtime: Runtime, info: *mut DeviceInfo) -> i32;
     pub(crate) fn apxinf_runtime_destroy(runtime: Runtime);

@@ -167,35 +167,36 @@ also include an FNV-1a token digest for repeatability checks.
 
 ### Tune once before measuring or serving
 
-Recipe misses trigger measured online tuning and must never be included in a
-performance result. Build the context benchmark and run one short explicit
-`--autotune` pass before starting the server. Match `--kv-capacity` to the
-server admission capacity (`max_input_tokens + max_output_tokens + 3`) and use
-an input length representative of the deployment. For the AIOS 20K/4096
-configuration and its roughly 13K static prefix:
+Recipe misses must not trigger tuning inside the first business request. Use
+the HTTP server itself for one explicit **sampling-only** warmup pass, so the
+warmup exercises the same path as AIOS. Always supply an absolute recipe
+directory; this also makes a copied binary independent of its working directory:
 
 ```bash
-cargo build --release -p apxinf-model \
-  --features qwen35-cuda \
-  --example qwen35_context_bench
+export APXINF_TUNING_DIR=/opt/data/apxinf/qwen35-recipes
+mkdir -p "$APXINF_TUNING_DIR"
 
 APXINF_QWEN35_CUDA_GRAPHS=1 \
 APXINF_QWEN35_GRAPH_GDN=full \
-"$CARGO_TARGET_DIR/release/examples/qwen35_context_bench" \
-  "$QWEN35_CHECKPOINT" \
+"$CARGO_TARGET_DIR/release/apxinf" serve \
+  --model "$QWEN35_CHECKPOINT" \
+  --model-name qwen3_5_moe \
+  --served-model-name qwen3.6-35b-a3b \
+  --device cuda:0 --dtype bf16 \
+  --qwen35-moe-activation nvfp4 --qwen35-kv-cache bf16 \
+  --host 127.0.0.1 --port 8000 \
+  --max-input-tokens 20000 --max-output-tokens 4096 \
+  --enable-context-reuse \
   --autotune \
-  --prefix-tokens 0 \
-  --input-tokens 13312 \
-  --kv-capacity 24099 \
-  --max-new 2 \
-  --warmups 1 \
-  --repeats 1 \
-  --mode scalar
+  --tuning-dir "$APXINF_TUNING_DIR"
 ```
 
-Run this command from the repository root. A later server run reuses the
-persisted recipe and must not create a new file in the tuning directory during
-the measured request.
+After the server is healthy, send one representative AIOS request with its real
+roughly 13K system/tool prefix and at least two output tokens. The request must
+explicitly use `temperature=1.0`, `top_k=20`, and `top_p=0.95`. Stop this warmup
+server, then start the production server **without** `--autotune`, using the
+same `--tuning-dir`. A missing recipe then uses the safe fallback instead of
+silently tuning inside a measured request.
 
 ## 4. Supported runtime precision choices
 
@@ -219,7 +220,7 @@ Build the Qwen-only CLI:
 cargo build --features qwen35-cuda
 ```
 
-Run deterministic greedy generation:
+Run sampling generation with the model's recommended parameters:
 
 ```bash
 "$CARGO_TARGET_DIR/debug/apxinf" generate \
@@ -229,7 +230,11 @@ Run deterministic greedy generation:
   --dtype bf16 \
   --qwen35-moe-activation nvfp4 \
   --qwen35-kv-cache bf16 \
-  --greedy \
+  --sample \
+  --temperature 1.0 \
+  --top-k 20 \
+  --top-p 0.95 \
+  --seed 123 \
   --max-tokens 256 \
   --prompt "Explain the main trade-off between latency and numerical precision."
 ```
@@ -242,6 +247,8 @@ Build and start the server without enabling the legacy CUDA runtime:
 
 ```bash
 cargo build --release --features qwen35-cuda,server
+
+export APXINF_TUNING_DIR=/opt/data/apxinf/qwen35-recipes
 
 APXINF_QWEN35_CUDA_GRAPHS=1 \
 APXINF_QWEN35_GRAPH_GDN=full \
@@ -257,6 +264,7 @@ APXINF_QWEN35_GRAPH_GDN=full \
   --port 8000 \
   --max-input-tokens 20000 \
   --max-output-tokens 4096 \
+  --tuning-dir "$APXINF_TUNING_DIR" \
   --enable-context-reuse
 ```
 
@@ -269,22 +277,31 @@ curl http://127.0.0.1:8000/v1/chat/completions \
     "model": "qwen3.6-35b-a3b",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_tokens": 64,
-    "temperature": 0
+    "temperature": 1.0,
+    "top_k": 20,
+    "top_p": 0.95,
+    "seed": 123
   }'
 ```
 
 ## 7. Fast validation
 
-After restoring HugeTLB, use a one-token prompt and two output tokens to
-validate load, prefill and one actual decode step. One output token is
-insufficient because generation TPS needs a post-TTFT interval:
+After restoring HugeTLB, validate load, prefill and sampled decode through the
+same OpenAI-compatible endpoint used by AIOS. Use at least two output tokens;
+one output token is insufficient to measure post-TTFT decode:
 
 ```bash
-"$CARGO_TARGET_DIR/debug/examples/qwen35_mtp_bench" \
-  "$QWEN35_CHECKPOINT" \
-  --device 0 --prompt-tokens 1 --max-new 2 \
-  --warmups 0 --repeats 1 --mode scalar \
-  --qwen35-moe-activation nvfp4 --qwen35-kv-cache bf16
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3.6-35b-a3b",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_tokens": 2,
+    "temperature": 1.0,
+    "top_k": 20,
+    "top_p": 0.95,
+    "seed": 123
+  }'
 ```
 
 ```bash
