@@ -195,8 +195,10 @@ After the server is healthy, send one representative AIOS request with its real
 roughly 13K system/tool prefix and at least two output tokens. The request must
 explicitly use `temperature=1.0`, `top_k=20`, and `top_p=0.95`. Stop this warmup
 server, then start the production server **without** `--autotune`, using the
-same `--tuning-dir`. A missing recipe then uses the safe fallback instead of
-silently tuning inside a measured request.
+same `--tuning-dir`. Qwen3.6 production execution is strict: an uncovered
+shape returns an explicit `recipe miss` error instead of silently tuning or
+changing kernels inside a measured request. Warm up every AIOS prompt/binding
+shape that production will use.
 
 ## 4. Supported runtime precision choices
 
@@ -283,6 +285,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
     "seed": 123
   }'
 ```
+
+The sampling path keeps up to four distinct system/tool prefix snapshots in
+most-recently-used order. Requests whose tool bindings render different
+prefixes therefore do not overwrite one another immediately; a fifth distinct
+prefix evicts the least recently used snapshot. `usage.prompt_tokens_details`
+reports the restored prefix as `cached_tokens`.
 
 ## 7. Fast validation
 
