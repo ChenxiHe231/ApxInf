@@ -216,7 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let checkpoint = args.get(1).filter(|arg| !arg.starts_with("--")).ok_or(
         "usage: qwen35_context_bench <checkpoint-dir> --autotune \
-         --prefix-tokens N --input-tokens N [--max-new N] [--warmups N] \
+         --prefix-tokens N --input-tokens N [--kv-capacity N] [--max-new N] [--warmups N] \
          [--repeats N] [--mode scalar|mtp|both]",
     )?;
     if !args.iter().any(|arg| arg == "--autotune") {
@@ -235,10 +235,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let total_context = prefix_tokens
         .checked_add(input_tokens)
         .ok_or("context length overflow")?;
-    let capacity = total_context
+    let minimum_capacity = total_context
         .checked_add(max_new_tokens)
         .and_then(|value| value.checked_add(MTP_LOOKAHEAD))
         .ok_or("KV capacity overflow")?;
+    let capacity = usize_arg(&args, "--kv-capacity", minimum_capacity);
+    if capacity < minimum_capacity {
+        return Err(format!(
+            "--kv-capacity must be at least {minimum_capacity} for this prompt/output shape"
+        )
+        .into());
+    }
 
     let prompt = exact_tokens(total_context);
     let (prefix, chunk) = prompt.split_at(prefix_tokens);
