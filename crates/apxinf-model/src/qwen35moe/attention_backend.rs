@@ -75,8 +75,8 @@ pub struct Qwen35Fp8AttentionBackend {
     rope_theta: f32,
     kv_cache_dtype: Qwen35KvCacheDType,
     scratch: HashMap<(usize, usize, usize), AttentionScratch>,
-    pre_projection_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
-    post_projection_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
+    pre_projection_sessions: HashMap<(usize, usize, usize), Rc<PreparedExecution>>,
+    post_projection_sessions: HashMap<(usize, usize, usize), Rc<PreparedExecution>>,
 }
 
 struct PreparedExecution {
@@ -152,17 +152,21 @@ impl Qwen35Fp8AttentionBackend {
     }
 
     fn projection_session(
-        sessions: &mut HashMap<(usize, usize), Rc<PreparedExecution>>,
+        sessions: &mut HashMap<(usize, usize, usize), Rc<PreparedExecution>>,
         ctx: &CudaContext,
         layer_index: usize,
         phase: DecoderPhase,
+        tokens: usize,
     ) -> Result<Option<Rc<PreparedExecution>>> {
-        if phase != DecoderPhase::Decode
+        let fixed_profile = phase == DecoderPhase::Decode
+            || (phase == DecoderPhase::Prefill
+                && tokens == ops::QWEN35_MTP_DRAFT_STEPS + 1);
+        if !fixed_profile
             || std::env::var("APXINF_QWEN35_ATTENTION_SESSIONS").as_deref() == Ok("0")
         {
             return Ok(None);
         }
-        let key = (ctx.device_id(), layer_index);
+        let key = (ctx.device_id(), layer_index, tokens);
         if !sessions.contains_key(&key) {
             sessions.insert(key, Rc::new(PreparedExecution::new(ctx.device_id())?));
         }
@@ -263,12 +267,14 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             ctx,
             request.layer_index,
             request.phase,
+            tokens,
         )?;
         let post_projection = Self::projection_session(
             &mut self.post_projection_sessions,
             ctx,
             request.layer_index,
             request.phase,
+            tokens,
         )?;
         let scratch = self.scratch(ctx, tokens, cache.capacity)?;
         scratch.ensure_text_positions(request.start_position)?;

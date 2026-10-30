@@ -595,24 +595,50 @@ impl Qwen35Decoder {
         let mut gdn_index = 0usize;
         let mut attention_index = 0usize;
         for layer_offset in 0..self.architecture.layers.len() {
-            phases.push(Qwen35VerifyPhase::prepare(ctx, || {
-                self.run_verify_layer(
-                    ctx,
-                    weights,
-                    attention,
-                    attention_caches,
-                    gdn_states,
-                    gdn_checkpoints,
-                    layer_offset,
-                    gdn_index,
-                    attention_index,
-                    start_position,
-                    scratch,
-                )
-            })?);
+            let resident = &weights.layers[layer_offset];
             match self.architecture.layers[layer_offset].mixer {
-                MixerKind::Gdn(_) => gdn_index += 1,
-                MixerKind::FullAttention(_) => attention_index += 1,
+                MixerKind::Gdn(_) => {
+                    phases.push(Qwen35VerifyPhase::prepare(ctx, || {
+                        self.run_verify_mixer(
+                            ctx,
+                            weights,
+                            attention,
+                            attention_caches,
+                            gdn_states,
+                            gdn_checkpoints,
+                            layer_offset,
+                            gdn_index,
+                            attention_index,
+                            start_position,
+                            scratch,
+                        )?;
+                        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                    })?);
+                    gdn_index += 1;
+                }
+                MixerKind::FullAttention(_) => {
+                    // The live prefix length changes every round, so FA2 stays
+                    // outside the outer layer session. Attention owns stable
+                    // q/k/v and o-projection sessions; this phase retains only
+                    // the fixed-address MoE tail.
+                    self.run_verify_mixer(
+                        ctx,
+                        weights,
+                        attention,
+                        attention_caches,
+                        gdn_states,
+                        gdn_checkpoints,
+                        layer_offset,
+                        gdn_index,
+                        attention_index,
+                        start_position,
+                        scratch,
+                    )?;
+                    phases.push(Qwen35VerifyPhase::prepare(ctx, || {
+                        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                    })?);
+                    attention_index += 1;
+                }
             }
         }
         ctx.synchronize().map_err(Error::Cuda)?;
@@ -620,7 +646,7 @@ impl Qwen35Decoder {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_verify_layer<B: FullAttentionBackend>(
+    fn run_verify_mixer<B: FullAttentionBackend>(
         &self,
         ctx: &CudaContext,
         weights: &Qwen35DeviceWeights,
@@ -700,8 +726,7 @@ impl Qwen35Decoder {
                 )))
             }
         }
-        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
-            .map_err(|error| layer_error(layer.index, "MoE tail", error))
+        Ok(())
     }
 
     /// Capture one fixed-shape decode graph per transformer layer. Full
@@ -1075,8 +1100,8 @@ impl Qwen35Decoder {
             if let Some(phases) = verify_phases {
                 let checkpoints = gdn_checkpoints
                     .expect("prepared verifier validation requires GDN checkpoints");
-                phases[layer_offset].run(|| {
-                    self.run_verify_layer(
+                let mut run_mixer = |scratch: &mut DecoderScratch| {
+                    self.run_verify_mixer(
                         ctx,
                         weights,
                         attention,
@@ -1089,10 +1114,22 @@ impl Qwen35Decoder {
                         start_position,
                         scratch,
                     )
-                })?;
+                };
                 match layer.mixer {
-                    MixerKind::Gdn(_) => gdn_index += 1,
-                    MixerKind::FullAttention(_) => attention_index += 1,
+                    MixerKind::Gdn(_) => {
+                        phases[layer_offset].run(|| {
+                            run_mixer(scratch)?;
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        })?;
+                        gdn_index += 1;
+                    }
+                    MixerKind::FullAttention(_) => {
+                        run_mixer(scratch)?;
+                        phases[layer_offset].run(|| {
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        })?;
+                        attention_index += 1;
+                    }
                 }
                 trace_hash("post", layer.index, &scratch.hidden);
                 continue;
