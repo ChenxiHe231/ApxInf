@@ -5,8 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use apxinf_core::{Backend, Device};
-use apxinf_cuda::CudaBackend;
+use apxinf_core::{Backend, CpuBackend, Device};
 use apxinf_model::qwen35moe::{Qwen35Moe, Qwen35MoeConfig};
 use apxinf_model::{GenerationOptions, LlmTrait, SamplingMode};
 use serde_json::{json, Value};
@@ -243,7 +242,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let prompt = exact_tokens(total_context);
     let (prefix, chunk) = prompt.split_at(prefix_tokens);
-    let backend: Arc<dyn Backend> = Arc::new(CudaBackend::new(device)?);
+    // Qwen3.6 owns its cuda-new execution context internally. The trait
+    // backend is retained only for the generic LLM surface, so the benchmark
+    // must not pull the unrelated legacy CUDA runtime into a qwen35-cuda build.
+    let backend: Arc<dyn Backend> = Arc::new(CpuBackend);
     let config = Qwen35MoeConfig::from_json_file(&Path::new(checkpoint).join("config.json"))?;
     let load_start = Instant::now();
     let mut model = Qwen35Moe::from_checkpoint_path(

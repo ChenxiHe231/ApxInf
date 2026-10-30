@@ -456,6 +456,9 @@ impl Qwen35Moe {
                 "Qwen3.5 scalar benchmark requires output tokens".into(),
             ));
         }
+        // Match ordinary non-speculative generation: every scalar step is
+        // committed, so no rollback shadow is required.
+        self.runtime.target_mut().set_decode_in_place(true);
         let mut tokens = Vec::with_capacity(max_new_tokens);
         tokens.push(first_token);
         while tokens.len() < max_new_tokens {
