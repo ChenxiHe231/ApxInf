@@ -6,12 +6,51 @@ use std::path::Path;
 use apxinf_core::{Error, Result};
 use serde::Deserialize;
 
+use super::runtime_weights::KvCacheScales;
+
 pub const CHECKPOINT_REPOSITORY: &str = "Qwen3.6-35B-A3B-NVFP4";
 pub const CHECKPOINT_REVISION: &str = "local-thor-u";
 
 const MODEL_TYPE: &str = "qwen3_5_moe";
 const TEXT_MODEL_TYPE: &str = "qwen3_5_moe_text";
 const ARCHITECTURE: &str = "Qwen3_5MoeForConditionalGeneration";
+
+/// Read the deployment-side ModelOpt manifest used by TensorRT Edge-LLM.
+///
+/// This checkpoint has no serialized `k_scale`/`v_scale` tensors. TensorRT
+/// Edge registers unit buffers in that case and exports `qkv_scales` as
+/// `[1.0, 1.0, 1.0]`; the attention plugin consumes K/V entries as direct
+/// dequantization multipliers. Keep this separate from `config.json`'s
+/// weight-quantization contract so BF16 KV serving remains unchanged.
+pub fn load_trt_fp8_kv_cache_scales(path: &Path) -> Result<KvCacheScales> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|error| Error::Other(format!("read {}: {error}", path.display())))?;
+    parse_trt_fp8_kv_cache_scales(&raw)
+}
+
+fn parse_trt_fp8_kv_cache_scales(raw: &str) -> Result<KvCacheScales> {
+    #[derive(Deserialize)]
+    struct HfQuantConfig {
+        quantization: HfQuantization,
+    }
+
+    #[derive(Deserialize)]
+    struct HfQuantization {
+        quant_algo: String,
+        kv_cache_quant_algo: String,
+    }
+
+    let config: HfQuantConfig = serde_json::from_str(raw)
+        .map_err(|error| invalid(format!("invalid Qwen3.5 hf_quant_config.json: {error}")))?;
+    if config.quantization.quant_algo != "MIXED_PRECISION"
+        || config.quantization.kv_cache_quant_algo != "FP8"
+    {
+        return Err(invalid(
+            "Qwen3.5 hf_quant_config.json must declare MIXED_PRECISION weights and FP8 KV cache",
+        ));
+    }
+    KvCacheScales::from_dequant_scales(1.0, 1.0)
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -332,6 +371,24 @@ fn invalid(message: impl Into<String>) -> Error {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn trt_fp8_kv_manifest_uses_unit_dequant_scales() {
+        let fp8 =
+            r#"{"quantization":{"quant_algo":"MIXED_PRECISION","kv_cache_quant_algo":"FP8"}}"#;
+        let scales = parse_trt_fp8_kv_cache_scales(fp8).unwrap();
+        assert_eq!(
+            scales,
+            KvCacheScales {
+                key: 1.0,
+                value: 1.0
+            }
+        );
+
+        let int8 =
+            r#"{"quantization":{"quant_algo":"MIXED_PRECISION","kv_cache_quant_algo":"INT8"}}"#;
+        assert!(parse_trt_fp8_kv_cache_scales(int8).is_err());
+    }
 
     fn valid_value() -> serde_json::Value {
         let layer_types: Vec<_> = (0..40)

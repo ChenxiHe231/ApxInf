@@ -120,20 +120,26 @@ impl PreparedExecution {
 
 impl Qwen35Fp8AttentionBackend {
     pub fn new(config: &Qwen35MoeConfig) -> Result<Self> {
-        Self::with_kv_cache(config, Qwen35KvCacheDType::Bf16)
+        Self::with_kv_cache(config, Qwen35KvCacheDType::Bf16, None)
     }
 
     pub fn with_kv_cache(
         config: &Qwen35MoeConfig,
         kv_cache_dtype: Qwen35KvCacheDType,
+        scales: Option<KvCacheScales>,
     ) -> Result<Self> {
         config.validate()?;
-        if kv_cache_dtype == Qwen35KvCacheDType::Fp8
-            && config.quantization_config.kv_cache_scheme.is_none()
-        {
-            return Err(invalid(
-                "Qwen3.6 checkpoint has no FP8 KV calibration scales; use BF16 KV cache",
-            ));
+        match (kv_cache_dtype, scales) {
+            (Qwen35KvCacheDType::Bf16, None) => {}
+            (Qwen35KvCacheDType::Fp8, Some(scales)) => validate_scales(scales)?,
+            (Qwen35KvCacheDType::Fp8, None) => {
+                return Err(invalid(
+                    "Qwen3.6 FP8 KV cache requires TensorRT-compatible static scales",
+                ));
+            }
+            (Qwen35KvCacheDType::Bf16, Some(_)) => {
+                return Err(invalid("Qwen3.6 BF16 KV cache must not carry FP8 scales"));
+            }
         }
         Ok(Self {
             hidden_size: TARGET_HIDDEN_SIZE,
@@ -174,10 +180,8 @@ impl Qwen35Fp8AttentionBackend {
         tokens: usize,
     ) -> Result<Option<Rc<PreparedExecution>>> {
         let fixed_profile = phase == DecoderPhase::Decode
-            || (phase == DecoderPhase::Prefill
-                && tokens == ops::QWEN35_MTP_DRAFT_STEPS + 1);
-        if !fixed_profile
-            || std::env::var("APXINF_QWEN35_ATTENTION_SESSIONS").as_deref() == Ok("0")
+            || (phase == DecoderPhase::Prefill && tokens == ops::QWEN35_MTP_DRAFT_STEPS + 1);
+        if !fixed_profile || std::env::var("APXINF_QWEN35_ATTENTION_SESSIONS").as_deref() == Ok("0")
         {
             return Ok(None);
         }

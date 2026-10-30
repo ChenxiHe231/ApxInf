@@ -27,14 +27,15 @@ use super::config::Qwen35MoeConfig;
 use super::decoder::Qwen35Decoder;
 use super::device_weights::{
     load_qwen35_device_weights_from_path_with_options, upload_qwen35_device_weights_with_options,
-    Qwen35DeviceWeights,
+    DeviceMixerWeights, Qwen35DeviceWeights,
 };
-use super::execution::Qwen35ExecutionOptions;
+use super::execution::{Qwen35ExecutionOptions, Qwen35KvCacheDType};
 use super::loader::load_qwen35_runtime_weights;
 use super::mtp_runtime::{
     MtpGreedyPolicy, Qwen35ContextSnapshot, Qwen35MtpCoordinator, Qwen35MtpRuntime, Qwen35MtpState,
 };
 use super::mtp_schedule::QWEN35_MTP_DRAFT_STEPS;
+use super::runtime_weights::KvCacheScales;
 use super::session::{Qwen35Session, Qwen35SessionSnapshot};
 
 /// Default cache admission for direct `AutoModel` callers. OpenAI serving
@@ -131,7 +132,7 @@ impl Qwen35Moe {
         let host_weights = load_qwen35_runtime_weights(&config, tensors)?;
         let weights =
             upload_qwen35_device_weights_with_options(&ctx, &config, host_weights, execution)?;
-        Self::from_device_weights(config, ctx, weights, backend, kv_capacity, execution)
+        Self::from_device_weights(config, ctx, weights, backend, kv_capacity, execution, None)
     }
 
     /// Load the exact checkpoint through the layer-streaming SafeTensors path.
@@ -171,6 +172,7 @@ impl Qwen35Moe {
             execution,
             true,
             None,
+            None,
         )
     }
 
@@ -184,6 +186,7 @@ impl Qwen35Moe {
         execution: Qwen35ExecutionOptions,
         autotune: bool,
         tuning_path: Option<PathBuf>,
+        kv_cache_scales: Option<KvCacheScales>,
     ) -> Result<Self> {
         config.validate()?;
         let Device::Cuda(ordinal) = device else {
@@ -202,19 +205,48 @@ impl Qwen35Moe {
             .map_err(Error::Cuda)?;
         let weights =
             load_qwen35_device_weights_from_path_with_options(&ctx, &config, path, execution)?;
-        Self::from_device_weights(config, ctx, weights, backend, kv_capacity, execution)
+        Self::from_device_weights(
+            config,
+            ctx,
+            weights,
+            backend,
+            kv_capacity,
+            execution,
+            kv_cache_scales,
+        )
     }
 
     fn from_device_weights(
         config: Qwen35MoeConfig,
         ctx: CudaContext,
-        weights: Qwen35DeviceWeights,
+        mut weights: Qwen35DeviceWeights,
         backend: Arc<dyn Backend>,
         kv_capacity: usize,
         execution: Qwen35ExecutionOptions,
+        kv_cache_scales: Option<KvCacheScales>,
     ) -> Result<Self> {
+        match (execution.kv_cache, kv_cache_scales) {
+            (Qwen35KvCacheDType::Bf16, None) => {}
+            (Qwen35KvCacheDType::Fp8, Some(_)) => {}
+            (Qwen35KvCacheDType::Fp8, None) => {
+                return Err(Error::Other(
+                    "Qwen3.6 FP8 KV cache requires TensorRT-compatible static scales".into(),
+                ));
+            }
+            (Qwen35KvCacheDType::Bf16, Some(_)) => {
+                return Err(Error::Other(
+                    "Qwen3.6 BF16 KV cache must not carry FP8 scales".into(),
+                ));
+            }
+        }
+        for layer in &mut weights.layers {
+            if let DeviceMixerWeights::FullAttention(attention) = &mut layer.mixer {
+                attention.kv_cache_scales = kv_cache_scales;
+            }
+        }
         let decoder = Qwen35Decoder::new(&config)?;
-        let attention = Qwen35Fp8AttentionBackend::with_kv_cache(&config, execution.kv_cache)?;
+        let attention =
+            Qwen35Fp8AttentionBackend::with_kv_cache(&config, execution.kv_cache, kv_cache_scales)?;
         let target = Qwen35Session::new(&ctx, &decoder, &weights, attention, kv_capacity)?;
         let mtp = Qwen35MtpRuntime::new(&config)?;
         let runtime = Qwen35MtpCoordinator::new(&ctx, target, mtp)?;

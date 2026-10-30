@@ -35,7 +35,7 @@ pub use architecture::{
 };
 #[cfg(feature = "qwen35-cuda")]
 pub use attention_backend::{Qwen35AttentionCache, Qwen35Fp8AttentionBackend};
-pub use config::{Qwen35MoeConfig, Qwen35MoeTextConfig};
+pub use config::{load_trt_fp8_kv_cache_scales, Qwen35MoeConfig, Qwen35MoeTextConfig};
 pub use execution::{Qwen35ExecutionOptions, Qwen35KvCacheDType, Qwen35MoeActivation};
 #[cfg(feature = "qwen35-cuda")]
 pub use llm::{Qwen35Moe, DEFAULT_KV_CAPACITY};
