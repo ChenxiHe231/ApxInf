@@ -137,6 +137,31 @@ impl Qwen35DecodePhase {
     }
 }
 
+/// One fixed-shape four-row target-verification layer traversal.
+///
+/// Unlike scalar decode, verification keeps FA2 eager because the live prefix
+/// grows every round. The surrounding execution session still retains every
+/// fixed-address GEMM execution and supplies direct-op workspace, eliminating
+/// per-round cudaMalloc/cudaFree and per-GEMM synchronization.
+pub(super) struct Qwen35VerifyPhase {
+    session: ExecutionSession,
+}
+
+impl Qwen35VerifyPhase {
+    fn prepare(
+        ctx: &CudaContext,
+        operation: impl FnOnce() -> Result<()>,
+    ) -> Result<Self> {
+        let session = ExecutionSession::with_capacity(DECODE_PHASE_WORKSPACE, ctx.device_id())?;
+        session.prepare(operation)?;
+        Ok(Self { session })
+    }
+
+    fn run(&self, operation: impl FnOnce() -> Result<()>) -> Result<()> {
+        self.session.run(operation)
+    }
+}
+
 /// Whether a decoder call processes a prompt/chunk or one autoregressive row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecoderPhase {
@@ -447,6 +472,7 @@ impl Qwen35Decoder {
             hidden_selection,
             &mut scratch,
             None,
+            None,
         )
     }
 
@@ -495,6 +521,7 @@ impl Qwen35Decoder {
         token_ids: &[u32],
         start_position: usize,
         scratch: &mut DecoderScratch,
+        verify_phases: Option<&[Qwen35VerifyPhase]>,
     ) -> Result<DecoderOutput> {
         self.validate_weights(weights)?;
         self.validate_call(
@@ -528,7 +555,153 @@ impl Qwen35Decoder {
             HiddenSelection::All,
             scratch,
             None,
+            verify_phases,
         )
+    }
+
+    /// Prepare one execution session per target layer for the fixed four-row
+    /// verifier. Two sets are built by the session owner because transactional
+    /// publication alternates the physical committed/shadow state banks.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn prepare_verify_phases<B: FullAttentionBackend>(
+        &self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        attention: &mut B,
+        attention_caches: &mut [B::Cache],
+        gdn_states: &[GdnState],
+        gdn_checkpoints: &[GdnStateCheckpoints],
+        start_position: usize,
+        scratch: &mut DecoderScratch,
+    ) -> Result<Vec<Qwen35VerifyPhase>> {
+        if attention_caches.len() != self.architecture.full_attention_layers().count()
+            || gdn_states.len() != self.architecture.gdn_layers().count()
+            || gdn_checkpoints.len() != gdn_states.len()
+        {
+            return Err(invalid(
+                "Qwen3.5 prepared verifier state count does not match the architecture",
+            ));
+        }
+        scratch.validate_contract(
+            super::mtp_schedule::QWEN35_MTP_VERIFY_ROWS,
+            self.architecture.hidden_size,
+            self.architecture.vocab_size,
+            LogitsSelection::All,
+            HiddenSelection::All,
+        )?;
+        scratch.embed(ctx, &weights.embedding)?;
+
+        let mut phases = Vec::with_capacity(self.architecture.layers.len());
+        let mut gdn_index = 0usize;
+        let mut attention_index = 0usize;
+        for layer_offset in 0..self.architecture.layers.len() {
+            phases.push(Qwen35VerifyPhase::prepare(ctx, || {
+                self.run_verify_layer(
+                    ctx,
+                    weights,
+                    attention,
+                    attention_caches,
+                    gdn_states,
+                    gdn_checkpoints,
+                    layer_offset,
+                    gdn_index,
+                    attention_index,
+                    start_position,
+                    scratch,
+                )
+            })?);
+            match self.architecture.layers[layer_offset].mixer {
+                MixerKind::Gdn(_) => gdn_index += 1,
+                MixerKind::FullAttention(_) => attention_index += 1,
+            }
+        }
+        ctx.synchronize().map_err(Error::Cuda)?;
+        Ok(phases)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_verify_layer<B: FullAttentionBackend>(
+        &self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        attention: &mut B,
+        attention_caches: &mut [B::Cache],
+        gdn_states: &[GdnState],
+        gdn_checkpoints: &[GdnStateCheckpoints],
+        layer_offset: usize,
+        gdn_index: usize,
+        attention_index: usize,
+        start_position: usize,
+        scratch: &mut DecoderScratch,
+    ) -> Result<()> {
+        let layer = self
+            .architecture
+            .layers
+            .get(layer_offset)
+            .ok_or_else(|| invalid("Qwen3.5 verifier layer index is out of range"))?;
+        let resident = weights
+            .layers
+            .get(layer_offset)
+            .ok_or_else(|| invalid("Qwen3.5 verifier weight index is out of range"))?;
+        qwen35_rms_norm(
+            ctx,
+            &scratch.hidden,
+            &resident.input_layernorm,
+            &mut scratch.normalized,
+            self.rms_norm_eps,
+        )
+        .map_err(|error| layer_error(layer.index, "input RMSNorm", error))?;
+        match (&layer.mixer, &resident.mixer) {
+            (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) => {
+                let state = gdn_states
+                    .get(gdn_index)
+                    .ok_or_else(|| invalid("Qwen3.5 verifier GDN state index is out of range"))?;
+                let checkpoints = gdn_checkpoints.get(gdn_index).ok_or_else(|| {
+                    invalid("Qwen3.5 verifier GDN checkpoint index is out of range")
+                })?;
+                scratch
+                    .gdn
+                    .prefill_with_checkpoints(ctx, gdn, state, &scratch.normalized, checkpoints)
+                    .map_err(|error| {
+                        layer_error(layer.index, "GDN checkpointed verification", error)
+                    })?;
+                ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
+                    .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
+            }
+            (
+                MixerKind::FullAttention(geometry),
+                DeviceMixerWeights::FullAttention(full_attention),
+            ) => {
+                let cache = attention_caches.get_mut(attention_index).ok_or_else(|| {
+                    invalid("Qwen3.5 verifier attention cache index is out of range")
+                })?;
+                attention
+                    .run(
+                        ctx,
+                        FullAttentionRequest {
+                            layer_index: layer.index,
+                            phase: DecoderPhase::Prefill,
+                            start_position,
+                            geometry: *geometry,
+                            weights: full_attention,
+                            normalized_hidden: &scratch.normalized,
+                            output: &scratch.mixer_output,
+                        },
+                        cache,
+                    )
+                    .map_err(|error| layer_error(layer.index, "attention", error))?;
+                ops::add_into(ctx, &scratch.mixer_output, &scratch.hidden)
+                    .map_err(|error| layer_error(layer.index, "attention residual", error))?;
+            }
+            _ => {
+                return Err(invalid(format!(
+                    "Qwen3.5 layer {} mixer changed during verifier preparation",
+                    layer.index
+                )))
+            }
+        }
+        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+            .map_err(|error| layer_error(layer.index, "MoE tail", error))
     }
 
     /// Capture one fixed-shape decode graph per transformer layer. Full
@@ -801,6 +974,7 @@ impl Qwen35Decoder {
             HiddenSelection::Last,
             scratch,
             decode_phases,
+            None,
         )
     }
 
@@ -820,6 +994,7 @@ impl Qwen35Decoder {
         hidden_selection: HiddenSelection,
         scratch: &mut DecoderScratch,
         decode_phases: Option<&[Qwen35DecodePhase]>,
+        verify_phases: Option<&[Qwen35VerifyPhase]>,
     ) -> Result<DecoderOutput> {
         scratch.write_token_ids(token_ids)?;
         self.run_after_token_ids(
@@ -835,6 +1010,7 @@ impl Qwen35Decoder {
             hidden_selection,
             scratch,
             decode_phases,
+            verify_phases,
         )
     }
 
@@ -853,6 +1029,7 @@ impl Qwen35Decoder {
         hidden_selection: HiddenSelection,
         scratch: &mut DecoderScratch,
         decode_phases: Option<&[Qwen35DecodePhase]>,
+        verify_phases: Option<&[Qwen35VerifyPhase]>,
     ) -> Result<DecoderOutput> {
         let tokens = scratch.tokens;
         scratch.embed(ctx, &weights.embedding)?;
@@ -863,6 +1040,16 @@ impl Qwen35Decoder {
             if phase != DecoderPhase::Decode || phases.len() != self.architecture.layers.len() {
                 return Err(invalid(
                     "Qwen3.5 decode graph set does not match the architecture",
+                ));
+            }
+        }
+        if let Some(phases) = verify_phases {
+            if phase != DecoderPhase::Prefill
+                || gdn_checkpoints.is_none()
+                || phases.len() != self.architecture.layers.len()
+            {
+                return Err(invalid(
+                    "Qwen3.5 prepared verifier set does not match the fixed verification call",
                 ));
             }
         }
@@ -885,6 +1072,31 @@ impl Qwen35Decoder {
             .enumerate()
         {
             trace_hash("pre", layer.index, &scratch.hidden);
+            if let Some(phases) = verify_phases {
+                let checkpoints = gdn_checkpoints
+                    .expect("prepared verifier validation requires GDN checkpoints");
+                phases[layer_offset].run(|| {
+                    self.run_verify_layer(
+                        ctx,
+                        weights,
+                        attention,
+                        attention_caches,
+                        gdn_states,
+                        checkpoints,
+                        layer_offset,
+                        gdn_index,
+                        attention_index,
+                        start_position,
+                        scratch,
+                    )
+                })?;
+                match layer.mixer {
+                    MixerKind::Gdn(_) => gdn_index += 1,
+                    MixerKind::FullAttention(_) => attention_index += 1,
+                }
+                trace_hash("post", layer.index, &scratch.hidden);
+                continue;
+            }
             match (&layer.mixer, &resident.mixer) {
                 (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) => {
                     let state = &gdn_states[gdn_index];
