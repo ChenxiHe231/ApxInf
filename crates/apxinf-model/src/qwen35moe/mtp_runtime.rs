@@ -1083,15 +1083,18 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
             ctx.synchronize().map_err(Error::Cuda)?;
         }
         let phase = std::time::Instant::now();
-        let proposals = self.mtp.draft(
-            ctx,
-            weights,
-            &self.committed_mtp,
-            &mut self.shadow_mtp,
-            pending,
-            start,
-            target_hidden,
-        )?;
+        let proposals = {
+            let _range = crate::profiling::trace::range("qwen35_mtp_draft");
+            self.mtp.draft(
+                ctx,
+                weights,
+                &self.committed_mtp,
+                &mut self.shadow_mtp,
+                pending,
+                start,
+                target_hidden,
+            )?
+        };
         if timing {
             ctx.synchronize().map_err(Error::Cuda)?;
         }
@@ -1101,9 +1104,11 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
             .begin_round(pending, &proposals)
             .map_err(schedule_error)?;
         let verification_inputs = *ticket.verification_inputs();
-        let verification =
+        let verification = {
+            let _range = crate::profiling::trace::range("qwen35_mtp_verify");
             self.target
-                .verify_target_chunk(ctx, decoder, weights, &verification_inputs)?;
+                .verify_target_chunk(ctx, decoder, weights, &verification_inputs)?
+        };
         if timing {
             ctx.synchronize().map_err(Error::Cuda)?;
         }
@@ -1118,17 +1123,21 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         // the final schedule assignment cannot fail.
         let mut next_schedule = schedule.clone();
         let outcome = next_schedule.commit(plan).map_err(schedule_error)?;
-        let prepared_target = self.target.prepare_target_commit(
-            ctx,
-            decoder,
-            weights,
-            verification,
-            contract.target.kv_range.committed_rows(),
-        )?;
-        let next_target_hidden = prepared_target.output().last_hidden_state()?;
-        let prepared_mtp =
-            self.mtp
-                .prepare_commit(ctx, weights, &mut self.shadow_mtp, contract.mtp)?;
+        let (prepared_target, next_target_hidden, prepared_mtp) = {
+            let _range = crate::profiling::trace::range("qwen35_mtp_commit");
+            let prepared_target = self.target.prepare_target_commit(
+                ctx,
+                decoder,
+                weights,
+                verification,
+                contract.target.kv_range.committed_rows(),
+            )?;
+            let next_target_hidden = prepared_target.output().last_hidden_state()?;
+            let prepared_mtp =
+                self.mtp
+                    .prepare_commit(ctx, weights, &mut self.shadow_mtp, contract.mtp)?;
+            (prepared_target, next_target_hidden, prepared_mtp)
+        };
         ctx.synchronize().map_err(Error::Cuda)?;
         mark("commit", phase);
 
