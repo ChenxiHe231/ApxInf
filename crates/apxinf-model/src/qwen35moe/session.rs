@@ -11,7 +11,7 @@ use apxinf_cuda_new::{transfers, CudaContext};
 use super::architecture::MixerKind;
 use super::decoder::{
     DecoderOutput, DecoderPhase, DecoderScratch, FullAttentionBackend, HiddenSelection,
-    LogitsSelection, Qwen35DecodePhase, Qwen35Decoder,
+    LogitsSelection, Qwen35DecodePhase, Qwen35Decoder, Qwen35VerifyPhase,
 };
 use super::device_weights::{DeviceMixerWeights, Qwen35DeviceWeights};
 use super::forward::{GdnState, GdnStateCheckpoints};
@@ -194,6 +194,10 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     /// publish by swapping committed and shadow storage.
     committed_decode_phases: Option<Vec<Qwen35DecodePhase>>,
     shadow_decode_phases: Option<Vec<Qwen35DecodePhase>>,
+    /// Prepared four-row verifier sessions follow the same physical state
+    /// banks as scalar-decode graphs and are swapped on transaction publish.
+    committed_verify_phases: Option<Vec<Qwen35VerifyPhase>>,
+    shadow_verify_phases: Option<Vec<Qwen35VerifyPhase>>,
     /// Device argmax outputs for the four-row verifier.
     verify_predictions: Tensor,
     capacity: usize,
@@ -283,6 +287,8 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             verify_scratch: decoder.allocate_verify_scratch(ctx)?,
             committed_decode_phases: None,
             shadow_decode_phases: None,
+            committed_verify_phases: None,
+            shadow_verify_phases: None,
             verify_predictions,
             capacity,
             position: 0,
@@ -301,6 +307,26 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                 weights,
                 &session.shadow_gdn,
                 &mut session.decode_scratch,
+            )?);
+            session.committed_verify_phases = Some(decoder.prepare_verify_phases(
+                ctx,
+                weights,
+                &mut session.attention,
+                &mut session.committed_attention,
+                &session.committed_gdn,
+                &session.verify_gdn_checkpoints,
+                0,
+                &mut session.verify_scratch,
+            )?);
+            session.shadow_verify_phases = Some(decoder.prepare_verify_phases(
+                ctx,
+                weights,
+                &mut session.attention,
+                &mut session.shadow_attention,
+                &session.shadow_gdn,
+                &session.verify_gdn_checkpoints,
+                0,
+                &mut session.verify_scratch,
             )?);
             if std::env::var("APXINF_QWEN35_VERIFY_GRAPHS").as_deref() == Ok("1") {
                 decoder.verify_decode_phases(
@@ -754,6 +780,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             token_ids,
             start_position,
             &mut self.verify_scratch,
+            self.shadow_verify_phases.as_deref(),
         )?;
         final_output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, 0)?;
         ctx.synchronize().map_err(Error::Cuda)?;
@@ -1003,6 +1030,10 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         std::mem::swap(
             &mut self.committed_decode_phases,
             &mut self.shadow_decode_phases,
+        );
+        std::mem::swap(
+            &mut self.committed_verify_phases,
+            &mut self.shadow_verify_phases,
         );
         self.position = position;
         self.epoch = next_epoch;
