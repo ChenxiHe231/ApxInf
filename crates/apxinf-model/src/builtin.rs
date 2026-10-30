@@ -189,6 +189,14 @@ fn load_qwen35_moe(
         moe_activation: options.qwen35_moe_activation.unwrap_or_default(),
         kv_cache: options.qwen35_kv_cache.unwrap_or_default(),
     };
+    let kv_cache_scales = match execution.kv_cache {
+        crate::qwen35moe::Qwen35KvCacheDType::Bf16 => None,
+        crate::qwen35moe::Qwen35KvCacheDType::Fp8 => {
+            Some(crate::qwen35moe::load_trt_fp8_kv_cache_scales(
+                &model_dir.join("hf_quant_config.json"),
+            )?)
+        }
+    };
     if kv_capacity == 0 || kv_capacity > config.text_config.max_position_embeddings {
         return Err(Error::Other(format!(
             "Qwen3.5 KV capacity must be in 1..={}, got {kv_capacity}",
@@ -204,6 +212,7 @@ fn load_qwen35_moe(
         execution,
         options.autotune,
         options.tuning_path.clone(),
+        kv_cache_scales,
     )?;
     Ok(LoadedModel::text(Box::new(model)))
 }

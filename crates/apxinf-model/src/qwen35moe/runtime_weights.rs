@@ -221,6 +221,17 @@ impl KvCacheScales {
     /// Largest finite magnitude represented by NVIDIA's E4M3 cache format.
     pub const FP8_E4M3_MAX: f32 = 448.0;
 
+    /// Construct from dequantization multipliers that are already in the
+    /// TensorRT Edge attention-plugin convention.
+    ///
+    /// These values are consumed directly on cache read and must not be
+    /// divided by [`Self::FP8_E4M3_MAX`].
+    pub fn from_dequant_scales(key: f32, value: f32) -> Result<Self> {
+        let scales = Self { key, value };
+        scales.validate()?;
+        Ok(scales)
+    }
+
     /// Convert ModelOpt checkpoint `k_scale`/`v_scale` scalars from amax to
     /// the cache contract used by Edge-LLM and cuda-new:
     ///
@@ -233,12 +244,10 @@ impl KvCacheScales {
                 "Qwen3.5 FP8 KV-cache checkpoint amax values must be finite and positive",
             ));
         }
-        let scales = Self {
-            key: key_amax / Self::FP8_E4M3_MAX,
-            value: value_amax / Self::FP8_E4M3_MAX,
-        };
-        scales.validate()?;
-        Ok(scales)
+        Self::from_dequant_scales(
+            key_amax / Self::FP8_E4M3_MAX,
+            value_amax / Self::FP8_E4M3_MAX,
+        )
     }
 
     fn validate(self) -> Result<()> {
