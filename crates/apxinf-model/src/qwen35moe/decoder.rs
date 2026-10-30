@@ -137,7 +137,7 @@ impl Qwen35DecodePhase {
     }
 }
 
-/// One fixed-shape four-row target-verification layer traversal.
+/// One fixed-shape target-verification layer traversal.
 ///
 /// Unlike scalar decode, verification keeps FA2 eager because the live prefix
 /// grows every round. The surrounding execution session still retains every
@@ -148,10 +148,7 @@ pub(super) struct Qwen35VerifyPhase {
 }
 
 impl Qwen35VerifyPhase {
-    fn prepare(
-        ctx: &CudaContext,
-        operation: impl FnOnce() -> Result<()>,
-    ) -> Result<Self> {
+    fn prepare(ctx: &CudaContext, operation: impl FnOnce() -> Result<()>) -> Result<Self> {
         let session = ExecutionSession::with_capacity(DECODE_PHASE_WORKSPACE, ctx.device_id())?;
         session.prepare(operation)?;
         Ok(Self { session })
@@ -174,7 +171,7 @@ pub enum DecoderPhase {
 pub enum LogitsSelection {
     /// Only the final row, used by ordinary prefill and decode.
     Last,
-    /// Every row, used by the fixed four-row MTP target verifier.
+    /// Every row, used by the fixed-row MTP target verifier.
     All,
 }
 
@@ -559,7 +556,7 @@ impl Qwen35Decoder {
         )
     }
 
-    /// Prepare one execution session per target layer for the fixed four-row
+    /// Prepare one execution session per target layer for the fixed-row
     /// verifier. Two sets are built by the session owner because transactional
     /// publication alternates the physical committed/shadow state banks.
     #[allow(clippy::too_many_arguments)]
@@ -1098,8 +1095,8 @@ impl Qwen35Decoder {
         {
             trace_hash("pre", layer.index, &scratch.hidden);
             if let Some(phases) = verify_phases {
-                let checkpoints = gdn_checkpoints
-                    .expect("prepared verifier validation requires GDN checkpoints");
+                let checkpoints =
+                    gdn_checkpoints.expect("prepared verifier validation requires GDN checkpoints");
                 let mut run_mixer = |scratch: &mut DecoderScratch| {
                     self.run_verify_mixer(
                         ctx,
@@ -1587,7 +1584,9 @@ pub(super) fn trace_hash(label: &str, index: usize, tensor: &Tensor) {
             }
         },
         DType::F32 => match host.as_f32() {
-            Ok(values) => values.iter().for_each(|value| feed(value.to_bits().to_le_bytes())),
+            Ok(values) => values
+                .iter()
+                .for_each(|value| feed(value.to_bits().to_le_bytes())),
             Err(error) => {
                 eprintln!("[qwen35-hash] {label}[{index}] as_f32 failed: {error}");
                 return;
@@ -1598,7 +1597,10 @@ pub(super) fn trace_hash(label: &str, index: usize, tensor: &Tensor) {
             return;
         }
     }
-    eprintln!("[qwen35-hash] {label}[{index}] shape={:?} = {hash:016x}", tensor.shape().dims());
+    eprintln!(
+        "[qwen35-hash] {label}[{index}] shape={:?} = {hash:016x}",
+        tensor.shape().dims()
+    );
 }
 
 fn run_decode_moe_tail(

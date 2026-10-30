@@ -1,13 +1,13 @@
 //! Device-agnostic speculative-decoding schedule for Qwen3.5 MTP.
 //!
 //! This module owns only transactional token/position accounting. The CUDA
-//! runtime produces three draft tokens, verifies four target rows, applies the
+//! runtime produces two draft tokens, verifies three target rows, applies the
 //! described cache/state commit, and calls [`Qwen35MtpSchedule::commit`] only
 //! after both target and draft device preparations succeed.
 
 use std::fmt;
 
-pub const QWEN35_MTP_DRAFT_STEPS: usize = 3;
+pub const QWEN35_MTP_DRAFT_STEPS: usize = 2;
 pub const QWEN35_MTP_VERIFY_ROWS: usize = QWEN35_MTP_DRAFT_STEPS + 1;
 
 pub type TokenId = u32;
@@ -41,7 +41,7 @@ pub struct Qwen35MtpStats {
 pub enum TailTokenKind {
     /// The target token at the first draft mismatch.
     Correction,
-    /// The target token after all three drafts matched.
+    /// The target token after all drafts matched.
     Bonus,
 }
 
@@ -90,7 +90,7 @@ pub struct MtpCommit {
     /// MTP KV rows already staged by the draft chain and made visible now.
     pub cache_range: ShadowCommitRange,
     /// Full acceptance plus a bonus consumes the final proposal as an input.
-    /// The three draft calls have not materialized that final cache row, so a
+    /// The draft calls have not materialized that final cache row, so a
     /// runtime must run the MTP layer once more without projecting logits.
     pub materialize_final_proposal: bool,
 }
@@ -112,7 +112,7 @@ pub struct RoundTicket {
 }
 
 impl RoundTicket {
-    /// Target verification consumes `pending` followed by the three drafts.
+    /// Target verification consumes `pending` followed by both drafts.
     pub fn verification_inputs(&self) -> &[TokenId; QWEN35_MTP_VERIFY_ROWS] {
         &self.verification_inputs
     }
@@ -504,14 +504,16 @@ mod tests {
         Qwen35MtpSchedule::new(7, 7, budget, 1, vec![99]).unwrap()
     }
 
-    fn verify_incrementing(inputs: &[TokenId; QWEN35_MTP_VERIFY_ROWS]) -> [TokenId; 4] {
+    fn verify_incrementing(
+        inputs: &[TokenId; QWEN35_MTP_VERIFY_ROWS],
+    ) -> [TokenId; QWEN35_MTP_VERIFY_ROWS] {
         inputs.map(|token| token + 1)
     }
 
     fn round(
         schedule: &mut Qwen35MtpSchedule,
         pending: TokenId,
-        proposals: [TokenId; 3],
+        proposals: [TokenId; QWEN35_MTP_DRAFT_STEPS],
     ) -> RoundOutcome {
         let ticket = schedule.begin_round(pending, &proposals).unwrap();
         let predictions = verify_incrementing(ticket.verification_inputs());
@@ -520,40 +522,40 @@ mod tests {
     }
 
     #[test]
-    fn three_step_zero_partial_and_full_accept_are_scalar_equivalent() {
+    fn two_step_zero_partial_and_full_accept_are_scalar_equivalent() {
         let mut schedule = schedule(13);
         let mut pending = 10;
         let mut speculative = vec![pending];
 
-        let zero = round(&mut schedule, pending, [90, 91, 92]);
+        let zero = round(&mut schedule, pending, [90, 91]);
         assert_eq!(zero.accepted_proposals, 0);
         assert_eq!(zero.tail_kind, TailTokenKind::Correction);
         assert_eq!(zero.emitted, [11]);
         pending = *zero.emitted.last().unwrap();
         speculative.extend(zero.emitted);
 
-        let partial = round(&mut schedule, pending, [12, 80, 81]);
+        let partial = round(&mut schedule, pending, [12, 80]);
         assert_eq!(partial.accepted_proposals, 1);
         assert_eq!(partial.emitted, [12, 13]);
         pending = *partial.emitted.last().unwrap();
         speculative.extend(partial.emitted);
 
-        let full = round(&mut schedule, pending, [14, 15, 16]);
-        assert_eq!(full.accepted_proposals, 3);
+        let full = round(&mut schedule, pending, [14, 15]);
+        assert_eq!(full.accepted_proposals, 2);
         assert_eq!(full.tail_kind, TailTokenKind::Bonus);
-        assert_eq!(full.emitted, [14, 15, 16, 17]);
+        assert_eq!(full.emitted, [14, 15, 16]);
         speculative.extend(full.emitted);
 
-        let scalar = (10..=17).collect::<Vec<_>>();
+        let scalar = (10..=16).collect::<Vec<_>>();
         assert_eq!(speculative, scalar);
         assert_eq!(
             schedule.positions(),
-            CommittedPositions { base: 14, mtp: 14 }
+            CommittedPositions { base: 13, mtp: 13 }
         );
         assert_eq!(schedule.stats().zero_accept_rounds, 1);
         assert_eq!(schedule.stats().partial_accept_rounds, 1);
         assert_eq!(schedule.stats().full_accept_rounds, 1);
-        assert_eq!(schedule.stats().verified_accepted_proposals, 4);
+        assert_eq!(schedule.stats().verified_accepted_proposals, 3);
         assert_eq!(schedule.stats().correction_tokens, 2);
         assert_eq!(schedule.stats().bonus_tokens, 1);
     }
@@ -561,8 +563,8 @@ mod tests {
     #[test]
     fn full_accept_commits_bonus_and_complete_gdn_kv_shadow() {
         let mut schedule = schedule(8);
-        let outcome = round(&mut schedule, 20, [21, 22, 23]);
-        assert_eq!(outcome.emitted, [21, 22, 23, 24]);
+        let outcome = round(&mut schedule, 20, [21, 22]);
+        assert_eq!(outcome.emitted, [21, 22, 23]);
         assert_eq!(
             outcome.contract.target.gdn,
             GdnShadowCommit::AdoptFullShadow
@@ -571,8 +573,8 @@ mod tests {
             outcome.contract.target.gdn_range,
             ShadowCommitRange {
                 start: 7,
-                committed_end: 11,
-                verified_end: 11,
+                committed_end: 10,
+                verified_end: 10,
             }
         );
         assert_eq!(
@@ -582,31 +584,31 @@ mod tests {
         assert!(outcome.contract.mtp.materialize_final_proposal);
         assert_eq!(
             outcome.contract.next_positions,
-            CommittedPositions { base: 11, mtp: 11 }
+            CommittedPositions { base: 10, mtp: 10 }
         );
     }
 
     #[test]
     fn partial_accept_commits_only_prefix_and_discards_shadow_suffix() {
         let mut schedule = schedule(8);
-        let outcome = round(&mut schedule, 20, [21, 70, 71]);
+        let outcome = round(&mut schedule, 20, [21, 70]);
         assert_eq!(outcome.emitted, [21, 22]);
         assert_eq!(
             outcome.contract.target.gdn,
             GdnShadowCommit::ReplayPrefix { rows: 2 }
         );
         assert_eq!(outcome.contract.target.gdn_range.committed_rows(), 2);
-        assert_eq!(outcome.contract.target.gdn_range.discarded_rows(), 2);
-        assert_eq!(outcome.contract.target.kv_range.discarded_rows(), 2);
+        assert_eq!(outcome.contract.target.gdn_range.discarded_rows(), 1);
+        assert_eq!(outcome.contract.target.kv_range.discarded_rows(), 1);
         assert_eq!(outcome.contract.mtp.cache_range.committed_rows(), 2);
-        assert_eq!(outcome.contract.mtp.cache_range.discarded_rows(), 1);
+        assert_eq!(outcome.contract.mtp.cache_range.discarded_rows(), 0);
         assert!(!outcome.contract.mtp.materialize_final_proposal);
     }
 
     #[test]
     fn eos_and_output_budget_truncate_before_bonus_without_overcommit() {
         let mut eos_schedule = schedule(8);
-        let ticket = eos_schedule.begin_round(97, &[98, 70, 71]).unwrap();
+        let ticket = eos_schedule.begin_round(97, &[98, 70]).unwrap();
         let predictions = verify_incrementing(ticket.verification_inputs());
         let plan = eos_schedule.finish_round(ticket, &predictions).unwrap();
         assert_eq!(plan.emitted(), [98, 99]);
@@ -618,10 +620,10 @@ mod tests {
         );
         assert!(!eos.contract.mtp.materialize_final_proposal);
 
-        // Only two slots remain, so a full match publishes two drafts and no
-        // third draft or bonus even though all target rows were verified.
+        // Only two slots remain, so a full match publishes both drafts and no
+        // bonus even though all target rows were verified.
         let mut budget_schedule = schedule(3);
-        let budget = round(&mut budget_schedule, 30, [31, 32, 33]);
+        let budget = round(&mut budget_schedule, 30, [31, 32]);
         assert_eq!(budget.emitted, [31, 32]);
         assert!(budget.finished);
         assert_eq!(budget_schedule.stats().bonus_tokens, 0);
@@ -636,7 +638,7 @@ mod tests {
     fn failed_or_stale_round_never_commits_positions_or_statistics() {
         let mut schedule = schedule(8);
         let before = schedule.clone();
-        let ticket = schedule.begin_round(20, &[21, 22, 23]).unwrap();
+        let ticket = schedule.begin_round(20, &[21, 22]).unwrap();
         assert!(matches!(
             schedule.finish_round(ticket.clone(), &[21, 22]),
             Err(MtpScheduleError::WrongPredictionCount { .. })
@@ -664,11 +666,11 @@ mod tests {
         ));
         let schedule = schedule(8);
         assert!(matches!(
-            schedule.begin_round(20, &[21, 22]),
+            schedule.begin_round(20, &[21]),
             Err(MtpScheduleError::WrongProposalCount { .. })
         ));
         assert!(matches!(
-            schedule.begin_round(99, &[100, 101, 102]),
+            schedule.begin_round(99, &[100, 101]),
             Err(MtpScheduleError::PendingIsEos(99))
         ));
     }

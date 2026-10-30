@@ -330,6 +330,80 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             project_qkv()?;
         }
 
+        // Decode and fixed-row MTP verification consume the FP8 cache directly.
+        // The native path fuses head RMSNorm, mRoPE, cache append, parallel
+        // score/value reduction, and sigmoid gating. Larger prompt chunks keep
+        // using FA2 below; launching one score grid per prompt row would be
+        // wasteful for prefill.
+        if cache.dtype == Qwen35KvCacheDType::Fp8
+            && tokens <= ops::QWEN35_MTP_DRAFT_STEPS + 1
+            && std::env::var("APXINF_QWEN35_FP8_DIRECT_ATTENTION").as_deref() != Ok("0")
+        {
+            let scales = cache.scales.ok_or_else(|| {
+                invalid("Qwen3.6 FP8 KV cache requested without static dequant scales")
+            })?;
+            ops::qwen35_attention_fp8(
+                ctx,
+                tokens,
+                ops::Qwen35Fp8AttentionArgs {
+                    projected_query_gate: &scratch.projected_query_gate,
+                    projected_key: &scratch.projected_key,
+                    projected_value: &scratch.projected_value,
+                    query_norm: &request.weights.q_norm,
+                    key_norm: &request.weights.k_norm,
+                    positions: &scratch.positions,
+                    cache: ops::Qwen35Fp8KvCache {
+                        key: &cache.key,
+                        value: &cache.value,
+                    },
+                    scratch: ops::Qwen35AttentionScratch {
+                        query: &scratch.query,
+                        gate: &scratch.gate,
+                        output: &scratch.attention_output,
+                        scores: &scratch.fp8_scores,
+                        partial_output: &scratch.fp8_partial_output,
+                        partial_stats: &scratch.fp8_partial_stats,
+                    },
+                    cache_offset: request.start_position,
+                    scales: ops::Qwen35KvCacheScales {
+                        key: scales.key,
+                        value: scales.value,
+                    },
+                    rope_theta,
+                },
+            )?;
+
+            let attention_output = view(
+                &scratch.attention_output,
+                vec![
+                    tokens,
+                    ops::QWEN35_ATTENTION_Q_HEADS * ops::QWEN35_ATTENTION_HEAD_DIM,
+                ],
+                DType::BF16,
+            )?;
+            let mut output = request.output.clone();
+            let mut project_output = || {
+                quantize_static_fp8(
+                    ctx,
+                    &attention_output,
+                    &scratch.fp8_output_input,
+                    request.weights.o_proj.input_scale,
+                )?;
+                project_static_fp8_prequantized(
+                    ctx,
+                    &request.weights.o_proj,
+                    &scratch.fp8_output_input,
+                    &mut output,
+                    tokens,
+                )
+            };
+            return if let Some(session) = post_projection {
+                session.run(project_output)
+            } else {
+                project_output()
+            };
+        }
+
         // ---- Decomposed pre/post processing (shared with old scalar path) ----
         // Split fused query+gate → query / gate [tokens, Q_HEADS, HEAD_DIM]
         let q_fused = view(
@@ -611,6 +685,9 @@ struct AttentionScratch {
     query: Tensor,
     gate: Tensor,
     attention_output: Tensor,
+    fp8_scores: Tensor,
+    fp8_partial_output: Tensor,
+    fp8_partial_stats: Tensor,
     fp8_key_bf16: Option<Tensor>,
     fp8_value_bf16: Option<Tensor>,
     tokens: usize,
@@ -636,6 +713,18 @@ impl AttentionScratch {
             ops::QWEN35_ATTENTION_Q_HEADS,
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ];
+        let (_, physical_cache_capacity) = cache_block_geometry(cache_capacity)?;
+        // The custom static-FP8 attention kernel is only selected for scalar
+        // decode and the fixed MTP verifier. Prompt prefill uses FA2 and never
+        // touches its score/split scratch. Do not reserve O(tokens * capacity)
+        // dead storage for a 4K+ prefill profile (over 1 GiB at 4K/5K).
+        let fp8_direct_tokens = if cache_dtype == Qwen35KvCacheDType::Fp8
+            && tokens <= ops::QWEN35_MTP_DRAFT_STEPS + 1
+        {
+            tokens
+        } else {
+            1
+        };
         let fp8_cache_shape = vec![
             cache_capacity,
             ops::QWEN35_ATTENTION_KV_HEADS,
@@ -678,6 +767,37 @@ impl AttentionScratch {
             query: zeros(ctx, attention_shape.clone(), DType::BF16)?,
             gate: zeros(ctx, attention_shape.clone(), DType::BF16)?,
             attention_output: zeros(ctx, attention_shape, DType::BF16)?,
+            fp8_scores: zeros(
+                ctx,
+                vec![
+                    fp8_direct_tokens,
+                    ops::QWEN35_ATTENTION_Q_HEADS,
+                    physical_cache_capacity,
+                ],
+                DType::F32,
+            )?,
+            fp8_partial_output: zeros(
+                ctx,
+                vec![
+                    fp8_direct_tokens,
+                    ops::QWEN35_ATTENTION_KV_HEADS,
+                    ops::QWEN35_ATTENTION_MAX_SPLITS,
+                    ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS,
+                    ops::QWEN35_ATTENTION_HEAD_DIM,
+                ],
+                DType::F32,
+            )?,
+            fp8_partial_stats: zeros(
+                ctx,
+                vec![
+                    fp8_direct_tokens,
+                    ops::QWEN35_ATTENTION_KV_HEADS,
+                    ops::QWEN35_ATTENTION_MAX_SPLITS,
+                    ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS,
+                    2,
+                ],
+                DType::F32,
+            )?,
             fp8_key_bf16,
             fp8_value_bf16,
             tokens,
@@ -950,8 +1070,6 @@ fn validate_cache_pair(
     validate_cache_device(ctx, destination)?;
     if source.layer_index != destination.layer_index
         || source.geometry != destination.geometry
-        || source.capacity != destination.capacity
-        || source.blocks != destination.blocks
         || source.scales != destination.scales
         || source.dtype != destination.dtype
     {
@@ -959,6 +1077,11 @@ fn validate_cache_pair(
             "Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
         ));
     }
+    // Prefix snapshots are intentionally sized to the reusable prefix while
+    // the live session is sized to prompt + output admission.  Their physical
+    // block counts therefore need not match; each token row has the same
+    // contiguous layout and the range check below proves that both buffers
+    // contain the copied rows.
     if positions.start > positions.end
         || positions.end > source.capacity
         || positions.end > destination.capacity

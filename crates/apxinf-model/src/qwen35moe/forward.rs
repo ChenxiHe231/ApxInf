@@ -136,9 +136,10 @@ impl TextBoundaryScratch {
     }
 }
 
-/// Use the checkpoint-native NVFP4 head. The Edge W4A16 kernel is one-row, so
-/// multi-row verification dispatches stable row views without materializing a
-/// BF16 vocabulary matrix.
+/// Use the checkpoint-native NVFP4 W4A16 head. The Blackwell kernel specializes
+/// 1/2/4/8/16 BF16 rows and stages every weight tile once for all rows, so MTP
+/// verification projects its four logits rows in one launch without changing
+/// activation precision or greedy semantics.
 pub(crate) fn project_lm_head(
     ctx: &CudaContext,
     weights: &Qwen35DeviceWeights,
@@ -156,31 +157,19 @@ pub(crate) fn project_lm_head(
         .a16
         .as_ref()
         .ok_or_else(|| invalid("Qwen3.6 lm_head W4A16 layout is unavailable"))?;
-    let input_row_bytes = weight.input_features * DType::BF16.size_in_bytes();
-    let output_row_bytes = weight.output_features * DType::BF16.size_in_bytes();
-    for row in 0..rows {
-        let input_row = CudaBuffer::from_tensor(input)
-            .map_err(Error::Cuda)?
-            .view(row * input_row_bytes, input_row_bytes)
-            .map_err(Error::Cuda)?
-            .as_tensor(Shape::new(vec![1, weight.input_features]), DType::BF16)
-            .map_err(Error::Cuda)?;
-        let output_row = CudaBuffer::from_tensor(output)
-            .map_err(Error::Cuda)?
-            .view(row * output_row_bytes, output_row_bytes)
-            .map_err(Error::Cuda)?
-            .as_tensor(Shape::new(vec![1, weight.output_features]), DType::BF16)
-            .map_err(Error::Cuda)?;
-        ops::nvfp4_a16_blackwell_gemv(
-            ctx,
-            &input_row,
-            &weight.qweight,
-            &weight.block_scales,
-            &weight.global_scale,
-            &output_row,
-        )?;
+    if !matches!(rows, 1 | 2 | 3 | 4 | 8 | 16) {
+        return Err(invalid(
+            "Qwen3.5 lm_head W4A16 row count must be one of 1,2,3,4,8,16",
+        ));
     }
-    Ok(())
+    ops::nvfp4_a16_blackwell_gemv(
+        ctx,
+        input,
+        &weight.qweight,
+        &weight.block_scales,
+        &weight.global_scale,
+        output,
+    )
 }
 
 pub(crate) fn quantize_static_fp8(
@@ -888,7 +877,7 @@ impl BaseMoeScratch {
             .as_ref()
             .ok_or_else(|| invalid("shared NVFP4 intermediate scales are unavailable"))?;
 
-        if matches!(self.tokens, 1 | 2 | 4 | 8 | 16) {
+        if matches!(self.tokens, 1 | 2 | 3 | 4 | 8 | 16) {
             if let (Some(gate), Some(up), Some(down)) = (
                 weights.shared_gate.a16.as_ref(),
                 weights.shared_up.a16.as_ref(),

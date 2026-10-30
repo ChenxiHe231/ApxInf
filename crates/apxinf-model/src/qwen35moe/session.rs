@@ -115,7 +115,7 @@ pub trait MtpBackend {
         prepared: Self::PreparedCommit,
     );
 }
-/// Opaque evidence that the four target rows were
+/// Opaque evidence that the fixed target-verification rows were
 /// evaluated against a particular committed session epoch. Dropping it aborts
 /// the target half of the speculative transaction.
 pub struct TargetVerification {
@@ -175,7 +175,7 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     attention: B,
     committed_gdn: Vec<GdnState>,
     shadow_gdn: Vec<GdnState>,
-    /// State after each row of the fixed four-token target verification.
+    /// State after each row of the fixed target verification.
     verify_gdn_checkpoints: Vec<GdnStateCheckpoints>,
     committed_attention: Vec<B::Cache>,
     shadow_attention: Vec<B::Cache>,
@@ -188,17 +188,17 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     /// Persistent one-row workspace for ordinary decode. Variable-size prefill
     /// deliberately keeps using call-sized temporary scratch.
     decode_scratch: DecoderScratch,
-    /// Persistent four-row workspace for the batched target verifier.
+    /// Persistent fixed-row workspace for the batched target verifier.
     verify_scratch: DecoderScratch,
     /// Graph sets follow their physical GDN state banks when transactions
     /// publish by swapping committed and shadow storage.
     committed_decode_phases: Option<Vec<Qwen35DecodePhase>>,
     shadow_decode_phases: Option<Vec<Qwen35DecodePhase>>,
-    /// Prepared four-row verifier sessions follow the same physical state
+    /// Prepared fixed-row verifier sessions follow the same physical state
     /// banks as scalar-decode graphs and are swapped on transaction publish.
     committed_verify_phases: Option<Vec<Qwen35VerifyPhase>>,
     shadow_verify_phases: Option<Vec<Qwen35VerifyPhase>>,
-    /// Device argmax outputs for the four-row verifier.
+    /// Device argmax outputs for the fixed-row verifier.
     verify_predictions: Tensor,
     capacity: usize,
     position: usize,
@@ -702,11 +702,15 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         // keeps the transactional path, because there a verified round can be
         // rejected and the pre-round state must survive.
         if self.decode_in_place {
-            let output = self.run_committed_decode(ctx, decoder, weights, token_id, start_position)?;
+            let output =
+                self.run_committed_decode(ctx, decoder, weights, token_id, start_position)?;
             if timing {
                 ctx.synchronize().map_err(Error::Cuda)?;
                 eprintln!("[decode] shadow 0.000 ms (in place)");
-                eprintln!("[decode] forward {:.3} ms", at.elapsed().as_secs_f64() * 1e3);
+                eprintln!(
+                    "[decode] forward {:.3} ms",
+                    at.elapsed().as_secs_f64() * 1e3
+                );
             }
             self.position = output.end_position;
             self.shadow_attention_valid = self.shadow_attention_valid.min(self.position);
@@ -715,10 +719,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         self.prepare_shadow_from_committed(ctx)?;
         if timing {
             ctx.synchronize().map_err(Error::Cuda)?;
-            eprintln!(
-                "[decode] shadow {:.3} ms",
-                at.elapsed().as_secs_f64() * 1e3
-            );
+            eprintln!("[decode] shadow {:.3} ms", at.elapsed().as_secs_f64() * 1e3);
         }
         let at = std::time::Instant::now();
         let output = self.run_shadow(
@@ -733,18 +734,21 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         )?;
         if timing {
             ctx.synchronize().map_err(Error::Cuda)?;
-            eprintln!("[decode] forward {:.3} ms", at.elapsed().as_secs_f64() * 1e3);
+            eprintln!(
+                "[decode] forward {:.3} ms",
+                at.elapsed().as_secs_f64() * 1e3
+            );
         }
         self.publish_shadow(output.end_position, start_position)?;
         Ok(output)
     }
 
-    /// Evaluate all four target-verification rows in one fixed-shape forward
+    /// Evaluate all target-verification rows in one fixed-shape forward
     /// without changing committed state or position.
     ///
     /// This is the exact base-model half required by `mtp_schedule`: an MTP
-    /// executor can draft three tokens, call this method with
-    /// `[pending,d0,d1,d2]`, and derive four target predictions. It is
+    /// executor can draft two tokens, call this method with
+    /// `[pending,d0,d1]`, and derive three target predictions. It is
     /// Each GDN layer records the state after every row, allowing partial
     /// acceptance to select the correct recurrent boundary without replaying
     /// the target model.
@@ -1076,7 +1080,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             // `prepare_target_commit` that narrows it to the accepted row via
             // `into_row`, and `publish_target_commit` that then requires
             // rows == 1. Demanding a single row here described the old
-            // pre-`into_row` shape and rejected every well-formed four-row
+            // pre-`into_row` shape and rejected every well-formed fixed-row
             // verification, which made --mode mtp unusable.
             || verification.final_output.rows != verification.inputs.len()
             || verification.final_output.hidden_rows != verification.inputs.len()

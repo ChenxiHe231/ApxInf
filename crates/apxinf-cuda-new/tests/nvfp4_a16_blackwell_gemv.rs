@@ -24,7 +24,7 @@ fn constant_weight_matches_bf16_reference_for_every_supported_row_count() {
         &Tensor::from_f8_e4m3(vec![1, 1, 128, 4], &vec![encode_e4m3(1.0); N * K / 16]).unwrap(),
     );
     let global_scale = upload(&ctx, &Tensor::from_f32(vec![1], &[1.0]).unwrap());
-    for rows in [1, 2, 4, 8, 16] {
+    for rows in [1, 2, 3, 4, 8, 16] {
         let activation = upload(
             &ctx,
             &Tensor::from_bf16(vec![rows, K], &vec![bf16::from_f32(1.0); rows * K]).unwrap(),

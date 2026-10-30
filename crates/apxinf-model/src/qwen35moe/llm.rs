@@ -868,7 +868,7 @@ impl LlmTrait for Qwen35Moe {
             .checked_mul(super::mtp_schedule::QWEN35_MTP_VERIFY_ROWS)?;
         let target_rolled_back_rows = target_verified_rows.checked_sub(stats.emitted_tokens)?;
         Some(SpeculativeGenerationStats {
-            implementation: "qwen3.5_moe_mtp3",
+            implementation: "qwen3.5_moe_mtp2",
             draft_steps: QWEN35_MTP_DRAFT_STEPS,
             rounds: stats.rounds,
             zero_accept_rounds: stats.zero_accept_rounds,

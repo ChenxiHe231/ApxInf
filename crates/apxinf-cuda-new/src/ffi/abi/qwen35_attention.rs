@@ -2,7 +2,7 @@ use std::ffi::c_void;
 
 use super::types::{CudaStream, Runtime};
 
-pub(crate) const SPEC_VERSION: u32 = 1;
+pub(crate) const SPEC_VERSION: u32 = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,6 +31,9 @@ pub(crate) struct Bindings {
     pub query: *mut c_void,
     pub gate: *mut c_void,
     pub output: *mut c_void,
+    pub scores: *mut c_void,
+    pub partial_output: *mut c_void,
+    pub partial_stats: *mut c_void,
     pub stream: CudaStream,
 }
 
@@ -41,4 +44,3 @@ unsafe extern "C" {
         bindings: *const Bindings,
     ) -> i32;
 }
-

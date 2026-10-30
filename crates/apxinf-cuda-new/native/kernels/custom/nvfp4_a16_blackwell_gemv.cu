@@ -193,7 +193,8 @@ int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
   if (activation == nullptr || qweights == nullptr || block_scales == nullptr ||
       global_scale == nullptr || output == nullptr || n <= 0 || k <= 0 ||
       n % kNTile != 0 || k % kKTile != 0 ||
-      (rows != 1 && rows != 2 && rows != 4 && rows != 8 && rows != 16)) {
+      (rows != 1 && rows != 2 && rows != 3 && rows != 4 && rows != 8 &&
+       rows != 16)) {
     return -1;
   }
   const auto* a = static_cast<const __nv_bfloat16*>(activation);
@@ -207,6 +208,9 @@ int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
       break;
     case 2:
       launch_nvfp4_a16_blackwell_gemv<2>(a, w, s, g, o, n, k, stream);
+      break;
+    case 3:
+      launch_nvfp4_a16_blackwell_gemv<3>(a, w, s, g, o, n, k, stream);
       break;
     case 4:
       launch_nvfp4_a16_blackwell_gemv<4>(a, w, s, g, o, n, k, stream);

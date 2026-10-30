@@ -17,11 +17,11 @@ pub const QWEN35_ATTENTION_HEAD_DIM: usize = 256;
 pub const QWEN35_ATTENTION_ROTARY_DIM: usize = 64;
 pub const QWEN35_ATTENTION_Q_PROJECTION_WIDTH: usize =
     2 * QWEN35_ATTENTION_Q_HEADS * QWEN35_ATTENTION_HEAD_DIM;
-pub const QWEN35_ATTENTION_KV_WIDTH: usize =
-    QWEN35_ATTENTION_KV_HEADS * QWEN35_ATTENTION_HEAD_DIM;
+pub const QWEN35_ATTENTION_KV_WIDTH: usize = QWEN35_ATTENTION_KV_HEADS * QWEN35_ATTENTION_HEAD_DIM;
 pub const QWEN35_ATTENTION_RMS_EPSILON: f32 = 1.0e-6;
 pub const FP8_E4M3_MAX_FINITE: f32 = 448.0;
 pub const QWEN35_KV_CACHE_BLOCK_TOKENS: usize = 128;
+pub const QWEN35_ATTENTION_MAX_SPLITS: usize = 32;
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
@@ -38,10 +38,7 @@ pub struct Qwen35KvCacheScales {
 
 impl Qwen35KvCacheScales {
     pub fn validate(self) -> Result<()> {
-        if !self.key.is_finite()
-            || self.key <= 0.0
-            || !self.value.is_finite()
-            || self.value <= 0.0
+        if !self.key.is_finite() || self.key <= 0.0 || !self.value.is_finite() || self.value <= 0.0
         {
             return Err(invalid(
                 "Qwen3.5 K/V dequant scales must be finite and positive",
@@ -67,6 +64,12 @@ pub struct Qwen35AttentionScratch<'a> {
     pub gate: &'a Tensor,
     /// BF16 `[tokens, 16, 256]` gated attention result for `o_proj`.
     pub output: &'a Tensor,
+    /// FP32 `[tokens, 16, cache_capacity]` parallel attention scores.
+    pub scores: &'a Tensor,
+    /// FP32 `[tokens, 2, 32, 8, 256]` split-KV value accumulators.
+    pub partial_output: &'a Tensor,
+    /// FP32 `[tokens, 2, 32, 8, 2]` split maximum/denominator pairs.
+    pub partial_stats: &'a Tensor,
 }
 
 pub struct Qwen35Fp8AttentionArgs<'a> {
@@ -191,6 +194,36 @@ pub fn qwen35_attention_fp8(
     let query = tensor_storage(ctx, args.scratch.query, DType::BF16, &attention_shape)?;
     let gate = tensor_storage(ctx, args.scratch.gate, DType::BF16, &attention_shape)?;
     let output = tensor_storage(ctx, args.scratch.output, DType::BF16, &attention_shape)?;
+    let scores = tensor_storage(
+        ctx,
+        args.scratch.scores,
+        DType::F32,
+        &[tokens, QWEN35_ATTENTION_Q_HEADS, capacity],
+    )?;
+    let partial_output = tensor_storage(
+        ctx,
+        args.scratch.partial_output,
+        DType::F32,
+        &[
+            tokens,
+            QWEN35_ATTENTION_KV_HEADS,
+            QWEN35_ATTENTION_MAX_SPLITS,
+            QWEN35_ATTENTION_Q_HEADS / QWEN35_ATTENTION_KV_HEADS,
+            QWEN35_ATTENTION_HEAD_DIM,
+        ],
+    )?;
+    let partial_stats = tensor_storage(
+        ctx,
+        args.scratch.partial_stats,
+        DType::F32,
+        &[
+            tokens,
+            QWEN35_ATTENTION_KV_HEADS,
+            QWEN35_ATTENTION_MAX_SPLITS,
+            QWEN35_ATTENTION_Q_HEADS / QWEN35_ATTENTION_KV_HEADS,
+            2,
+        ],
+    )?;
 
     let read_only = [
         &projected_query_gate,
@@ -200,7 +233,16 @@ pub fn qwen35_attention_fp8(
         &key_norm,
         &positions,
     ];
-    let written = [&key_cache, &value_cache, &query, &gate, &output];
+    let written = [
+        &key_cache,
+        &value_cache,
+        &query,
+        &gate,
+        &output,
+        &scores,
+        &partial_output,
+        &partial_stats,
+    ];
     for (index, left) in written.iter().enumerate() {
         for right in written.iter().skip(index + 1).chain(read_only.iter()) {
             if storage_overlaps(left, right) {
@@ -233,10 +275,19 @@ pub fn qwen35_attention_fp8(
         query: query.ptr(),
         gate: gate.ptr(),
         output: output.ptr(),
+        scores: scores.ptr(),
+        partial_output: partial_output.ptr(),
+        partial_stats: partial_stats.ptr(),
         stream: ctx.stream().handle(),
     };
     crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
-    unsafe { status::check(abi::apxinf_qwen35_attention_fp8(ctx.runtime(), &spec, &bindings)) }
+    unsafe {
+        status::check(abi::apxinf_qwen35_attention_fp8(
+            ctx.runtime(),
+            &spec,
+            &bindings,
+        ))
+    }
 }
 
 fn storage_overlaps(left: &CudaBuffer, right: &CudaBuffer) -> bool {
@@ -285,18 +336,17 @@ pub fn qwen35_attention_reference(
 
     for token in 0..args.tokens {
         for head in 0..QWEN35_ATTENTION_Q_HEADS {
-            let source = (token * QWEN35_ATTENTION_Q_HEADS + head)
-                * (2 * QWEN35_ATTENTION_HEAD_DIM);
-            let destination =
-                (token * QWEN35_ATTENTION_Q_HEADS + head) * QWEN35_ATTENTION_HEAD_DIM;
+            let source =
+                (token * QWEN35_ATTENTION_Q_HEADS + head) * (2 * QWEN35_ATTENTION_HEAD_DIM);
+            let destination = (token * QWEN35_ATTENTION_Q_HEADS + head) * QWEN35_ATTENTION_HEAD_DIM;
             normalize_zero_centered(
                 &args.projected_query_gate[source..source + QWEN35_ATTENTION_HEAD_DIM],
                 args.query_norm,
                 &mut query[destination..destination + QWEN35_ATTENTION_HEAD_DIM],
             );
             gate[destination..destination + QWEN35_ATTENTION_HEAD_DIM].copy_from_slice(
-                &args.projected_query_gate[source + QWEN35_ATTENTION_HEAD_DIM
-                    ..source + 2 * QWEN35_ATTENTION_HEAD_DIM],
+                &args.projected_query_gate
+                    [source + QWEN35_ATTENTION_HEAD_DIM..source + 2 * QWEN35_ATTENTION_HEAD_DIM],
             );
             apply_mrope(
                 &mut query[destination..destination + QWEN35_ATTENTION_HEAD_DIM],
@@ -307,8 +357,7 @@ pub fn qwen35_attention_reference(
             );
         }
         for head in 0..QWEN35_ATTENTION_KV_HEADS {
-            let source =
-                (token * QWEN35_ATTENTION_KV_HEADS + head) * QWEN35_ATTENTION_HEAD_DIM;
+            let source = (token * QWEN35_ATTENTION_KV_HEADS + head) * QWEN35_ATTENTION_HEAD_DIM;
             let cache = ((args.cache_offset + token) * QWEN35_ATTENTION_KV_HEADS + head)
                 * QWEN35_ATTENTION_HEAD_DIM;
             let mut normalized = vec![0.0f32; QWEN35_ATTENTION_HEAD_DIM];
@@ -335,25 +384,25 @@ pub fn qwen35_attention_reference(
     let mut output = vec![0.0f32; attention_elements];
     for token in 0..args.tokens {
         for q_head in 0..QWEN35_ATTENTION_Q_HEADS {
-            let q_base =
-                (token * QWEN35_ATTENTION_Q_HEADS + q_head) * QWEN35_ATTENTION_HEAD_DIM;
+            let q_base = (token * QWEN35_ATTENTION_Q_HEADS + q_head) * QWEN35_ATTENTION_HEAD_DIM;
             let kv_head = q_head / (QWEN35_ATTENTION_Q_HEADS / QWEN35_ATTENTION_KV_HEADS);
             let length = args.cache_offset + token + 1;
             let mut scores = Vec::with_capacity(length);
             for position in 0..length {
-                let cache = (position * QWEN35_ATTENTION_KV_HEADS + kv_head)
-                    * QWEN35_ATTENTION_HEAD_DIM;
+                let cache =
+                    (position * QWEN35_ATTENTION_KV_HEADS + kv_head) * QWEN35_ATTENTION_HEAD_DIM;
                 let dot = (0..QWEN35_ATTENTION_HEAD_DIM)
                     .map(|dim| {
-                        query[q_base + dim]
-                            * decode_e4m3(args.key_cache[cache + dim])
-                            * key_scale
+                        query[q_base + dim] * decode_e4m3(args.key_cache[cache + dim]) * key_scale
                     })
                     .sum::<f32>();
                 scores.push(dot / (QWEN35_ATTENTION_HEAD_DIM as f32).sqrt());
             }
             let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let denominator = scores.iter().map(|score| (*score - maximum).exp()).sum::<f32>();
+            let denominator = scores
+                .iter()
+                .map(|score| (*score - maximum).exp())
+                .sum::<f32>();
             for dim in 0..QWEN35_ATTENTION_HEAD_DIM {
                 let attended = scores
                     .iter()
@@ -371,7 +420,11 @@ pub fn qwen35_attention_reference(
         }
     }
 
-    Ok(Qwen35AttentionReferenceOutput { query, gate, output })
+    Ok(Qwen35AttentionReferenceOutput {
+        query,
+        gate,
+        output,
+    })
 }
 
 fn validate_reference(args: &Qwen35AttentionReferenceArgs<'_>) -> Result<()> {
@@ -425,14 +478,16 @@ fn validate_reference(args: &Qwen35AttentionReferenceArgs<'_>) -> Result<()> {
         .chain(args.key_norm)
         .any(|value| !value.is_finite())
     {
-        return Err(invalid("Qwen3.5 attention reference requires finite inputs"));
+        return Err(invalid(
+            "Qwen3.5 attention reference requires finite inputs",
+        ));
     }
     Ok(())
 }
 
 fn normalize_zero_centered(input: &[f32], weight: &[f32], output: &mut [f32]) {
-    let variance = input.iter().map(|value| value * value).sum::<f32>()
-        / QWEN35_ATTENTION_HEAD_DIM as f32;
+    let variance =
+        input.iter().map(|value| value * value).sum::<f32>() / QWEN35_ATTENTION_HEAD_DIM as f32;
     let scale = (variance + QWEN35_ATTENTION_RMS_EPSILON).sqrt().recip();
     for ((output, input), weight) in output.iter_mut().zip(input).zip(weight) {
         *output = round_bf16(*input * scale * (1.0 + *weight));
@@ -572,12 +627,17 @@ mod tests {
         for token in 0..tokens {
             let q_start = token * QWEN35_ATTENTION_Q_PROJECTION_WIDTH;
             let kv_start = token * QWEN35_ATTENTION_KV_WIDTH;
-            let one_positions = [positions[token], positions[tokens + token], positions[2 * tokens + token]];
+            let one_positions = [
+                positions[token],
+                positions[tokens + token],
+                positions[2 * tokens + token],
+            ];
             let decode = qwen35_attention_reference(Qwen35AttentionReferenceArgs {
                 tokens: 1,
                 cache_offset: token,
                 cache_capacity: capacity,
-                projected_query_gate: &query[q_start..q_start + QWEN35_ATTENTION_Q_PROJECTION_WIDTH],
+                projected_query_gate: &query
+                    [q_start..q_start + QWEN35_ATTENTION_Q_PROJECTION_WIDTH],
                 projected_key: &key[kv_start..kv_start + QWEN35_ATTENTION_KV_WIDTH],
                 projected_value: &value[kv_start..kv_start + QWEN35_ATTENTION_KV_WIDTH],
                 query_norm: &norm,

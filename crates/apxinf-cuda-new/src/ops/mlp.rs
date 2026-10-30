@@ -322,7 +322,7 @@ pub fn nvfp4_gemv(
     }
 }
 
-/// TensorRT-Edge-LLM weight-only NVFP4 GEMV for 1, 2, 4, 8, or 16 BF16 rows.
+/// TensorRT-Edge-LLM weight-only NVFP4 GEMV for 1, 2, 3, 4, 8, or 16 BF16 rows.
 ///
 /// `qweights` and `block_scales` use `BLACKWELL_N128_K64_V1` storage:
 /// `[N/128, K/64, 128, 32]` packed FP4 bytes and
@@ -349,8 +349,8 @@ pub fn nvfp4_a16_blackwell_gemv(
         return Err(invalid("NVFP4-A16 activation must be [M,K] BF16"));
     }
     let rows = activation_dims[0];
-    if !matches!(rows, 1 | 2 | 4 | 8 | 16) {
-        return Err(invalid("NVFP4-A16 row count must be one of 1,2,4,8,16"));
+    if !matches!(rows, 1 | 2 | 3 | 4 | 8 | 16) {
+        return Err(invalid("NVFP4-A16 row count must be one of 1,2,3,4,8,16"));
     }
     let output_dims = output.shape().dims().to_vec();
     if output_dims != [rows, n] {
