@@ -169,6 +169,7 @@ async fn chat_completions(
         enable_thinking: request.enable_thinking.unwrap_or(false),
         max_tokens,
         temperature: request.temperature,
+        top_k: request.top_k,
         top_p: request.top_p,
         frequency_penalty: request.frequency_penalty,
         presence_penalty: request.presence_penalty,
@@ -240,6 +241,7 @@ async fn messages(
         max_tokens: Some(converted.max_tokens),
         max_completion_tokens: None,
         temperature: converted.temperature,
+        top_k: None,
         top_p: converted.top_p,
         frequency_penalty: None,
         presence_penalty: None,
@@ -267,6 +269,7 @@ async fn messages(
         enable_thinking: openai_request.enable_thinking.unwrap_or(false),
         max_tokens,
         temperature: openai_request.temperature,
+        top_k: openai_request.top_k,
         top_p: openai_request.top_p,
         frequency_penalty: None,
         presence_penalty: None,
@@ -1104,6 +1107,12 @@ fn validate_request(request: &ChatCompletionRequest, config: &ApiConfig) -> Resu
         }
     }
     validate_finite_range(request.temperature, 0.0, 2.0, "temperature")?;
+    if request.top_k.is_some_and(|top_k| top_k < 0) {
+        return Err(ApiError::invalid(
+            "top_k must be non-negative",
+            Some("top_k".to_owned()),
+        ));
+    }
     validate_finite_range(request.top_p, f32::MIN_POSITIVE, 1.0, "top_p")?;
     validate_finite_range(request.frequency_penalty, -2.0, 2.0, "frequency_penalty")?;
     validate_finite_range(request.presence_penalty, -2.0, 2.0, "presence_penalty")?;

@@ -154,6 +154,7 @@ async fn serves_health_models_and_plain_chat() {
             "model":"fake-model",
             "messages":[{"role":"user","content":"你好"}],
             "temperature":0,
+            "top_k":20,
             "max_tokens":32
         }),
     )
@@ -215,6 +216,18 @@ async fn rejects_invalid_stream_options_and_bad_tool_schema_before_inference() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, response) = json_response(
+        app.clone(),
+        serde_json::json!({
+            "messages":[{"role":"user","content":"x"}],
+            "temperature":1.0,
+            "top_k":-1
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(response["error"]["param"], "top_k");
 
     let (status, _) = json_response(
         app,
@@ -578,6 +591,7 @@ fn empty_engine_request() -> EngineRequest {
         enable_thinking: false,
         max_tokens: 1,
         temperature: None,
+        top_k: None,
         top_p: None,
         frequency_penalty: None,
         presence_penalty: None,
