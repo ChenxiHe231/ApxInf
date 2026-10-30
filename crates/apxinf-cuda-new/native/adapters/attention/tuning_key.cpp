@@ -28,9 +28,25 @@ TuningKeys tuning_keys(const Spec& spec,
   cudaDeviceProp properties{};
   check_cuda(cudaGetDeviceProperties(&properties, device));
 
-  // One exact key: the namespace prefix captures the candidate/toolchain/GPU
-  // identity and the suffix captures the normalized operation and policy.
-  // There is no compatible fallback key; a miss runs the full autotuner.
+  // Single-token causal KV decode keeps an exact execution Spec/binding so FA2
+  // remains eligible, but shares its measured recipe within a 4K live-length
+  // bucket. The provider/configuration is restored against each exact Spec.
+  // This avoids an autotune on every generated token without forcing the
+  // capacity-shaped dynamic-decode contract onto providers that cannot read
+  // device-side length metadata.
+  const bool live_kv_decode =
+      spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+      spec.dynamic_decode == 0 && spec.batch == 1 &&
+      spec.query_tokens == 1 && spec.mask == APXINF_ATTENTION_MASK_CAUSAL &&
+      spec.query_start == spec.key_tokens - 1;
+  constexpr int64_t kDecodeBucketTokens = 4096;
+  const int64_t decode_bucket =
+      live_kv_decode
+          ? ((spec.key_tokens + kDecodeBucketTokens - 1) /
+             kDecodeBucketTokens) *
+                kDecodeBucketTokens
+          : 0;
+
   std::ostringstream key;
   key << "attention-recipe-v5|ns|" << APXINF_ATTENTION_BUILD_ID << '|'
       << "toolkit=" << CUDART_VERSION << '|'
@@ -40,11 +56,18 @@ TuningKeys tuning_keys(const Spec& spec,
       << "|driver=" << cuda_compat_version(driver_version)
       << "|op|" << spec.version << '|' << spec.semantic << '|'
       << spec.dtype << '|' << spec.output_dtype << '|' << spec.mask << '|'
-      << spec.batch << '|' << spec.query_tokens << '|' << spec.key_tokens << '|'
-      << spec.key_capacity << '|' << spec.query_heads << '|' << spec.kv_heads
+      << spec.batch << '|' << spec.query_tokens << '|';
+  if (live_kv_decode) {
+    key << "decode-bucket-4096|" << decode_bucket << '|' << decode_bucket << '|';
+  } else {
+    key << spec.key_tokens << '|' << spec.key_capacity << '|';
+  }
+  key << spec.query_heads << '|' << spec.kv_heads
       << '|' << spec.head_dim << '|';
   key << spec.dynamic_decode << '|';
-  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
+  if (live_kv_decode) {
+    key << "decode-live|";
+  } else if (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
       spec.dynamic_decode != 0) {
     key << "decode-meta|";
   } else {
