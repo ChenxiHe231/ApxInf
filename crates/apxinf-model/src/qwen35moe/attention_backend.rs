@@ -77,16 +77,6 @@ pub struct Qwen35Fp8AttentionBackend {
     scratch: HashMap<(usize, usize, usize), AttentionScratch>,
     pre_projection_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
     post_projection_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
-    /// The attention call sits between the two projection sessions, so it ran
-    /// outside every session and `execute` then issued a full ctx.synchronize()
-    /// after each enqueue, plus another when the prepared Execution dropped.
-    /// That is two device synchronizes per attention layer per token.
-    ///
-    /// Caching it needs a stable ExecutionKey, which only became true after
-    /// two other changes: the tuning key stopped moving with the live prefix,
-    /// and in-place decode stopped alternating KV banks every step. With
-    /// either of those missing this misses on every call and fails capture.
-    attention_sessions: HashMap<(usize, usize), Rc<PreparedExecution>>,
 }
 
 struct PreparedExecution {
@@ -137,7 +127,6 @@ impl Qwen35Fp8AttentionBackend {
             scratch: HashMap::new(),
             pre_projection_sessions: HashMap::new(),
             post_projection_sessions: HashMap::new(),
-            attention_sessions: HashMap::new(),
         })
     }
 
@@ -277,12 +266,6 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         )?;
         let post_projection = Self::projection_session(
             &mut self.post_projection_sessions,
-            ctx,
-            request.layer_index,
-            request.phase,
-        )?;
-        let attention_session = Self::projection_session(
-            &mut self.attention_sessions,
             ctx,
             request.layer_index,
             request.phase,
@@ -451,37 +434,18 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
 
         // ---- FA2 attention over the full prefix ----
         let valid = request.start_position + tokens;
-        // A retained decode session needs a position-invariant Attention key.
-        // Keep the cache binding capacity-shaped and publish the live prefix
-        // length/position through one fixed-address metadata allocation.
-        let decode_meta = if request.phase == DecoderPhase::Decode {
-            if scratch.decode_meta.is_none() {
-                scratch.decode_meta = Some(ops::KvCacheDecodeMeta::new(
-                    ctx.device_id(),
-                    cache.capacity,
-                )?);
-            }
-            scratch.decode_meta.clone()
-        } else {
-            None
-        };
-        let attention_cache_tokens = if decode_meta.is_some() {
-            cache.capacity
-        } else {
-            valid
-        };
         let (key_prefix, value_prefix) = match cache.dtype {
             Qwen35KvCacheDType::Bf16 => (
                 cache_prefix_view(
                     &cache.key,
-                    attention_cache_tokens,
+                    valid,
                     ops::QWEN35_ATTENTION_KV_HEADS,
                     ops::QWEN35_ATTENTION_HEAD_DIM,
                     DType::BF16,
                 )?,
                 cache_prefix_view(
                     &cache.value,
-                    attention_cache_tokens,
+                    valid,
                     ops::QWEN35_ATTENTION_KV_HEADS,
                     ops::QWEN35_ATTENTION_HEAD_DIM,
                     DType::BF16,
@@ -519,14 +483,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
                     args.scale = scale;
                     ops::quantization(ctx, args)?;
                 }
-                if decode_meta.is_some() {
-                    (
-                        scratch.fp8_prefix_view(true, attention_cache_tokens)?,
-                        scratch.fp8_prefix_view(false, attention_cache_tokens)?,
-                    )
-                } else {
-                    (key_bf16, value_bf16)
-                }
+                (key_bf16, value_bf16)
             }
         };
         let query_fa2 = view(
@@ -552,17 +509,17 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         let scale = 1.0 / (ops::QWEN35_ATTENTION_HEAD_DIM as f32).sqrt();
         let mut fa2_args =
             ops::KvCacheAttentionArgs::new(&query_fa2, &key_prefix, &value_prefix, &mut attn_out);
-        if let Some(meta) = decode_meta.as_ref() {
-            fa2_args = fa2_args.with_decode_meta(meta);
-        }
         fa2_args.valid_key_tokens = valid;
         fa2_args.query_start = request.start_position;
         fa2_args.scale = scale;
         fa2_args.policy.allow_fallback = false;
-        match attention_session {
-            Some(session) => session.run(|| ops::kv_cache_attention(ctx, fa2_args))?,
-            None => ops::kv_cache_attention(ctx, fa2_args)?,
-        }
+        // The live KV view changes on every decode step. Caching this execution
+        // would require a capacity-shaped dynamic binding, which excludes FA2
+        // and falls back to the scalar correctness kernel (seconds/token at
+        // AIOS context lengths). Prefix snapshots do not require that execution
+        // cache: keep the stable projection sessions, but launch attention from
+        // the exact live view so the optimized FA2 provider remains eligible.
+        ops::kv_cache_attention(ctx, fa2_args)?;
 
         // ---- Output gate (sigmoid, not silu) ----
         let gate_2d = view(
@@ -628,7 +585,6 @@ struct AttentionScratch {
     attention_output: Tensor,
     fp8_key_bf16: Option<Tensor>,
     fp8_value_bf16: Option<Tensor>,
-    decode_meta: Option<ops::KvCacheDecodeMeta>,
     tokens: usize,
     positions_start: Option<usize>,
 }
@@ -696,7 +652,6 @@ impl AttentionScratch {
             attention_output: zeros(ctx, attention_shape, DType::BF16)?,
             fp8_key_bf16,
             fp8_value_bf16,
-            decode_meta: None,
             tokens,
             positions_start: None,
         })
