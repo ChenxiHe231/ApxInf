@@ -195,13 +195,15 @@ fn load_qwen35_moe(
             config.text_config.max_position_embeddings
         )));
     }
-    let model = crate::qwen35moe::Qwen35Moe::from_checkpoint_path_with_options(
+    let model = crate::qwen35moe::Qwen35Moe::from_checkpoint_path_with_runtime_options(
         config,
         path,
         device,
         backend,
         kv_capacity,
         execution,
+        options.autotune,
+        options.tuning_path.clone(),
     )?;
     Ok(LoadedModel::text(Box::new(model)))
 }

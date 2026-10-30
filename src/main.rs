@@ -230,6 +230,15 @@ enum Commands {
         /// across requests. Conversation history and user content are not cached.
         #[arg(long, default_value_t = false)]
         enable_context_reuse: bool,
+
+        /// Enable measured operator autotuning on recipe misses. Use only for
+        /// an explicit warmup pass, then restart serving without this flag.
+        #[arg(long)]
+        autotune: bool,
+
+        /// Absolute directory containing persistent operator tuning recipes
+        #[arg(long)]
+        tuning_dir: Option<PathBuf>,
     },
 
     /// Run a quick test of the engine
@@ -357,6 +366,8 @@ fn main() {
             max_input_tokens,
             max_output_tokens,
             enable_context_reuse,
+            autotune,
+            tuning_dir,
         } => {
             if queue_capacity == 0 || max_input_tokens == 0 || max_output_tokens == 0 {
                 eprintln!("queue and token limits must be positive");
@@ -385,6 +396,14 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            if tuning_dir.as_ref().is_some_and(|path| !path.is_absolute()) {
+                eprintln!("--tuning-dir must be an absolute path");
+                std::process::exit(1);
+            }
+            if autotune && tuning_dir.is_none() {
+                eprintln!("--autotune requires an explicit absolute --tuning-dir");
+                std::process::exit(1);
+            }
             let alias = served_model_name.unwrap_or_else(|| {
                 model
                     .file_name()
@@ -399,6 +418,8 @@ fn main() {
                 qwen35_moe_activation,
                 qwen35_kv_cache,
                 assets,
+                autotune,
+                tuning_path: tuning_dir,
                 ..LoadOptions::default()
             };
             let config = apxinf_serving::ServeConfig {

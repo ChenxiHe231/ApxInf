@@ -93,6 +93,17 @@ extern "C" const char* apxinf_runtime_default_cache_dir(apxinf_runtime_t runtime
   return runtime != nullptr ? runtime->default_cache_dir.c_str() : nullptr;
 }
 
+extern "C" apxinf_status_t apxinf_runtime_set_default_cache_dir(
+    apxinf_runtime_t runtime, const char* cache_dir) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || cache_dir == nullptr) {
+      throw apxinf::framework::Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                                      "invalid runtime cache directory");
+    }
+    runtime->default_cache_dir = cache_dir;
+  });
+}
+
 extern "C" void apxinf_runtime_destroy(apxinf_runtime_t runtime) {
   delete runtime;
 }

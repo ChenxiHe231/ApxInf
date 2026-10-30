@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use apxinf_core::{
@@ -157,6 +157,29 @@ impl Qwen35Moe {
         kv_capacity: usize,
         execution: Qwen35ExecutionOptions,
     ) -> Result<Self> {
+        Self::from_checkpoint_path_with_runtime_options(
+            config,
+            path,
+            device,
+            backend,
+            kv_capacity,
+            execution,
+            true,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_checkpoint_path_with_runtime_options(
+        config: Qwen35MoeConfig,
+        path: &Path,
+        device: Device,
+        backend: Arc<dyn Backend>,
+        kv_capacity: usize,
+        execution: Qwen35ExecutionOptions,
+        autotune: bool,
+        tuning_path: Option<PathBuf>,
+    ) -> Result<Self> {
         config.validate()?;
         let Device::Cuda(ordinal) = device else {
             return Err(Error::Other(
@@ -170,7 +193,8 @@ impl Qwen35Moe {
             )));
         }
 
-        let ctx = CudaContext::new(ordinal).map_err(Error::Cuda)?;
+        let ctx = CudaContext::new_with_options(ordinal, autotune, tuning_path.as_deref())
+            .map_err(Error::Cuda)?;
         let weights =
             load_qwen35_device_weights_from_path_with_options(&ctx, &config, path, execution)?;
         Self::from_device_weights(config, ctx, weights, backend, kv_capacity, execution)

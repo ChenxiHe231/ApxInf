@@ -20,6 +20,8 @@ typedef struct {
 apxinf_status_t apxinf_runtime_create(int32_t device, apxinf_runtime_t* runtime);
 apxinf_status_t apxinf_runtime_create_with_autotune(
     int32_t device, uint32_t allow_online_tune, apxinf_runtime_t* runtime);
+apxinf_status_t apxinf_runtime_set_default_cache_dir(
+    apxinf_runtime_t runtime, const char* cache_dir);
 const char* apxinf_runtime_default_cache_dir(apxinf_runtime_t runtime);
 apxinf_status_t apxinf_runtime_device_info(apxinf_runtime_t runtime,
                                            apxinf_device_info_t* info);
