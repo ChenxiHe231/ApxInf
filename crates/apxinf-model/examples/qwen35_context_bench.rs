@@ -41,7 +41,7 @@ impl Mode {
         match self {
             Self::Mtp => GenerationOptions::greedy(max_new_tokens, None),
             Self::Scalar => GenerationOptions {
-                top_k: Some(1),
+                speculative_decoding: Some(false),
                 sampling_mode: Some(SamplingMode::Greedy),
                 ..GenerationOptions::greedy(max_new_tokens, None)
             },

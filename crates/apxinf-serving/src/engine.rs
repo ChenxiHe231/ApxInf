@@ -26,6 +26,7 @@ pub struct EngineRequest {
     pub frequency_penalty: Option<f32>,
     pub presence_penalty: Option<f32>,
     pub seed: Option<u64>,
+    pub disable_spec_decode: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -248,6 +249,7 @@ impl ChatEngine for ApxInfChatEngine {
             presence_penalty: request.presence_penalty,
             seed: request.seed,
             return_logprob: Some(false),
+            speculative_decoding: Some(!request.disable_spec_decode),
         };
         let mut decoder = IncrementalTextDecoder::new(&self.tokenizer);
         let mut decode_error = None;

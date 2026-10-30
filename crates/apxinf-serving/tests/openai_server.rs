@@ -596,6 +596,7 @@ fn empty_engine_request() -> EngineRequest {
         frequency_penalty: None,
         presence_penalty: None,
         seed: None,
+        disable_spec_decode: false,
     }
 }
 
