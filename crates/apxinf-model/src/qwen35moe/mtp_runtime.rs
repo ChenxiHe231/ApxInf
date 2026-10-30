@@ -726,6 +726,11 @@ pub struct MtpGreedyPolicy {
 impl MtpGreedyPolicy {
     pub fn from_generation_options(options: &GenerationOptions) -> Result<Self> {
         let complete = GenerationOptions::apxinf_defaults().overlay(options);
+        if complete.speculative_decoding == Some(false) {
+            return Err(invalid(
+                "Qwen3.5 speculative decoding was disabled for this request; use base scalar generation",
+            ));
+        }
         let greedy = complete.sampling_mode == Some(SamplingMode::Greedy)
             || complete.temperature == Some(0.0);
         let neutral_penalties = complete.repetition_penalty == Some(1.0)
@@ -2197,6 +2202,10 @@ mod tests {
         filtered.top_p = Some(0.9);
         filtered.top_k = Some(20);
         assert!(MtpGreedyPolicy::from_generation_options(&filtered).is_ok());
+
+        let mut scalar = greedy.clone();
+        scalar.speculative_decoding = Some(false);
+        assert!(MtpGreedyPolicy::from_generation_options(&scalar).is_err());
 
         let mut penalized = greedy.clone();
         penalized.repetition_penalty = Some(1.1);

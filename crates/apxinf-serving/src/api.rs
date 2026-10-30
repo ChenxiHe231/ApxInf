@@ -174,6 +174,7 @@ async fn chat_completions(
         frequency_penalty: request.frequency_penalty,
         presence_penalty: request.presence_penalty,
         seed: request.seed,
+        disable_spec_decode: request.disable_spec_decode,
     };
     let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let id = format!("chatcmpl-{sequence:016x}");
@@ -251,6 +252,7 @@ async fn messages(
         logprobs: None,
         response_format: None,
         enable_thinking: Some(converted.enable_thinking),
+        disable_spec_decode: false,
         chat_template_kwargs: empty_options(),
     };
     validate_request(&openai_request, &state.api)?;
@@ -274,6 +276,7 @@ async fn messages(
         frequency_penalty: None,
         presence_penalty: None,
         seed: None,
+        disable_spec_decode: openai_request.disable_spec_decode,
     };
     let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let id = format!("msg-{sequence:016x}");

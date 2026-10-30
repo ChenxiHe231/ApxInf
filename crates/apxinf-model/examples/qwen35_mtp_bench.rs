@@ -74,11 +74,7 @@ impl Mode {
         match self {
             Self::Mtp => GenerationOptions::greedy(max_new_tokens, None),
             Self::Scalar => GenerationOptions {
-                // Requesting log probabilities changes only the returned
-                // metadata, not greedy argmax token selection. MTP does not
-                // expose log probabilities, so this forces the exact scalar
-                // path while preserving token parity with MTP.
-                return_logprob: Some(true),
+                speculative_decoding: Some(false),
                 sampling_mode: Some(SamplingMode::Greedy),
                 ..GenerationOptions::greedy(max_new_tokens, None)
             },

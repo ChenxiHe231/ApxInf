@@ -74,11 +74,7 @@ fn mtp_options(output_tokens: usize) -> GenerationOptions {
 
 fn forced_scalar_options(output_tokens: usize) -> GenerationOptions {
     GenerationOptions {
-        // A positive top-k makes the request ineligible for MTP, while the
-        // explicit greedy mode keeps token selection exact argmax. The scalar
-        // sampler therefore has identical token semantics without logprob or
-        // random-sampling overhead.
-        top_k: Some(1),
+        speculative_decoding: Some(false),
         sampling_mode: Some(SamplingMode::Greedy),
         ..GenerationOptions::greedy(output_tokens, None)
     }

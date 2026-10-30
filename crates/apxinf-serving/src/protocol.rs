@@ -26,6 +26,9 @@ pub struct ChatCompletionRequest {
     pub logprobs: Option<bool>,
     pub response_format: Option<Value>,
     pub enable_thinking: Option<bool>,
+    /// ApxInf extension: force exact scalar generation instead of MTP.
+    #[serde(default)]
+    pub disable_spec_decode: bool,
     #[serde(default)]
     pub chat_template_kwargs: Map<String, Value>,
 }

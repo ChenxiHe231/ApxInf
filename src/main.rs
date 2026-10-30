@@ -857,6 +857,7 @@ fn run_generate(
         presence_penalty,
         seed,
         return_logprob: Some(false),
+        speculative_decoding: None,
     };
     let output = model
         .generate_streaming_with_options(input, &generation_options, |token| {

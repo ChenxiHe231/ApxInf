@@ -31,6 +31,9 @@ pub struct GenerationOptions {
     pub presence_penalty: Option<f32>,
     pub seed: Option<u64>,
     pub return_logprob: Option<bool>,
+    /// `false` forces the model's exact scalar generation path even when a
+    /// speculative decoder could preserve the requested token semantics.
+    pub speculative_decoding: Option<bool>,
 }
 
 /// Complete, normalized execution settings. This is deliberately crate-local:
@@ -61,6 +64,7 @@ impl GenerationOptions {
             presence_penalty: Some(0.0),
             seed: Some(0),
             return_logprob: Some(false),
+            speculative_decoding: Some(true),
         }
     }
 
@@ -79,6 +83,7 @@ impl GenerationOptions {
             presence_penalty: Some(0.0),
             seed: Some(0),
             return_logprob: Some(false),
+            speculative_decoding: Some(true),
         }
     }
 
@@ -103,6 +108,7 @@ impl GenerationOptions {
         replace_some!(presence_penalty);
         replace_some!(seed);
         replace_some!(return_logprob);
+        replace_some!(speculative_decoding);
 
         // An explicit mode always wins. Otherwise, an explicitly supplied
         // temperature/filter implies a sampling choice for that layer.
@@ -286,6 +292,7 @@ impl HuggingFaceGenerationConfig {
             presence_penalty: self.presence_penalty,
             seed: None,
             return_logprob: None,
+            speculative_decoding: None,
         }
     }
 }
