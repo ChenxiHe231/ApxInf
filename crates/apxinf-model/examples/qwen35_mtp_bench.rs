@@ -7,6 +7,7 @@
 //! The model and its CUDA allocations are loaded once for the whole process.
 
 use std::cmp::Ordering;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use apxinf_core::Device;
@@ -344,6 +345,21 @@ fn arg_value(args: &[String], name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn optional_path_arg(
+    args: &[String],
+    name: &str,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    args.iter()
+        .position(|arg| arg == name)
+        .map(|index| {
+            args.get(index + 1)
+                .filter(|value| !value.starts_with("--"))
+                .map(PathBuf::from)
+                .ok_or_else(|| format!("{name} requires a path").into())
+        })
+        .transpose()
+}
+
 fn precision_arg<T>(args: &[String], name: &str) -> Result<T, Box<dyn std::error::Error>>
 where
     T: std::str::FromStr<Err = String> + Default,
@@ -365,7 +381,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checkpoint = args.get(1).filter(|arg| !arg.starts_with("--")).ok_or(
         "usage: qwen35_mtp_bench <checkpoint-dir> [--device N] [--max-new N] \
              [--prompt-tokens N] [--warmups N] [--repeats N] [--mode scalar|mtp|both] \
-             [--qwen35-moe-activation nvfp4|bf16] [--qwen35-kv-cache bf16|fp8]",
+             [--qwen35-moe-activation nvfp4|bf16] [--qwen35-kv-cache bf16|fp8] \
+             [--tuning-dir ABSOLUTE_PATH] [--autotune]",
     )?;
     let device = arg_value(&args, "--device", 0);
     let prompt_tokens = arg_value(&args, "--prompt-tokens", PROMPT_TOKENS);
@@ -378,6 +395,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let benchmark_mode = BenchmarkMode::parse(&args)?;
     let moe_activation = precision_arg::<Qwen35MoeActivation>(&args, "--qwen35-moe-activation")?;
     let kv_cache = precision_arg::<Qwen35KvCacheDType>(&args, "--qwen35-kv-cache")?;
+    let tuning_path = optional_path_arg(&args, "--tuning-dir")?;
+    let autotune = args.iter().any(|arg| arg == "--autotune");
+    if tuning_path.as_ref().is_some_and(|path| !path.is_absolute()) {
+        return Err("--tuning-dir must be an absolute path".into());
+    }
+    if autotune && tuning_path.is_none() {
+        return Err("--autotune requires --tuning-dir".into());
+    }
     if prompt_tokens == 0 {
         return Err("--prompt-tokens must be at least 1".into());
     }
@@ -393,6 +418,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         text_kv_capacity: Some(prompt_tokens + max_new_tokens + MTP_LOOKAHEAD),
         qwen35_moe_activation: Some(moe_activation),
         qwen35_kv_cache: Some(kv_cache),
+        tuning_path: tuning_path.clone(),
+        autotune,
         ..LoadOptions::default()
     };
     let load_start = Instant::now();
@@ -410,6 +437,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "mode": benchmark_mode.name(),
             "qwen35_moe_activation": moe_activation.as_str(),
             "qwen35_kv_cache": kv_cache.as_str(),
+            "tuning_dir": tuning_path,
+            "autotune": autotune,
             "load_seconds": load_start.elapsed().as_secs_f64(),
         })
     );
