@@ -74,6 +74,10 @@ pub struct Qwen35Moe {
     reset_error: Option<String>,
     context_reuse_enabled: bool,
     system_prefix_cache: Option<SystemPrefixCache>,
+    /// Token identity for the live MTP endpoint. The batch-one serving worker
+    /// leaves target/GDN/MTP state resident after generation, so an immediate
+    /// tool-result follow-up can append without copying a second KV snapshot.
+    mtp_live_conversation_prefix: Option<Vec<u32>>,
     /// Sampling-only prefix snapshots in most-recently-used order. AIOS tool
     /// bindings can render different system prefixes; retaining a small,
     /// bounded set prevents those bindings from evicting one another on every
@@ -262,6 +266,7 @@ impl Qwen35Moe {
             reset_error: None,
             context_reuse_enabled: false,
             system_prefix_cache: None,
+            mtp_live_conversation_prefix: None,
             scalar_system_prefix_caches: VecDeque::new(),
             last_reused_tokens: 0,
             decode_logits_cache: RefCell::new(None),
@@ -277,6 +282,7 @@ impl Qwen35Moe {
         self.context_reuse_enabled = enabled;
         if !enabled {
             self.system_prefix_cache = None;
+            self.mtp_live_conversation_prefix = None;
             self.scalar_system_prefix_caches.clear();
         }
         Ok(())
@@ -385,9 +391,9 @@ impl Qwen35Moe {
         result
     }
 
-    /// Prepare an MTP request while retaining only the caller-designated
-    /// system/tool prefix. Conversation history and user content are always
-    /// evaluated again for each request.
+    /// Prepare an MTP request from the longest exact checkpoint available.
+    /// Tool-result follow-ups can extend the previous conversation endpoint;
+    /// unrelated requests fall back to the caller-designated system/tool prefix.
     fn prefill_mtp_with_system_reuse(
         &mut self,
         prompt: &[u32],
@@ -401,6 +407,44 @@ impl Qwen35Moe {
                 prompt.len()
             )));
         }
+
+        // A tool-result turn contains the prior rendered prompt and generated
+        // assistant tool call verbatim. Prefer the still-live endpoint over the
+        // stable system snapshot. The suffix must be non-empty because MTP
+        // append needs a fresh final hidden row before drafting again.
+        if self.context_reuse_enabled {
+            if let Some(tokens) = self.mtp_live_conversation_prefix.take() {
+                let cached_tokens = tokens.len();
+                let runtime_position = self.runtime.target().position();
+                if let Some(suffix) = live_conversation_suffix(&tokens, prompt, runtime_position) {
+                    let outcome = self.runtime.append_prefill_greedy(
+                        &self.ctx,
+                        &self.decoder,
+                        &self.weights,
+                        suffix,
+                        options,
+                    )?;
+                    self.last_reused_tokens = cached_tokens;
+                    eprintln!(
+                        "live conversation prefix hit: reused {} of {} prompt tokens; evaluated {}",
+                        cached_tokens,
+                        prompt.len(),
+                        prompt.len() - cached_tokens
+                    );
+                    return Ok(outcome);
+                }
+                let common_tokens = tokens
+                    .iter()
+                    .zip(prompt)
+                    .take_while(|(cached, requested)| cached == requested)
+                    .count();
+                eprintln!(
+                    "live conversation prefix miss: cached_tokens={cached_tokens} prompt_tokens={} runtime_position={runtime_position} common_tokens={common_tokens}",
+                    prompt.len()
+                );
+            }
+        }
+
         if !self.context_reuse_enabled
             || reusable_prefix_tokens == 0
             || reusable_prefix_tokens == prompt.len()
@@ -479,6 +523,30 @@ impl Qwen35Moe {
         })();
         self.system_prefix_cache = Some(cache);
         result
+    }
+
+    /// Publish the committed token identity for the live MTP endpoint. The
+    /// final emitted token is usually still the schedule's pending lookahead,
+    /// so identity is truncated to the target's authoritative position.
+    fn publish_mtp_live_conversation_prefix(
+        &mut self,
+        prompt: &[u32],
+        generated: &[GeneratedToken],
+    ) -> Result<()> {
+        if !self.context_reuse_enabled {
+            return Ok(());
+        }
+        let position = self.runtime.target().position();
+        let Some(tokens) = committed_context_identity(prompt, generated, position)? else {
+            self.mtp_live_conversation_prefix = None;
+            return Ok(());
+        };
+        eprintln!(
+            "live conversation prefix published {} committed tokens",
+            tokens.len()
+        );
+        self.mtp_live_conversation_prefix = Some(tokens);
+        Ok(())
     }
 
     /// Benchmark-only setup for a scalar chunk-prefill case. The prefix is
@@ -707,6 +775,12 @@ impl Qwen35Moe {
                 profile.run_unprofiled(|| on_token(token));
             }
         }
+        if let Err(error) = self.publish_mtp_live_conversation_prefix(prompt, &tokens) {
+            // Generation has already streamed successfully. A best-effort
+            // optimization must not turn that response into an API error.
+            self.mtp_live_conversation_prefix = None;
+            eprintln!("live conversation prefix publication skipped: {error}");
+        }
         profile.finalize_with_reuse(prompt.len(), tokens.len(), self.last_reused_tokens);
         Ok(GenerationOutput { tokens, profile })
     }
@@ -777,6 +851,51 @@ impl Qwen35Moe {
             .map_err(Error::Cuda)?;
         transfers::copy_cuda_to_cuda(&self.ctx, logits, &destination)
     }
+}
+
+fn committed_context_identity(
+    prompt: &[u32],
+    generated: &[GeneratedToken],
+    committed_position: usize,
+) -> Result<Option<Vec<u32>>> {
+    if committed_position < prompt.len() {
+        return Err(Error::Other(format!(
+            "Qwen3.5 committed position {committed_position} precedes prompt length {}",
+            prompt.len()
+        )));
+    }
+    let committed_generated = committed_position - prompt.len();
+    if committed_generated > generated.len() {
+        return Err(Error::Other(format!(
+            "Qwen3.5 committed position includes {committed_generated} generated tokens, but only {} were emitted",
+            generated.len()
+        )));
+    }
+    if committed_generated == 0 {
+        return Ok(None);
+    }
+    let mut tokens = Vec::with_capacity(committed_position);
+    tokens.extend_from_slice(prompt);
+    tokens.extend(
+        generated
+            .iter()
+            .take(committed_generated)
+            .map(|token| token.token_id),
+    );
+    debug_assert_eq!(tokens.len(), committed_position);
+    Ok(Some(tokens))
+}
+
+fn live_conversation_suffix<'a>(
+    cached: &[u32],
+    prompt: &'a [u32],
+    runtime_position: usize,
+) -> Option<&'a [u32]> {
+    (!cached.is_empty()
+        && cached.len() < prompt.len()
+        && runtime_position == cached.len()
+        && prompt.get(..cached.len()) == Some(cached))
+    .then(|| &prompt[cached.len()..])
 }
 
 fn decode_logits_layout(rows: usize, vocab_size: usize) -> Result<(usize, usize)> {
@@ -913,6 +1032,7 @@ impl LlmTrait for Qwen35Moe {
     }
 
     fn reset(&mut self) {
+        self.mtp_live_conversation_prefix = None;
         self.reset_error = self
             .runtime
             .reset(&self.ctx)
@@ -994,5 +1114,54 @@ mod tests {
         assert!(decode_logits_layout(0, 248_320).is_err());
         assert!(decode_logits_layout(1, 0).is_err());
         assert!(decode_logits_layout(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn committed_context_identity_excludes_pending_lookahead() {
+        let prompt = [10, 11, 12];
+        let generated = [
+            GeneratedToken {
+                token_id: 20,
+                logprob: None,
+            },
+            GeneratedToken {
+                token_id: 21,
+                logprob: None,
+            },
+            GeneratedToken {
+                token_id: 22,
+                logprob: None,
+            },
+        ];
+        let identity = committed_context_identity(&prompt, &generated, 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity, vec![10, 11, 12, 20, 21]);
+    }
+
+    #[test]
+    fn committed_context_identity_validates_runtime_position() {
+        let generated = [GeneratedToken {
+            token_id: 20,
+            logprob: None,
+        }];
+        assert!(committed_context_identity(&[10, 11], &generated, 1).is_err());
+        assert!(committed_context_identity(&[10, 11], &generated, 4).is_err());
+        assert!(committed_context_identity(&[10, 11], &generated, 2)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn live_conversation_suffix_requires_exact_resident_prefix() {
+        let prompt = [10, 11, 12, 20, 21];
+        assert_eq!(
+            live_conversation_suffix(&[10, 11, 12], &prompt, 3),
+            Some(&[20, 21][..])
+        );
+        assert!(live_conversation_suffix(&[], &prompt, 0).is_none());
+        assert!(live_conversation_suffix(&prompt, &prompt, prompt.len()).is_none());
+        assert!(live_conversation_suffix(&[10, 99, 12], &prompt, 3).is_none());
+        assert!(live_conversation_suffix(&[10, 11, 12], &prompt, 2).is_none());
     }
 }

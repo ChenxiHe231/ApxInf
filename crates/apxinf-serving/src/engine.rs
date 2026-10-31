@@ -165,6 +165,15 @@ impl ChatEngine for ApxInfChatEngine {
             }
         }
         options.insert("enable_thinking".into(), request.enable_thinking.into());
+        if !request.enable_thinking {
+            // Qwen's disabled-thinking generation prompt still contains an
+            // empty <think></think> control span. Preserve that same span when
+            // the assistant turn is rendered back as history so its tokenized
+            // form remains an exact extension of the live KV endpoint.
+            options
+                .entry("preserve_thinking")
+                .or_insert(Value::Bool(true));
+        }
         let rendered_tools = match &request.tool_choice {
             ToolChoice::None => Vec::new(),
             ToolChoice::Function(name) => request
