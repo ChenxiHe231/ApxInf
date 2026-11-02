@@ -12,7 +12,9 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <math_constants.h>
+#include <mma.h>
 
+#include <cfloat>
 #include <cmath>
 #include <climits>
 #include <cstdint>
@@ -659,12 +661,33 @@ __global__ void dynamic_kv_prepare_kernel(
   value_cache[row * kHeadDim + dim] = __nv_fp8_e4m3(v / vs);
 }
 
+// E4M3 normal values are a BF16 exponent rebias and mantissa shift. The
+// small subnormal range is also exact in BF16. This avoids the sm_87 CUDA
+// scalar FP8->half normalization loop; four contiguous cache bytes share a load.
+__device__ __forceinline__ unsigned short e4m3_bf16_bits(unsigned int code) {
+  const unsigned int magnitude = code & 0x7fU;
+  const unsigned short sign = (code & 0x80U) << 8;
+  if (magnitude == 0x7fU) return 0x7fffU;
+  if (magnitude < 8U) {
+    const __nv_bfloat16 small = __float2bfloat16(__uint2float_rn(magnitude) * 0x1p-9F);
+    return sign | __bfloat16_as_ushort(small);
+  }
+  return sign | (0x3c00U + (magnitude << 4));
+}
+
+__device__ __forceinline__ void store_e4m3x4_bf16(unsigned int bytes, unsigned int* out) {
+  out[0] = e4m3_bf16_bits(bytes & 0xffU) |
+      (static_cast<unsigned int>(e4m3_bf16_bits((bytes >> 8) & 0xffU)) << 16);
+  out[1] = e4m3_bf16_bits((bytes >> 16) & 0xffU) |
+      (static_cast<unsigned int>(e4m3_bf16_bits(bytes >> 24)) << 16);
+}
+
 // One CTA owns one KV head and one 128/256-token split.  Its eight warps own the
 // eight GQA query heads sharing that KV head.  K/V are loaded once into shared
 // memory and reused by all eight query heads, avoiding eight redundant global
 // cache reads. Synchronization and online softmax rescaling are amortized across tiles.
 template <int kSplitTokens>
-__global__ void dynamic_decode_split_kernel(
+__device__ __forceinline__ void dynamic_decode_simt(
     const __nv_bfloat16* __restrict__ query,
     const __nv_fp8_e4m3* __restrict__ key_cache,
     const __nv_fp8_e4m3* __restrict__ value_cache,
@@ -702,8 +725,10 @@ __global__ void dynamic_decode_split_kernel(
     const int tile_count = min(kTile, end - tile_begin);
     for (int t = 0; t < tile_count; ++t) {
       const int64_t row = static_cast<int64_t>(tile_begin + t) * kKvHeads + kv_head;
-      shared_key[t][threadIdx.x] = static_cast<float>(key_cache[row * kHeadDim + threadIdx.x]);
-      shared_value[t][threadIdx.x] = static_cast<float>(value_cache[row * kHeadDim + threadIdx.x]);
+      shared_key[t][threadIdx.x] = __bfloat162float(__ushort_as_bfloat16(
+          e4m3_bf16_bits(key_cache[row * kHeadDim + threadIdx.x].__x)));
+      shared_value[t][threadIdx.x] = __bfloat162float(__ushort_as_bfloat16(
+          e4m3_bf16_bits(value_cache[row * kHeadDim + threadIdx.x].__x)));
       if (threadIdx.x == 0) {
         shared_key_scale[t] = key_scales[row];
         shared_value_scale[t] = value_scales[row];
@@ -759,6 +784,211 @@ __global__ void dynamic_decode_split_kernel(
     const int dim = lane + item * 32;
     partial_output[partial_index * kHeadDim + dim] = accumulator[item];
   }
+}
+
+template <int kSplitTokens>
+__global__ void dynamic_decode_split_kernel(
+    const __nv_bfloat16* query, const __nv_fp8_e4m3* key_cache,
+    const __nv_fp8_e4m3* value_cache, const float* key_scales,
+    const float* value_scales, float* partial_max, float* partial_sum,
+    float* partial_output, int valid_tokens, int max_splits) {
+  dynamic_decode_simt<kSplitTokens>(query, key_cache, value_cache, key_scales,
+      value_scales, partial_max, partial_sum, partial_output, valid_tokens, max_splits);
+}
+
+// Every nonzero finite E4M3 magnitude lies in [2^-9,448]. A margin of
+// 512 keeps each BF16 tensor product normal and finite. Inputs outside this
+// range use SIMT, including normal operands whose product could underflow.
+__device__ __forceinline__ bool safe_tensor_operand(float value) {
+  const float magnitude = fabsf(value);
+  return isfinite(value) && (value == 0.0F ||
+      (magnitude >= FLT_MIN * 512.0F && magnitude <= FLT_MAX / 512.0F));
+}
+
+// BF16 Tensor Cores consume raw E4M3 values exactly. QK applies each token's
+// scale after the matrix product. PV decomposes the FP32 probability*V-scale
+// into three BF16 components, rather than rounding the probability once.
+// Unsafe components/products use the FP32 SIMT path for that tile.
+template <int kSplitTokens>
+__global__ void dynamic_decode_tensor_kernel(
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_fp8_e4m3* __restrict__ key_cache,
+    const __nv_fp8_e4m3* __restrict__ value_cache,
+    const float* __restrict__ key_scales,
+    const float* __restrict__ value_scales,
+    float* __restrict__ partial_max, float* __restrict__ partial_sum,
+    float* __restrict__ partial_output, int valid_tokens, int max_splits) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  namespace wmma = nvcuda::wmma;
+  constexpr int kTile = 32;
+  const int split = blockIdx.x;
+  const int kv_head = blockIdx.y;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int query_head = kv_head * kQueriesPerKvHead + warp;
+  const int begin = split * kSplitTokens;
+  const int end = begin + min(kSplitTokens, valid_tokens - begin);
+  if (begin >= end || kv_head >= kKvHeads) return;
+
+  // K, V and the tile's FP32 PV output share storage across separate phases.
+  // All WMMA pointers/leading dimensions meet the 32-byte alignment contract.
+  __shared__ __align__(32) unsigned char data[kTile * kHeadDim * sizeof(__nv_bfloat16)];
+  __shared__ __align__(32) __nv_bfloat16 shared_query[kQueriesPerKvHead][kHeadDim];
+  __shared__ __align__(32) unsigned char weights[3 * kQueriesPerKvHead * kTile * sizeof(__nv_bfloat16)];
+  __shared__ float ks[kTile];
+  __shared__ float vs[kTile];
+  auto* raw = reinterpret_cast<__nv_bfloat16*>(data);
+  auto* scores = reinterpret_cast<float*>(weights);
+  auto* parts = reinterpret_cast<__nv_bfloat16*>(weights);
+  constexpr int kPartElements = kQueriesPerKvHead * kTile;
+  bool unsafe_query = false;
+  for (int i = threadIdx.x; i < kQueriesPerKvHead * kHeadDim; i += kThreads) {
+    const __nv_bfloat16 q = query[kv_head * kQueriesPerKvHead * kHeadDim + i];
+    shared_query[i / kHeadDim][i % kHeadDim] = q;
+    const float qf = __bfloat162float(q);
+    unsafe_query |= !safe_tensor_operand(qf);
+  }
+  const bool scalar_qk = __syncthreads_or(unsafe_query);
+  float accumulator[8] = {};
+  float running_max = -CUDART_INF_F;
+  float running_sum = 0.0F;
+
+  for (int first = begin; first < end; first += kTile) {
+    const int count = min(kTile, end - first);
+    for (int group = threadIdx.x; group < kTile * kHeadDim / 4; group += kThreads) {
+      const int t = group / (kHeadDim / 4);
+      const int d = (group % (kHeadDim / 4)) * 4;
+      const int64_t index = (static_cast<int64_t>(first + t) * kKvHeads + kv_head) * kHeadDim + d;
+      const unsigned int bytes = t < count ?
+          *reinterpret_cast<const unsigned int*>(key_cache + index) : 0U;
+      store_e4m3x4_bf16(bytes, reinterpret_cast<unsigned int*>(raw) + group * 2);
+    }
+    if (threadIdx.x < kTile) {
+      const int t = threadIdx.x;
+      const int64_t row = static_cast<int64_t>(first + t) * kKvHeads + kv_head;
+      ks[t] = t < count ? key_scales[row] : 0.0F;
+      vs[t] = t < count ? value_scales[row] : 0.0F;
+    }
+    __syncthreads();
+    if (scalar_qk) {
+      for (int t = 0; t < kTile; ++t) {
+        float dot = 0.0F;
+#pragma unroll
+        for (int item = 0; item < 8; ++item) {
+          const int d = lane + item * 32;
+          dot += __bfloat162float(shared_query[warp][d]) * __bfloat162float(raw[t * kHeadDim + d]);
+        }
+        dot = warp_sum(dot);
+        if (lane == 0) scores[warp * kTile + t] = dot;
+      }
+    } else if (warp == 0) {
+      wmma::fragment<wmma::matrix_a, 8, 32, 16, __nv_bfloat16, wmma::row_major> a;
+      wmma::fragment<wmma::matrix_b, 8, 32, 16, __nv_bfloat16, wmma::col_major> b;
+      wmma::fragment<wmma::accumulator, 8, 32, 16, float> c;
+      wmma::fill_fragment(c, 0.0F);
+#pragma unroll
+      for (int d = 0; d < kHeadDim; d += 16) {
+        wmma::load_matrix_sync(a, &shared_query[0][d], kHeadDim);
+        wmma::load_matrix_sync(b, raw + d, kHeadDim);
+        wmma::mma_sync(c, a, b, c);
+      }
+      wmma::store_matrix_sync(scores, c, kTile, wmma::mem_row_major);
+    }
+    __syncthreads(); // QK finished; K storage may become V storage.
+    float score = lane < count ? scores[warp * kTile + lane] * ks[lane] * 0.0625F : -CUDART_INF_F;
+    float maximum = score;
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+      maximum = fmaxf(maximum, __shfl_down_sync(0xffffffffU, maximum, delta));
+    }
+    maximum = __shfl_sync(0xffffffffU, maximum, 0);
+    const float next_max = fmaxf(running_max, maximum);
+    const float old_weight = __expf(running_max - next_max);
+    const float probability = lane < count ? __expf(score - next_max) : 0.0F;
+    const float tile_sum = __shfl_sync(0xffffffffU, warp_sum(probability), 0);
+    running_sum = running_sum * old_weight + tile_sum;
+    running_max = next_max;
+    const float weight = probability * vs[lane];
+    const __nv_bfloat16 high = __float2bfloat16(weight);
+    const float hf = __bfloat162float(high);
+    const float r1 = weight - hf;
+    const __nv_bfloat16 middle = __float2bfloat16(r1);
+    const float mf = __bfloat162float(middle);
+    const float r2 = r1 - mf;
+    const __nv_bfloat16 low = __float2bfloat16(r2);
+    const float lf = __bfloat162float(low);
+    const bool unsafe_weight = !isfinite(weight) || r2 - lf != 0.0F ||
+        !safe_tensor_operand(hf) || !safe_tensor_operand(mf) ||
+        !safe_tensor_operand(lf);
+    // Also ensures every warp has read FP32 scores before BF16 parts reuse
+    // the same bytes. The fallback keeps tiny FP32 weights intact.
+    const bool scalar_pv = __syncthreads_or(unsafe_weight);
+    const int wi = warp * kTile + lane;
+    if (scalar_pv) {
+      scores[wi] = weight;
+    } else {
+      parts[wi] = high;
+      parts[kPartElements + wi] = middle;
+      parts[2 * kPartElements + wi] = low;
+    }
+    for (int group = threadIdx.x; group < kTile * kHeadDim / 4; group += kThreads) {
+      const int t = group / (kHeadDim / 4);
+      const int d = (group % (kHeadDim / 4)) * 4;
+      const int64_t index = (static_cast<int64_t>(first + t) * kKvHeads + kv_head) * kHeadDim + d;
+      const unsigned int bytes = t < count ?
+          *reinterpret_cast<const unsigned int*>(value_cache + index) : 0U;
+      store_e4m3x4_bf16(bytes, reinterpret_cast<unsigned int*>(raw) + group * 2);
+    }
+    __syncthreads();
+    if (scalar_pv) {
+#pragma unroll
+      for (int item = 0; item < 8; ++item) accumulator[item] *= old_weight;
+      for (int t = 0; t < count; ++t) {
+        const float w = scores[warp * kTile + t];
+#pragma unroll
+        for (int item = 0; item < 8; ++item) {
+          accumulator[item] += __bfloat162float(raw[t * kHeadDim + lane + item * 32]) * w;
+        }
+      }
+    } else {
+      wmma::fragment<wmma::matrix_a, 8, 32, 16, __nv_bfloat16, wmma::row_major> a;
+      wmma::fragment<wmma::matrix_b, 8, 32, 16, __nv_bfloat16, wmma::row_major> b;
+      wmma::fragment<wmma::accumulator, 8, 32, 16, float> c;
+      wmma::fill_fragment(c, 0.0F);
+#pragma unroll
+      for (int t = 0; t < kTile; t += 16) {
+        wmma::load_matrix_sync(b, raw + t * kHeadDim + warp * 32, kHeadDim);
+#pragma unroll
+        for (int part = 0; part < 3; ++part) {
+          wmma::load_matrix_sync(a, parts + part * kPartElements + t, kTile);
+          wmma::mma_sync(c, a, b, c);
+        }
+      }
+      __syncthreads(); // All V fragments are loaded before output reuse.
+      auto* tile_output = reinterpret_cast<float*>(data);
+      wmma::store_matrix_sync(tile_output + warp * 32, c, kHeadDim, wmma::mem_row_major);
+      __syncthreads();
+#pragma unroll
+      for (int item = 0; item < 8; ++item) {
+        accumulator[item] = accumulator[item] * old_weight +
+            tile_output[warp * kHeadDim + lane + item * 32];
+      }
+    }
+    __syncthreads(); // All PV consumers finish before the next K tile.
+  }
+  const int64_t pi = static_cast<int64_t>(query_head) * max_splits + split;
+  if (lane == 0) {
+    partial_max[pi] = running_max;
+    partial_sum[pi] = running_sum;
+  }
+#pragma unroll
+  for (int item = 0; item < 8; ++item) {
+    partial_output[pi * kHeadDim + lane + item * 32] = accumulator[item];
+  }
+#else
+  dynamic_decode_simt<kSplitTokens>(query, key_cache, value_cache, key_scales,
+      value_scales, partial_max, partial_sum, partial_output, valid_tokens, max_splits);
+#endif
 }
 
 __global__ void dynamic_decode_reduce_kernel(
@@ -839,15 +1069,27 @@ void launch_dynamic_decode_split(
     const apxinf_qwen35_dynamic_decode_spec_t& spec,
     const apxinf_qwen35_dynamic_decode_bindings_t& bindings,
     cudaStream_t stream, int num_splits) {
-  dynamic_decode_split_kernel<kSplitTokens><<<dim3(num_splits, kKvHeads), kThreads, 0, stream>>>(
-      static_cast<const __nv_bfloat16*>(bindings.query),
-      static_cast<const __nv_fp8_e4m3*>(bindings.key_cache),
-      static_cast<const __nv_fp8_e4m3*>(bindings.value_cache),
-      static_cast<const float*>(bindings.key_scales),
-      static_cast<const float*>(bindings.value_scales),
-      static_cast<float*>(bindings.partial_max),
-      static_cast<float*>(bindings.partial_sum),
-      static_cast<float*>(bindings.partial_output), spec.valid_tokens, spec.max_splits);
+  if (spec.valid_tokens >= 256) {
+    dynamic_decode_tensor_kernel<kSplitTokens><<<dim3(num_splits, kKvHeads), kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(bindings.query),
+        static_cast<const __nv_fp8_e4m3*>(bindings.key_cache),
+        static_cast<const __nv_fp8_e4m3*>(bindings.value_cache),
+        static_cast<const float*>(bindings.key_scales),
+        static_cast<const float*>(bindings.value_scales),
+        static_cast<float*>(bindings.partial_max),
+        static_cast<float*>(bindings.partial_sum),
+        static_cast<float*>(bindings.partial_output), spec.valid_tokens, spec.max_splits);
+  } else {
+    dynamic_decode_split_kernel<kSplitTokens><<<dim3(num_splits, kKvHeads), kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(bindings.query),
+        static_cast<const __nv_fp8_e4m3*>(bindings.key_cache),
+        static_cast<const __nv_fp8_e4m3*>(bindings.value_cache),
+        static_cast<const float*>(bindings.key_scales),
+        static_cast<const float*>(bindings.value_scales),
+        static_cast<float*>(bindings.partial_max),
+        static_cast<float*>(bindings.partial_sum),
+        static_cast<float*>(bindings.partial_output), spec.valid_tokens, spec.max_splits);
+  }
 }
 
 bool valid_spec(const apxinf_qwen35_attention_spec_t& spec) {

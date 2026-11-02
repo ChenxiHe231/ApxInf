@@ -508,6 +508,186 @@ fn dynamic_decode_negative_scores_and_large_merge() {
     }
 }
 
+// An attention oracle independent of the GPU quantizer: every finite E4M3
+// magnitude/sign occurs in the payload, with nonuniform FP32 token/head scales.
+// FP64 evaluates raw dot*scale and weighted V; BF16 is rounded only at output.
+#[test]
+fn dynamic_decode_long_tail_matches_f64_with_tiny_query_and_weights() {
+    let ctx = CudaContext::new(0).unwrap();
+    let tokens = 8193;
+    let mut state = 0x31415926u32;
+    let mut bytes = || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        ((state % 127) as u8) | (((state >> 16) as u8) & 0x80)
+    };
+    let kh: Vec<_> = (0..tokens * 512).map(|_| bytes()).collect();
+    let vh: Vec<_> = (0..tokens * 512).map(|_| bytes()).collect();
+    let ksh: Vec<_> = (0..tokens * 2)
+        .map(|i| 0.001 * (1u32 << (i % 8)) as f32)
+        .collect();
+    let vsh: Vec<_> = (0..tokens * 2)
+        .map(|i| 0.015625 * (1u32 << ((i * 3) % 7)) as f32)
+        .collect();
+    let kc =
+        transfers::to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
+    let vc =
+        transfers::to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
+    let ks = transfers::to_cuda(&Tensor::from_f32(vec![tokens, 2], &ksh).unwrap(), 0).unwrap();
+    let vs = transfers::to_cuda(&Tensor::from_f32(vec![tokens, 2], &vsh).unwrap(), 0).unwrap();
+    let cache = || ops::Qwen35DynamicFp8KvCache {
+        key: &kc,
+        value: &vc,
+        key_scales: &ks,
+        value_scales: &vs,
+    };
+    let splits = ops::qwen35_dynamic_decode_max_splits(tokens).unwrap();
+    let pm = zeros(&ctx, vec![16, splits], DType::F32);
+    let ps = zeros(&ctx, vec![16, splits], DType::F32);
+    let po = zeros(&ctx, vec![16, splits, 256], DType::F32);
+    let output = zeros(&ctx, vec![1, 16, 256], DType::BF16);
+    let mut qh = patterned_bf16(4096, 31, 263, 127.0);
+    qh[..256].fill(bf16::ZERO);
+    for q in &mut qh[512..768] {
+        *q = bf16::from_f32(q.to_f32() * 8.0);
+    }
+    for (subnormal, valid) in [(false, 273), (false, tokens), (true, tokens)] {
+        if subnormal {
+            qh[256..512].fill(bf16::from_f32(1.0e-39));
+        }
+        let query =
+            transfers::to_cuda(&Tensor::from_bf16(vec![1, 16, 256], &qh).unwrap(), 0).unwrap();
+        ops::qwen35_dynamic_decode_attention(
+            &ctx,
+            valid,
+            &query,
+            cache(),
+            ops::Qwen35DynamicDecodeScratch {
+                partial_max: &pm,
+                partial_sum: &ps,
+                partial_output: &po,
+            },
+            &output,
+        )
+        .unwrap();
+        ctx.synchronize().unwrap();
+        let actual = transfers::to_cpu(&output).unwrap();
+        let mut squared_error = 0.0f64;
+        let mut squared_reference = 0.0f64;
+        let mut max_abs_error = 0.0f64;
+        let mut tiny_weights = 0usize;
+        for head in 0..16 {
+            let kv_head = head / 8;
+            let mut scores = vec![0.0f64; valid];
+            for (t, score) in scores.iter_mut().enumerate() {
+                let row = t * 2 + kv_head;
+                let dot: f64 = (0..256)
+                    .map(|d| {
+                        f64::from(qh[head * 256 + d].to_f32())
+                            * f64::from(ops::decode_e4m3(kh[row * 256 + d]))
+                    })
+                    .sum();
+                *score = dot * f64::from(ksh[row]) * 0.0625;
+            }
+            let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let weights: Vec<_> = scores.iter().map(|v| (v - maximum).exp()).collect();
+            tiny_weights += weights
+                .iter()
+                .filter(|&&w| w > 0.0 && w < f64::from(f32::MIN_POSITIVE))
+                .count();
+            let denominator: f64 = weights.iter().sum();
+            for d in 0..256 {
+                let reference: f64 = weights
+                    .iter()
+                    .enumerate()
+                    .map(|(t, w)| {
+                        let row = t * 2 + kv_head;
+                        w * f64::from(vsh[row]) * f64::from(ops::decode_e4m3(vh[row * 256 + d]))
+                    })
+                    .sum::<f64>()
+                    / denominator;
+                let got = f64::from(actual.as_bf16().unwrap()[head * 256 + d].to_f32());
+                let error = (got - reference).abs();
+                // Covers final BF16 half-ULP, plus a small absolute allowance
+                // for FP32 dot/reduction order in cancellation-heavy outputs.
+                assert!(error <= 0.004 * reference.abs() + 5.0e-4,
+                    "valid={valid} subnormal={subnormal} head={head} d={d} got={got} f64={reference}");
+                squared_error += error * error;
+                squared_reference += reference * reference;
+                max_abs_error = max_abs_error.max(error);
+            }
+        }
+        println!("{{\"oracle\":\"f64_raw_fp8\",\"tokens\":{valid},\"subnormal_query\":{subnormal},\"tiny_weights\":{tiny_weights},\"max_abs_error\":{max_abs_error},\"relative_rms_error\":{}}}", (squared_error / squared_reference).sqrt());
+        assert!(
+            tiny_weights > 0,
+            "fixture must exercise probabilities below FP32's normal range"
+        );
+    }
+}
+
+// This tiny positive V scale needs a subnormal residual in the three-part
+// decomposition. Tensor PV must take its FP32 tile fallback instead of FTZ.
+#[test]
+fn dynamic_decode_preserves_tiny_value_scale() {
+    let ctx = CudaContext::new(0).unwrap();
+    let tokens = 273;
+    for (value_code, scale) in [(0x38, 1.234567e-33f32), (0x01, 2.0f32.powi(-118))] {
+        let q = transfers::to_cuda(
+            &Tensor::from_bf16(vec![1, 16, 256], &vec![bf16::ZERO; 4096]).unwrap(),
+            0,
+        )
+        .unwrap();
+        let kc = transfers::to_cuda(
+            &Tensor::from_f8_e4m3(vec![tokens, 2, 256], &vec![0x38; tokens * 512]).unwrap(),
+            0,
+        )
+        .unwrap();
+        let vc = transfers::to_cuda(
+            &Tensor::from_f8_e4m3(vec![tokens, 2, 256], &vec![value_code; tokens * 512]).unwrap(),
+            0,
+        )
+        .unwrap();
+        let ks = transfers::to_cuda(
+            &Tensor::from_f32(vec![tokens, 2], &vec![1.0; tokens * 2]).unwrap(),
+            0,
+        )
+        .unwrap();
+        let vs = transfers::to_cuda(
+            &Tensor::from_f32(vec![tokens, 2], &vec![scale; tokens * 2]).unwrap(),
+            0,
+        )
+        .unwrap();
+        let splits = ops::qwen35_dynamic_decode_max_splits(tokens).unwrap();
+        let pm = zeros(&ctx, vec![16, splits], DType::F32);
+        let ps = zeros(&ctx, vec![16, splits], DType::F32);
+        let po = zeros(&ctx, vec![16, splits, 256], DType::F32);
+        let out = zeros(&ctx, vec![1, 16, 256], DType::BF16);
+        ops::qwen35_dynamic_decode_attention(
+            &ctx,
+            tokens,
+            &q,
+            ops::Qwen35DynamicFp8KvCache {
+                key: &kc,
+                value: &vc,
+                key_scales: &ks,
+                value_scales: &vs,
+            },
+            ops::Qwen35DynamicDecodeScratch {
+                partial_max: &pm,
+                partial_sum: &ps,
+                partial_output: &po,
+            },
+            &out,
+        )
+        .unwrap();
+        ctx.synchronize().unwrap();
+        for got in transfers::to_cpu(&out).unwrap().as_bf16().unwrap() {
+            assert!((got.to_f32() / (scale * ops::decode_e4m3(value_code)) - 1.0).abs() < 0.004);
+        }
+    }
+}
+
 // Explicit opt-in attention-only timing: dequant+FA2 and direct FP8 use the
 // same dynamic cache, queries and valid prefix. Run under the device GPU lock.
 #[test]

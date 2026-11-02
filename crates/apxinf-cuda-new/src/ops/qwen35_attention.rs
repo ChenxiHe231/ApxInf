@@ -1,9 +1,14 @@
-//! Exact batch-one full-attention core for Qwen3.5-35B-A3B.
+//! Batch-one full-attention core for Qwen3.5-35B-A3B.
 //!
 //! This module contains the legacy static-scale FP8 reference path plus the
 //! dynamic cache path used by the Qwen3.5 backend. Dynamic K/V scales cover one
 //! token and one KV head; decode consumes FP8 directly, while prefill may expand
 //! the valid prefix for the existing FA2 kernel. MTP attention remains separate.
+//! On Ampere and newer, prefixes of at least 256 tokens use BF16 Tensor Cores
+//! on exactly converted raw E4M3 tiles. FP32 probability*V-scale is decomposed
+//! into three BF16 components; unsafe components/products retain FP32 SIMT PV.
+//! This preserves the operands, but FP32 accumulation order can differ from
+//! the SIMT route. Short prefixes and older devices use the SIMT route.
 
 use apxinf_core::{DType, Error, Result, Tensor};
 
