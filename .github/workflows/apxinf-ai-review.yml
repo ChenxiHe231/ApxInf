@@ -59,7 +59,9 @@ jobs:
         id: codex
         uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1
         with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          openai-api-key: ${{ secrets.CODEX_REVIEW_API_KEY }}
+          responses-api-endpoint: ${{ vars.CODEX_RESPONSES_API_ENDPOINT }}
+          model: ${{ vars.CODEX_REVIEW_MODEL }}
           codex-home: ${{ runner.temp }}/codex-home
           prompt-file: .github/codex/review-prompt.md
           output-file: devlocal/apxinf-auto-review/review.json
