@@ -1,7 +1,7 @@
 // Copyright 2026 ApxInf contributors.
 //
 // Exact Qwen3.5-35B-A3B full-attention kernels for batch size one.  The legacy
-// entry point retains static-scale E4M3 semantics.  The production path stores
+// entry point retains static-scale E4M3 semantics.  The dynamic path stores
 // post-RoPE K and projected V with dynamic per-token-per-KV-head scales, then
 // decodes directly from FP8 without materializing a BF16 cache.
 
@@ -59,7 +59,9 @@ __device__ float block_sum(float value, float* partial) {
     partial[0] = total;
   }
   __syncthreads();
-  return partial[0];
+  const float result = partial[0];
+  __syncthreads();  // All warps must read before a later reduction reuses partial.
+  return result;
 }
 
 __device__ float block_max(float value, float* partial) {
@@ -79,7 +81,9 @@ __device__ float block_max(float value, float* partial) {
     partial[0] = maximum;
   }
   __syncthreads();
-  return partial[0];
+  const float result = partial[0];
+  __syncthreads();  // All warps must read before a later reduction reuses partial.
+  return result;
 }
 
 __device__ float rotary_value(const float* normalized, int dim, int token,
@@ -618,10 +622,47 @@ __global__ void dynamic_kv_append_kernel(
       __nv_fp8_e4m3(value_values[dim] / value_scale);
 }
 
+// Fused K-Norm -> RoPE -> dynamic quantize/write. Preserve both BF16
+// rounding boundaries of the separate kernels, without global intermediates.
+__global__ void dynamic_kv_prepare_kernel(
+    const __nv_bfloat16* __restrict__ key,
+    const __nv_bfloat16* __restrict__ value,
+    const __nv_bfloat16* __restrict__ norm_weight,
+    const int32_t* __restrict__ positions,
+    __nv_fp8_e4m3* __restrict__ key_cache,
+    __nv_fp8_e4m3* __restrict__ value_cache,
+    float* __restrict__ key_scales, float* __restrict__ value_scales,
+    int tokens, int cache_offset, float theta, float epsilon) {
+  const int token = blockIdx.x;
+  const int head = blockIdx.y;
+  const int dim = threadIdx.x;
+  __shared__ float partial[kWarps];
+  __shared__ float normalized[kHeadDim];
+  const int64_t source =
+      (static_cast<int64_t>(token) * kKvHeads + head) * kHeadDim + dim;
+  const float k = __bfloat162float(key[source]);
+  const float total = block_sum(k * k, partial);
+  const float norm_scale = rsqrtf(total / kHeadDim + epsilon);
+  normalized[dim] = __bfloat162float(__float2bfloat16(
+      k * norm_scale * (1.0F + __bfloat162float(norm_weight[dim]))));
+  __syncthreads();
+  const float rotated = __bfloat162float(__float2bfloat16(
+      rotary_value(normalized, dim, token, tokens, positions, theta)));
+  const float v = __bfloat162float(value[source]);
+  const float ks = fmaxf(block_max(fabsf(rotated), partial) / kFp8Max,
+                        kMinDynamicScale);
+  const float vs = fmaxf(block_max(fabsf(v), partial) / kFp8Max,
+                        kMinDynamicScale);
+  const int64_t row = static_cast<int64_t>(cache_offset + token) * kKvHeads + head;
+  if (dim == 0) { key_scales[row] = ks; value_scales[row] = vs; }
+  key_cache[row * kHeadDim + dim] = __nv_fp8_e4m3(rotated / ks);
+  value_cache[row * kHeadDim + dim] = __nv_fp8_e4m3(v / vs);
+}
+
 // One CTA owns one KV head and one 256-token split.  Its eight warps own the
 // eight GQA query heads sharing that KV head.  K/V are loaded once into shared
 // memory and reused by all eight query heads, avoiding eight redundant global
-// cache reads.
+// cache reads. Synchronization is amortized across eight-token tiles.
 __global__ void dynamic_decode_split_kernel(
     const __nv_bfloat16* __restrict__ query,
     const __nv_fp8_e4m3* __restrict__ key_cache,
@@ -636,65 +677,62 @@ __global__ void dynamic_decode_split_kernel(
   const int lane = threadIdx.x & 31;
   const int query_head = kv_head * kQueriesPerKvHead + warp;
   const int begin = split * kDecodeSplitTokens;
-  const int end = min(begin + kDecodeSplitTokens, valid_tokens);
+  const int end = begin + min(kDecodeSplitTokens, valid_tokens - begin);
   if (begin >= end || kv_head >= kKvHeads || warp >= kQueriesPerKvHead) return;
 
-  __shared__ float shared_key[kHeadDim];
-  __shared__ float shared_value[kHeadDim];
-  __shared__ float shared_key_scale;
-  __shared__ float shared_value_scale;
-
+  constexpr int kTile = 8;
+  __shared__ float shared_key[kTile][kHeadDim];
+  __shared__ float shared_value[kTile][kHeadDim];
+  __shared__ float shared_key_scale[kTile];
+  __shared__ float shared_value_scale[kTile];
   float q[8];
   float accumulator[8];
 #pragma unroll
   for (int item = 0; item < 8; ++item) {
-    const int dim = lane + item * 32;
-    q[item] = __bfloat162float(query[query_head * kHeadDim + dim]);
+    q[item] = __bfloat162float(query[query_head * kHeadDim + lane + item * 32]);
     accumulator[item] = 0.0F;
   }
   float running_max = -CUDART_INF_F;
   float running_sum = 0.0F;
-
-  for (int position = begin; position < end; ++position) {
-    const int dim = threadIdx.x;
-    const int64_t base =
-        (static_cast<int64_t>(position) * kKvHeads + kv_head) * kHeadDim;
-    shared_key[dim] = static_cast<float>(key_cache[base + dim]);
-    shared_value[dim] = static_cast<float>(value_cache[base + dim]);
-    if (dim == 0) {
-      const int64_t scale_index =
-          static_cast<int64_t>(position) * kKvHeads + kv_head;
-      shared_key_scale = key_scales[scale_index];
-      shared_value_scale = value_scales[scale_index];
+  // Load eight cache rows per tile; synchronize per tile instead of per token.
+  // Every query warp reuses the same coalesced K/V tile.
+  for (int tile_begin = begin; tile_begin < end; tile_begin += kTile) {
+    const int tile_count = min(kTile, end - tile_begin);
+    for (int t = 0; t < tile_count; ++t) {
+      const int64_t row = static_cast<int64_t>(tile_begin + t) * kKvHeads + kv_head;
+      shared_key[t][threadIdx.x] = static_cast<float>(key_cache[row * kHeadDim + threadIdx.x]);
+      shared_value[t][threadIdx.x] = static_cast<float>(value_cache[row * kHeadDim + threadIdx.x]);
+      if (threadIdx.x == 0) {
+        shared_key_scale[t] = key_scales[row];
+        shared_value_scale[t] = value_scales[row];
+      }
     }
     __syncthreads();
-
-    float dot = 0.0F;
+    for (int t = 0; t < tile_count; ++t) {
+      float dot = 0.0F;
 #pragma unroll
-    for (int item = 0; item < 8; ++item) {
-      const int query_dim = lane + item * 32;
-      dot += q[item] * shared_key[query_dim];
-    }
-    dot = warp_sum(dot);
-
-    float old_weight = 0.0F;
-    float new_weight = 0.0F;
-    if (lane == 0) {
-      const float score = dot * shared_key_scale * 0.0625F;
-      const float next_max = fmaxf(running_max, score);
-      old_weight = __expf(running_max - next_max);
-      new_weight = __expf(score - next_max);
-      running_sum = running_sum * old_weight + new_weight;
-      running_max = next_max;
-    }
-    old_weight = __shfl_sync(0xffffffffU, old_weight, 0);
-    new_weight = __shfl_sync(0xffffffffU, new_weight, 0);
-    const float weighted_value_scale = new_weight * shared_value_scale;
+      for (int item = 0; item < 8; ++item) {
+        dot += q[item] * shared_key[t][lane + item * 32];
+      }
+      dot = warp_sum(dot);
+      float old_weight = 0.0F;
+      float new_weight = 0.0F;
+      if (lane == 0) {
+        const float score = dot * shared_key_scale[t] * 0.0625F;
+        const float next_max = fmaxf(running_max, score);
+        old_weight = __expf(running_max - next_max);
+        new_weight = __expf(score - next_max);
+        running_sum = running_sum * old_weight + new_weight;
+        running_max = next_max;
+      }
+      old_weight = __shfl_sync(0xffffffffU, old_weight, 0);
+      new_weight = __shfl_sync(0xffffffffU, new_weight, 0);
+      const float weighted_value_scale = new_weight * shared_value_scale[t];
 #pragma unroll
-    for (int item = 0; item < 8; ++item) {
-      const int output_dim = lane + item * 32;
-      accumulator[item] = accumulator[item] * old_weight +
-                          shared_value[output_dim] * weighted_value_scale;
+      for (int item = 0; item < 8; ++item) {
+        accumulator[item] = accumulator[item] * old_weight +
+            shared_value[t][lane + item * 32] * weighted_value_scale;
+      }
     }
     __syncthreads();
   }
@@ -833,7 +871,8 @@ bool valid_dynamic_dequant_spec(
     const apxinf_qwen35_dynamic_dequant_spec_t& spec) {
   return spec.version == APXINF_QWEN35_DYNAMIC_KV_SPEC_VERSION &&
          spec.valid_tokens > 0 && spec.valid_tokens <= spec.cache_capacity &&
-         spec.cache_capacity <= INT_MAX;
+         spec.cache_capacity <= INT_MAX &&
+         spec.valid_tokens <= INT_MAX / (kKvHeads * kHeadDim);
 }
 
 bool valid_dynamic_dequant_bindings(
@@ -948,6 +987,34 @@ extern "C" apxinf_status_t apxinf_qwen35_dynamic_kv_append(
         static_cast<float*>(bindings->key_scales),
         static_cast<float*>(bindings->value_scales), spec->tokens,
         spec->cache_offset);
+    apxinf::framework::check_cuda(cudaGetLastError());
+  });
+}
+
+extern "C" apxinf_status_t apxinf_qwen35_dynamic_kv_prepare(
+    apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_prepare_spec_t* spec,
+    const apxinf_qwen35_dynamic_prepare_bindings_t* bindings) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr ||
+        !valid_dynamic_kv_spec(spec->kv) ||
+        !valid_dynamic_kv_bindings(bindings->kv) ||
+        bindings->norm_weight == nullptr || bindings->positions == nullptr ||
+        !std::isfinite(spec->rope_theta) || spec->rope_theta <= 0.0F ||
+        !std::isfinite(spec->rms_epsilon) || spec->rms_epsilon <= 0.0F) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid fused KV prepare arguments");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    const auto& b = bindings->kv;
+    dynamic_kv_prepare_kernel<<<dim3(spec->kv.tokens, kKvHeads), kThreads, 0,
+        static_cast<cudaStream_t>(b.stream)>>>(
+        static_cast<const __nv_bfloat16*>(b.key),
+        static_cast<const __nv_bfloat16*>(b.value),
+        static_cast<const __nv_bfloat16*>(bindings->norm_weight),
+        static_cast<const int32_t*>(bindings->positions),
+        static_cast<__nv_fp8_e4m3*>(b.key_cache),
+        static_cast<__nv_fp8_e4m3*>(b.value_cache),
+        static_cast<float*>(b.key_scales), static_cast<float*>(b.value_scales),
+        spec->kv.tokens, spec->kv.cache_offset, spec->rope_theta, spec->rms_epsilon);
     apxinf::framework::check_cuda(cudaGetLastError());
   });
 }

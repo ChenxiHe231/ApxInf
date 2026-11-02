@@ -3,9 +3,10 @@ use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext};
 use half::bf16;
 
 fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Tensor {
-    CudaBuffer::alloc_zeros(
+    CudaBuffer::alloc_zeros_async(
         shape.iter().product::<usize>() * dtype.size_in_bytes(),
         ctx.device_id(),
+        ctx.stream(),
     )
     .unwrap()
     .as_tensor(Shape::new(shape), dtype)
@@ -231,9 +232,200 @@ fn dynamic_fp8_decode_matches_quantized_reference_across_splits() {
                 / denominator;
             let actual_value = actual[query_begin + dim];
             assert!(
-                (actual_value - expected).abs() <= 0.025,
+                (actual_value - expected).abs() <= 0.005,
                 "head={query_head} dim={dim}: {actual_value} != {expected}"
             );
         }
+    }
+}
+
+#[test]
+fn fused_prepare_matches_separate_bf16_norm_rope_and_quantization() {
+    let ctx = CudaContext::new(0).unwrap();
+    for (tokens, offset, position) in [(1, 0, 0), (17, 3, 49151)] {
+        let capacity = tokens + offset + 7;
+        let mut kh = patterned_bf16(tokens * 512, 23, 331, 39.0);
+        let mut vh = patterned_bf16(tokens * 512, 31, 257, 19.0);
+        // A zero head exercises the minimum scale, while an outlier tests
+        // scale selection independent of K normalization and RoPE.
+        kh[..256].fill(bf16::ZERO);
+        vh[..256].fill(bf16::ZERO);
+        vh[256] = bf16::from_f32(8192.0);
+        let key =
+            transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
+        let value =
+            transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
+        let weight = transfers::to_cuda(
+            &Tensor::from_bf16(vec![256], &patterned_bf16(256, 7, 97, 173.0)).unwrap(),
+            0,
+        )
+        .unwrap();
+        let pos: Vec<i32> = (0..tokens).map(|i| position + i as i32).collect();
+        let pos1 = transfers::to_cuda(&Tensor::from_i32(vec![tokens], &pos).unwrap(), 0).unwrap();
+        let pos3 = transfers::to_cuda(
+            &Tensor::from_i32(
+                vec![3, tokens],
+                &pos.iter()
+                    .copied()
+                    .cycle()
+                    .take(tokens * 3)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+            0,
+        )
+        .unwrap();
+        let payloads: Vec<Tensor> = (0..4)
+            .map(|_| zeros(&ctx, vec![capacity, 2, 256], DType::F8E4M3))
+            .collect();
+        let scales: Vec<Tensor> = (0..4)
+            .map(|_| zeros(&ctx, vec![capacity, 2], DType::F32))
+            .collect();
+        let cache = |i: usize| ops::Qwen35DynamicFp8KvCache {
+            key: &payloads[i],
+            value: &payloads[i + 1],
+            key_scales: &scales[i],
+            value_scales: &scales[i + 1],
+        };
+        ops::qwen35_dynamic_kv_prepare(
+            &ctx,
+            tokens,
+            offset,
+            &key,
+            &value,
+            &weight,
+            &pos3,
+            10_000_000.0,
+            cache(0),
+        )
+        .unwrap();
+        let key2d = CudaBuffer::from_tensor(&key)
+            .unwrap()
+            .as_tensor(Shape::new(vec![tokens * 2, 256]), DType::BF16)
+            .unwrap();
+        ops::head_rms_norm(&ctx, &key2d, &weight, ops::QWEN35_ATTENTION_RMS_EPSILON).unwrap();
+        ops::partial_rope(&ctx, &key, &pos1, 64, 10_000_000.0).unwrap();
+        ops::qwen35_dynamic_kv_append(&ctx, tokens, offset, &key, &value, cache(2)).unwrap();
+        ctx.synchronize().unwrap();
+        for i in 0..2 {
+            let lhs = transfers::to_cpu(&payloads[i]).unwrap();
+            let rhs = transfers::to_cpu(&payloads[i + 2]).unwrap();
+            // Exact bytes also verify untouched prefix and tail rows.
+            assert_eq!(lhs.as_f8_e4m3().unwrap(), rhs.as_f8_e4m3().unwrap());
+            let lhs = transfers::to_cpu(&scales[i]).unwrap();
+            let rhs = transfers::to_cpu(&scales[i + 2]).unwrap();
+            assert_eq!(lhs.as_f32().unwrap(), rhs.as_f32().unwrap());
+        }
+    }
+}
+
+// Explicit opt-in attention-only timing: dequant+FA2 and direct FP8 use the
+// same dynamic cache, queries and valid prefix. Run under the device GPU lock.
+#[test]
+#[ignore]
+fn benchmark_dynamic_fp8_decode_against_dequant_fa2() {
+    use std::time::Instant;
+    let ctx = CudaContext::new(0).unwrap();
+    for tokens in [4096, 8192, 16384, 32768, 49152] {
+        let key = transfers::to_cuda(
+            &Tensor::from_bf16(
+                vec![tokens, 2, 256],
+                &patterned_bf16(tokens * 512, 17, 257, 91.0),
+            )
+            .unwrap(),
+            0,
+        )
+        .unwrap();
+        let value = transfers::to_cuda(
+            &Tensor::from_bf16(
+                vec![tokens, 2, 256],
+                &patterned_bf16(tokens * 512, 29, 251, 83.0),
+            )
+            .unwrap(),
+            0,
+        )
+        .unwrap();
+        let query = transfers::to_cuda(
+            &Tensor::from_bf16(vec![1, 16, 256], &patterned_bf16(4096, 31, 263, 97.0)).unwrap(),
+            0,
+        )
+        .unwrap();
+        let kc = zeros(&ctx, vec![tokens, 2, 256], DType::F8E4M3);
+        let vc = zeros(&ctx, vec![tokens, 2, 256], DType::F8E4M3);
+        let ks = zeros(&ctx, vec![tokens, 2], DType::F32);
+        let vs = zeros(&ctx, vec![tokens, 2], DType::F32);
+        let cache = || ops::Qwen35DynamicFp8KvCache {
+            key: &kc,
+            value: &vc,
+            key_scales: &ks,
+            value_scales: &vs,
+        };
+        ops::qwen35_dynamic_kv_append(&ctx, tokens, 0, &key, &value, cache()).unwrap();
+        let splits = ops::qwen35_dynamic_decode_max_splits(tokens).unwrap();
+        let pm = zeros(&ctx, vec![16, splits], DType::F32);
+        let ps = zeros(&ctx, vec![16, splits], DType::F32);
+        let po = zeros(&ctx, vec![16, splits, 256], DType::F32);
+        let out = zeros(&ctx, vec![1, 16, 256], DType::BF16);
+        let mut reference = zeros(&ctx, vec![1, 1, 16, 256], DType::BF16);
+        let kb = zeros(&ctx, vec![1, tokens, 2, 256], DType::BF16);
+        let vb = zeros(&ctx, vec![1, tokens, 2, 256], DType::BF16);
+        let q4 = CudaBuffer::from_tensor(&query)
+            .unwrap()
+            .as_tensor(Shape::new(vec![1, 1, 16, 256]), DType::BF16)
+            .unwrap();
+        let mut samples = [Vec::new(), Vec::new()];
+        // Interleave both routes and synchronize around each timed sample.
+        // Timing includes Rust dispatch and launch overhead for both routes.
+        for round in 0..12 {
+            for which in [round % 2, 1 - round % 2] {
+                ctx.synchronize().unwrap();
+                let start = Instant::now();
+                if which == 0 {
+                    ops::qwen35_dynamic_decode_attention(
+                        &ctx,
+                        tokens,
+                        &query,
+                        cache(),
+                        ops::Qwen35DynamicDecodeScratch {
+                            partial_max: &pm,
+                            partial_sum: &ps,
+                            partial_output: &po,
+                        },
+                        &out,
+                    )
+                    .unwrap();
+                } else {
+                    ops::qwen35_dynamic_kv_dequant(&ctx, tokens, cache(), &kb, &vb).unwrap();
+                    let mut args = ops::KvCacheAttentionArgs::new(&q4, &kb, &vb, &mut reference);
+                    args.query_start = tokens - 1;
+                    args.valid_key_tokens = tokens;
+                    args.policy.allow_fallback = false;
+                    ops::kv_cache_attention(&ctx, args).unwrap();
+                }
+                ctx.synchronize().unwrap();
+                if round >= 2 {
+                    samples[which].push(start.elapsed().as_secs_f64() * 1e6);
+                }
+            }
+        }
+        for sample in &mut samples {
+            sample.sort_by(f64::total_cmp);
+        }
+        let direct_us = samples[0][samples[0].len() / 2];
+        let dequant_fa2_us = samples[1][samples[1].len() / 2];
+        let actual = transfers::to_cpu(&out).unwrap();
+        let expected = transfers::to_cpu(&reference).unwrap();
+        let max_abs_error = actual
+            .as_bf16()
+            .unwrap()
+            .iter()
+            .zip(expected.as_bf16().unwrap())
+            .map(|(a, b)| (a.to_f32() - b.to_f32()).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_error <= 0.005,
+            "tokens={tokens} max_abs_error={max_abs_error}"
+        );
+        println!("{{\"tokens\":{tokens},\"direct_us\":{direct_us:.3},\"dequant_fa2_us\":{dequant_fa2_us:.3},\"speedup\":{:.3},\"max_abs_error\":{max_abs_error}}}",dequant_fa2_us/direct_us);
     }
 }

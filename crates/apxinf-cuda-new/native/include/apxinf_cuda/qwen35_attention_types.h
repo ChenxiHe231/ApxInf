@@ -79,6 +79,18 @@ typedef struct {
 } apxinf_qwen35_dynamic_kv_bindings_t;
 
 typedef struct {
+  apxinf_qwen35_dynamic_kv_spec_t kv;
+  float rope_theta;
+  float rms_epsilon;
+} apxinf_qwen35_dynamic_prepare_spec_t;
+
+typedef struct {
+  apxinf_qwen35_dynamic_kv_bindings_t kv;
+  const void* norm_weight;
+  const void* positions; /* I32 [3,T], text backend supplies identical channels. */
+} apxinf_qwen35_dynamic_prepare_bindings_t;
+
+typedef struct {
   uint32_t version;
   uint32_t valid_tokens;
   uint32_t cache_capacity;
@@ -119,4 +131,3 @@ typedef struct {
   void* value;
   apxinf_cuda_stream_t stream;
 } apxinf_qwen35_dynamic_dequant_bindings_t;
-

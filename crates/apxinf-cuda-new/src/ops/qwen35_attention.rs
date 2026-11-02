@@ -331,11 +331,15 @@ fn dynamic_cache_storage(
         ));
     }
     let capacity = shape[0];
+    if i32::try_from(capacity).is_err() {
+        return Err(invalid("dynamic cache capacity exceeds native range"));
+    }
     let key = tensor_storage(ctx, cache.key, DType::F8E4M3, shape)?;
     let value = tensor_storage(ctx, cache.value, DType::F8E4M3, shape)?;
     let scale_shape = [capacity, QWEN35_ATTENTION_KV_HEADS];
     let key_scales = tensor_storage(ctx, cache.key_scales, DType::F32, &scale_shape)?;
     let value_scales = tensor_storage(ctx, cache.value_scales, DType::F32, &scale_shape)?;
+    validate_disjoint(&[], &[&key, &value, &key_scales, &value_scales])?;
     Ok((capacity, key, value, key_scales, value_scales))
 }
 
@@ -363,6 +367,10 @@ pub fn qwen35_dynamic_kv_append(
     let input_shape = [tokens, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM];
     let key = tensor_storage(ctx, key, DType::BF16, &input_shape)?;
     let value = tensor_storage(ctx, value, DType::BF16, &input_shape)?;
+    validate_disjoint(
+        &[&key, &value],
+        &[&key_cache, &value_cache, &key_scales, &value_scales],
+    )?;
     let spec = abi::DynamicKvSpec {
         version: abi::DYNAMIC_KV_SPEC_VERSION,
         tokens: tokens as u32,
@@ -381,6 +389,74 @@ pub fn qwen35_dynamic_kv_append(
     crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
     unsafe {
         status::check(abi::apxinf_qwen35_dynamic_kv_append(
+            ctx.runtime(),
+            &spec,
+            &bindings,
+        ))
+    }
+}
+
+/// Fused K-Norm -> RoPE -> online per-token-per-head FP8 cache write.
+/// BF16 rounding after normalization and RoPE is preserved in registers.
+#[allow(clippy::too_many_arguments)]
+pub fn qwen35_dynamic_kv_prepare(
+    ctx: &CudaContext,
+    tokens: usize,
+    cache_offset: usize,
+    key: &Tensor,
+    value: &Tensor,
+    norm_weight: &Tensor,
+    positions: &Tensor,
+    rope_theta: f32,
+    cache: Qwen35DynamicFp8KvCache<'_>,
+) -> Result<()> {
+    if tokens == 0 || i32::try_from(tokens).is_err() || !rope_theta.is_finite() || rope_theta <= 0.0
+    {
+        return Err(invalid("invalid fused KV preparation parameters"));
+    }
+    let (capacity, key_cache, value_cache, key_scales, value_scales) =
+        dynamic_cache_storage(ctx, cache)?;
+    if cache_offset
+        .checked_add(tokens)
+        .is_none_or(|end| end > capacity)
+    {
+        return Err(invalid("fused KV preparation exceeds cache capacity"));
+    }
+    let shape = [tokens, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM];
+    let key = tensor_storage(ctx, key, DType::BF16, &shape)?;
+    let value = tensor_storage(ctx, value, DType::BF16, &shape)?;
+    let norm_weight = tensor_storage(ctx, norm_weight, DType::BF16, &[QWEN35_ATTENTION_HEAD_DIM])?;
+    let positions = tensor_storage(ctx, positions, DType::I32, &[3, tokens])?;
+    validate_disjoint(
+        &[&key, &value, &norm_weight, &positions],
+        &[&key_cache, &value_cache, &key_scales, &value_scales],
+    )?;
+    let spec = abi::DynamicPrepareSpec {
+        kv: abi::DynamicKvSpec {
+            version: abi::DYNAMIC_KV_SPEC_VERSION,
+            tokens: tokens as u32,
+            cache_offset: cache_offset as u32,
+            cache_capacity: capacity as u32,
+        },
+        rope_theta,
+        rms_epsilon: QWEN35_ATTENTION_RMS_EPSILON,
+    };
+    let bindings = abi::DynamicPrepareBindings {
+        kv: abi::DynamicKvBindings {
+            key: key.ptr(),
+            value: value.ptr(),
+            key_cache: key_cache.ptr(),
+            value_cache: value_cache.ptr(),
+            key_scales: key_scales.ptr(),
+            value_scales: value_scales.ptr(),
+            stream: ctx.stream().handle(),
+        },
+        norm_weight: norm_weight.ptr(),
+        positions: positions.ptr(),
+    };
+    crate::workspace::validate_capture_target(ctx.device_id(), bindings.kv.stream as usize)?;
+    unsafe {
+        status::check(abi::apxinf_qwen35_dynamic_kv_prepare(
             ctx.runtime(),
             &spec,
             &bindings,
@@ -436,6 +512,10 @@ pub fn qwen35_dynamic_decode_attention(
             QWEN35_ATTENTION_HEAD_DIM,
         ],
     )?;
+    validate_disjoint(
+        &[&query, &key_cache, &value_cache, &key_scales, &value_scales],
+        &[&partial_max, &partial_sum, &partial_output, &output],
+    )?;
     let spec = abi::DynamicDecodeSpec {
         version: abi::DYNAMIC_DECODE_SPEC_VERSION,
         valid_tokens: valid_tokens as u32,
@@ -474,7 +554,12 @@ pub fn qwen35_dynamic_kv_dequant(
 ) -> Result<()> {
     let (capacity, key_cache, value_cache, key_scales, value_scales) =
         dynamic_cache_storage(ctx, cache)?;
-    if valid_tokens == 0 || valid_tokens > capacity || i32::try_from(valid_tokens).is_err() {
+    if valid_tokens == 0
+        || valid_tokens > capacity
+        || valid_tokens
+            .checked_mul(QWEN35_ATTENTION_KV_WIDTH)
+            .is_none_or(|n| i32::try_from(n).is_err())
+    {
         return Err(invalid("Qwen3.5 dynamic dequant valid length is invalid"));
     }
     let output_shape = [
@@ -485,6 +570,10 @@ pub fn qwen35_dynamic_kv_dequant(
     ];
     let key = tensor_storage(ctx, key, DType::BF16, &output_shape)?;
     let value = tensor_storage(ctx, value, DType::BF16, &output_shape)?;
+    validate_disjoint(
+        &[&key_cache, &value_cache, &key_scales, &value_scales],
+        &[&key, &value],
+    )?;
     let spec = abi::DynamicDequantSpec {
         version: abi::DYNAMIC_KV_SPEC_VERSION,
         valid_tokens: valid_tokens as u32,
@@ -507,6 +596,19 @@ pub fn qwen35_dynamic_kv_dequant(
             &bindings,
         ))
     }
+}
+
+fn validate_disjoint(inputs: &[&CudaBuffer], outputs: &[&CudaBuffer]) -> Result<()> {
+    for (i, output) in outputs.iter().enumerate() {
+        if inputs.iter().any(|input| storage_overlaps(input, output))
+            || outputs[..i]
+                .iter()
+                .any(|other| storage_overlaps(other, output))
+        {
+            return Err(invalid("dynamic attention writable buffers overlap"));
+        }
+    }
+    Ok(())
 }
 
 fn storage_overlaps(left: &CudaBuffer, right: &CudaBuffer) -> bool {

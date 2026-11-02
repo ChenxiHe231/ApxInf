@@ -100,7 +100,7 @@ pub use rope::apply_vision_2d as rope_apply_vision_2d;
 pub use qwen35_attention::{
     decode_e4m3, encode_e4m3, qwen35_attention_fp8, qwen35_attention_reference,
     qwen35_dynamic_decode_attention, qwen35_dynamic_decode_max_splits, qwen35_dynamic_kv_append,
-    qwen35_dynamic_kv_dequant, Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput,
+    qwen35_dynamic_kv_dequant, qwen35_dynamic_kv_prepare, Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput,
     Qwen35AttentionScratch, Qwen35DynamicDecodeScratch, Qwen35DynamicFp8KvCache,
     Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales, FP8_E4M3_MAX_FINITE,
     QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_KV_WIDTH,

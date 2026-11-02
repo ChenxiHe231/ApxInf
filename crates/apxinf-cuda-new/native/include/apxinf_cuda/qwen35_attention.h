@@ -20,6 +20,11 @@ apxinf_status_t apxinf_qwen35_dynamic_kv_append(
     apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_kv_spec_t* spec,
     const apxinf_qwen35_dynamic_kv_bindings_t* bindings);
 
+/* Fused K-Norm, RoPE and online quantization/cache write. */
+apxinf_status_t apxinf_qwen35_dynamic_kv_prepare(
+    apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_prepare_spec_t* spec,
+    const apxinf_qwen35_dynamic_prepare_bindings_t* bindings);
+
 /* Decode one BF16 query row directly from dynamic FP8 K/V.  The kernel never
    materializes a BF16 cache; it converts each cache tile in registers and
    combines split-KV partial softmax states in FP32. */

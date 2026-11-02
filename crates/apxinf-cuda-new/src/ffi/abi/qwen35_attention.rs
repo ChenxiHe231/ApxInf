@@ -62,6 +62,21 @@ pub(crate) struct DynamicKvBindings {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DynamicPrepareSpec {
+    pub kv: DynamicKvSpec,
+    pub rope_theta: f32,
+    pub rms_epsilon: f32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DynamicPrepareBindings {
+    pub kv: DynamicKvBindings,
+    pub norm_weight: *const c_void,
+    pub positions: *const c_void,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DynamicDecodeSpec {
     pub version: u32,
@@ -116,6 +131,12 @@ unsafe extern "C" {
         runtime: Runtime,
         spec: *const DynamicKvSpec,
         bindings: *const DynamicKvBindings,
+    ) -> i32;
+
+    pub(crate) fn apxinf_qwen35_dynamic_kv_prepare(
+        runtime: Runtime,
+        spec: *const DynamicPrepareSpec,
+        bindings: *const DynamicPrepareBindings,
     ) -> i32;
 
     pub(crate) fn apxinf_qwen35_dynamic_decode_attention(
