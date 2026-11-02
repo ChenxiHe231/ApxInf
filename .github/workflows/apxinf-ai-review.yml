@@ -34,7 +34,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
-          persist-credentials: false
+          # The collector needs one authenticated fetch of refs/pull/<n>/head.
+          # Credentials are removed and verified absent before Codex starts.
+          persist-credentials: true
 
       - name: Install the trusted review skill
         env:
@@ -54,6 +56,15 @@ jobs:
           python3 .github/codex/scripts/collect_pr_context.py \
             --event "$GITHUB_EVENT_PATH" \
             --output "$REVIEW_CONTEXT"
+
+      - name: Remove checkout credentials before Codex
+        run: |
+          set -euo pipefail
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          if git config --local --get-regexp 'extraheader|authorization'; then
+            echo 'Git credentials remain in the checkout configuration.' >&2
+            exit 1
+          fi
 
       - name: Run one read-only Codex review
         id: codex

@@ -9,7 +9,8 @@ used by `.github/workflows/apxinf-ai-review.yml`.
   base SHA. Its prompt, scripts, and installed skill therefore come from the
   trusted base branch.
 - The PR head is fetched as Git objects for `git diff` and `git show`. It is
-  never checked out, built, imported, sourced, or executed.
+  never checked out, built, imported, sourced, or executed. The checkout token
+  used for that fetch is removed and verified absent before Codex starts.
 - The `analyze` job has read-only GitHub permissions and invokes Codex once
   with the `:read-only` permission profile.
 - The separate `publish` job receives only validated artifacts and is the only
