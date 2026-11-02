@@ -27,11 +27,14 @@ HIGH_RISK_SUFFIXES = (".cu", ".cuh", ".metal", ".cpp", ".cc", ".rs")
 def git(*args: str) -> str:
     result = subprocess.run(
         ["git", *args],
-        check=True,
+        check=False,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
+    if result.returncode:
+        detail = result.stderr.strip() or "no stderr"
+        raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
     return result.stdout
 
 
