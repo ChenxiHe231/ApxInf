@@ -309,11 +309,12 @@ pub struct Qwen35DynamicDecodeScratch<'a> {
 
 pub const QWEN35_DECODE_SPLIT_TOKENS: usize = abi::DECODE_SPLIT_TOKENS;
 
+/// Workspace bound for the minimum split size, including shorter live prefixes.
 pub fn qwen35_dynamic_decode_max_splits(capacity: usize) -> Result<usize> {
     if capacity == 0 || i32::try_from(capacity).is_err() {
         return Err(invalid("Qwen3.5 dynamic decode capacity is invalid"));
     }
-    Ok(capacity.div_ceil(QWEN35_DECODE_SPLIT_TOKENS))
+    Ok(capacity.div_ceil(abi::MIN_DECODE_SPLIT_TOKENS))
 }
 
 fn dynamic_cache_storage(
@@ -389,6 +390,63 @@ pub fn qwen35_dynamic_kv_append(
     crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
     unsafe {
         status::check(abi::apxinf_qwen35_dynamic_kv_append(
+            ctx.runtime(),
+            &spec,
+            &bindings,
+        ))
+    }
+}
+
+/// Split projected Q/gate, apply Q RMSNorm and RoPE in one kernel.
+/// Intermediate normalization and rotation results retain BF16 rounding.
+#[allow(clippy::too_many_arguments)]
+pub fn qwen35_query_prepare(
+    ctx: &CudaContext,
+    tokens: usize,
+    projected: &Tensor,
+    norm_weight: &Tensor,
+    positions: &Tensor,
+    rope_theta: f32,
+    query: &Tensor,
+    gate: &Tensor,
+) -> Result<()> {
+    if tokens == 0 || i32::try_from(tokens).is_err() || !rope_theta.is_finite() || rope_theta <= 0.0
+    {
+        return Err(invalid("invalid fused query preparation parameters"));
+    }
+    let projected = tensor_storage(
+        ctx,
+        projected,
+        DType::BF16,
+        &[
+            tokens,
+            QWEN35_ATTENTION_Q_HEADS,
+            2 * QWEN35_ATTENTION_HEAD_DIM,
+        ],
+    )?;
+    let norm_weight = tensor_storage(ctx, norm_weight, DType::BF16, &[QWEN35_ATTENTION_HEAD_DIM])?;
+    let positions = tensor_storage(ctx, positions, DType::I32, &[3, tokens])?;
+    let shape = [tokens, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_HEAD_DIM];
+    let query = tensor_storage(ctx, query, DType::BF16, &shape)?;
+    let gate = tensor_storage(ctx, gate, DType::BF16, &shape)?;
+    validate_disjoint(&[&projected, &norm_weight, &positions], &[&query, &gate])?;
+    let spec = abi::QueryPrepareSpec {
+        version: abi::QUERY_PREPARE_SPEC_VERSION,
+        tokens: tokens as u32,
+        rope_theta,
+        rms_epsilon: QWEN35_ATTENTION_RMS_EPSILON,
+    };
+    let bindings = abi::QueryPrepareBindings {
+        projected_query_gate: projected.ptr(),
+        norm_weight: norm_weight.ptr(),
+        positions: positions.ptr(),
+        query: query.ptr(),
+        gate: gate.ptr(),
+        stream: ctx.stream().handle(),
+    };
+    crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
+    unsafe {
+        status::check(abi::apxinf_qwen35_query_prepare(
             ctx.runtime(),
             &spec,
             &bindings,
@@ -474,6 +532,34 @@ pub fn qwen35_dynamic_decode_attention(
     scratch: Qwen35DynamicDecodeScratch<'_>,
     output: &Tensor,
 ) -> Result<()> {
+    dynamic_decode_attention(ctx, valid_tokens, query, None, cache, scratch, output)
+}
+
+/// Direct dynamic FP8 decode with sigmoid gate fused into split reduction.
+/// The attention result rounds to BF16 before gating, as in separate ops.
+#[allow(clippy::too_many_arguments)]
+pub fn qwen35_dynamic_decode_attention_gated(
+    ctx: &CudaContext,
+    valid_tokens: usize,
+    query: &Tensor,
+    gate: &Tensor,
+    cache: Qwen35DynamicFp8KvCache<'_>,
+    scratch: Qwen35DynamicDecodeScratch<'_>,
+    output: &Tensor,
+) -> Result<()> {
+    dynamic_decode_attention(ctx, valid_tokens, query, Some(gate), cache, scratch, output)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dynamic_decode_attention(
+    ctx: &CudaContext,
+    valid_tokens: usize,
+    query: &Tensor,
+    gate: Option<&Tensor>,
+    cache: Qwen35DynamicFp8KvCache<'_>,
+    scratch: Qwen35DynamicDecodeScratch<'_>,
+    output: &Tensor,
+) -> Result<()> {
     let (capacity, key_cache, value_cache, key_scales, value_scales) =
         dynamic_cache_storage(ctx, cache)?;
     if valid_tokens == 0 || valid_tokens > capacity || i32::try_from(valid_tokens).is_err() {
@@ -482,6 +568,10 @@ pub fn qwen35_dynamic_decode_attention(
     let query_shape = [1, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_HEAD_DIM];
     let query = tensor_storage(ctx, query, DType::BF16, &query_shape)?;
     let output = tensor_storage(ctx, output, DType::BF16, &query_shape)?;
+    let gate = gate
+        .map(|g| tensor_storage(ctx, g, DType::BF16, &query_shape))
+        .transpose()?;
+
     let partial_shape = scratch.partial_max.shape().dims();
     if partial_shape.len() != 2
         || partial_shape[0] != QWEN35_ATTENTION_Q_HEADS
@@ -516,6 +606,12 @@ pub fn qwen35_dynamic_decode_attention(
         &[&query, &key_cache, &value_cache, &key_scales, &value_scales],
         &[&partial_max, &partial_sum, &partial_output, &output],
     )?;
+    if let Some(gate) = &gate {
+        validate_disjoint(
+            &[gate],
+            &[&partial_max, &partial_sum, &partial_output, &output],
+        )?;
+    }
     let spec = abi::DynamicDecodeSpec {
         version: abi::DYNAMIC_DECODE_SPEC_VERSION,
         valid_tokens: valid_tokens as u32,
@@ -531,6 +627,9 @@ pub fn qwen35_dynamic_decode_attention(
         partial_max: partial_max.ptr(),
         partial_sum: partial_sum.ptr(),
         partial_output: partial_output.ptr(),
+        gate: gate
+            .as_ref()
+            .map_or(std::ptr::null(), |g| g.ptr().cast_const()),
         output: output.ptr(),
         stream: ctx.stream().handle(),
     };

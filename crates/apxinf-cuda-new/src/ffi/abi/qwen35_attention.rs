@@ -4,8 +4,10 @@ use super::types::{CudaStream, Runtime};
 
 pub(crate) const SPEC_VERSION: u32 = 2;
 pub(crate) const DYNAMIC_KV_SPEC_VERSION: u32 = 1;
-pub(crate) const DYNAMIC_DECODE_SPEC_VERSION: u32 = 1;
+pub(crate) const DYNAMIC_DECODE_SPEC_VERSION: u32 = 2;
+pub(crate) const QUERY_PREPARE_SPEC_VERSION: u32 = 1;
 pub(crate) const DECODE_SPLIT_TOKENS: usize = 256;
+pub(crate) const MIN_DECODE_SPLIT_TOKENS: usize = 128;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -77,6 +79,25 @@ pub(crate) struct DynamicPrepareBindings {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct QueryPrepareSpec {
+    pub version: u32,
+    pub tokens: u32,
+    pub rope_theta: f32,
+    pub rms_epsilon: f32,
+}
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct QueryPrepareBindings {
+    pub projected_query_gate: *const c_void,
+    pub norm_weight: *const c_void,
+    pub positions: *const c_void,
+    pub query: *mut c_void,
+    pub gate: *mut c_void,
+    pub stream: CudaStream,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DynamicDecodeSpec {
     pub version: u32,
@@ -96,6 +117,7 @@ pub(crate) struct DynamicDecodeBindings {
     pub partial_max: *mut c_void,
     pub partial_sum: *mut c_void,
     pub partial_output: *mut c_void,
+    pub gate: *const c_void,
     pub output: *mut c_void,
     pub stream: CudaStream,
 }
@@ -121,6 +143,12 @@ pub(crate) struct DynamicDequantBindings {
 }
 
 unsafe extern "C" {
+    pub(crate) fn apxinf_qwen35_query_prepare(
+        runtime: Runtime,
+        spec: *const QueryPrepareSpec,
+        bindings: *const QueryPrepareBindings,
+    ) -> i32;
+
     pub(crate) fn apxinf_qwen35_attention_fp8(
         runtime: Runtime,
         spec: *const Spec,

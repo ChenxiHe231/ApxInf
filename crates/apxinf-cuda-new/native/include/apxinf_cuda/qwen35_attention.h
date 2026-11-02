@@ -14,6 +14,11 @@ apxinf_status_t apxinf_qwen35_attention_fp8(
     apxinf_runtime_t runtime, const apxinf_qwen35_attention_spec_t* spec,
     const apxinf_qwen35_attention_bindings_t* bindings);
 
+/* Split Q/gate, Q RMSNorm and RoPE with intermediate BF16 rounding. */
+apxinf_status_t apxinf_qwen35_query_prepare(
+    apxinf_runtime_t runtime, const apxinf_qwen35_query_prepare_spec_t* spec,
+    const apxinf_qwen35_query_prepare_bindings_t* bindings);
+
 /* Quantize post-RoPE K and projected V with one online scale per token and KV
    head, then append both payloads and scales to their persistent caches. */
 apxinf_status_t apxinf_qwen35_dynamic_kv_append(

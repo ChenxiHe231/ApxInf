@@ -659,10 +659,11 @@ __global__ void dynamic_kv_prepare_kernel(
   value_cache[row * kHeadDim + dim] = __nv_fp8_e4m3(v / vs);
 }
 
-// One CTA owns one KV head and one 256-token split.  Its eight warps own the
+// One CTA owns one KV head and one 128/256-token split.  Its eight warps own the
 // eight GQA query heads sharing that KV head.  K/V are loaded once into shared
 // memory and reused by all eight query heads, avoiding eight redundant global
-// cache reads. Synchronization is amortized across eight-token tiles.
+// cache reads. Synchronization and online softmax rescaling are amortized across tiles.
+template <int kSplitTokens>
 __global__ void dynamic_decode_split_kernel(
     const __nv_bfloat16* __restrict__ query,
     const __nv_fp8_e4m3* __restrict__ key_cache,
@@ -676,11 +677,12 @@ __global__ void dynamic_decode_split_kernel(
   const int warp = threadIdx.x >> 5;
   const int lane = threadIdx.x & 31;
   const int query_head = kv_head * kQueriesPerKvHead + warp;
-  const int begin = split * kDecodeSplitTokens;
-  const int end = begin + min(kDecodeSplitTokens, valid_tokens - begin);
+  const int begin = split * kSplitTokens;
+  const int end = begin + min(kSplitTokens, valid_tokens - begin);
   if (begin >= end || kv_head >= kKvHeads || warp >= kQueriesPerKvHead) return;
 
   constexpr int kTile = 8;
+  static_assert(kTile <= 32);
   __shared__ float shared_key[kTile][kHeadDim];
   __shared__ float shared_value[kTile][kHeadDim];
   __shared__ float shared_key_scale[kTile];
@@ -708,30 +710,39 @@ __global__ void dynamic_decode_split_kernel(
       }
     }
     __syncthreads();
+    // Each query warp computes a tile of scores, then distributes one score
+    // to each active lane. Softmax exponentials run in parallel, and the
+    // running accumulator is rescaled once per tile rather than per token.
+    float lane_score = -CUDART_INF_F;
     for (int t = 0; t < tile_count; ++t) {
       float dot = 0.0F;
 #pragma unroll
       for (int item = 0; item < 8; ++item) {
         dot += q[item] * shared_key[t][lane + item * 32];
       }
-      dot = warp_sum(dot);
-      float old_weight = 0.0F;
-      float new_weight = 0.0F;
-      if (lane == 0) {
-        const float score = dot * shared_key_scale[t] * 0.0625F;
-        const float next_max = fmaxf(running_max, score);
-        old_weight = __expf(running_max - next_max);
-        new_weight = __expf(score - next_max);
-        running_sum = running_sum * old_weight + new_weight;
-        running_max = next_max;
-      }
-      old_weight = __shfl_sync(0xffffffffU, old_weight, 0);
-      new_weight = __shfl_sync(0xffffffffU, new_weight, 0);
-      const float weighted_value_scale = new_weight * shared_value_scale[t];
+      dot = __shfl_sync(0xffffffffU, warp_sum(dot), 0);
+      if (lane == t) lane_score = dot * shared_key_scale[t] * 0.0625F;
+    }
+    float tile_max = lane_score;
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+      tile_max = fmaxf(tile_max, __shfl_down_sync(0xffffffffU, tile_max, delta));
+    }
+    tile_max = __shfl_sync(0xffffffffU, tile_max, 0);
+    const float next_max = fmaxf(running_max, tile_max);
+    const float old_weight = __expf(running_max - next_max);
+    const float probability = lane < tile_count ? __expf(lane_score - next_max) : 0.0F;
+    const float tile_sum = __shfl_sync(0xffffffffU, warp_sum(probability), 0);
+    running_sum = running_sum * old_weight + tile_sum;
+    running_max = next_max;
+    const float lane_weight = lane < tile_count ? probability * shared_value_scale[lane] : 0.0F;
+#pragma unroll
+    for (int item = 0; item < 8; ++item) accumulator[item] *= old_weight;
+    for (int t = 0; t < tile_count; ++t) {
+      const float weighted_value_scale = __shfl_sync(0xffffffffU, lane_weight, t);
 #pragma unroll
       for (int item = 0; item < 8; ++item) {
-        accumulator[item] = accumulator[item] * old_weight +
-            shared_value[t][lane + item * 32] * weighted_value_scale;
+        accumulator[item] += shared_value[t][lane + item * 32] * weighted_value_scale;
       }
     }
     __syncthreads();
@@ -754,40 +765,57 @@ __global__ void dynamic_decode_reduce_kernel(
     const float* __restrict__ partial_max,
     const float* __restrict__ partial_sum,
     const float* __restrict__ partial_output,
+    const __nv_bfloat16* __restrict__ gate,
     __nv_bfloat16* __restrict__ output, int num_splits, int max_splits) {
   const int query_head = blockIdx.x;
   const int dim = threadIdx.x;
   if (query_head >= kQHeads || dim >= kHeadDim) return;
-
-  __shared__ float global_max;
-  __shared__ float denominator;
+  __shared__ float partial[kWarps];
+  __shared__ float weights[kThreads];
+  const int64_t base = static_cast<int64_t>(query_head) * max_splits;
+  float maximum = -CUDART_INF_F;
+  for (int split = dim; split < num_splits; split += kThreads) {
+    maximum = fmaxf(maximum, partial_max[base + split]);
+  }
+  // Unlike absmax reduction, attention scores can all be negative.
+  for (int delta = 16; delta > 0; delta >>= 1) {
+    maximum = fmaxf(maximum, __shfl_down_sync(0xffffffffU, maximum, delta));
+  }
+  if ((dim & 31) == 0) partial[dim >> 5] = maximum;
+  __syncthreads();
   if (dim == 0) {
-    float maximum = -CUDART_INF_F;
-    for (int split = 0; split < num_splits; ++split) {
-      const int64_t index =
-          static_cast<int64_t>(query_head) * max_splits + split;
-      maximum = fmaxf(maximum, partial_max[index]);
-    }
-    float sum = 0.0F;
-    for (int split = 0; split < num_splits; ++split) {
-      const int64_t index =
-          static_cast<int64_t>(query_head) * max_splits + split;
-      sum += partial_sum[index] * __expf(partial_max[index] - maximum);
-    }
-    global_max = maximum;
-    denominator = sum;
+    float m = -CUDART_INF_F;
+#pragma unroll
+    for (int i = 0; i < kWarps; ++i) m = fmaxf(m, partial[i]);
+    partial[0] = m;
   }
   __syncthreads();
-
+  const float global_max = partial[0];
+  __syncthreads();
+  float sum = 0.0F;
   float value = 0.0F;
-  for (int split = 0; split < num_splits; ++split) {
-    const int64_t index =
-        static_cast<int64_t>(query_head) * max_splits + split;
-    const float weight = __expf(partial_max[index] - global_max);
-    value += partial_output[index * kHeadDim + dim] * weight;
+  // Compute each split weight once for all 256 output dimensions. Chunking
+  // keeps shared memory bounded even for contexts with >256 splits.
+  for (int first = 0; first < num_splits; first += kThreads) {
+    const int count = min(kThreads, num_splits - first);
+    if (dim < count) {
+      const int64_t index = base + first + dim;
+      const float weight = __expf(partial_max[index] - global_max);
+      weights[dim] = weight;
+      sum += partial_sum[index] * weight;
+    }
+    __syncthreads();
+    for (int split = 0; split < count; ++split) {
+      value += partial_output[(base + first + split) * kHeadDim + dim] * weights[split];
+    }
+    __syncthreads();
   }
-  output[query_head * kHeadDim + dim] =
-      __float2bfloat16(value / denominator);
+  const float denominator = block_sum(sum, partial);
+  // Preserve the decomposed path's BF16 attention rounding before the gate.
+  const __nv_bfloat16 attention = __float2bfloat16(value / denominator);
+  const int index = query_head * kHeadDim + dim;
+  output[index] = gate == nullptr ? attention : __float2bfloat16(
+      __bfloat162float(attention) / (1.0F + __expf(-__bfloat162float(gate[index]))));
 }
 
 __global__ void dynamic_kv_dequant_kernel(
@@ -804,6 +832,22 @@ __global__ void dynamic_kv_dequant_kernel(
                                key_scales[scale_index]);
   value[index] = __float2bfloat16(static_cast<float>(value_cache[index]) *
                                  value_scales[scale_index]);
+}
+
+template <int kSplitTokens>
+void launch_dynamic_decode_split(
+    const apxinf_qwen35_dynamic_decode_spec_t& spec,
+    const apxinf_qwen35_dynamic_decode_bindings_t& bindings,
+    cudaStream_t stream, int num_splits) {
+  dynamic_decode_split_kernel<kSplitTokens><<<dim3(num_splits, kKvHeads), kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(bindings.query),
+      static_cast<const __nv_fp8_e4m3*>(bindings.key_cache),
+      static_cast<const __nv_fp8_e4m3*>(bindings.value_cache),
+      static_cast<const float*>(bindings.key_scales),
+      static_cast<const float*>(bindings.value_scales),
+      static_cast<float*>(bindings.partial_max),
+      static_cast<float*>(bindings.partial_sum),
+      static_cast<float*>(bindings.partial_output), spec.valid_tokens, spec.max_splits);
 }
 
 bool valid_spec(const apxinf_qwen35_attention_spec_t& spec) {
@@ -850,8 +894,8 @@ bool valid_dynamic_kv_bindings(
 bool valid_dynamic_decode_spec(
     const apxinf_qwen35_dynamic_decode_spec_t& spec) {
   const uint64_t splits =
-      (static_cast<uint64_t>(spec.valid_tokens) + kDecodeSplitTokens - 1) /
-      kDecodeSplitTokens;
+      (static_cast<uint64_t>(spec.valid_tokens) + APXINF_QWEN35_MIN_DECODE_SPLIT_TOKENS - 1) /
+      APXINF_QWEN35_MIN_DECODE_SPLIT_TOKENS;
   return spec.version == APXINF_QWEN35_DYNAMIC_DECODE_SPEC_VERSION &&
          spec.valid_tokens > 0 && spec.valid_tokens <= spec.cache_capacity &&
          spec.cache_capacity <= INT_MAX && spec.max_splits > 0 &&
@@ -966,6 +1010,32 @@ extern "C" apxinf_status_t apxinf_qwen35_attention_fp8(
   });
 }
 
+extern "C" apxinf_status_t apxinf_qwen35_query_prepare(
+    apxinf_runtime_t runtime, const apxinf_qwen35_query_prepare_spec_t* spec,
+    const apxinf_qwen35_query_prepare_bindings_t* bindings) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr ||
+        spec->version != APXINF_QWEN35_QUERY_PREPARE_SPEC_VERSION ||
+        spec->tokens == 0 || spec->tokens > INT_MAX ||
+        !std::isfinite(spec->rope_theta) || spec->rope_theta <= 0.0F ||
+        !std::isfinite(spec->rms_epsilon) || spec->rms_epsilon <= 0.0F ||
+        bindings->projected_query_gate == nullptr || bindings->norm_weight == nullptr ||
+        bindings->positions == nullptr || bindings->query == nullptr || bindings->gate == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid fused query preparation arguments");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    prepare_query_kernel<<<dim3(spec->tokens, kQHeads), kThreads, 0,
+        static_cast<cudaStream_t>(bindings->stream)>>>(
+        static_cast<const __nv_bfloat16*>(bindings->projected_query_gate),
+        static_cast<const __nv_bfloat16*>(bindings->norm_weight),
+        static_cast<const int32_t*>(bindings->positions),
+        static_cast<__nv_bfloat16*>(bindings->query),
+        static_cast<__nv_bfloat16*>(bindings->gate), spec->tokens,
+        spec->rope_theta, spec->rms_epsilon);
+    apxinf::framework::check_cuda(cudaGetLastError());
+  });
+}
+
 extern "C" apxinf_status_t apxinf_qwen35_dynamic_kv_append(
     apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_kv_spec_t* spec,
     const apxinf_qwen35_dynamic_kv_bindings_t* bindings) {
@@ -1031,24 +1101,21 @@ extern "C" apxinf_status_t apxinf_qwen35_dynamic_decode_attention(
     }
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
     auto stream = static_cast<cudaStream_t>(bindings->stream);
-    const int num_splits =
-        (spec->valid_tokens + kDecodeSplitTokens - 1) / kDecodeSplitTokens;
-    const dim3 split_grid(num_splits, kKvHeads);
-    dynamic_decode_split_kernel<<<split_grid, kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(bindings->query),
-        static_cast<const __nv_fp8_e4m3*>(bindings->key_cache),
-        static_cast<const __nv_fp8_e4m3*>(bindings->value_cache),
-        static_cast<const float*>(bindings->key_scales),
-        static_cast<const float*>(bindings->value_scales),
-        static_cast<float*>(bindings->partial_max),
-        static_cast<float*>(bindings->partial_sum),
-        static_cast<float*>(bindings->partial_output), spec->valid_tokens,
-        spec->max_splits);
+    // Short prefixes need more CTAs to fill the device; long prefixes retain
+    // 256-token splits to bound partial traffic. Workspace covers the minimum.
+    const int split_tokens = spec->valid_tokens <= 8192 ? 128 : kDecodeSplitTokens;
+    const int num_splits = (spec->valid_tokens + split_tokens - 1) / split_tokens;
+    if (split_tokens == 128) {
+      launch_dynamic_decode_split<128>(*spec, *bindings, stream, num_splits);
+    } else {
+      launch_dynamic_decode_split<kDecodeSplitTokens>(*spec, *bindings, stream, num_splits);
+    }
     apxinf::framework::check_cuda(cudaGetLastError());
     dynamic_decode_reduce_kernel<<<kQHeads, kThreads, 0, stream>>>(
         static_cast<const float*>(bindings->partial_max),
         static_cast<const float*>(bindings->partial_sum),
         static_cast<const float*>(bindings->partial_output),
+        static_cast<const __nv_bfloat16*>(bindings->gate),
         static_cast<__nv_bfloat16*>(bindings->output), num_splits,
         spec->max_splits);
     apxinf::framework::check_cuda(cudaGetLastError());

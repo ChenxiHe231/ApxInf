@@ -14,8 +14,10 @@
 #define APXINF_QWEN35_ROTARY_DIM 64u
 #define APXINF_QWEN35_ATTENTION_MAX_SPLITS 32u
 #define APXINF_QWEN35_DYNAMIC_KV_SPEC_VERSION 1u
-#define APXINF_QWEN35_DYNAMIC_DECODE_SPEC_VERSION 1u
+#define APXINF_QWEN35_DYNAMIC_DECODE_SPEC_VERSION 2u
+#define APXINF_QWEN35_QUERY_PREPARE_SPEC_VERSION 1u
 #define APXINF_QWEN35_DECODE_SPLIT_TOKENS 256u
+#define APXINF_QWEN35_MIN_DECODE_SPLIT_TOKENS 128u
 
 typedef struct {
   uint32_t version;
@@ -92,6 +94,22 @@ typedef struct {
 
 typedef struct {
   uint32_t version;
+  uint32_t tokens;
+  float rope_theta;
+  float rms_epsilon;
+} apxinf_qwen35_query_prepare_spec_t;
+
+typedef struct {
+  const void* projected_query_gate; /* BF16 [T,16,512]. */
+  const void* norm_weight; /* BF16 [256], zero-centered. */
+  const void* positions; /* I32 [3,T]. */
+  void* query; /* BF16 [T,16,256]. */
+  void* gate; /* BF16 [T,16,256]. */
+  apxinf_cuda_stream_t stream;
+} apxinf_qwen35_query_prepare_bindings_t;
+
+typedef struct {
+  uint32_t version;
   uint32_t valid_tokens;
   uint32_t cache_capacity;
   uint32_t max_splits;
@@ -110,6 +128,8 @@ typedef struct {
   void* partial_max;
   void* partial_sum;
   void* partial_output;
+  /* Optional BF16 [1,16,256] sigmoid logits; null returns ungated output. */
+  const void* gate;
   /* BF16 [1,16,256]. */
   void* output;
   apxinf_cuda_stream_t stream;

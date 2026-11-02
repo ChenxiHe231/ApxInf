@@ -41,9 +41,26 @@ fn dynamic_fp8_decode_matches_quantized_reference_across_splits() {
     let capacity = tokens + 19;
     let kv_elements = tokens * ops::QWEN35_ATTENTION_KV_WIDTH;
     let query_elements = ops::QWEN35_ATTENTION_Q_HEADS * ops::QWEN35_ATTENTION_HEAD_DIM;
-    let key_host = patterned_bf16(kv_elements, 17, 257, 91.0);
-    let value_host = patterned_bf16(kv_elements, 29, 251, 83.0);
-    let query_host = patterned_bf16(query_elements, 31, 263, 97.0);
+    let mut key_host = patterned_bf16(kv_elements, 17, 257, 91.0);
+    let mut value_host = patterned_bf16(kv_elements, 29, 251, 83.0);
+    let mut query_host = patterned_bf16(query_elements, 31, 263, 97.0);
+    for row in 0..tokens * 2 {
+        let ka = if row % 13 == 0 {
+            0.0
+        } else {
+            0.125 * (1 << (row % 7)) as f32
+        };
+        let va = if row % 17 == 0 {
+            0.0
+        } else {
+            0.25 * (1 << ((row * 3) % 7)) as f32
+        };
+        for dim in 0..256 {
+            key_host[row * 256 + dim] = bf16::from_f32(key_host[row * 256 + dim].to_f32() * ka);
+            value_host[row * 256 + dim] = bf16::from_f32(value_host[row * 256 + dim].to_f32() * va);
+        }
+    }
+    query_host[..256].fill(bf16::ZERO);
     let key = transfers::to_cuda(
         &Tensor::from_bf16(
             vec![
@@ -148,95 +165,139 @@ fn dynamic_fp8_decode_matches_quantized_reference_across_splits() {
         ],
         DType::BF16,
     );
-    ops::qwen35_dynamic_decode_attention(
+    for valid in [1, 7, 16, 17, 255, 256, 257, tokens] {
+        ops::qwen35_dynamic_decode_attention(
+            &ctx,
+            valid,
+            &query,
+            cache(),
+            ops::Qwen35DynamicDecodeScratch {
+                partial_max: &partial_max,
+                partial_sum: &partial_sum,
+                partial_output: &partial_output,
+            },
+            &output,
+        )
+        .unwrap();
+        ctx.synchronize().unwrap();
+
+        let actual_key_scales = transfers::to_cpu(&key_scales)
+            .unwrap()
+            .as_f32()
+            .unwrap()
+            .to_vec();
+        let actual_value_scales = transfers::to_cpu(&value_scales)
+            .unwrap()
+            .as_f32()
+            .unwrap()
+            .to_vec();
+        let mut decoded_key = vec![0.0f32; kv_elements];
+        let mut decoded_value = vec![0.0f32; kv_elements];
+        for position in 0..tokens {
+            for head in 0..ops::QWEN35_ATTENTION_KV_HEADS {
+                let row = position * ops::QWEN35_ATTENTION_KV_HEADS + head;
+                let begin = row * ops::QWEN35_ATTENTION_HEAD_DIM;
+                let end = begin + ops::QWEN35_ATTENTION_HEAD_DIM;
+                let (key_scale, key_values) = dynamic_quantized(&key_host[begin..end]);
+                let (value_scale, value_values) = dynamic_quantized(&value_host[begin..end]);
+                assert!(
+                    (actual_key_scales[row] - key_scale).abs()
+                        <= key_scale.abs() * 1.0e-6 + 1.0e-12
+                );
+                assert!(
+                    (actual_value_scales[row] - value_scale).abs()
+                        <= value_scale.abs() * 1.0e-6 + 1.0e-12
+                );
+                decoded_key[begin..end].copy_from_slice(&key_values);
+                decoded_value[begin..end].copy_from_slice(&value_values);
+            }
+        }
+
+        let actual = transfers::to_cpu(&output)
+            .unwrap()
+            .as_bf16()
+            .unwrap()
+            .iter()
+            .map(|value| value.to_f32())
+            .collect::<Vec<_>>();
+        for query_head in 0..ops::QWEN35_ATTENTION_Q_HEADS {
+            let kv_head =
+                query_head / (ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS);
+            let query_begin = query_head * ops::QWEN35_ATTENTION_HEAD_DIM;
+            let query_values =
+                &query_host[query_begin..query_begin + ops::QWEN35_ATTENTION_HEAD_DIM];
+            let mut scores = Vec::with_capacity(valid);
+            for position in 0..valid {
+                let key_begin = (position * ops::QWEN35_ATTENTION_KV_HEADS + kv_head)
+                    * ops::QWEN35_ATTENTION_HEAD_DIM;
+                let score = query_values
+                    .iter()
+                    .zip(&decoded_key[key_begin..key_begin + ops::QWEN35_ATTENTION_HEAD_DIM])
+                    .map(|(query, key)| query.to_f32() * key)
+                    .sum::<f32>()
+                    / (ops::QWEN35_ATTENTION_HEAD_DIM as f32).sqrt();
+                scores.push(score);
+            }
+            let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let weights = scores
+                .iter()
+                .map(|score| (*score - maximum).exp())
+                .collect::<Vec<_>>();
+            let denominator = weights.iter().sum::<f32>();
+            for dim in 0..ops::QWEN35_ATTENTION_HEAD_DIM {
+                let expected = weights
+                    .iter()
+                    .enumerate()
+                    .map(|(position, weight)| {
+                        let value_index = (position * ops::QWEN35_ATTENTION_KV_HEADS + kv_head)
+                            * ops::QWEN35_ATTENTION_HEAD_DIM
+                            + dim;
+                        weight * decoded_value[value_index]
+                    })
+                    .sum::<f32>()
+                    / denominator;
+                let actual_value = actual[query_begin + dim];
+                assert!(
+                    (actual_value - expected).abs() <= 0.004 * expected.abs() + 0.002,
+                    "head={query_head} dim={dim}: {actual_value} != {expected}"
+                );
+            }
+        }
+    }
+    // The fused gate must exactly preserve the separate BF16->gate rounding.
+    let gh: Vec<_> = (0..query_elements)
+        .map(|i| bf16::from_f32([-80.0, -8.0, -1.0, 0.0, 1.0, 8.0, 80.0][i % 7]))
+        .collect();
+    let gate = transfers::to_cuda(&Tensor::from_bf16(vec![1, 16, 256], &gh).unwrap(), 0).unwrap();
+    let gated = zeros(&ctx, vec![1, 16, 256], DType::BF16);
+    ops::qwen35_dynamic_decode_attention_gated(
         &ctx,
         tokens,
         &query,
+        &gate,
         cache(),
         ops::Qwen35DynamicDecodeScratch {
             partial_max: &partial_max,
             partial_sum: &partial_sum,
             partial_output: &partial_output,
         },
-        &output,
+        &gated,
     )
     .unwrap();
+    let out2d = CudaBuffer::from_tensor(&output)
+        .unwrap()
+        .as_tensor(Shape::new(vec![16, 256]), DType::BF16)
+        .unwrap();
+    let gate2d = CudaBuffer::from_tensor(&gate)
+        .unwrap()
+        .as_tensor(Shape::new(vec![16, 256]), DType::BF16)
+        .unwrap();
+    ops::apply_output_gate(&ctx, &out2d, &gate2d).unwrap();
     ctx.synchronize().unwrap();
-
-    let actual_key_scales = transfers::to_cpu(&key_scales)
-        .unwrap()
-        .as_f32()
-        .unwrap()
-        .to_vec();
-    let actual_value_scales = transfers::to_cpu(&value_scales)
-        .unwrap()
-        .as_f32()
-        .unwrap()
-        .to_vec();
-    let mut decoded_key = vec![0.0f32; kv_elements];
-    let mut decoded_value = vec![0.0f32; kv_elements];
-    for position in 0..tokens {
-        for head in 0..ops::QWEN35_ATTENTION_KV_HEADS {
-            let row = position * ops::QWEN35_ATTENTION_KV_HEADS + head;
-            let begin = row * ops::QWEN35_ATTENTION_HEAD_DIM;
-            let end = begin + ops::QWEN35_ATTENTION_HEAD_DIM;
-            let (key_scale, key_values) = dynamic_quantized(&key_host[begin..end]);
-            let (value_scale, value_values) = dynamic_quantized(&value_host[begin..end]);
-            assert!((actual_key_scales[row] - key_scale).abs() <= 1.0e-7);
-            assert!((actual_value_scales[row] - value_scale).abs() <= 1.0e-7);
-            decoded_key[begin..end].copy_from_slice(&key_values);
-            decoded_value[begin..end].copy_from_slice(&value_values);
-        }
-    }
-
-    let actual = transfers::to_cpu(&output)
-        .unwrap()
-        .as_bf16()
-        .unwrap()
-        .iter()
-        .map(|value| value.to_f32())
-        .collect::<Vec<_>>();
-    for query_head in 0..ops::QWEN35_ATTENTION_Q_HEADS {
-        let kv_head = query_head / (ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS);
-        let query_begin = query_head * ops::QWEN35_ATTENTION_HEAD_DIM;
-        let query_values = &query_host[query_begin..query_begin + ops::QWEN35_ATTENTION_HEAD_DIM];
-        let mut scores = Vec::with_capacity(tokens);
-        for position in 0..tokens {
-            let key_begin = (position * ops::QWEN35_ATTENTION_KV_HEADS + kv_head)
-                * ops::QWEN35_ATTENTION_HEAD_DIM;
-            let score = query_values
-                .iter()
-                .zip(&decoded_key[key_begin..key_begin + ops::QWEN35_ATTENTION_HEAD_DIM])
-                .map(|(query, key)| query.to_f32() * key)
-                .sum::<f32>()
-                / (ops::QWEN35_ATTENTION_HEAD_DIM as f32).sqrt();
-            scores.push(score);
-        }
-        let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let weights = scores
-            .iter()
-            .map(|score| (*score - maximum).exp())
-            .collect::<Vec<_>>();
-        let denominator = weights.iter().sum::<f32>();
-        for dim in 0..ops::QWEN35_ATTENTION_HEAD_DIM {
-            let expected = weights
-                .iter()
-                .enumerate()
-                .map(|(position, weight)| {
-                    let value_index = (position * ops::QWEN35_ATTENTION_KV_HEADS + kv_head)
-                        * ops::QWEN35_ATTENTION_HEAD_DIM
-                        + dim;
-                    weight * decoded_value[value_index]
-                })
-                .sum::<f32>()
-                / denominator;
-            let actual_value = actual[query_begin + dim];
-            assert!(
-                (actual_value - expected).abs() <= 0.005,
-                "head={query_head} dim={dim}: {actual_value} != {expected}"
-            );
-        }
-    }
+    assert_eq!(
+        transfers::to_cpu(&gated).unwrap().as_bf16().unwrap(),
+        transfers::to_cpu(&output).unwrap().as_bf16().unwrap()
+    );
 }
 
 #[test]
@@ -319,6 +380,134 @@ fn fused_prepare_matches_separate_bf16_norm_rope_and_quantization() {
     }
 }
 
+#[test]
+fn fused_query_prepare_matches_separate_norm_rope_exactly() {
+    let ctx = CudaContext::new(0).unwrap();
+    for (tokens, start) in [(1, 0), (1, 49151), (17, 524287)] {
+        let mut host = patterned_bf16(tokens * 8192, 23, 331, 39.0);
+        host[..256].fill(bf16::ZERO);
+        host[1024] = bf16::from_f32(8192.0);
+        let projected =
+            transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 16, 512], &host).unwrap(), 0)
+                .unwrap();
+        let norm = transfers::to_cuda(
+            &Tensor::from_bf16(vec![256], &patterned_bf16(256, 7, 97, 173.0)).unwrap(),
+            0,
+        )
+        .unwrap();
+        let p: Vec<i32> = (0..tokens).map(|i| start + i as i32).collect();
+        let pos1 = transfers::to_cuda(&Tensor::from_i32(vec![tokens], &p).unwrap(), 0).unwrap();
+        let p3: Vec<i32> = p.iter().copied().cycle().take(tokens * 3).collect();
+        let pos3 = transfers::to_cuda(&Tensor::from_i32(vec![3, tokens], &p3).unwrap(), 0).unwrap();
+        let q1 = zeros(&ctx, vec![tokens, 16, 256], DType::BF16);
+        let g1 = zeros(&ctx, vec![tokens, 16, 256], DType::BF16);
+        let q2 = zeros(&ctx, vec![tokens, 16, 256], DType::BF16);
+        let g2 = zeros(&ctx, vec![tokens, 16, 256], DType::BF16);
+        ops::qwen35_query_prepare(
+            &ctx,
+            tokens,
+            &projected,
+            &norm,
+            &pos3,
+            10_000_000.0,
+            &q1,
+            &g1,
+        )
+        .unwrap();
+        ops::split_query_and_gate(&ctx, &projected, &q2, &g2).unwrap();
+        let q2d = CudaBuffer::from_tensor(&q2)
+            .unwrap()
+            .as_tensor(Shape::new(vec![tokens * 16, 256]), DType::BF16)
+            .unwrap();
+        ops::head_rms_norm(&ctx, &q2d, &norm, ops::QWEN35_ATTENTION_RMS_EPSILON).unwrap();
+        ops::partial_rope(&ctx, &q2, &pos1, 64, 10_000_000.0).unwrap();
+        ctx.synchronize().unwrap();
+        assert_eq!(
+            transfers::to_cpu(&q1).unwrap().as_bf16().unwrap(),
+            transfers::to_cpu(&q2).unwrap().as_bf16().unwrap()
+        );
+        assert_eq!(
+            transfers::to_cpu(&g1).unwrap().as_bf16().unwrap(),
+            transfers::to_cpu(&g2).unwrap().as_bf16().unwrap()
+        );
+        assert!(ops::qwen35_query_prepare(
+            &ctx,
+            tokens,
+            &projected,
+            &norm,
+            &pos3,
+            f32::NAN,
+            &q1,
+            &g1
+        )
+        .is_err());
+        assert!(ops::qwen35_query_prepare(
+            &ctx,
+            tokens,
+            &projected,
+            &norm,
+            &pos3,
+            10_000_000.0,
+            &q1,
+            &q1
+        )
+        .is_err());
+    }
+}
+
+#[test]
+fn dynamic_decode_negative_scores_and_large_merge() {
+    let ctx = CudaContext::new(0).unwrap();
+    let tokens = 65537; // 257 splits exercises shared-weight chunking.
+    let kh = vec![bf16::from_f32(1.0); tokens * 512];
+    let vh: Vec<_> = (0..tokens * 512)
+        .map(|i| bf16::from_f32(if (i / 256) % 2 == 0 { 2.0 } else { -3.0 }))
+        .collect();
+    let key =
+        transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
+    let value =
+        transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
+    let query = transfers::to_cuda(
+        &Tensor::from_bf16(vec![1, 16, 256], &vec![bf16::from_f32(-10.0); 4096]).unwrap(),
+        0,
+    )
+    .unwrap();
+    let kc = zeros(&ctx, vec![tokens, 2, 256], DType::F8E4M3);
+    let vc = zeros(&ctx, vec![tokens, 2, 256], DType::F8E4M3);
+    let ks = zeros(&ctx, vec![tokens, 2], DType::F32);
+    let vs = zeros(&ctx, vec![tokens, 2], DType::F32);
+    let cache = || ops::Qwen35DynamicFp8KvCache {
+        key: &kc,
+        value: &vc,
+        key_scales: &ks,
+        value_scales: &vs,
+    };
+    ops::qwen35_dynamic_kv_append(&ctx, tokens, 0, &key, &value, cache()).unwrap();
+    let splits = ops::qwen35_dynamic_decode_max_splits(tokens).unwrap();
+    let pm = zeros(&ctx, vec![16, splits], DType::F32);
+    let ps = zeros(&ctx, vec![16, splits], DType::F32);
+    let po = zeros(&ctx, vec![16, splits, 256], DType::F32);
+    let out = zeros(&ctx, vec![1, 16, 256], DType::BF16);
+    ops::qwen35_dynamic_decode_attention(
+        &ctx,
+        tokens,
+        &query,
+        cache(),
+        ops::Qwen35DynamicDecodeScratch {
+            partial_max: &pm,
+            partial_sum: &ps,
+            partial_output: &po,
+        },
+        &out,
+    )
+    .unwrap();
+    ctx.synchronize().unwrap();
+    let out = transfers::to_cpu(&out).unwrap();
+    for (i, v) in out.as_bf16().unwrap().iter().enumerate() {
+        assert_eq!(v.to_f32(), if i / 256 < 8 { 2.0 } else { -3.0 });
+    }
+}
+
 // Explicit opt-in attention-only timing: dequant+FA2 and direct FP8 use the
 // same dynamic cache, queries and valid prefix. Run under the device GPU lock.
 #[test]
@@ -326,7 +515,7 @@ fn fused_prepare_matches_separate_bf16_norm_rope_and_quantization() {
 fn benchmark_dynamic_fp8_decode_against_dequant_fa2() {
     use std::time::Instant;
     let ctx = CudaContext::new(0).unwrap();
-    for tokens in [4096, 8192, 16384, 32768, 49152] {
+    for tokens in [4096, 8192, 16384, 24576, 32768, 49152] {
         let key = transfers::to_cuda(
             &Tensor::from_bf16(
                 vec![tokens, 2, 256],
@@ -411,6 +600,10 @@ fn benchmark_dynamic_fp8_decode_against_dequant_fa2() {
         for sample in &mut samples {
             sample.sort_by(f64::total_cmp);
         }
+        println!(
+            "{{\"tokens\":{tokens},\"direct_samples_us\":{:?},\"dequant_fa2_samples_us\":{:?}}}",
+            samples[0], samples[1]
+        );
         let direct_us = samples[0][samples[0].len() / 2];
         let dequant_fa2_us = samples[1][samples[1].len() / 2];
         let actual = transfers::to_cpu(&out).unwrap();
