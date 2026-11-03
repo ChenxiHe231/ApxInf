@@ -91,17 +91,46 @@ impl WorkerClient {
                         }
                         JobResponse::Stream(response) => {
                             let mut connected = true;
+                            let mut first_delta_sent = false;
+                            let mut pending = String::new();
+                            let mut pending_deltas = 0usize;
                             let result = engine.complete_stream(job.request, &mut |delta| {
                                 if !connected {
                                     return false;
                                 }
-                                connected = response
-                                    .blocking_send(Ok(EngineStreamEvent::TextDelta(
-                                        delta.to_owned(),
-                                    )))
-                                    .is_ok();
+                                // Preserve first-token streaming latency, then
+                                // coalesce the small UTF-8 fragments emitted by
+                                // an MTP round. This keeps byte-for-byte output
+                                // while avoiding one cross-thread wakeup and
+                                // one SSE frame per generated token.
+                                if !first_delta_sent {
+                                    first_delta_sent = true;
+                                    connected = response
+                                        .blocking_send(Ok(EngineStreamEvent::TextDelta(
+                                            delta.to_owned(),
+                                        )))
+                                        .is_ok();
+                                } else {
+                                    pending.push_str(delta);
+                                    pending_deltas += 1;
+                                    if pending_deltas >= 8 {
+                                        connected = response
+                                            .blocking_send(Ok(EngineStreamEvent::TextDelta(
+                                                std::mem::take(&mut pending),
+                                            )))
+                                            .is_ok();
+                                        pending_deltas = 0;
+                                    }
+                                }
                                 connected
                             });
+                            if connected {
+                                if !pending.is_empty() {
+                                    connected = response
+                                        .blocking_send(Ok(EngineStreamEvent::TextDelta(pending)))
+                                        .is_ok();
+                                }
+                            }
                             if connected {
                                 let terminal = result.map(EngineStreamEvent::Complete);
                                 let _ = response.blocking_send(terminal);
@@ -182,7 +211,11 @@ impl WorkerClient {
         // This is separate from the inference queue capacity. It bounds
         // decoded text waiting for the HTTP task and applies backpressure to
         // the generation callback when a client reads slowly.
-        let (response, receiver) = mpsc::channel(8);
+        // One MTP round can publish several deltas back-to-back. Keep a full
+        // short completion buffered so HTTP/SSE scheduling never stalls the
+        // GPU worker between speculative rounds. The channel remains bounded
+        // and disconnect still closes it immediately.
+        let (response, receiver) = mpsc::channel(128);
         match self.sender.try_send(Job {
             request,
             response: JobResponse::Stream(response),

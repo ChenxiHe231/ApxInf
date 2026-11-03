@@ -373,7 +373,7 @@ fn streaming_response(
     created: u64,
     model: String,
 ) -> Response {
-    let (sender, body_receiver) = mpsc::channel::<Result<Bytes, Infallible>>(8);
+    let (sender, body_receiver) = mpsc::channel::<Result<Bytes, Infallible>>(128);
     tokio::spawn(async move {
         let envelope = StreamEnvelope {
             id: &id,
@@ -529,7 +529,7 @@ fn anthropic_streaming_response(
     id: String,
     model: String,
 ) -> Response {
-    let (sender, body_receiver) = mpsc::channel::<Result<Bytes, Infallible>>(8);
+    let (sender, body_receiver) = mpsc::channel::<Result<Bytes, Infallible>>(128);
     tokio::spawn(async move {
         if !send_anthropic_sse(
             &sender,
