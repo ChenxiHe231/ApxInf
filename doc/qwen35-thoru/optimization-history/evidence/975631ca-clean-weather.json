@@ -106,15 +106,18 @@
   },
   "reanalysis": {
     "reason": "Count every model call and repeated weather query, using existing captured logs and AIOS tool counters; no inference replay",
-    "collector_sha256": "43274783541373f3d47a8272d4b5b5e904922317a22fca6911ed366919b4c189"
+    "collector_sha256": "7a1166cd76b87e76d601d2211232c1359d82ff1b7ef9b011f686db3d435a432d",
+    "full_stream_audit": "One formal run (index10) contains a music_play id-type protocol error after weather call; no clean whole-population performance median."
   },
   "summary": {
-    "correct": 10,
+    "correct": 9,
     "total": 10,
-    "median_ms": 3315.455,
-    "p90_ms": 3620.03,
     "two_model_calls": 3,
-    "representative_index": 7
+    "representative_index": 7,
+    "final_weather_text_correct": 10,
+    "all_runs_valid": false,
+    "all_returned_requests_median_ms_including_errors": 3315.455,
+    "all_returned_requests_p90_ms_including_errors": 3620.03
   },
   "runs": [
     {
@@ -273,7 +276,8 @@
           "percent": 10.07777891895701
         }
       ],
-      "raw_record_sha256": "2d63e22a307f626313227ade9cd0511f57b3206a9ece9e990a803c16dbf67ba1"
+      "raw_record_sha256": "2d63e22a307f626313227ade9cd0511f57b3206a9ece9e990a803c16dbf67ba1",
+      "final_weather_text_correct": true
     },
     {
       "index": 1,
@@ -386,7 +390,8 @@
           "percent": 17.322879030276045
         }
       ],
-      "raw_record_sha256": "a7a258589fa4ed652c52eea756fc7fb10aaab998892b54ce179c49cbf103aa17"
+      "raw_record_sha256": "a7a258589fa4ed652c52eea756fc7fb10aaab998892b54ce179c49cbf103aa17",
+      "final_weather_text_correct": true
     },
     {
       "index": 2,
@@ -499,7 +504,8 @@
           "percent": 11.313397888836157
         }
       ],
-      "raw_record_sha256": "9eacac15bdf0b15ef79043d38560ebb879263e453d3ce1867388300c0a52a90f"
+      "raw_record_sha256": "9eacac15bdf0b15ef79043d38560ebb879263e453d3ce1867388300c0a52a90f",
+      "final_weather_text_correct": true
     },
     {
       "index": 3,
@@ -657,7 +663,8 @@
           "percent": 11.85613168951639
         }
       ],
-      "raw_record_sha256": "f5f3fe82b8325e2fa8788efcbcaec73fc2388c624ff03a40d2b8037c25272658"
+      "raw_record_sha256": "f5f3fe82b8325e2fa8788efcbcaec73fc2388c624ff03a40d2b8037c25272658",
+      "final_weather_text_correct": true
     },
     {
       "index": 4,
@@ -815,7 +822,8 @@
           "percent": 10.936512364084534
         }
       ],
-      "raw_record_sha256": "403afc4c003d42ca4c44bd52aa6ca75a2c86278a6825b4acaf95310af931c6cf"
+      "raw_record_sha256": "403afc4c003d42ca4c44bd52aa6ca75a2c86278a6825b4acaf95310af931c6cf",
+      "final_weather_text_correct": true
     },
     {
       "index": 5,
@@ -973,7 +981,8 @@
           "percent": 11.236971490482427
         }
       ],
-      "raw_record_sha256": "2e22c2b8ac01f1594328b7c12554d6bf40514b9281917c057d2ca134dddffab6"
+      "raw_record_sha256": "2e22c2b8ac01f1594328b7c12554d6bf40514b9281917c057d2ca134dddffab6",
+      "final_weather_text_correct": true
     },
     {
       "index": 6,
@@ -1131,7 +1140,8 @@
           "percent": 14.423590394524657
         }
       ],
-      "raw_record_sha256": "4dd4f015c9cc632137c4b0560994b39768a208cd3979ab3490a47dc85cbe4d71"
+      "raw_record_sha256": "4dd4f015c9cc632137c4b0560994b39768a208cd3979ab3490a47dc85cbe4d71",
+      "final_weather_text_correct": true
     },
     {
       "index": 7,
@@ -1289,7 +1299,8 @@
           "percent": 18.066993458502367
         }
       ],
-      "raw_record_sha256": "53910521e507e9731497113352a2c6ca827f59fed96e890c7d313aa7b6fdf19a"
+      "raw_record_sha256": "53910521e507e9731497113352a2c6ca827f59fed96e890c7d313aa7b6fdf19a",
+      "final_weather_text_correct": true
     },
     {
       "index": 8,
@@ -1447,7 +1458,8 @@
           "percent": 11.39735211708356
         }
       ],
-      "raw_record_sha256": "a6f9fa097d0882f7a00a644fe0713a26d0219fd46e94a37c6294f262e1a6602c"
+      "raw_record_sha256": "a6f9fa097d0882f7a00a644fe0713a26d0219fd46e94a37c6294f262e1a6602c",
+      "final_weather_text_correct": true
     },
     {
       "index": 9,
@@ -1560,13 +1572,14 @@
           "percent": 16.30432139371461
         }
       ],
-      "raw_record_sha256": "2bd34afbbeb7e1028665cf66654df648c54e517265e9b5a1fff0baa5cf39c191"
+      "raw_record_sha256": "2bd34afbbeb7e1028665cf66654df648c54e517265e9b5a1fff0baa5cf39c191",
+      "final_weather_text_correct": true
     },
     {
       "index": 10,
       "phase": "formal",
-      "correct": true,
-      "validation": "next-day temperatures/weather match",
+      "correct": false,
+      "validation": "final weather text matches, but model stream contains a tool protocol error",
       "aios": {
         "request_id": "20261103114200850183",
         "reply_text": "明天上海小雨，气温15到18度，出门记得带伞。",
@@ -1671,7 +1684,22 @@
           "percent": 10.736051135466894
         }
       ],
-      "raw_record_sha256": "52516ddfc8a3fd5d2904b54b47e9101cdd802218f0dd6c829c353bf99ac0d8c1"
+      "raw_record_sha256": "52516ddfc8a3fd5d2904b54b47e9101cdd802218f0dd6c829c353bf99ac0d8c1",
+      "final_weather_text_correct": true,
+      "stream_error_evidence": [
+        {
+          "capture_id": "92cd56821afe402ab1a30d69ba204c32",
+          "response_sha256": "c088ec920cc41bd15ae102d29c039bf75cc60c7eb61ff22a94a5fc0fb17b5d87",
+          "errors": [
+            {
+              "message": "tool protocol error: parameter 'id' in call to 'music_play' must have type 'string'",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        }
+      ]
     },
     {
       "index": 11,
@@ -1829,7 +1857,8 @@
           "percent": 13.57863629817264
         }
       ],
-      "raw_record_sha256": "fbfcd45f7b048564d0961496b34ed1cf53916c6994c3c6a0663f9b70dec51100"
+      "raw_record_sha256": "fbfcd45f7b048564d0961496b34ed1cf53916c6994c3c6a0663f9b70dec51100",
+      "final_weather_text_correct": true
     }
   ]
 }

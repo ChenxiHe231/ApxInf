@@ -96,25 +96,32 @@ def sse_events(path):
 def validate_weather(args, requests, responses, reply):
     if len(requests) < 2 or len(responses) != len(requests):
         return False, "expected matching model calls and responses"
+    for request in requests:
+        if any(event.get("error") for event in sse_events(Path(args.capture_dir) / (request["capture_id"] + ".response"))):
+            return False, "model stream contains error, including after partial answer"
     if any(response.get("tool_call_names", ["mcp__amap__maps_weather"]) != ["mcp__amap__maps_weather"] for response in responses[:-1]):
         return False, "unexpected intermediate tool calls"
     if responses[-1].get("tool_call_names"):
         return False, "final model call did not finish with an answer"
-    fragments = []
-    for event in sse_events(Path(args.capture_dir) / (requests[0]["capture_id"] + ".response")):
-        if event.get("error"):
-            return False, "model stream contains error"
-        for choice in event.get("choices", []):
-            fragments.extend((choice.get("delta") or {}).get("tool_calls") or [])
-    names = [(item.get("function") or {}).get("name") for item in fragments]
-    if "mcp__amap__maps_weather" not in names:
-        return False, "missing structured AMap weather call"
-    try:
-        arguments = json.loads("".join((item.get("function") or {}).get("arguments", "") for item in fragments))
-    except ValueError:
-        return False, "malformed tool arguments"
-    if not arguments.get("city"):
-        return False, "empty city argument"
+    for request in requests[:-1]:
+        fragments = []
+        for event in sse_events(Path(args.capture_dir) / (request["capture_id"] + ".response")):
+            if event.get("error"):
+                return False, "model stream contains error"
+            for choice in event.get("choices", []):
+                fragments.extend((choice.get("delta") or {}).get("tool_calls") or [])
+        names = [(item.get("function") or {}).get("name") for item in fragments]
+        if "mcp__amap__maps_weather" not in names:
+            return False, "missing structured AMap weather call"
+        try:
+            arguments = json.loads("".join((item.get("function") or {}).get("arguments", "") for item in fragments))
+        except ValueError:
+            return False, "malformed tool arguments"
+        city = str(arguments.get("city", "")).strip().lower() if isinstance(arguments, dict) else ""
+        if not city:
+            return False, "empty city argument"
+        if city not in ("上海", "上海市", "shanghai") and not re.fullmatch(r"31\d{4}", city):
+            return False, "weather tool did not query Shanghai"
     payload = json.loads((Path(args.capture_dir) / (requests[-1]["capture_id"] + ".request")).read_text())
     # The harness may inject UTC while the task's user timezone is Shanghai;
     # time normalization can also erase the original hour. Require the date
@@ -206,6 +213,12 @@ def main():
             responses = [by_id[x["capture_id"]] for x in requests]
             row["proxy_events"] = [{key: x[key] for key in ("event", "time", "duration_ms", "capture_id", "status", "tool_call_names", "finish_reasons") if key in x} for x in events]
             row["profiles"] = profiles
+            row["stream_errors"] = [
+                event["error"]
+                for request_event in requests
+                for event in sse_events(Path(args.capture_dir) / (request_event["capture_id"] + ".response"))
+                if event.get("error")
+            ]
             row["correct"], row["validation"] = validate_weather(args, requests, responses, result.get("reply_text", ""))
             row["answer_correct"] = row["correct"]
             tool_count = tools_after["calls"] - tools_before["calls"]
@@ -234,7 +247,7 @@ def main():
     if len(valid) == len(formal):
         median = statistics.median(times)
         representative = min(valid, key=lambda row: abs(row["aios"]["execution_time_ms"] - median))
-        text = ["# Weather E2E", "", "10 轮口径以实际 repeats 为准；以下为最接近中位数的同一轮，非各阶段独立分位数。", "", "| 阶段 | 时间 | 占比 |", "|---|---:|---:|"]
+        text = ["# Weather E2E", "", "正式 %d 轮；以下为最接近中位数的同一轮，非各阶段独立分位数。单轮不能作为统计中位数。" % len(formal), "", "| 阶段 | 时间 | 占比 |", "|---|---:|---:|"]
         for stage in representative["stages"]:
             text.append("| %s | %.6f s | %.2f%% |" % (stage["stage"], stage["time_ms"] / 1000, stage["percent"]))
         text.append("| **端到端总计** | **%.6f s** | **100%%** |" % (representative["aios"]["execution_time_ms"] / 1000))

@@ -77,6 +77,7 @@ class WeatherEvidenceTests(unittest.TestCase):
             path = Path(directory)
             event = {"choices": [{"delta": {"content": "上海晴，15到22度"}}]}
             (path / "a.response").write_text("data: " + json.dumps(event) + "\n\ndata: [DONE]\n")
+            (path / "b.response").write_text('data: [DONE]\n')
             valid, reason = validate_weather(SimpleNamespace(capture_dir=directory), [{"capture_id": "a"}, {"capture_id": "b"}], [{}, {}], "上海晴，15到22度")
             self.assertFalse(valid)
             self.assertIn("structured", reason)
@@ -98,10 +99,21 @@ class WeatherEvidenceTests(unittest.TestCase):
             event = {"choices": [{"delta": {"tool_calls": [{"function": {"name": "mcp__amap__maps_weather", "arguments": '{"city":"上海"}'}}]}}]}
             (path / "a.response").write_text("data: " + json.dumps(event) + "\n\ndata: [DONE]\n")
             (path / "b.request").write_text(json.dumps({"messages": self.messages()}, ensure_ascii=False))
+            (path / "b.response").write_text('data: [DONE]\n')
             args = SimpleNamespace(capture_dir=directory, expected_target_date="2026-11-04")
             reqs = [{"capture_id": "a"}, {"capture_id": "b"}]
             self.assertTrue(validate_weather(args, reqs, [{}, {}], "明天上海小雨，15到19度")[0])
             self.assertFalse(validate_weather(args, reqs, [{}, {}], "明天上海小雨转中雨，16到20度")[0])
+            (path / "b.response").write_text('data: {"error":{"message":"late recipe miss"}}\n\ndata: [DONE]\n')
+            valid, reason = validate_weather(args, reqs, [{}, {}], "明天上海小雨，15到19度")
+            self.assertFalse(valid)
+            self.assertIn("partial answer", reason)
+            (path / "b.response").write_text('data: [DONE]\n')
+            event["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] = '{"city":"北京"}'
+            (path / "a.response").write_text("data: " + json.dumps(event) + "\n\ndata: [DONE]\n")
+            valid, reason = validate_weather(args, reqs, [{}, {}], "明天上海小雨，15到19度")
+            self.assertFalse(valid)
+            self.assertIn("Shanghai", reason)
 
     def test_utc_date_cannot_override_case_target_date(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -111,6 +123,7 @@ class WeatherEvidenceTests(unittest.TestCase):
             messages = self.messages()
             messages[1]["content"] = "Time sampled while preparing turn 1, step 2: 2026-11-03T16:24:00+00:00[UTC]"
             (path / "b.request").write_text(json.dumps({"messages": messages}, ensure_ascii=False))
+            (path / "b.response").write_text('data: [DONE]\n')
             reqs = [{"capture_id": "a"}, {"capture_id": "b"}]
             # Shanghai is already Nov 4, so tomorrow is Nov 5, even though
             # adding a day to the injected UTC date would select Nov 4.
