@@ -48,23 +48,43 @@ def parse_profile(line):
     return result
 
 
-def phases(e2e_ms, profiles, requests, responses):
-    if len(profiles) != 2 or len(requests) != 2 or len(responses) != 2:
-        raise ValueError("expected exactly two calls; retries/concurrency require manual attribution")
+def phases(e2e_ms, profiles, requests, responses, tool_execution_ms=None):
+    if len(profiles) < 2 or len(requests) != len(profiles) or len(responses) != len(profiles):
+        raise ValueError("model profiles and HTTP calls must match, with at least two calls")
     timestamp = lambda x: dt.datetime.fromisoformat(x["time"])
-    gap = (timestamp(requests[1]) - timestamp(responses[0])).total_seconds() * 1000
-    rows = [
-        ("模型调用1 Prefill/TTFT：新增 %d tokens" % profiles[0]["computed_prompt_tokens"], profiles[0]["ttft_ms"]),
-        ("模型调用1 Decode：%d 个间隔" % profiles[0]["decode_intervals"], profiles[0]["decode_ms"]),
-        ("AMap 查询及工具编排间隔", gap),
-        ("模型调用2 Prefill/TTFT：新增 %d tokens" % profiles[1]["computed_prompt_tokens"], profiles[1]["ttft_ms"]),
-        ("模型调用2 Decode：%d 个间隔" % profiles[1]["decode_intervals"], profiles[1]["decode_ms"]),
-    ]
+    gaps = [(timestamp(requests[i + 1]) - timestamp(responses[i])).total_seconds() * 1000 for i in range(len(profiles) - 1)]
+    if isinstance(tool_execution_ms, (int, float)):
+        tool_execution_ms = [tool_execution_ms]
+    tools = gaps if tool_execution_ms is None else tool_execution_ms
+    if len(tools) != len(gaps):
+        raise ValueError("each inter-model gap must have exactly one weather-tool measurement")
+    tool_label = "AMap 查询及工具编排间隔" if tool_execution_ms is None else "AMap天气查询（AIOS工具计时）"
+    rows = []
+    for index, profile in enumerate(profiles):
+        rows.extend([
+            ("模型调用%d Prefill/TTFT：新增 %d tokens" % (index + 1, profile["computed_prompt_tokens"]), profile["ttft_ms"]),
+            ("模型调用%d Decode：%d 个间隔" % (index + 1, profile["decode_intervals"]), profile["decode_ms"]),
+        ])
+        if index < len(tools):
+            tool_ms = tools[index]
+            if not math.isfinite(tool_ms) or tool_ms < 0 or tool_ms > gaps[index] + 2.0:
+                raise ValueError("tool measurement is outside the inter-model gap")
+            rows.append((tool_label + (" %d" % (index + 1) if len(tools) > 1 else ""), tool_ms))
     other = e2e_ms - sum(value for _, value in rows)
-    if gap < 0 or other < 0:
+    if any(gap < 0 for gap in gaps) or other < 0:
         raise ValueError("non-additive timeline; check clock or profile matching")
     rows.append(("AIOS、模型服务、HTTP及其他余项", other))
     return [{"stage": name, "time_ms": value, "percent": 100 * value / e2e_ms} for name, value in rows]
+
+
+def weather_tool_snapshot(opener, aios_url):
+    with opener.open(aios_url.rstrip("/") + "/api/admin/dashboard", timeout=10) as response:
+        dashboard = json.load(response)
+    name = "mcp__amap__maps_weather"
+    return {
+        "calls": dashboard.get("tool_calls", {}).get(name, 0),
+        "recent": [item for item in dashboard.get("recent_tools", []) if item.get("tool") == name],
+    }
 
 
 def sse_events(path):
@@ -74,8 +94,12 @@ def sse_events(path):
 
 
 def validate_weather(args, requests, responses, reply):
-    if len(requests) != 2 or len(responses) != 2:
-        return False, "expected two model calls"
+    if len(requests) < 2 or len(responses) != len(requests):
+        return False, "expected matching model calls and responses"
+    if any(response.get("tool_call_names", ["mcp__amap__maps_weather"]) != ["mcp__amap__maps_weather"] for response in responses[:-1]):
+        return False, "unexpected intermediate tool calls"
+    if responses[-1].get("tool_call_names"):
+        return False, "final model call did not finish with an answer"
     fragments = []
     for event in sse_events(Path(args.capture_dir) / (requests[0]["capture_id"] + ".response")):
         if event.get("error"):
@@ -91,7 +115,7 @@ def validate_weather(args, requests, responses, reply):
         return False, "malformed tool arguments"
     if not arguments.get("city"):
         return False, "empty city argument"
-    payload = json.loads((Path(args.capture_dir) / (requests[1]["capture_id"] + ".request")).read_text())
+    payload = json.loads((Path(args.capture_dir) / (requests[-1]["capture_id"] + ".request")).read_text())
     # The harness may inject UTC while the task's user timezone is Shanghai;
     # time normalization can also erase the original hour. Require the date
     # fixed in the case manifest rather than silently adding a day to UTC.
@@ -154,6 +178,7 @@ def main():
     for index in range(args.warmups + args.repeats):
         log_before = server_log(args)
         proxy_offset = Path(args.proxy_log).stat().st_size
+        tools_before = weather_tool_snapshot(opener, args.aios_url)
         session = "weather-audit-" + uuid.uuid4().hex
         payload = {"asr_text": CASE, "user_id": "weather_commit_audit", "session_id": session, "new_session": True, "language": "zh-CN"}
         request = urllib.request.Request(args.aios_url.rstrip("/") + "/v1/process", data=json.dumps(payload, ensure_ascii=False).encode(), headers={"Content-Type": "application/json"})
@@ -163,6 +188,8 @@ def main():
             with opener.open(request, timeout=180) as response:
                 result = json.load(response)
             row.update(aios=result, wall_ms=(time.monotonic() - started) * 1000)
+            tools_after = weather_tool_snapshot(opener, args.aios_url)
+            row["aios_weather_tool"] = {"before": tools_before, "after": tools_after}
             after = server_log(args)
             if after.startswith(log_before):
                 delta = after[len(log_before):]
@@ -180,17 +207,28 @@ def main():
             row["proxy_events"] = [{key: x[key] for key in ("event", "time", "duration_ms", "capture_id", "status", "tool_call_names", "finish_reasons") if key in x} for x in events]
             row["profiles"] = profiles
             row["correct"], row["validation"] = validate_weather(args, requests, responses, result.get("reply_text", ""))
-            row["stages"] = phases(result["execution_time_ms"], profiles, requests, responses)
+            row["answer_correct"] = row["correct"]
+            tool_count = tools_after["calls"] - tools_before["calls"]
+            if tool_count != len(requests) - 1 or tool_count < 1 or len(tools_after["recent"]) < tool_count:
+                raise ValueError("cannot attribute AIOS weather-tool timings to each model gap")
+            tools = list(reversed(tools_after["recent"][:tool_count]))
+            if any(tool.get("status") != "done" for tool in tools):
+                raise ValueError("AIOS weather tool failed")
+            row["inter_model_gaps_ms"] = [
+                (dt.datetime.fromisoformat(requests[i + 1]["time"]) - dt.datetime.fromisoformat(responses[i]["time"])).total_seconds() * 1000
+                for i in range(len(requests) - 1)
+            ]
+            row["stages"] = phases(result["execution_time_ms"], profiles, requests, responses, [tool["duration_ms"] for tool in tools])
         except Exception as error:
             row["error"] = str(error)
             row["correct"] = False
         rows.append(row)
         (output / ("run-%02d.json" % index)).write_text(json.dumps(row, ensure_ascii=False, indent=2) + "\n")
-        print(json.dumps({key: row.get(key) for key in ("index", "phase", "correct", "validation", "error")}, ensure_ascii=False), flush=True)
+        print(json.dumps({key: row.get(key) for key in ("index", "phase", "answer_correct", "correct", "validation", "error")}, ensure_ascii=False), flush=True)
     formal = [row for row in rows if row["phase"] == "formal"]
     valid = [row for row in formal if row["correct"] and row.get("stages")]
     times = sorted(row["aios"]["execution_time_ms"] for row in valid)
-    summary = {"metadata": metadata, "metadata_file_sha256": hashlib.sha256(Path(args.metadata).read_bytes()).hexdigest(), "correct": len(valid), "total": len(formal), "all_runs_valid": len(valid) == len(formal)}
+    summary = {"metadata": metadata, "metadata_file_sha256": hashlib.sha256(Path(args.metadata).read_bytes()).hexdigest(), "answer_correct": sum(bool(row.get("answer_correct")) for row in formal), "correct": len(valid), "total": len(formal), "all_runs_valid": len(valid) == len(formal)}
     if times:
         summary.update(successful_subset_median_ms=statistics.median(times), successful_subset_p90_ms=times[math.ceil(.9 * len(times)) - 1])
     if len(valid) == len(formal):

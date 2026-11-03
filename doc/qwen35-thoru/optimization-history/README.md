@@ -1,6 +1,8 @@
 # Qwen3.6 Thor-U / AIOS optimization history
 
-本目录是版本与证据台账。**源码已整理；逐 commit 的 GPU 重测尚未执行。** 用户确认另一个任务正在使用 thor-u，因此本轮未停止服务、未重新编译 CUDA、未运行 AIOS 请求。
+本目录是版本与证据台账。源码已整理并推送；用户于 2026-11-03 释放 GPU 后，已开始在独立干净 checkout 中逐 commit 编译、调优和实测。**补测正在进行，不能把尚待测的页面当成成绩。**
+
+首个干净重建结果为 `975631ca`：10/10 轮最终天气回答通过次日工具数据校验，端到端中位数 **3.315455 s**，其中 7/10 轮重复查询天气，需要 3 次模型调用。完整同轮阶段表见 [S7](records/S7-live-measurement.md)，原始计时见 [JSON](evidence/975631ca-clean-weather.json)。这不复现旧未提交工作区的 1.519645 s，也不能据此声称最终整理版本比 TRT 快。
 
 ## 版本边界
 
@@ -20,6 +22,7 @@
 | Weather adapter and reproducible evidence tooling | opt-in 天气结果压缩、请求记录代理、阶段统计脚本和历史原始数据 | [S4](records/S4-weather-adapter.md) |
 | Historical evidence and date-policy audit | 恢复2c24e07包的同轮profile；要求显式目标预报日期 | [S5](records/S5-date-audit.md) |
 | Scalar historical evidence | 恢复a50a058和96344b1包的原始E2E/HTTP计时与报告精度限制 | [S6](records/S6-scalar-history.md) |
+| Live phase collector | 读取 AIOS 工具计时；展开所有实际模型/工具调用，保留额外查询和失败 | [S7](records/S7-live-measurement.md) |
 
 MTP depth、backend proposal 常量、verifier 资源、GDN checkpoint 与 host commit 合约耦合，作为一个完整提交；不能拆成中间运行时相互不匹配的版本。
 
@@ -61,11 +64,11 @@ MTP depth、backend proposal 常量、verifier 资源、GDN checkpoint 与 host 
 
 另已恢复声明为 `2c24e07` 的历史部署包：二进制 SHA256 已核对，5轮 AIOS 输出、逐调用 profile 和 HTTP 时间戳可复查；源码归属只有包内声明，未建立干净重建证明。日期审计发现 UTC/上海跨午夜歧义，旧“5/5成功”不能当成5轮日期正确。详见该版本记录与 `evidence/2c24e07-package-weather.json`。
 
-AMap 记录为两次模型 HTTP 之间的间隔，包含调度与序列化，不等于纯 API 时间。模型时间以 server profile 为准；TTFT 包括缓存恢复及首 token。其余为差值，不能据此宣称 AIOS 或 AMap 被 kernel 优化加速。旧 3.92 s 表无可定位的完整 trace，不能用于分阶段增益归因。
+历史 AMap 记录为两次模型 HTTP 之间的间隔，包含调度与序列化，不等于纯 API 时间。新实测直接读取 AIOS 的工具执行时长；剩余编排间隔归入余项。模型时间以 server profile 为准；TTFT 包括缓存恢复及首 token。其余为差值，不能据此宣称 AIOS 或 AMap 被 kernel 优化加速。旧 3.92 s 表无可定位的完整 trace，不能用于分阶段增益归因。
 
 ## 补测要求
 
-GPU 空闲后依序在干净 checkout 构建各 commit，记录源码树、二进制 SHA256、完整 argv/environment、checkpoint/recipe 哈希与功耗时钟。各版本先单独 autotune，再关闭 autotune，预热 2 轮、正式 10 轮；未命中 recipe、重试与失败必须记录。
+依序在干净 checkout 构建各 commit，记录源码树、二进制 SHA256、完整 argv/environment、checkpoint/recipe 哈希与时钟。每个历史版本至少保留 1 轮正式天气记录；性能中位数比较使用 10 轮，不能将单轮叫作中位数。支持显式调优的版本先单独 autotune，再关闭 autotune、预热 2 轮。较早版本没有 serving 调优开关，按原有默认在线调优行为运行，保留 3 轮调优/预热请求并明确注明差异；不补造旧版不支持的配置。
 每轮输出用户要求的阶段表，标明 full/reused/computed tokens、completion tokens/间隔数；同一轮的所有阶段之和应等于该轮 E2E。不得拼接不同样本的分位数。
 正确性须检查结构化 AMap tool call、非空 city、工具成功、次日日期和返回温度/天气一致；仅有天气文本不足以判定通过。
 

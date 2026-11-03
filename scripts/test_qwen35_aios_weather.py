@@ -65,6 +65,12 @@ class WeatherEvidenceTests(unittest.TestCase):
         self.assertAlmostEqual(rows[2]["time_ms"], 419.903)
         with self.assertRaises(ValueError):
             phases(1526.96, profiles * 2, requests, responses)
+        measured = phases(1526.96, profiles, requests, responses, tool_execution_ms=400.0)
+        self.assertEqual(measured[2]["time_ms"], 400.0)
+        self.assertAlmostEqual(measured[-1]["time_ms"] - rows[-1]["time_ms"], 19.903)
+        self.assertAlmostEqual(sum(stage["time_ms"] for stage in measured), 1526.96)
+        with self.assertRaises(ValueError):
+            phases(1526.96, profiles, requests, responses, tool_execution_ms=500.0)
 
     def test_weather_text_without_structured_tool_call_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -74,6 +80,17 @@ class WeatherEvidenceTests(unittest.TestCase):
             valid, reason = validate_weather(SimpleNamespace(capture_dir=directory), [{"capture_id": "a"}, {"capture_id": "b"}], [{}, {}], "上海晴，15到22度")
             self.assertFalse(valid)
             self.assertIn("structured", reason)
+
+    def test_repeated_weather_query_is_counted_in_full(self):
+        profiles = [dict(computed_prompt_tokens=1, decode_intervals=2, ttft_ms=10, decode_ms=20)] * 3
+        requests = [{"time": "2026-11-03T00:00:%02d+00:00" % i} for i in (0, 2, 4)]
+        responses = [{"time": "2026-11-03T00:00:%02d+00:00" % i} for i in (1, 3, 5)]
+        rows = phases(5100, profiles, requests, responses, [500, 600])
+        self.assertEqual(len(rows), 9)
+        self.assertAlmostEqual(sum(row["time_ms"] for row in rows), 5100)
+        self.assertEqual(rows[5]["time_ms"], 600)
+        with self.assertRaises(ValueError):
+            phases(5100, profiles, requests, responses, [500])
 
     def test_tool_success_still_requires_tomorrow_values(self):
         with tempfile.TemporaryDirectory() as directory:
