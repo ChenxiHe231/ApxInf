@@ -42,6 +42,31 @@ def write_log(path, record):
             stream.write(line + "\n")
 
 
+SHANGHAI_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
+TIME_CONTEXT = re.compile(
+    r"(Time sampled while preparing turn \d+, step \d+: )"
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))"
+    r"(?:\[[^\]\r\n]+\])?"
+)
+
+
+def normalize_time_context(messages):
+    """Canonicalize the weather benchmark's clock to its Shanghai date."""
+    changed = 0
+    for message in messages:
+        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+            continue
+        def replace(match):
+            value = dt.datetime.fromisoformat(match[2].replace("Z", "+00:00"))
+            date = value.astimezone(SHANGHAI_TZ).date().isoformat()
+            return match[1] + date + "T00:00:00+08:00[Asia/Shanghai]"
+        content, count = TIME_CONTEXT.subn(replace, message["content"])
+        if content != message["content"]:
+            message["content"] = content
+            changed += count
+    return changed
+
+
 def compress_amap_weather(messages):
     """Keep only the requested tomorrow forecast in AMap tool results."""
     sampled_date = None
@@ -52,16 +77,14 @@ def compress_amap_weather(messages):
         content = message["content"]
         if message.get("role") == "user" and "明天" in content:
             wants_tomorrow = True
-        matches = re.findall(
-            r"Time sampled while preparing turn \d+, step \d+: (\d{4}-\d{2}-\d{2})T",
-            content,
-        )
+        matches = list(TIME_CONTEXT.finditer(content))
         if matches:
-            sampled_date = dt.date.fromisoformat(matches[-1])
+            sampled_date = dt.datetime.fromisoformat(matches[-1][2].replace("Z", "+00:00")).astimezone(SHANGHAI_TZ).date()
     if not wants_tomorrow or sampled_date is None:
         return None
 
     target_date = (sampled_date + dt.timedelta(days=1)).isoformat()
+    changes = []
     for message in messages:
         if not isinstance(message, dict) or message.get("role") != "tool":
             continue
@@ -84,22 +107,29 @@ def compress_amap_weather(messages):
         )
         if forecast is None:
             continue
+        if not result.get("city") or not all(forecast.get(key) is not None for key in ("daytemp", "nighttemp", "dayweather", "nightweather")):
+            continue
         compact = {
             "city": result.get("city"),
-            "forecast": {
+            "forecasts": [{
                 field: forecast[field]
                 for field in AMAP_WEATHER_FIELDS
                 if field in forecast
-            },
+            }],
         }
         replacement = json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+        if replacement == content:
+            continue
         message["content"] = replacement
-        return {
-            "target_date": target_date,
+        changes.append({
             "original_chars": len(content),
             "compressed_chars": len(replacement),
-        }
-    return None
+        })
+    if not changes:
+        return None
+    return {"target_date": target_date, "tool_results": len(changes),
+            "original_chars": sum(item["original_chars"] for item in changes),
+            "compressed_chars": sum(item["compressed_chars"] for item in changes)}
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -196,20 +226,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     request_meta["cache_generated_tokens"] = False
                     outbound = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 if self.server.normalize_time_context:
-                    normalized = 0
-                    for message in messages:
-                        if not isinstance(message, dict) or not isinstance(message.get("content"), str):
-                            continue
-                        content, replacements = re.subn(
-                            r"(Time sampled while preparing turn \d+, step \d+: "
-                            r"\d{4}-\d{2}-\d{2})T[^\[]+(\[UTC\])",
-                            r"\1T00:00:00+00:00\2",
-                            message["content"],
-                            count=1,
-                        )
-                        if replacements:
-                            message["content"] = content
-                            normalized += replacements
+                    normalized = normalize_time_context(messages)
                     if normalized:
                         request_meta["normalized_time_contexts"] = normalized
                         outbound = json.dumps(payload, ensure_ascii=False).encode("utf-8")

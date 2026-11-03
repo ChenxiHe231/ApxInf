@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import unittest
 
 from bench_qwen35_aios_weather import parse_profile, phases, validate_weather
-from qwen35_aios_proxy import compress_amap_weather
+from qwen35_aios_proxy import compress_amap_weather, normalize_time_context
 
 
 class WeatherEvidenceTests(unittest.TestCase):
@@ -27,9 +27,32 @@ class WeatherEvidenceTests(unittest.TestCase):
         stats = compress_amap_weather(messages)
         result = json.loads(messages[-1]["content"])
         self.assertEqual(stats["target_date"], "2026-11-04")
-        self.assertEqual(result["forecast"]["daytemp"], "19")
-        self.assertNotIn("unused", result["forecast"])
+        self.assertEqual(result["forecasts"][0]["daytemp"], "19")
+        self.assertNotIn("unused", result["forecasts"][0])
         self.assertIsNone(compress_amap_weather(messages))
+
+    def test_compression_covers_repeated_weather_results(self):
+        messages = self.messages()
+        messages.append(copy.deepcopy(messages[-1]))
+        stats = compress_amap_weather(messages)
+        self.assertEqual(stats["tool_results"], 2)
+        for message in messages[-2:]:
+            result = json.loads(message["content"])
+            self.assertEqual([item["date"] for item in result["forecasts"]], ["2026-11-04"])
+        self.assertIsNone(compress_amap_weather(messages))
+
+    def test_normalized_clock_preserves_shanghai_day_across_utc_midnight_boundary(self):
+        messages = self.messages()
+        messages[1]["content"] = "Time sampled while preparing turn 1, step 2: 2026-11-03T16:24:00+00:00[UTC]"
+        tool = json.loads(messages[-1]["content"])
+        tool["forecasts"].append({"date":"2026-11-05", "daytemp":"21", "nighttemp":"17", "dayweather":"阴", "nightweather":"阴"})
+        messages[-1]["content"] = json.dumps(tool, ensure_ascii=False)
+        self.assertEqual(normalize_time_context(messages), 1)
+        self.assertIn("2026-11-04T00:00:00+08:00[Asia/Shanghai]", messages[1]["content"])
+        self.assertEqual(normalize_time_context(messages), 0)
+        stats = compress_amap_weather(messages)
+        self.assertEqual(stats["target_date"], "2026-11-05")
+        self.assertEqual(json.loads(messages[-1]["content"])["forecasts"][0]["daytemp"], "21")
 
     def test_compression_requires_date_and_tomorrow_intent(self):
         for index in (0, 1):
