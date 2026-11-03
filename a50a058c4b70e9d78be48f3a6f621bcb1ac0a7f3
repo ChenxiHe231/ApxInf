@@ -1,0 +1,25 @@
+## 精确版本重建实测（2026-11-03 起）
+
+Source: `a50a058c4b70e9d78be48f3a6f621bcb1ac0a7f3`；tracked 工作区干净。
+
+Binary SHA256: `7abb60bae6b948add494287e5de30a69bb6610e761a9af863692be6394d6d7f8`。
+
+配置与逐轮记录：[JSON](doc/qwen35-thoru/optimization-history/evidence/a50a058c-clean-weather.json)。
+
+正式 1 轮，回答校验通过 0 轮，完整有效阶段记录 0 轮。
+
+**不能报告为有效性能中位数**。回答错误或缺失计时不从总体中隐去。
+
+以下为同一真实请求 index=2，回答校验=False；不拼接不同请求的阶段分位数。
+
+| 阶段 | 时间 | 占比 |
+|---|---:|---:|
+| 模型 Prefill/Decode 内部切分 | 无可验证计时 | — |
+| 其余未能进一步拆分的时间 | 保留原始 HTTP 记录，不估算 | — |
+| **请求返回总耗时（回答未通过校验）** | **2.930430 s** | **100%** |
+
+服务端 SSE 错误（1 次）：`generation failed: Qwen3.5 layer 3 attention: CUDA error: ApxInf native status 5: Attention Recipe miss and fallback is disabled`。不能将空回答计为天气完成。
+
+TTFT 包括缓存恢复与首 token；余项含未归属的服务/调度/HTTP时间。工具时长为AIOS执行计时，不能声称等于纯网络时间。当前没有仅凭该单轮成立的单项优化提升百分比。
+
+正式测试前后 recipe 数：1222 → 1222；清单内容未变。旧版默认在线调优可能进入正式请求时间，不能直接当作纯GPU kernel性能。
