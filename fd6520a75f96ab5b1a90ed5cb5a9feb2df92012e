@@ -20,3 +20,5 @@ Binary SHA256: `b08ad5a31cf7868c25bf00de67bc851c13f90cf41de9deb27f37cea6daed38fe
 | **端到端总计** | **29.727060 s** | **100%** |
 
 TTFT 包括缓存恢复与首 token；余项含未归属的服务/调度/HTTP时间。工具时长为AIOS执行计时，不能声称等于纯网络时间。当前没有仅凭该单轮成立的单项优化提升百分比。
+
+Qualification (2026-11-03 recipe-directory audit): this acquisition used the historical runtime default thor-sm101/cuda12.8-cublas12.8 while the declared recipe manifest described an unused seed directory. The E2E and internal timings are real, but are not valid evidence of fully tuned performance or of kernel speedup. Corrected rerun is pending.
