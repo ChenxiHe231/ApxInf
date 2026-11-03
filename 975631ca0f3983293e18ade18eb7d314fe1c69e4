@@ -1,8 +1,8 @@
 Weather case: 明天上海的天气怎么样
 Source: 975631ca0f3983293e18ade18eb7d314fe1c69e4
 Binary-SHA256: b52ed4df42efe213c3e6684257c3d90ed17c5b2f6f1d86a5d369fbd9c8ce6655
-Final answers: 10/10 match 2026-11-04 tool forecast
-E2E median: 3.315455 s; P90: 3.620030 s
+Final weather text: 10/10 match 2026-11-04 tool forecast; clean protocol completion: 9/10. Formal index10 also emits a music_play id-type tool-protocol error.
+All-returned-request median INCLUDING ERROR: 3.315455 s; P90 INCLUDING ERROR: 3.620030 s. Not an accepted clean performance median.
 7/10 formal rounds repeat the weather query (3 model calls, 2 tools).
 Representative actual run index 7:
 
