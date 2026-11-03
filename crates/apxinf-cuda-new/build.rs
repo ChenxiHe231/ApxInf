@@ -492,6 +492,7 @@ fn main() {
         "rope/partial.cpp",
         "preprocess/ops.cpp",
         "gdn/execution.cpp",
+        "gdn/verify.cpp",
         "sampling/argmax.cpp",
         "sampling/suppress_bf16.cu",
         "sampling/launch.cu",

@@ -233,6 +233,32 @@ __global__ void combine_kernel(
   }
 }
 
+// Resolve the accepted proposal prefix and pack every host-visible scalar in
+// one cache-line-sized result. Keeping the compare on device avoids separate
+// proposal/prediction D2H transfers and gives a stable boundary for a future
+// whole-round graph.
+__global__ void accept_kernel(const int32_t* __restrict__ proposals,
+                              const int32_t* __restrict__ predictions,
+                              int draft_steps,
+                              int32_t* __restrict__ output) {
+  if (blockIdx.x != 0 || threadIdx.x != 0) return;
+  int accepted = 0;
+  while (accepted < draft_steps &&
+         proposals[accepted] == predictions[accepted]) {
+    ++accepted;
+  }
+  output[0] = accepted;
+#pragma unroll
+  for (int index = 0; index < kDraftSteps; ++index) {
+    output[1 + index] = index < draft_steps ? proposals[index] : -1;
+  }
+#pragma unroll
+  for (int index = 0; index < kDraftSteps + 1; ++index) {
+    output[1 + kDraftSteps + index] =
+        index <= draft_steps ? predictions[index] : -1;
+  }
+}
+
 void validate_spec(const apxinf_qwen35_mtp_moe_spec_t& spec) {
   // Steps 0..2 are draft rows. Step 3 is the no-logits d2 cache row used
   // only after full acceptance plus a bonus; 4 and above are invalid.
@@ -341,5 +367,26 @@ extern "C" apxinf_status_t apxinf_qwen35_mtp_moe(
     }
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
     apxinf::framework::check_cuda(launch(*bindings));
+  });
+}
+
+extern "C" apxinf_status_t apxinf_qwen35_mtp_accept(
+    apxinf_runtime_t runtime, const apxinf_qwen35_mtp_accept_spec_t* spec,
+    const apxinf_qwen35_mtp_accept_bindings_t* bindings) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr ||
+        spec->version != APXINF_QWEN35_MTP_ACCEPT_SPEC_VERSION ||
+        spec->draft_steps == 0 || spec->draft_steps > kDraftSteps ||
+        bindings->proposals == nullptr ||
+        bindings->target_predictions == nullptr || bindings->output == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid Qwen3.5 MTP acceptance argument");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    auto stream = static_cast<cudaStream_t>(bindings->stream);
+    accept_kernel<<<1, 1, 0, stream>>>(
+        bindings->proposals, bindings->target_predictions,
+        static_cast<int>(spec->draft_steps), bindings->output);
+    apxinf::framework::check_cuda(cudaGetLastError());
   });
 }

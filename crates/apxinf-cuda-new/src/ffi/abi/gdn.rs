@@ -170,6 +170,45 @@ unsafe extern "C" {
         head_v_dim: i32,
         chunk_size: i32,
     ) -> i32;
+    pub(crate) fn apxinf_gdn_recurrent_verify(
+        state: *mut c_void,
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        decay: *const c_void,
+        beta: *const c_void,
+        output: *mut c_void,
+        checkpoints: *mut c_void,
+        tokens: i64,
+        v_heads: i64,
+        k_heads: i64,
+        v_dim: i64,
+        k_dim: i64,
+        q_row_stride: i64,
+        k_row_stride: i64,
+        v_row_stride: i64,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_gdn_causal_conv_verify(
+        window: *mut c_void,
+        input: *const c_void,
+        weight: *const c_void,
+        output: *mut c_void,
+        checkpoints: *mut c_void,
+        tokens: i64,
+        channels: i64,
+        kernel_width: i64,
+        stream: CudaStream,
+    ) -> i32;
+    pub(crate) fn apxinf_gdn_l2_normalize_heads_seq(
+        data: *mut c_void,
+        tokens: i64,
+        heads: i64,
+        head_dim: i64,
+        row_stride: i64,
+        epsilon: f32,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_gdn_qk_bf16_supported(
         device: i32,
         recurrent: i32,

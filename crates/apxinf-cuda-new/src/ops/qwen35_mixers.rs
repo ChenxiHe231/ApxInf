@@ -19,9 +19,10 @@ use crate::ops::gemm::contracts::tensor_storage;
 use crate::{transfers, CudaBuffer, CudaContext};
 
 use super::{
-    gdn_causal_conv_step, gdn_conv_prepare, gdn_decay_and_beta, gdn_decay_and_beta_seq,
-    gdn_gated_norm, gdn_gated_norm_seq_f16, gdn_l2_normalize_heads, gdn_prefill,
-    gdn_recurrent_step,
+    gdn_causal_conv_step, gdn_causal_conv_verify, gdn_conv_prepare, gdn_decay_and_beta,
+    gdn_decay_and_beta_seq, gdn_gated_norm, gdn_gated_norm_seq, gdn_gated_norm_seq_f16,
+    gdn_l2_normalize_heads, gdn_l2_normalize_heads_seq, gdn_prefill, gdn_recurrent_step,
+    gdn_recurrent_verify,
 };
 
 pub const QWEN35_GDN_KEY_HEADS: usize = 16;
@@ -168,11 +169,12 @@ pub fn qwen35_gdn_decode(ctx: &CudaContext, args: &Qwen35GdnDecodeArgs<'_>) -> R
 /// Run a new prompt through one Qwen3.5 GDN layer.
 ///
 /// The caller must provide zero-initialized state for a new sequence.  A prompt
-/// whose length is a multiple of 64 takes the FlashInfer Cake kernel when the
-/// device and its FP16 scratch are both present; every other case takes the
-/// exact recurrent path rather than padding, because padding would corrupt the
-/// causal-convolution window and therefore the first decoded token.  Both paths
-/// leave byte-compatible state for `qwen35_gdn_decode`.
+/// The complete 64-token chunks of a prompt take the FlashInfer Cake kernel
+/// when the device and its FP16 scratch are both present; a partial final chunk
+/// continues through the exact recurrent path rather than padding, because
+/// padding would corrupt the causal-convolution window and therefore the first
+/// decoded token. Both paths leave byte-compatible state for
+/// `qwen35_gdn_decode`.
 ///
 /// The hand-written `gdn_chunk_scan` is deliberately *not* reachable from here.
 /// Its single launch grows with the sequence -- measured 48 ms for one layer at
@@ -190,11 +192,42 @@ pub fn qwen35_gdn_prefill(
 ) -> Result<()> {
     validate_prefill(ctx, tokens, args)?;
 
-    if let (0, Some(cake), None) = (
-        tokens % QWEN35_GDN_SCAN_CHUNK,
-        args.cake.as_ref(),
-        args.checkpoints.as_ref(),
-    ) {
+    if let Some(checkpoints) = args.checkpoints.as_ref() {
+        // Target verification is only four rows, but the old path launched
+        // every single-token primitive four times and copied both GDN states
+        // after each row. These sequence kernels keep each recurrent row in
+        // registers across all verifier tokens while preserving identical
+        // post-row checkpoints for partial acceptance.
+        let conv_weight = conv_weight_view(args.weights.conv)?;
+        gdn_causal_conv_verify(
+            ctx,
+            args.state.conv,
+            args.projected_qkv,
+            &conv_weight,
+            args.scratch.convolved_qkv,
+            checkpoints.conv,
+            tokens,
+        )?;
+        gdn_l2_normalize_heads_seq(
+            ctx,
+            args.scratch.convolved_qkv,
+            tokens,
+            QWEN35_GDN_KEY_HEADS,
+            QWEN35_GDN_HEAD_DIM,
+            QWEN35_GDN_QKV_WIDTH,
+            0,
+            QWEN35_GDN_EPSILON,
+        )?;
+        gdn_l2_normalize_heads_seq(
+            ctx,
+            args.scratch.convolved_qkv,
+            tokens,
+            QWEN35_GDN_KEY_HEADS,
+            QWEN35_GDN_HEAD_DIM,
+            QWEN35_GDN_QKV_WIDTH,
+            QWEN35_GDN_Q_WIDTH,
+            QWEN35_GDN_EPSILON,
+        )?;
         gdn_decay_and_beta_seq(
             ctx,
             args.a,
@@ -206,50 +239,25 @@ pub fn qwen35_gdn_prefill(
             tokens,
             QWEN35_GDN_VALUE_HEADS,
         )?;
-        // The convolution is fused into the prepare op, which also writes the
-        // sliding window back into `state.conv` so decode continues from it.
-        let conv_weight = conv_weight_view(args.weights.conv)?;
-        gdn_conv_prepare(
-            ctx,
-            args.projected_qkv,
-            &conv_weight,
-            args.state.conv,
-            cake.q16,
-            cake.k16,
-            cake.v16,
-            args.scratch.decay,
-            cake.alpha,
-            tokens,
-            QWEN35_GDN_KEY_HEADS,
-            QWEN35_GDN_VALUE_HEADS,
-            QWEN35_GDN_EPSILON,
+        let core_output = element_view(
+            args.scratch.core_output,
+            0,
+            vec![tokens, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_HEAD_DIM],
+            DType::BF16,
         )?;
-        let seqlens = Tensor::from_i32(
-            vec![2],
-            &[
-                0,
-                i32::try_from(tokens).map_err(|_| invalid("Qwen3.5 GDN prompt exceeds i32"))?,
-            ],
-        )?;
-        transfers::copy_cpu_to_cuda(&seqlens, cake.cu_seqlens)?;
-        gdn_prefill(
+        gdn_recurrent_verify(
             ctx,
-            cake.q16,
-            cake.k16,
-            cake.v16,
-            cake.out16,
-            // The gate is the linear-space alpha the prepare op emits, not the
-            // log-space `decay` that feeds the reference scan.
-            cake.alpha,
-            args.scratch.beta,
-            cake.cu_seqlens,
             args.state.recurrent,
-            cake.workspace,
+            args.scratch.convolved_qkv,
+            args.scratch.decay,
+            args.scratch.beta,
+            &core_output,
+            checkpoints.recurrent,
             tokens,
-            QWEN35_GDN_KEY_HEADS,
             QWEN35_GDN_VALUE_HEADS,
-            1,
-            1.0 / (QWEN35_GDN_HEAD_DIM as f32).sqrt(),
+            QWEN35_GDN_KEY_HEADS,
+            [0, QWEN35_GDN_Q_WIDTH, 2 * QWEN35_GDN_Q_WIDTH],
+            QWEN35_GDN_QKV_WIDTH,
         )?;
         let z = element_view(
             args.z,
@@ -263,9 +271,9 @@ pub fn qwen35_gdn_prefill(
             vec![tokens, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_HEAD_DIM],
             DType::BF16,
         )?;
-        return gdn_gated_norm_seq_f16(
+        return gdn_gated_norm_seq(
             ctx,
-            cake.out16,
+            &core_output,
             &z,
             args.weights.norm,
             &gated_output,
@@ -276,9 +284,187 @@ pub fn qwen35_gdn_prefill(
         );
     }
 
+    let exact_start = if let (Some(cake), None) =
+        (args.cake.as_ref(), args.checkpoints.as_ref())
+    {
+        // Cake consumes complete 64-token scan chunks.  A variable-length
+        // prompt used to send the *entire* sequence through the scalar
+        // recurrent fallback whenever it had a partial final chunk (AIOS
+        // tool-result turns are typically about 430 rows).  Advance every
+        // complete chunk with Cake, then continue from the exact state with
+        // only the short tail below.  This never pads the sequence, so the
+        // convolution window and recurrent state retain their exact causal
+        // semantics.
+        let cake_tokens = tokens / QWEN35_GDN_SCAN_CHUNK * QWEN35_GDN_SCAN_CHUNK;
+        if cake_tokens == 0 {
+            0
+        } else {
+            let a = element_view(
+                args.a,
+                0,
+                vec![cake_tokens, QWEN35_GDN_VALUE_HEADS],
+                DType::BF16,
+            )?;
+            let b = element_view(
+                args.b,
+                0,
+                vec![cake_tokens, QWEN35_GDN_VALUE_HEADS],
+                DType::BF16,
+            )?;
+            let decay = element_view(
+                args.scratch.decay,
+                0,
+                vec![cake_tokens, QWEN35_GDN_VALUE_HEADS],
+                DType::F32,
+            )?;
+            let beta = element_view(
+                args.scratch.beta,
+                0,
+                vec![cake_tokens, QWEN35_GDN_VALUE_HEADS],
+                DType::F32,
+            )?;
+            let projected_qkv = element_view(
+                args.projected_qkv,
+                0,
+                vec![cake_tokens, QWEN35_GDN_QKV_WIDTH],
+                DType::BF16,
+            )?;
+            let q16 = element_view(
+                cake.q16,
+                0,
+                vec![cake_tokens, QWEN35_GDN_KEY_HEADS, QWEN35_GDN_HEAD_DIM],
+                DType::F16,
+            )?;
+            let k16 = element_view(
+                cake.k16,
+                0,
+                vec![cake_tokens, QWEN35_GDN_KEY_HEADS, QWEN35_GDN_HEAD_DIM],
+                DType::F16,
+            )?;
+            let v16 = element_view(
+                cake.v16,
+                0,
+                vec![
+                    cake_tokens,
+                    QWEN35_GDN_VALUE_HEADS,
+                    QWEN35_GDN_HEAD_DIM,
+                ],
+                DType::F16,
+            )?;
+            let out16 = element_view(
+                cake.out16,
+                0,
+                vec![
+                    cake_tokens,
+                    QWEN35_GDN_VALUE_HEADS,
+                    QWEN35_GDN_HEAD_DIM,
+                ],
+                DType::F16,
+            )?;
+            let alpha = element_view(
+                cake.alpha,
+                0,
+                vec![cake_tokens, QWEN35_GDN_VALUE_HEADS],
+                DType::F32,
+            )?;
+
+            gdn_decay_and_beta_seq(
+                ctx,
+                &a,
+                &b,
+                args.weights.a_log,
+                args.weights.dt_bias,
+                &decay,
+                &beta,
+                cake_tokens,
+                QWEN35_GDN_VALUE_HEADS,
+            )?;
+            let conv_weight = conv_weight_view(args.weights.conv)?;
+            gdn_conv_prepare(
+                ctx,
+                &projected_qkv,
+                &conv_weight,
+                args.state.conv,
+                &q16,
+                &k16,
+                &v16,
+                &decay,
+                &alpha,
+                cake_tokens,
+                QWEN35_GDN_KEY_HEADS,
+                QWEN35_GDN_VALUE_HEADS,
+                QWEN35_GDN_EPSILON,
+            )?;
+            let seqlens = Tensor::from_i32(
+                vec![2],
+                &[
+                    0,
+                    i32::try_from(cake_tokens)
+                        .map_err(|_| invalid("Qwen3.5 GDN prompt exceeds i32"))?,
+                ],
+            )?;
+            transfers::copy_cpu_to_cuda(&seqlens, cake.cu_seqlens)?;
+            gdn_prefill(
+                ctx,
+                &q16,
+                &k16,
+                &v16,
+                &out16,
+                &alpha,
+                &beta,
+                cake.cu_seqlens,
+                args.state.recurrent,
+                cake.workspace,
+                cake_tokens,
+                QWEN35_GDN_KEY_HEADS,
+                QWEN35_GDN_VALUE_HEADS,
+                1,
+                1.0 / (QWEN35_GDN_HEAD_DIM as f32).sqrt(),
+            )?;
+            let z = element_view(
+                args.z,
+                0,
+                vec![
+                    cake_tokens,
+                    QWEN35_GDN_VALUE_HEADS,
+                    QWEN35_GDN_HEAD_DIM,
+                ],
+                DType::BF16,
+            )?;
+            let gated_output = element_view(
+                args.scratch.gated_output,
+                0,
+                vec![
+                    cake_tokens,
+                    QWEN35_GDN_VALUE_HEADS,
+                    QWEN35_GDN_HEAD_DIM,
+                ],
+                DType::BF16,
+            )?;
+            gdn_gated_norm_seq_f16(
+                ctx,
+                &out16,
+                &z,
+                args.weights.norm,
+                &gated_output,
+                cake_tokens,
+                QWEN35_GDN_VALUE_HEADS,
+                QWEN35_GDN_HEAD_DIM,
+                QWEN35_GDN_EPSILON,
+            )?;
+            cake_tokens
+        }
+    } else {
+        0
+    };
+
+    if exact_start == tokens {
+        return Ok(());
+    }
+
     // Exact correctness path for a partial scan chunk.  It is intentionally
     // slower, but does not invent padding tokens or damage the decode state.
-    for token in 0..tokens {
+    for token in exact_start..tokens {
         let scratch = Qwen35GdnDecodeScratch {
             convolved_qkv: &row_view(
                 args.scratch.convolved_qkv,

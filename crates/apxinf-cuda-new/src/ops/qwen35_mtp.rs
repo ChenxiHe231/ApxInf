@@ -19,7 +19,52 @@ pub const QWEN35_MTP_HIDDEN: usize = 2_048;
 pub const QWEN35_MTP_INTERMEDIATE: usize = 512;
 pub const QWEN35_MTP_VOCAB_SIZE: usize = 248_320;
 pub const QWEN35_MTP_LAYERS: usize = 1;
-pub const QWEN35_MTP_DRAFT_STEPS: usize = 2;
+pub const QWEN35_MTP_DRAFT_STEPS: usize = 3;
+pub const QWEN35_MTP_ACCEPT_OUTPUT_I32: usize = abi::MTP_ACCEPT_OUTPUT_I32;
+
+pub struct Qwen35MtpAcceptArgs<'a> {
+    /// I32 `[draft_steps]` device argmax IDs from the proposer.
+    pub proposals: &'a Tensor,
+    /// I32 `[draft_steps + 1]` target argmax IDs.
+    pub target_predictions: &'a Tensor,
+    /// I32 `[8]`: accepted count, three proposal slots and four target slots.
+    pub output: &'a Tensor,
+}
+
+/// Compare proposal/target IDs on device and pack one compact round result.
+pub fn qwen35_mtp_accept(ctx: &CudaContext, args: Qwen35MtpAcceptArgs<'_>) -> Result<()> {
+    let proposal_dims = args.proposals.shape().dims();
+    if proposal_dims.len() != 1 || !(1..=QWEN35_MTP_DRAFT_STEPS).contains(&proposal_dims[0]) {
+        return Err(invalid("Qwen3.5 MTP acceptance proposal shape is invalid"));
+    }
+    let draft_steps = proposal_dims[0];
+    let proposals = tensor_storage(ctx, args.proposals, DType::I32, &[draft_steps])?;
+    let predictions = tensor_storage(ctx, args.target_predictions, DType::I32, &[draft_steps + 1])?;
+    let output = tensor_storage(
+        ctx,
+        args.output,
+        DType::I32,
+        &[QWEN35_MTP_ACCEPT_OUTPUT_I32],
+    )?;
+    let spec = abi::MtpAcceptSpec {
+        version: abi::MTP_ACCEPT_SPEC_VERSION,
+        draft_steps: draft_steps as u32,
+    };
+    let bindings = abi::MtpAcceptBindings {
+        proposals: proposals.ptr().cast(),
+        target_predictions: predictions.ptr().cast(),
+        output: output.ptr().cast(),
+        stream: ctx.stream().handle(),
+    };
+    crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
+    unsafe {
+        status::check(abi::apxinf_qwen35_mtp_accept(
+            ctx.runtime(),
+            &spec,
+            &bindings,
+        ))
+    }
+}
 
 /// Transactional identity of one MTP proposal execution.
 ///

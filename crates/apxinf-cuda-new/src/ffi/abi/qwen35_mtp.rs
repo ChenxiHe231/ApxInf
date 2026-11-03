@@ -4,6 +4,8 @@ pub(crate) use super::types::CudaStream;
 use super::types::Runtime;
 
 pub(crate) const MTP_MOE_SPEC_VERSION: u32 = 1;
+pub(crate) const MTP_ACCEPT_SPEC_VERSION: u32 = 1;
+pub(crate) const MTP_ACCEPT_OUTPUT_I32: usize = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -46,10 +48,32 @@ pub(crate) struct MtpMoeBindings {
     pub stream: CudaStream,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct MtpAcceptSpec {
+    pub version: u32,
+    pub draft_steps: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MtpAcceptBindings {
+    pub proposals: *const i32,
+    pub target_predictions: *const i32,
+    pub output: *mut i32,
+    pub stream: CudaStream,
+}
+
 unsafe extern "C" {
     pub(crate) fn apxinf_qwen35_mtp_moe(
         runtime: Runtime,
         spec: *const MtpMoeSpec,
         bindings: *const MtpMoeBindings,
+    ) -> i32;
+
+    pub(crate) fn apxinf_qwen35_mtp_accept(
+        runtime: Runtime,
+        spec: *const MtpAcceptSpec,
+        bindings: *const MtpAcceptBindings,
     ) -> i32;
 }

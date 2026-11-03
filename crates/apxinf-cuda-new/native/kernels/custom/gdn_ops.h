@@ -21,6 +21,16 @@ int gdn_recurrent_step(void* state, const void* q, const void* k,
                        void* output, int v_heads, int k_heads, int v_dim,
                        int k_dim, cudaStream_t stream);
 
+// Multi-token verifier recurrence. The state row is loaded once, advanced
+// across all tokens in registers, and written both to the live state and to
+// [tokens, v_heads, v_dim, k_dim] checkpoints after every transition.
+int gdn_recurrent_verify(void* state, const void* q, const void* k,
+                         const void* v, const void* decay, const void* beta,
+                         void* output, void* checkpoints, int tokens,
+                         int v_heads, int k_heads, int v_dim, int k_dim,
+                         int q_row_stride, int k_row_stride,
+                         int v_row_stride, cudaStream_t stream);
+
 // Per-head RMSNorm followed by the swish output gate.
 //
 // Qwen3.5 sets `output_gate_type: swish`, so the gate is silu(z); a
@@ -42,6 +52,13 @@ int gdn_gated_norm_quantize(const void* input, const void* gate,
 int gdn_causal_conv_step(void* window, const void* input, const void* weight,
                          void* output, int channels, int kernel_width,
                          cudaStream_t stream);
+
+// Multi-token verifier convolution starting from an existing recurrent
+// window. Writes the post-token windows to [tokens, channels, kernel_width].
+int gdn_causal_conv_verify(void* window, const void* input,
+                           const void* weight, void* output,
+                           void* checkpoints, int tokens, int channels,
+                           int kernel_width, cudaStream_t stream);
 
 // Causal depthwise conv1d over a whole prompt, then SiLU.
 //
@@ -77,6 +94,10 @@ int gdn_conv_prepare(const void* input, const void* weight,
 // L2-normalize each head in place; the delta rule needs unit-norm q and k.
 int gdn_l2_normalize_heads(void* data, int heads, int head_dim, float epsilon,
                            cudaStream_t stream);
+
+int gdn_l2_normalize_heads_seq(void* data, int tokens, int heads,
+                               int head_dim, int row_stride, float epsilon,
+                               cudaStream_t stream);
 
 // decay = -exp(A_log) * softplus(a + dt_bias), beta = sigmoid(b).
 int gdn_decay_and_beta(const void* a, const void* b, const void* a_log,

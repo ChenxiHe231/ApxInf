@@ -61,6 +61,7 @@ pub use gdn::{
     gdn_prefill_workspace_bytes, gdn_prepare_prefill, gdn_recurrent_step, gdn_state_elements,
     GdnChunkScanArgs, GdnChunkScanInput, GdnContinuationArgs, GdnDecayAndBetaArgs,
     GdnFirstPrefillArgs, GdnGate, GdnGatedNormArgs, GdnQuantizedOutput,
+    gdn_causal_conv_verify, gdn_recurrent_verify, gdn_l2_normalize_heads_seq,
 };
 pub use gemm::{
     gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu, gemm_gelu_exact, gemm_swiglu,
@@ -115,6 +116,7 @@ pub use qwen35_mixers::{
     QWEN35_GDN_HEAD_DIM, QWEN35_GDN_KEY_HEADS, QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_Q_WIDTH,
     QWEN35_GDN_SCAN_CHUNK, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_VALUE_WIDTH,
 };
+pub use qwen35_mtp::{qwen35_mtp_accept, Qwen35MtpAcceptArgs, QWEN35_MTP_ACCEPT_OUTPUT_I32};
 pub use qwen35_mtp::{
     qwen35_mtp_moe, qwen35_mtp_moe_reference, Qwen35MtpMoeArgs, Qwen35MtpMoeScratch,
     Qwen35MtpMoeState, Qwen35MtpMoeWeights, Qwen35MtpReferenceOutput, Qwen35MtpReferenceWeights,

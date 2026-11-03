@@ -18,7 +18,7 @@ use super::device_weights::{
 use super::mtp_schedule::{
     MtpCommit, Qwen35MtpSchedule, RoundOutcome, TokenId, QWEN35_MTP_DRAFT_STEPS,
 };
-use super::session::{MtpBackend, Qwen35Session, Qwen35SessionSnapshot};
+use super::session::{MtpBackend, MtpDraft, Qwen35Session, Qwen35SessionSnapshot};
 use crate::{GenerationOptions, SamplingMode};
 
 const HIDDEN: usize = ops::QWEN35_MTP_HIDDEN;
@@ -135,6 +135,7 @@ pub struct PreparedMtpCommit {
 struct PendingDraft {
     shadow_generation: u64,
     start: MtpPositionContract,
+    draft_steps: usize,
 }
 
 /// Complete native proposer backend. All large tensors remain on CUDA. Draft
@@ -543,7 +544,13 @@ impl MtpBackend for Qwen35MtpRuntime {
         pending: TokenId,
         start_position: usize,
         target_hidden: &Tensor,
-    ) -> Result<[TokenId; QWEN35_MTP_DRAFT_STEPS]> {
+        draft_steps: usize,
+    ) -> Result<MtpDraft> {
+        if !(1..=QWEN35_MTP_DRAFT_STEPS).contains(&draft_steps) {
+            return Err(invalid(format!(
+                "Qwen3.5 MTP draft depth must be in 1..={QWEN35_MTP_DRAFT_STEPS}, got {draft_steps}"
+            )));
+        }
         self.validate_weights(ctx, weights)?;
         validate_tensor(
             target_hidden,
@@ -564,7 +571,7 @@ impl MtpBackend for Qwen35MtpRuntime {
         start.validate(committed.capacity)?;
         let required_rows = start
             .cache_rows
-            .checked_add(QWEN35_MTP_DRAFT_STEPS)
+            .checked_add(draft_steps)
             .ok_or_else(|| invalid("Qwen3.5 MTP draft capacity overflow"))?;
         if required_rows > committed.capacity {
             return Err(invalid("Qwen3.5 MTP draft exceeds FP8 KV capacity"));
@@ -576,7 +583,9 @@ impl MtpBackend for Qwen35MtpRuntime {
         let theta = self.rope_theta;
         let scratch = self.ensure_scratch(ctx, committed.capacity)?;
         write_i32(&scratch.token, pending)?;
-        let draft_positions = (0..QWEN35_MTP_DRAFT_STEPS)
+        let pending_slot = element_view(&scratch.verification_inputs, 0)?;
+        transfers::copy_cuda_to_cuda(ctx, &scratch.token, &pending_slot)?;
+        let draft_positions = (0..draft_steps)
             .map(|depth| {
                 i32::try_from(start.rope_position_for_draft(depth)?)
                     .map_err(|_| invalid("Qwen3.5 MTP RoPE position exceeds i32"))
@@ -587,7 +596,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             .flat_map(|position| [position; 3])
             .collect::<Vec<_>>();
         let draft_positions = transfers::to_cuda(
-            &Tensor::from_i32(vec![QWEN35_MTP_DRAFT_STEPS, 3], &draft_positions)?,
+            &Tensor::from_i32(vec![draft_steps, 3], &draft_positions)?,
             ctx.device_id(),
         )?;
         // GEMM normally synchronizes after every eager execution so temporary
@@ -595,8 +604,9 @@ impl MtpBackend for Qwen35MtpRuntime {
         // uses fixed scratch addresses for all three sequential steps, so one
         // persistent execution session can retain those resources and leave
         // the chain asynchronous until the compact proposal readback below.
-        let draft_session = scratch.draft_session.clone();
-        if scratch.draft_session_prepared {
+        let session_index = draft_steps - 1;
+        let draft_session = scratch.draft_sessions[session_index].clone();
+        if scratch.draft_sessions_prepared[session_index] {
             draft_session.run(|| {
                 run_draft_chain(
                     ctx,
@@ -609,6 +619,7 @@ impl MtpBackend for Qwen35MtpRuntime {
                     target_hidden,
                     &draft_positions,
                     start,
+                    draft_steps,
                 )
             })?;
         } else {
@@ -624,27 +635,21 @@ impl MtpBackend for Qwen35MtpRuntime {
                     target_hidden,
                     &draft_positions,
                     start,
+                    draft_steps,
                 )
             })?;
-            scratch.draft_session_prepared = true;
+            scratch.draft_sessions_prepared[session_index] = true;
         }
-        ctx.synchronize().map_err(Error::Cuda)?;
-        let host = transfers::to_cpu(&scratch.proposals)?;
-        let proposals = host
-            .as_i32()?
-            .iter()
-            .map(|&token| {
-                u32::try_from(token)
-                    .map_err(|_| invalid(format!("Qwen3.5 MTP argmax returned {token}")))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .try_into()
-            .map_err(|_| invalid("Qwen3.5 MTP proposal count changed"))?;
+        let draft = MtpDraft::new(
+            vector_view(&scratch.proposals, 0, draft_steps)?,
+            vector_view(&scratch.verification_inputs, 0, draft_steps + 1)?,
+        )?;
         self.pending_draft = Some(PendingDraft {
             shadow_generation: shadow.generation,
             start,
+            draft_steps,
         });
-        Ok(proposals)
+        Ok(draft)
     }
 
     fn prepare_commit(
@@ -660,9 +665,9 @@ impl MtpBackend for Qwen35MtpRuntime {
             .pending_draft
             .ok_or_else(|| invalid("Qwen3.5 MTP commit has no prepared draft"))?;
         let expected_verified_rows = if contract.materialize_final_proposal {
-            QWEN35_MTP_DRAFT_STEPS + 1
+            pending.draft_steps + 1
         } else {
-            QWEN35_MTP_DRAFT_STEPS
+            pending.draft_steps
         };
         let expected_verified_end = pending
             .start
@@ -678,11 +683,15 @@ impl MtpBackend for Qwen35MtpRuntime {
             return Err(invalid("Qwen3.5 MTP commit does not match prepared shadow"));
         }
         let committed_rows = contract.cache_range.committed_rows();
-        if committed_rows == 0 || committed_rows > QWEN35_MTP_DRAFT_STEPS + 1 {
-            return Err(invalid("Qwen3.5 MTP commit row count is outside 1..=4"));
+        if committed_rows == 0 || committed_rows > pending.draft_steps + 1 {
+            return Err(invalid(format!(
+                "Qwen3.5 MTP commit row count is outside 1..={} for draft depth {}",
+                pending.draft_steps + 1,
+                pending.draft_steps
+            )));
         }
         if contract.materialize_final_proposal {
-            if committed_rows != QWEN35_MTP_DRAFT_STEPS + 1 {
+            if committed_rows != pending.draft_steps + 1 {
                 return Err(invalid(
                     "Qwen3.5 MTP final proposal is materialized only on full accept plus bonus",
                 ));
@@ -690,7 +699,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             let materialize_row = pending
                 .start
                 .cache_rows
-                .checked_add(QWEN35_MTP_DRAFT_STEPS)
+                .checked_add(pending.draft_steps)
                 .ok_or_else(|| invalid("Qwen3.5 MTP final cache row overflow"))?;
             if materialize_row >= shadow.capacity {
                 return Err(invalid("Qwen3.5 MTP final materialization exceeds cache"));
@@ -706,7 +715,7 @@ impl MtpBackend for Qwen35MtpRuntime {
                     pending
                         .start
                         .logical_position
-                        .checked_add(QWEN35_MTP_DRAFT_STEPS)
+                        .checked_add(pending.draft_steps)
                         .ok_or_else(|| invalid("Qwen3.5 MTP final RoPE position overflow"))?,
                 )
                 .map_err(|_| invalid("Qwen3.5 MTP final RoPE position exceeds i32"))?,
@@ -728,10 +737,10 @@ impl MtpBackend for Qwen35MtpRuntime {
                 &token_input,
                 &rope_position,
                 materialize_row,
-                QWEN35_MTP_DRAFT_STEPS,
+                pending.draft_steps,
                 false,
             )?;
-        } else if committed_rows > QWEN35_MTP_DRAFT_STEPS {
+        } else if committed_rows > pending.draft_steps {
             return Err(invalid(
                 "Qwen3.5 MTP full verifier commit needs materialization",
             ));
@@ -1086,7 +1095,7 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         })
     }
 
-    /// Execute draft(2) -> canonical scalar target verify(3) -> schedule ->
+    /// Execute draft(1..=3) -> target verify(2..=4) -> schedule ->
     /// target/MTP prepare -> dual publish. All device work and the schedule's
     /// fallible transition are completed before either visible state changes.
     pub fn run_greedy_round(
@@ -1094,6 +1103,7 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         ctx: &CudaContext,
         decoder: &Qwen35Decoder,
         weights: &Qwen35DeviceWeights,
+        draft_steps: usize,
     ) -> Result<MtpRoundOutput> {
         if self.is_finished() {
             return Err(invalid("Qwen3.5 MTP generation is finished"));
@@ -1133,7 +1143,7 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
             ctx.synchronize().map_err(Error::Cuda)?;
         }
         let phase = std::time::Instant::now();
-        let proposals = {
+        let draft = {
             let _range = crate::profiling::trace::range("qwen35_mtp_draft");
             self.mtp.draft(
                 ctx,
@@ -1143,30 +1153,45 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
                 pending,
                 start,
                 target_hidden,
+                draft_steps,
             )?
         };
         if timing {
             ctx.synchronize().map_err(Error::Cuda)?;
         }
         mark("draft", phase);
+        // A/B escape hatch for validating the device-resident draft chain.
+        // The disabled path deliberately reads proposals here, recreating the
+        // old draft -> host synchronization before target verification.
+        let host_proposals = (!mtp_device_chain_enabled())
+            .then(|| draft.read_proposals())
+            .transpose()?;
         let phase = std::time::Instant::now();
-        let ticket = schedule
-            .begin_round(pending, &proposals)
-            .map_err(schedule_error)?;
-        let verification_inputs = *ticket.verification_inputs();
         let verification = {
             let _range = crate::profiling::trace::range("qwen35_mtp_verify");
-            self.target
-                .verify_target_chunk(ctx, decoder, weights, &verification_inputs)?
+            self.target.verify_target_chunk_device(
+                ctx,
+                decoder,
+                weights,
+                draft.verification_inputs(),
+            )?
         };
         if timing {
             ctx.synchronize().map_err(Error::Cuda)?;
         }
         mark("verify", phase);
         let phase = std::time::Instant::now();
-        let plan = schedule
-            .finish_round(ticket, verification.predictions())
+        let resolution = verification.resolve(ctx, &draft)?;
+        let proposals = host_proposals.unwrap_or_else(|| resolution.proposals.clone());
+        debug_assert_eq!(proposals, resolution.proposals);
+        debug_assert_eq!(proposals.len(), draft.draft_steps());
+        let ticket = schedule
+            .begin_round(pending, &proposals)
             .map_err(schedule_error)?;
+        let plan = schedule
+            .finish_round(ticket, &resolution.predictions)
+            .map_err(schedule_error)?;
+        debug_assert_eq!(plan.accepted_proposals(), resolution.accepted_proposals);
         let contract = plan.commit_contract();
 
         // Preflight the host schedule transition on a clone. After this point
@@ -1201,6 +1226,31 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         self.pending = outcome.emitted.last().copied();
         self.target_hidden = Some(next_target_hidden);
         Ok(MtpRoundOutput { outcome })
+    }
+
+    /// Permanently leave speculative execution for the current request and
+    /// advance the authoritative target one token at a time. The proposer is
+    /// intentionally not maintained after this transition: re-entering MTP
+    /// would make scalar fallback more expensive than staying speculative.
+    pub fn run_scalar_fallback_step(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+    ) -> Result<TokenId> {
+        let pending = self
+            .pending
+            .ok_or_else(|| invalid("Qwen3.5 scalar fallback has no pending token"))?;
+        self.target.set_decode_in_place(true);
+        let output = self.target.decode(ctx, decoder, weights, pending)?;
+        let next = output
+            .greedy_token_ids(ctx)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| invalid("Qwen3.5 scalar fallback returned no token"))?;
+        self.pending = Some(next);
+        self.target_hidden = None;
+        Ok(next)
     }
 }
 
@@ -1401,6 +1451,9 @@ struct MtpScratch {
     logits: Tensor,
     next_token: Tensor,
     proposals: Tensor,
+    /// `[pending, d0, d1, d2]`, populated on the draft stream so target
+    /// verification can start without a proposal D2H/H2D round trip.
+    verification_inputs: Tensor,
     router_logits: Tensor,
     expert_ids: Tensor,
     expert_weights: Tensor,
@@ -1410,8 +1463,8 @@ struct MtpScratch {
     shared_output: Tensor,
     shared_gate_logit: Tensor,
     edge_workspace: Option<CudaBuffer>,
-    draft_session: ExecutionSession,
-    draft_session_prepared: bool,
+    draft_sessions: Vec<ExecutionSession>,
+    draft_sessions_prepared: [bool; QWEN35_MTP_DRAFT_STEPS],
 }
 
 impl MtpScratch {
@@ -1480,6 +1533,7 @@ impl MtpScratch {
             logits: zeros(ctx, vec![1, VOCAB], DType::BF16)?,
             next_token: zeros(ctx, vec![1], DType::I32)?,
             proposals: zeros(ctx, vec![QWEN35_MTP_DRAFT_STEPS], DType::I32)?,
+            verification_inputs: zeros(ctx, vec![QWEN35_MTP_DRAFT_STEPS + 1], DType::I32)?,
             router_logits: zeros(ctx, vec![1, EXPERTS], DType::BF16)?,
             expert_ids: zeros(ctx, vec![TOP_K], DType::I32)?,
             expert_weights: zeros(ctx, vec![TOP_K], DType::F32)?,
@@ -1498,8 +1552,10 @@ impl MtpScratch {
                     CudaBuffer::alloc(bytes, ctx.device_id()).map_err(Error::Cuda)
                 })
                 .transpose()?,
-            draft_session: ExecutionSession::with_capacity(MTP_DRAFT_WORKSPACE, ctx.device_id())?,
-            draft_session_prepared: false,
+            draft_sessions: (0..QWEN35_MTP_DRAFT_STEPS)
+                .map(|_| ExecutionSession::with_capacity(MTP_DRAFT_WORKSPACE, ctx.device_id()))
+                .collect::<Result<Vec<_>>>()?,
+            draft_sessions_prepared: [false; QWEN35_MTP_DRAFT_STEPS],
         })
     }
 }
@@ -1516,9 +1572,10 @@ fn run_draft_chain(
     target_hidden: &Tensor,
     draft_positions: &Tensor,
     start: MtpPositionContract,
+    draft_steps: usize,
 ) -> Result<()> {
     let mut base_hidden = target_hidden.clone();
-    for depth in 0..QWEN35_MTP_DRAFT_STEPS {
+    for depth in 0..draft_steps {
         let token_input = scratch.token.clone();
         let rope_position = rows_view(draft_positions, depth, 1, 3)?;
         let rope_position = reshape(&rope_position, vec![3, 1], DType::I32)?;
@@ -1539,7 +1596,9 @@ fn run_draft_chain(
         )?;
         let proposal_slot = element_view(&scratch.proposals, depth)?;
         transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &proposal_slot)?;
-        if depth + 1 < QWEN35_MTP_DRAFT_STEPS {
+        let verification_slot = element_view(&scratch.verification_inputs, depth + 1)?;
+        transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &verification_slot)?;
+        if depth + 1 < draft_steps {
             transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &scratch.token)?;
             base_hidden = scratch.final_hidden.clone();
         }
@@ -2253,6 +2312,15 @@ fn cache_prefix_view(cache: &Tensor, rows: usize, heads: usize, head_dim: usize)
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
+}
+
+fn mtp_device_chain_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("APXINF_QWEN35_MTP_DEVICE_CHAIN")
+            .map(|value| !matches!(value.as_str(), "0" | "false" | "off"))
+            .unwrap_or(true)
+    })
 }
 
 fn schedule_error(error: impl std::fmt::Display) -> Error {

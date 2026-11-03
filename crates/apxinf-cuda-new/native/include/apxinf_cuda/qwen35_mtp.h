@@ -6,6 +6,8 @@
 #include "runtime.h"
 
 #define APXINF_QWEN35_MTP_MOE_SPEC_VERSION 1u
+#define APXINF_QWEN35_MTP_ACCEPT_SPEC_VERSION 1u
+#define APXINF_QWEN35_MTP_ACCEPT_OUTPUT_I32 8u
 
 #ifdef __cplusplus
 extern "C" {
@@ -59,6 +61,24 @@ typedef struct {
 apxinf_status_t apxinf_qwen35_mtp_moe(
     apxinf_runtime_t runtime, const apxinf_qwen35_mtp_moe_spec_t* spec,
     const apxinf_qwen35_mtp_moe_bindings_t* bindings);
+
+typedef struct {
+  uint32_t version;
+  uint32_t draft_steps;
+} apxinf_qwen35_mtp_accept_spec_t;
+
+typedef struct {
+  // proposals[draft_steps], target_predictions[draft_steps + 1]
+  const int32_t* proposals;
+  const int32_t* target_predictions;
+  // [accepted, p0, p1, p2, t0, t1, t2, t3]
+  int32_t* output;
+  apxinf_cuda_stream_t stream;
+} apxinf_qwen35_mtp_accept_bindings_t;
+
+apxinf_status_t apxinf_qwen35_mtp_accept(
+    apxinf_runtime_t runtime, const apxinf_qwen35_mtp_accept_spec_t* spec,
+    const apxinf_qwen35_mtp_accept_bindings_t* bindings);
 
 #ifdef __cplusplus
 }

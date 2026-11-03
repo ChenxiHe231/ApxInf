@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use apxinf_core::{
     Backend, DType, Device, Error, Result, Shape, Tensor, TokenSampler, TokenSamplingSpec,
@@ -43,6 +44,151 @@ use super::session::{Qwen35Session, Qwen35SessionSnapshot};
 /// `LoadOptions::text_kv_capacity` instead of relying on this default.
 pub const DEFAULT_KV_CAPACITY: usize = 8_192;
 const SCALAR_PREFIX_CACHE_ENTRIES: usize = 4;
+/// One exact first-turn checkpoint plus one exact tool-follow-up checkpoint.
+/// Each entry owns a complete device snapshot; the two-entry LRU recycles the
+/// prior tool-turn allocation instead of stalling on a third allocation.
+// Retain the stable first-turn checkpoint plus the common tool-call variants.
+// Greedy NVFP4 execution can differ by one token near close logits; a two-entry
+// LRU made the corresponding tool-result checkpoints evict each other and
+// forced an otherwise avoidable ~430-token prefill every other request.
+const MTP_PROMPT_PREFIX_CACHE_ENTRIES: usize = 4;
+const MTP_VOLATILE_TOOL_TAIL_TOKENS: usize = 64;
+const MTP_TOOL_PROMPT_MIN_TOKENS: usize = 9_000;
+const ADAPTIVE_MTP_HISTORY: usize = 16;
+const ADAPTIVE_MTP_WARMUP_ROUNDS: usize = 3;
+const ADAPTIVE_MTP_SCALAR_DECISIONS: usize = 6;
+
+#[derive(Clone, Copy, Debug)]
+struct MtpRoundObservation {
+    depth: usize,
+    accepted: usize,
+    elapsed_ms: f64,
+}
+
+/// Request-local cost policy. Acceptance probabilities use every round that
+/// actually proposed the corresponding depth; latency uses direct samples
+/// when available and a shallow linear projection while a depth is untried.
+/// The scalar threshold is configurable so the decision remains tied to a
+/// measured Thor scalar baseline instead of a hard-coded acceptance heuristic.
+struct AdaptiveMtpController {
+    observations: VecDeque<MtpRoundObservation>,
+    rounds: usize,
+    last_depth: usize,
+    scalar_tpot_ms: f64,
+    fixed_depth: Option<usize>,
+}
+
+impl AdaptiveMtpController {
+    fn new() -> Self {
+        let scalar_tpot_ms = std::env::var("APXINF_QWEN35_SCALAR_TPOT_MS")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            // Measured Thor scalar decode reference. Production/demo scripts
+            // override this with the same-run scalar calibration.
+            .unwrap_or(19.42);
+        let fixed_depth = std::env::var("APXINF_QWEN35_MTP_FIXED_DEPTH")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|depth| (1..=QWEN35_MTP_DRAFT_STEPS).contains(depth));
+        Self {
+            observations: VecDeque::with_capacity(ADAPTIVE_MTP_HISTORY),
+            rounds: 0,
+            last_depth: QWEN35_MTP_DRAFT_STEPS,
+            scalar_tpot_ms,
+            fixed_depth,
+        }
+    }
+
+    fn next_depth(&self) -> usize {
+        if let Some(depth) = self.fixed_depth {
+            return depth;
+        }
+        if self.rounds < ADAPTIVE_MTP_WARMUP_ROUNDS {
+            return QWEN35_MTP_DRAFT_STEPS;
+        }
+        // A periodic full-depth probe prevents an early low-acceptance window
+        // from permanently hiding later high-confidence spans.
+        if self.rounds % 12 == 11 {
+            return QWEN35_MTP_DRAFT_STEPS;
+        }
+
+        let mut best_depth = 1usize;
+        let mut best_tpot = f64::INFINITY;
+        for depth in 1..=QWEN35_MTP_DRAFT_STEPS {
+            let expected_tokens = 1.0
+                + (0..depth)
+                    .map(|proposal_depth| self.prefix_acceptance(proposal_depth))
+                    .sum::<f64>();
+            let tpot = self.estimated_round_ms(depth) / expected_tokens;
+            if tpot < best_tpot {
+                best_tpot = tpot;
+                best_depth = depth;
+            }
+        }
+        if self.rounds >= ADAPTIVE_MTP_SCALAR_DECISIONS
+            && best_tpot >= self.scalar_tpot_ms
+        {
+            0
+        } else {
+            best_depth
+        }
+    }
+
+    fn observe(&mut self, depth: usize, accepted: usize, elapsed_ms: f64) {
+        if self.observations.len() == ADAPTIVE_MTP_HISTORY {
+            self.observations.pop_front();
+        }
+        self.observations.push_back(MtpRoundObservation {
+            depth,
+            accepted,
+            elapsed_ms,
+        });
+        self.rounds += 1;
+        self.last_depth = depth;
+    }
+
+    fn prefix_acceptance(&self, proposal_depth: usize) -> f64 {
+        let mut opportunities = 0usize;
+        let mut accepted = 0usize;
+        for observation in &self.observations {
+            if observation.depth > proposal_depth {
+                opportunities += 1;
+                accepted += usize::from(observation.accepted > proposal_depth);
+            }
+        }
+        // Beta(1,1) smoothing avoids selecting a depth from one lucky round.
+        (accepted as f64 + 1.0) / (opportunities as f64 + 2.0)
+    }
+
+    fn estimated_round_ms(&self, depth: usize) -> f64 {
+        let direct = self
+            .observations
+            .iter()
+            .filter(|observation| observation.depth == depth)
+            .map(|observation| observation.elapsed_ms)
+            .collect::<Vec<_>>();
+        if !direct.is_empty() {
+            return direct.iter().sum::<f64>() / direct.len() as f64;
+        }
+        let normalized = self
+            .observations
+            .iter()
+            .map(|observation| observation.elapsed_ms / depth_cost(observation.depth))
+            .collect::<Vec<_>>();
+        if normalized.is_empty() {
+            return self.scalar_tpot_ms * depth_cost(depth);
+        }
+        normalized.iter().sum::<f64>() / normalized.len() as f64 * depth_cost(depth)
+    }
+}
+
+fn depth_cost(depth: usize) -> f64 {
+    // The target verifier dominates the round; draft work adds a smaller
+    // approximately linear component. Online direct samples replace this
+    // projection as soon as a depth is exercised.
+    1.0 + 0.24 * depth as f64
+}
 
 type ContextSnapshot = Qwen35ContextSnapshot<Qwen35AttentionCache, Qwen35MtpState>;
 type ScalarContextSnapshot = Qwen35SessionSnapshot<Qwen35AttentionCache>;
@@ -74,6 +220,11 @@ pub struct Qwen35Moe {
     reset_error: Option<String>,
     context_reuse_enabled: bool,
     system_prefix_cache: Option<SystemPrefixCache>,
+    /// Exact prompt checkpoints in most-recently-used order. Checkpoints stop
+    /// one token before the rendered prompt end: restoring one and appending
+    /// that final token reconstructs the first target token and a fresh MTP
+    /// schedule without re-evaluating the stable prompt body.
+    mtp_prompt_prefix_caches: VecDeque<SystemPrefixCache>,
     /// Token identity for the live MTP endpoint. The batch-one serving worker
     /// leaves target/GDN/MTP state resident after generation, so an immediate
     /// tool-result follow-up can append without copying a second KV snapshot.
@@ -272,6 +423,7 @@ impl Qwen35Moe {
             reset_error: None,
             context_reuse_enabled: false,
             system_prefix_cache: None,
+            mtp_prompt_prefix_caches: VecDeque::new(),
             mtp_live_conversation_prefix: None,
             scalar_system_prefix_caches: VecDeque::new(),
             last_reused_tokens: 0,
@@ -288,6 +440,7 @@ impl Qwen35Moe {
         self.context_reuse_enabled = enabled;
         if !enabled {
             self.system_prefix_cache = None;
+            self.mtp_prompt_prefix_caches.clear();
             self.mtp_live_conversation_prefix = None;
             self.scalar_system_prefix_caches.clear();
         }
@@ -414,31 +567,78 @@ impl Qwen35Moe {
             )));
         }
 
+        let exact_hit = longest_reusable_prefix_index(
+            self.mtp_prompt_prefix_caches
+                .iter()
+                .map(|cache| cache.tokens.as_slice()),
+            prompt,
+        );
+        let exact_hit_tokens = exact_hit
+            .and_then(|index| self.mtp_prompt_prefix_caches.get(index))
+            .map_or(0, |cache| cache.tokens.len());
+
         // A tool-result turn contains the prior rendered prompt and generated
-        // assistant tool call verbatim. Prefer the still-live endpoint over the
-        // stable system snapshot. The suffix must be non-empty because MTP
-        // append needs a fresh final hidden row before drafting again.
+        // assistant tool call verbatim. Prefer the still-live endpoint when it
+        // is at least as deep as a stored checkpoint; otherwise restore the
+        // deeper exact checkpoint. The suffix is always non-empty because
+        // prompt checkpoints intentionally stop one token before the end.
         if self.context_reuse_enabled {
+            let live_hit_tokens = self
+                .mtp_live_conversation_prefix
+                .as_ref()
+                .filter(|tokens| {
+                    live_conversation_suffix(tokens, prompt, self.runtime.target().position())
+                        .is_some()
+                })
+                .map_or(0, Vec::len);
+
+            if live_hit_tokens >= exact_hit_tokens && live_hit_tokens > 0 {
+                let tokens = self
+                    .mtp_live_conversation_prefix
+                    .take()
+                    .expect("a measured live-prefix hit remains present");
+                let cached_tokens = tokens.len();
+                let outcome =
+                    self.append_mtp_with_prompt_checkpoint(prompt, cached_tokens, options)?;
+                self.last_reused_tokens = cached_tokens;
+                eprintln!(
+                    "live conversation prefix hit: reused {} of {} prompt tokens; evaluated {}",
+                    cached_tokens,
+                    prompt.len(),
+                    prompt.len() - cached_tokens
+                );
+                return Ok(outcome);
+            }
+
+            if let Some(index) = exact_hit {
+                self.mtp_live_conversation_prefix = None;
+                let cache = self
+                    .mtp_prompt_prefix_caches
+                    .remove(index)
+                    .expect("located MTP prompt prefix cache entry exists");
+                let cached_tokens = cache.tokens.len();
+                self.runtime.restore_context(&self.ctx, &cache.snapshot)?;
+                let outcome = self.runtime.append_prefill_greedy(
+                    &self.ctx,
+                    &self.decoder,
+                    &self.weights,
+                    &prompt[cached_tokens..],
+                    options,
+                )?;
+                self.last_reused_tokens = cached_tokens;
+                self.mtp_prompt_prefix_caches.push_front(cache);
+                eprintln!(
+                    "exact prompt prefix cache hit: reused {} of {} prompt tokens; evaluated {}",
+                    cached_tokens,
+                    prompt.len(),
+                    prompt.len() - cached_tokens
+                );
+                return Ok(outcome);
+            }
+
             if let Some(tokens) = self.mtp_live_conversation_prefix.take() {
                 let cached_tokens = tokens.len();
                 let runtime_position = self.runtime.target().position();
-                if let Some(suffix) = live_conversation_suffix(&tokens, prompt, runtime_position) {
-                    let outcome = self.runtime.append_prefill_greedy(
-                        &self.ctx,
-                        &self.decoder,
-                        &self.weights,
-                        suffix,
-                        options,
-                    )?;
-                    self.last_reused_tokens = cached_tokens;
-                    eprintln!(
-                        "live conversation prefix hit: reused {} of {} prompt tokens; evaluated {}",
-                        cached_tokens,
-                        prompt.len(),
-                        prompt.len() - cached_tokens
-                    );
-                    return Ok(outcome);
-                }
                 let common_tokens = tokens
                     .iter()
                     .zip(prompt)
@@ -510,13 +710,8 @@ impl Qwen35Moe {
                 );
             }
 
-            let outcome = self.runtime.append_prefill_greedy(
-                &self.ctx,
-                &self.decoder,
-                &self.weights,
-                &prompt[reusable_prefix_tokens..],
-                options,
-            )?;
+            let outcome =
+                self.append_mtp_with_prompt_checkpoint(prompt, reusable_prefix_tokens, options)?;
             if self.last_reused_tokens > 0 {
                 eprintln!(
                     "system prefix cache hit: reused {} of {} prompt tokens; evaluated {}",
@@ -529,6 +724,86 @@ impl Qwen35Moe {
         })();
         self.system_prefix_cache = Some(cache);
         result
+    }
+
+    /// Extend the currently restored context while retaining a prompt
+    /// checkpoint. First turns stop one token before the end. AIOS tool-result
+    /// turns keep one scan-aligned uncached tail because their final
+    /// elapsed-time context changes on every request. This trades a 64-token
+    /// Cake append for a stable hit instead of alternating between one and
+    /// ~430 evaluated rows.
+    fn append_mtp_with_prompt_checkpoint(
+        &mut self,
+        prompt: &[u32],
+        restored_tokens: usize,
+        options: &GenerationOptions,
+    ) -> Result<super::mtp_runtime::MtpPrefillOutcome> {
+        if restored_tokens >= prompt.len() {
+            return Err(Error::Other(
+                "Qwen3.5 prompt checkpoint append requires a non-empty suffix".into(),
+            ));
+        }
+        let checkpoint_tokens = if prompt.len() >= MTP_TOOL_PROMPT_MIN_TOKENS {
+            prompt.len().saturating_sub(MTP_VOLATILE_TOOL_TAIL_TOKENS)
+        } else {
+            prompt.len() - 1
+        };
+        if checkpoint_tokens < restored_tokens {
+            return Err(Error::Other(
+                "Qwen3.5 restored prefix extends past the prompt checkpoint".into(),
+            ));
+        }
+
+        if checkpoint_tokens > restored_tokens {
+            self.runtime.append_prefill_greedy(
+                &self.ctx,
+                &self.decoder,
+                &self.weights,
+                &prompt[restored_tokens..checkpoint_tokens],
+                options,
+            )?;
+        }
+
+        if checkpoint_tokens > 0 {
+            let mut cache = self.take_mtp_prompt_prefix_cache(checkpoint_tokens)?;
+            self.runtime
+                .capture_context(&self.ctx, &mut cache.snapshot)?;
+            cache.tokens.clear();
+            cache.tokens.extend_from_slice(&prompt[..checkpoint_tokens]);
+            self.mtp_prompt_prefix_caches.push_front(cache);
+        }
+
+        self.runtime.append_prefill_greedy(
+            &self.ctx,
+            &self.decoder,
+            &self.weights,
+            &prompt[checkpoint_tokens..],
+            options,
+        )
+    }
+
+    fn take_mtp_prompt_prefix_cache(&mut self, capacity: usize) -> Result<SystemPrefixCache> {
+        let reusable = if self.mtp_prompt_prefix_caches.len() >= MTP_PROMPT_PREFIX_CACHE_ENTRIES {
+            self.mtp_prompt_prefix_caches.pop_back()
+        } else {
+            None
+        };
+        match reusable.filter(|cache| cache.capacity >= capacity) {
+            Some(mut cache) => {
+                cache.tokens.clear();
+                Ok(cache)
+            }
+            None => Ok(SystemPrefixCache {
+                tokens: Vec::new(),
+                snapshot: self.runtime.allocate_context_snapshot(
+                    &self.ctx,
+                    &self.decoder,
+                    &self.weights,
+                    capacity,
+                )?,
+                capacity,
+            }),
+        }
     }
 
     /// Publish the committed token identity for the live MTP endpoint. The
@@ -700,7 +975,12 @@ impl Qwen35Moe {
         while tokens.len() < max_new_tokens && !self.runtime.is_finished() {
             let round = self
                 .runtime
-                .run_greedy_round(&self.ctx, &self.decoder, &self.weights)?;
+                .run_greedy_round(
+                    &self.ctx,
+                    &self.decoder,
+                    &self.weights,
+                    QWEN35_MTP_DRAFT_STEPS,
+                )?;
             for token in round.outcome.emitted {
                 if tokens.len() == max_new_tokens {
                     break;
@@ -763,10 +1043,59 @@ impl Qwen35Moe {
         profile.record_first_token();
         profile.run_unprofiled(|| on_token(first));
 
+        let mut adaptive = AdaptiveMtpController::new();
+        let mut scalar_fallback = false;
         while tokens.len() < policy.max_new_tokens && !self.runtime.is_finished() {
-            let round = self
-                .runtime
-                .run_greedy_round(&self.ctx, &self.decoder, &self.weights)?;
+            if policy
+                .eos_token_ids
+                .contains(&tokens.last().expect("generated token exists").token_id)
+            {
+                break;
+            }
+            let depth = if scalar_fallback {
+                0
+            } else {
+                adaptive.next_depth()
+            };
+            if depth == 0 {
+                if !scalar_fallback {
+                    eprintln!(
+                        "adaptive MTP: scalar fallback after {} rounds; scalar_tpot_ms={:.3}",
+                        adaptive.rounds, adaptive.scalar_tpot_ms
+                    );
+                    scalar_fallback = true;
+                }
+                let token_id = self.runtime.run_scalar_fallback_step(
+                    &self.ctx,
+                    &self.decoder,
+                    &self.weights,
+                )?;
+                let token = GeneratedToken {
+                    token_id,
+                    logprob: None,
+                };
+                tokens.push(token);
+                profile.run_unprofiled(|| on_token(token));
+                continue;
+            }
+            if depth != adaptive.last_depth {
+                eprintln!(
+                    "adaptive MTP: depth {} -> {} after {} rounds",
+                    adaptive.last_depth, depth, adaptive.rounds
+                );
+            }
+            let started = Instant::now();
+            let round = self.runtime.run_greedy_round(
+                &self.ctx,
+                &self.decoder,
+                &self.weights,
+                depth,
+            )?;
+            adaptive.observe(
+                depth,
+                round.outcome.accepted_proposals,
+                started.elapsed().as_secs_f64() * 1e3,
+            );
             for token_id in round.outcome.emitted {
                 if tokens.len() == policy.max_new_tokens {
                     return Err(Error::Other(
@@ -781,7 +1110,12 @@ impl Qwen35Moe {
                 profile.run_unprofiled(|| on_token(token));
             }
         }
-        if let Err(error) = self.publish_mtp_live_conversation_prefix(prompt, &tokens) {
+        if scalar_fallback {
+            // The target advanced without maintaining proposer KV. Keep the
+            // static prefix snapshots, but do not advertise the live endpoint
+            // as an exact target+MTP continuation.
+            self.mtp_live_conversation_prefix = None;
+        } else if let Err(error) = self.publish_mtp_live_conversation_prefix(prompt, &tokens) {
             // Generation has already streamed successfully. A best-effort
             // optimization must not turn that response into an API error.
             self.mtp_live_conversation_prefix = None;
@@ -904,6 +1238,21 @@ fn live_conversation_suffix<'a>(
     .then(|| &prompt[cached.len()..])
 }
 
+fn longest_reusable_prefix_index<'a>(
+    caches: impl Iterator<Item = &'a [u32]>,
+    prompt: &[u32],
+) -> Option<usize> {
+    caches
+        .enumerate()
+        .filter(|(_, cached)| {
+            !cached.is_empty()
+                && cached.len() < prompt.len()
+                && prompt.get(..cached.len()) == Some(*cached)
+        })
+        .max_by_key(|(_, cached)| cached.len())
+        .map(|(index, _)| index)
+}
+
 fn decode_logits_layout(rows: usize, vocab_size: usize) -> Result<(usize, usize)> {
     if rows == 0 || vocab_size == 0 {
         return Err(Error::Other(
@@ -988,12 +1337,10 @@ impl LlmTrait for Qwen35Moe {
 
     fn speculative_generation_stats(&self) -> Option<SpeculativeGenerationStats> {
         let stats = self.runtime.schedule()?.stats();
-        let target_verified_rows = stats
-            .rounds
-            .checked_mul(super::mtp_schedule::QWEN35_MTP_VERIFY_ROWS)?;
+        let target_verified_rows = stats.target_verified_rows;
         let target_rolled_back_rows = target_verified_rows.checked_sub(stats.emitted_tokens)?;
         Some(SpeculativeGenerationStats {
-            implementation: "qwen3.5_moe_mtp2",
+            implementation: "qwen3.6_moe_adaptive_mtp",
             draft_steps: QWEN35_MTP_DRAFT_STEPS,
             rounds: stats.rounds,
             zero_accept_rounds: stats.zero_accept_rounds,
@@ -1169,5 +1516,60 @@ mod tests {
         assert!(live_conversation_suffix(&prompt, &prompt, prompt.len()).is_none());
         assert!(live_conversation_suffix(&[10, 99, 12], &prompt, 3).is_none());
         assert!(live_conversation_suffix(&[10, 11, 12], &prompt, 2).is_none());
+    }
+
+    #[test]
+    fn exact_prompt_cache_selects_the_longest_compatible_prefix() {
+        let caches = [vec![10, 11], vec![10, 11, 12, 13], vec![99], vec![]];
+        let prompt = [10, 11, 12, 13, 14];
+        assert_eq!(
+            longest_reusable_prefix_index(caches.iter().map(Vec::as_slice), &prompt),
+            Some(1)
+        );
+        assert_eq!(
+            longest_reusable_prefix_index(caches.iter().map(Vec::as_slice), &[7, 8]),
+            None
+        );
+        assert_eq!(
+            longest_reusable_prefix_index(caches.iter().map(Vec::as_slice), &[10, 11]),
+            None
+        );
+    }
+
+    fn adaptive_controller() -> AdaptiveMtpController {
+        AdaptiveMtpController {
+            observations: VecDeque::with_capacity(ADAPTIVE_MTP_HISTORY),
+            rounds: 0,
+            last_depth: QWEN35_MTP_DRAFT_STEPS,
+            scalar_tpot_ms: 19.42,
+            fixed_depth: None,
+        }
+    }
+
+    #[test]
+    fn adaptive_mtp_keeps_depth_three_for_high_acceptance() {
+        let mut controller = adaptive_controller();
+        for _ in 0..6 {
+            controller.observe(3, 3, 40.0);
+        }
+        assert_eq!(controller.next_depth(), 3);
+    }
+
+    #[test]
+    fn adaptive_mtp_shrinks_to_one_when_only_first_draft_matches() {
+        let mut controller = adaptive_controller();
+        for _ in 0..6 {
+            controller.observe(3, 1, 35.0);
+        }
+        assert_eq!(controller.next_depth(), 1);
+    }
+
+    #[test]
+    fn adaptive_mtp_falls_back_when_speculation_loses_to_scalar() {
+        let mut controller = adaptive_controller();
+        for _ in 0..6 {
+            controller.observe(3, 0, 45.0);
+        }
+        assert_eq!(controller.next_depth(), 0);
     }
 }

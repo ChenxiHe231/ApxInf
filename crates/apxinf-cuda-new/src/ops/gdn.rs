@@ -783,6 +783,76 @@ pub struct GdnGatedNormArgs<'a> {
     pub epsilon: f32,
 }
 
+/// Advance a short verifier sequence while materializing every recurrent
+/// rollback checkpoint. All tensors are sequence-major.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_recurrent_verify(
+    ctx: &CudaContext,
+    state: &Tensor,
+    fused_qkv: &Tensor,
+    decay: &Tensor,
+    beta: &Tensor,
+    output: &Tensor,
+    checkpoints: &Tensor,
+    tokens: usize,
+    v_heads: usize,
+    k_heads: usize,
+    offsets: [usize; 3],
+    row_width: usize,
+) -> Result<()> {
+    let state_dims = state.shape().dims().to_vec();
+    if state_dims.len() != 3 {
+        return Err(invalid("GDN state must be [v_heads, v_dim, k_dim]"));
+    }
+    let (state_heads, v_dim, k_dim) = (state_dims[0], state_dims[1], state_dims[2]);
+    if tokens == 0 || k_heads == 0 || state_heads != v_heads || v_heads % k_heads != 0 {
+        return Err(invalid("invalid GDN verifier recurrence geometry"));
+    }
+    let [q_offset, k_offset, v_offset] = offsets;
+    if q_offset + k_heads * k_dim > row_width
+        || k_offset + k_heads * k_dim > row_width
+        || v_offset + v_heads * v_dim > row_width
+    {
+        return Err(invalid("GDN verifier QKV offsets run past the fused row"));
+    }
+    let state_buffer = tensor_storage(ctx, state, DType::F32, &state_dims)?;
+    let fused_buffer =
+        tensor_storage(ctx, fused_qkv, DType::BF16, &[tokens, row_width])?;
+    let decay_buffer = tensor_storage(ctx, decay, DType::F32, &[tokens, v_heads])?;
+    let beta_buffer = tensor_storage(ctx, beta, DType::F32, &[tokens, v_heads])?;
+    let output_buffer =
+        tensor_storage(ctx, output, DType::BF16, &[tokens, v_heads, v_dim])?;
+    let checkpoints_buffer = tensor_storage(
+        ctx,
+        checkpoints,
+        DType::F32,
+        &[tokens, v_heads, v_dim, k_dim],
+    )?;
+    let base = fused_buffer.ptr() as *const u8;
+    let element = DType::BF16.size_in_bytes();
+    unsafe {
+        status::check(abi::apxinf_gdn_recurrent_verify(
+            state_buffer.ptr(),
+            base.add(q_offset * element).cast(),
+            base.add(k_offset * element).cast(),
+            base.add(v_offset * element).cast(),
+            decay_buffer.ptr(),
+            beta_buffer.ptr(),
+            output_buffer.ptr(),
+            checkpoints_buffer.ptr(),
+            tokens as i64,
+            v_heads as i64,
+            k_heads as i64,
+            v_dim as i64,
+            k_dim as i64,
+            row_width as i64,
+            row_width as i64,
+            row_width as i64,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
 /// Per-head RMSNorm followed by the swish output gate.
 pub fn gdn_gated_norm(ctx: &CudaContext, args: GdnGatedNormArgs<'_>) -> Result<()> {
     match (args.input.shape().dims().len(), args.gate, args.quantized) {
@@ -986,6 +1056,48 @@ pub fn gdn_causal_conv_step(
     launch(ctx, &spec, &bindings)
 }
 
+/// Advance the recurrent convolution over verifier rows in one launch and
+/// retain the post-row windows required for partial acceptance.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_causal_conv_verify(
+    ctx: &CudaContext,
+    window: &Tensor,
+    input: &Tensor,
+    weight: &Tensor,
+    output: &Tensor,
+    checkpoints: &Tensor,
+    tokens: usize,
+) -> Result<()> {
+    let window_dims = window.shape().dims().to_vec();
+    if window_dims.len() != 2 || tokens == 0 {
+        return Err(invalid("GDN verifier conv requires [channels, width] state"));
+    }
+    let (channels, kernel_width) = (window_dims[0], window_dims[1]);
+    let window_buffer = tensor_storage(ctx, window, DType::F32, &window_dims)?;
+    let input_buffer = tensor_storage(ctx, input, DType::BF16, &[tokens, channels])?;
+    let weight_buffer = tensor_storage(ctx, weight, DType::BF16, &window_dims)?;
+    let output_buffer = tensor_storage(ctx, output, DType::BF16, &[tokens, channels])?;
+    let checkpoints_buffer = tensor_storage(
+        ctx,
+        checkpoints,
+        DType::F32,
+        &[tokens, channels, kernel_width],
+    )?;
+    unsafe {
+        status::check(abi::apxinf_gdn_causal_conv_verify(
+            window_buffer.ptr(),
+            input_buffer.ptr(),
+            weight_buffer.ptr(),
+            output_buffer.ptr(),
+            checkpoints_buffer.ptr(),
+            tokens as i64,
+            channels as i64,
+            kernel_width as i64,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
 /// Causal depthwise conv1d over a whole prompt, then SiLU.
 ///
 /// `input`/`output` are `[tokens, channels]` BF16 and `weight` is
@@ -1142,6 +1254,40 @@ pub fn gdn_l2_normalize_heads(ctx: &CudaContext, data: &Tensor, epsilon: f32) ->
     bindings.output = buffer.ptr();
     bindings.epsilon = epsilon;
     launch(ctx, &spec, &bindings)
+}
+
+/// Sequence-axis L2 normalization for `[tokens, heads, head_dim]` BF16 data.
+pub fn gdn_l2_normalize_heads_seq(
+    ctx: &CudaContext,
+    data: &Tensor,
+    tokens: usize,
+    heads: usize,
+    head_dim: usize,
+    row_stride: usize,
+    offset: usize,
+    epsilon: f32,
+) -> Result<()> {
+    let dims = data.shape().dims().to_vec();
+    if dims != [tokens, row_stride] || offset + heads * head_dim > row_stride {
+        return Err(invalid(
+            "GDN sequence normalization geometry exceeds its fused rows",
+        ));
+    }
+    let buffer = tensor_storage(ctx, data, DType::BF16, &dims)?;
+    let pointer = unsafe {
+        (buffer.ptr() as *mut u8).add(offset * DType::BF16.size_in_bytes())
+    };
+    unsafe {
+        status::check(abi::apxinf_gdn_l2_normalize_heads_seq(
+            pointer.cast(),
+            tokens as i64,
+            heads as i64,
+            head_dim as i64,
+            row_stride as i64,
+            epsilon,
+            ctx.stream().handle(),
+        ))
+    }
 }
 
 fn gdn_decay_and_beta_step(ctx: &CudaContext, args: &GdnDecayAndBetaArgs<'_>) -> Result<()> {

@@ -1,14 +1,15 @@
 //! Device-agnostic speculative-decoding schedule for Qwen3.5 MTP.
 //!
 //! This module owns only transactional token/position accounting. The CUDA
-//! runtime produces two draft tokens, verifies three target rows, applies the
+//! runtime produces one to three draft tokens, verifies two to four target rows, applies the
 //! described cache/state commit, and calls [`Qwen35MtpSchedule::commit`] only
 //! after both target and draft device preparations succeed.
 
 use std::fmt;
 
-pub const QWEN35_MTP_DRAFT_STEPS: usize = 2;
+pub const QWEN35_MTP_DRAFT_STEPS: usize = 3;
 pub const QWEN35_MTP_VERIFY_ROWS: usize = QWEN35_MTP_DRAFT_STEPS + 1;
+pub const QWEN35_MTP_MIN_DRAFT_STEPS: usize = 1;
 
 pub type TokenId = u32;
 
@@ -32,6 +33,7 @@ pub struct Qwen35MtpStats {
     pub correction_tokens: usize,
     pub bonus_tokens: usize,
     pub emitted_tokens: usize,
+    pub target_verified_rows: usize,
     pub proposed_by_depth: [usize; QWEN35_MTP_DRAFT_STEPS],
     pub matched_by_depth: [usize; QWEN35_MTP_DRAFT_STEPS],
     pub accepted_prefix_by_depth: [usize; QWEN35_MTP_DRAFT_STEPS],
@@ -107,17 +109,17 @@ pub struct RoundTicket {
     epoch: u64,
     positions: CommittedPositions,
     remaining_budget: usize,
-    proposals: [TokenId; QWEN35_MTP_DRAFT_STEPS],
-    verification_inputs: [TokenId; QWEN35_MTP_VERIFY_ROWS],
+    proposals: Vec<TokenId>,
+    verification_inputs: Vec<TokenId>,
 }
 
 impl RoundTicket {
-    /// Target verification consumes `pending` followed by both drafts.
-    pub fn verification_inputs(&self) -> &[TokenId; QWEN35_MTP_VERIFY_ROWS] {
+    /// Target verification consumes `pending` followed by every draft.
+    pub fn verification_inputs(&self) -> &[TokenId] {
         &self.verification_inputs
     }
 
-    pub fn proposals(&self) -> &[TokenId; QWEN35_MTP_DRAFT_STEPS] {
+    pub fn proposals(&self) -> &[TokenId] {
         &self.proposals
     }
 }
@@ -131,7 +133,7 @@ pub struct RoundPlan {
     tail_kind: TailTokenKind,
     ends_with_eos: bool,
     reaches_budget: bool,
-    proposal_matches: [bool; QWEN35_MTP_DRAFT_STEPS],
+    proposal_matches: Vec<bool>,
     contract: CommitContract,
 }
 
@@ -242,15 +244,19 @@ impl Qwen35MtpSchedule {
         if self.eos_token_ids.contains(&pending) {
             return Err(MtpScheduleError::PendingIsEos(pending));
         }
-        let proposals: [TokenId; QWEN35_MTP_DRAFT_STEPS] =
-            proposals
-                .try_into()
-                .map_err(|_| MtpScheduleError::WrongProposalCount {
-                    expected: QWEN35_MTP_DRAFT_STEPS,
-                    got: proposals.len(),
-                })?;
-        let mut verification_inputs = [pending; QWEN35_MTP_VERIFY_ROWS];
-        verification_inputs[1..].copy_from_slice(&proposals);
+        if !(QWEN35_MTP_MIN_DRAFT_STEPS..=QWEN35_MTP_DRAFT_STEPS)
+            .contains(&proposals.len())
+        {
+            return Err(MtpScheduleError::DraftDepthOutOfRange {
+                min: QWEN35_MTP_MIN_DRAFT_STEPS,
+                max: QWEN35_MTP_DRAFT_STEPS,
+                got: proposals.len(),
+            });
+        }
+        let proposals = proposals.to_vec();
+        let mut verification_inputs = Vec::with_capacity(proposals.len() + 1);
+        verification_inputs.push(pending);
+        verification_inputs.extend_from_slice(&proposals);
         Ok(RoundTicket {
             epoch: self.epoch,
             positions: self.positions,
@@ -263,31 +269,32 @@ impl Qwen35MtpSchedule {
     /// Resolve draft acceptance and produce an immutable device commit plan.
     ///
     /// `target_predictions[i]` is the target argmax after verification input
-    /// row `i`. Hence rows 0..3 check the drafts, and row 3 becomes the bonus
-    /// token only when every draft matched.
+    /// row `i`. The first `ticket.proposals.len()` rows check drafts and the
+    /// final row becomes the bonus token only when every draft matched.
     pub fn finish_round(
         &self,
         ticket: RoundTicket,
         target_predictions: &[TokenId],
     ) -> Result<RoundPlan, MtpScheduleError> {
         self.validate_ticket(&ticket)?;
-        let target_predictions: [TokenId; QWEN35_MTP_VERIFY_ROWS] =
-            target_predictions
-                .try_into()
-                .map_err(|_| MtpScheduleError::WrongPredictionCount {
-                    expected: QWEN35_MTP_VERIFY_ROWS,
-                    got: target_predictions.len(),
-                })?;
+        let draft_steps = ticket.proposals.len();
+        let verify_rows = draft_steps + 1;
+        if target_predictions.len() != verify_rows {
+            return Err(MtpScheduleError::WrongPredictionCount {
+                expected: verify_rows,
+                got: target_predictions.len(),
+            });
+        }
 
-        let mut proposal_matches = [false; QWEN35_MTP_DRAFT_STEPS];
-        for depth in 0..QWEN35_MTP_DRAFT_STEPS {
+        let mut proposal_matches = vec![false; draft_steps];
+        for depth in 0..draft_steps {
             proposal_matches[depth] = ticket.proposals[depth] == target_predictions[depth];
         }
         let accepted_proposals = proposal_matches
             .iter()
             .take_while(|matched| **matched)
             .count();
-        let tail_kind = if accepted_proposals == QWEN35_MTP_DRAFT_STEPS {
+        let tail_kind = if accepted_proposals == draft_steps {
             TailTokenKind::Bonus
         } else {
             TailTokenKind::Correction
@@ -307,13 +314,13 @@ impl Qwen35MtpSchedule {
         let committed_rows = emitted.len();
         let start = ticket.positions.base;
         let committed_end = checked_add(start, committed_rows)?;
-        let verified_end = checked_add(start, QWEN35_MTP_VERIFY_ROWS)?;
+        let verified_end = checked_add(start, verify_rows)?;
         let target_range = ShadowCommitRange {
             start,
             committed_end,
             verified_end,
         };
-        let gdn = if committed_rows == QWEN35_MTP_VERIFY_ROWS {
+        let gdn = if committed_rows == verify_rows {
             GdnShadowCommit::AdoptFullShadow
         } else {
             GdnShadowCommit::ReplayPrefix {
@@ -321,13 +328,14 @@ impl Qwen35MtpSchedule {
             }
         };
 
-        // Three draft calls stage inputs pending, d0 and d1. Consuming the
-        // bonus also consumes d2, which must be materialized before commit.
-        let materialize_final_proposal = committed_rows == QWEN35_MTP_VERIFY_ROWS;
+        // The draft chain stages `draft_steps` inputs. Consuming the
+        // bonus also consumes the final proposal, which must be materialized
+        // before commit.
+        let materialize_final_proposal = committed_rows == verify_rows;
         let mtp_staged_rows = if materialize_final_proposal {
-            QWEN35_MTP_VERIFY_ROWS
+            verify_rows
         } else {
-            QWEN35_MTP_DRAFT_STEPS
+            draft_steps
         };
         let mtp_range = ShadowCommitRange {
             start: ticket.positions.mtp,
@@ -394,13 +402,15 @@ impl Qwen35MtpSchedule {
 
         let mut stats = self.stats.clone();
         stats.rounds += 1;
-        stats.proposed_tokens += QWEN35_MTP_DRAFT_STEPS;
+        let draft_steps = plan.proposal_matches.len();
+        stats.proposed_tokens += draft_steps;
         stats.verified_accepted_proposals += plan.accepted_proposals;
         stats.committed_accepted_proposals += plan.accepted_proposals.min(plan.emitted.len());
         stats.emitted_tokens += plan.emitted.len();
+        stats.target_verified_rows += draft_steps + 1;
         match plan.accepted_proposals {
             0 => stats.zero_accept_rounds += 1,
-            QWEN35_MTP_DRAFT_STEPS => stats.full_accept_rounds += 1,
+            accepted if accepted == draft_steps => stats.full_accept_rounds += 1,
             _ => stats.partial_accept_rounds += 1,
         }
         let tail_was_emitted = plan.emitted.len() > plan.accepted_proposals;
@@ -411,7 +421,7 @@ impl Qwen35MtpSchedule {
             }
         }
         let mut prefix = true;
-        for depth in 0..QWEN35_MTP_DRAFT_STEPS {
+        for depth in 0..draft_steps {
             stats.proposed_by_depth[depth] += 1;
             if plan.proposal_matches[depth] {
                 stats.matched_by_depth[depth] += 1;
@@ -462,7 +472,7 @@ fn checked_add(left: usize, right: usize) -> Result<usize, MtpScheduleError> {
 pub enum MtpScheduleError {
     PositionDivergence { base: usize, mtp: usize },
     BudgetExceeded { emitted: usize, budget: usize },
-    WrongProposalCount { expected: usize, got: usize },
+    DraftDepthOutOfRange { min: usize, max: usize, got: usize },
     WrongPredictionCount { expected: usize, got: usize },
     PendingIsEos(TokenId),
     Finished,
@@ -479,8 +489,8 @@ impl fmt::Display for MtpScheduleError {
             Self::BudgetExceeded { emitted, budget } => {
                 write!(f, "emitted token count {emitted} exceeds budget {budget}")
             }
-            Self::WrongProposalCount { expected, got } => {
-                write!(f, "expected {expected} MTP proposals, got {got}")
+            Self::DraftDepthOutOfRange { min, max, got } => {
+                write!(f, "MTP draft depth must be in {min}..={max}, got {got}")
             }
             Self::WrongPredictionCount { expected, got } => {
                 write!(f, "expected {expected} target predictions, got {got}")
@@ -504,10 +514,8 @@ mod tests {
         Qwen35MtpSchedule::new(7, 7, budget, 1, vec![99]).unwrap()
     }
 
-    fn verify_incrementing(
-        inputs: &[TokenId; QWEN35_MTP_VERIFY_ROWS],
-    ) -> [TokenId; QWEN35_MTP_VERIFY_ROWS] {
-        inputs.map(|token| token + 1)
+    fn verify_incrementing(inputs: &[TokenId]) -> Vec<TokenId> {
+        inputs.iter().map(|token| token + 1).collect()
     }
 
     fn round(
@@ -522,40 +530,40 @@ mod tests {
     }
 
     #[test]
-    fn two_step_zero_partial_and_full_accept_are_scalar_equivalent() {
-        let mut schedule = schedule(13);
+    fn three_step_zero_partial_and_full_accept_are_scalar_equivalent() {
+        let mut schedule = schedule(15);
         let mut pending = 10;
         let mut speculative = vec![pending];
 
-        let zero = round(&mut schedule, pending, [90, 91]);
+        let zero = round(&mut schedule, pending, [90, 91, 92]);
         assert_eq!(zero.accepted_proposals, 0);
         assert_eq!(zero.tail_kind, TailTokenKind::Correction);
         assert_eq!(zero.emitted, [11]);
         pending = *zero.emitted.last().unwrap();
         speculative.extend(zero.emitted);
 
-        let partial = round(&mut schedule, pending, [12, 80]);
+        let partial = round(&mut schedule, pending, [12, 80, 81]);
         assert_eq!(partial.accepted_proposals, 1);
         assert_eq!(partial.emitted, [12, 13]);
         pending = *partial.emitted.last().unwrap();
         speculative.extend(partial.emitted);
 
-        let full = round(&mut schedule, pending, [14, 15]);
-        assert_eq!(full.accepted_proposals, 2);
+        let full = round(&mut schedule, pending, [14, 15, 16]);
+        assert_eq!(full.accepted_proposals, 3);
         assert_eq!(full.tail_kind, TailTokenKind::Bonus);
-        assert_eq!(full.emitted, [14, 15, 16]);
+        assert_eq!(full.emitted, [14, 15, 16, 17]);
         speculative.extend(full.emitted);
 
-        let scalar = (10..=16).collect::<Vec<_>>();
+        let scalar = (10..=17).collect::<Vec<_>>();
         assert_eq!(speculative, scalar);
         assert_eq!(
             schedule.positions(),
-            CommittedPositions { base: 13, mtp: 13 }
+            CommittedPositions { base: 14, mtp: 14 }
         );
         assert_eq!(schedule.stats().zero_accept_rounds, 1);
         assert_eq!(schedule.stats().partial_accept_rounds, 1);
         assert_eq!(schedule.stats().full_accept_rounds, 1);
-        assert_eq!(schedule.stats().verified_accepted_proposals, 3);
+        assert_eq!(schedule.stats().verified_accepted_proposals, 4);
         assert_eq!(schedule.stats().correction_tokens, 2);
         assert_eq!(schedule.stats().bonus_tokens, 1);
     }
@@ -563,8 +571,8 @@ mod tests {
     #[test]
     fn full_accept_commits_bonus_and_complete_gdn_kv_shadow() {
         let mut schedule = schedule(8);
-        let outcome = round(&mut schedule, 20, [21, 22]);
-        assert_eq!(outcome.emitted, [21, 22, 23]);
+        let outcome = round(&mut schedule, 20, [21, 22, 23]);
+        assert_eq!(outcome.emitted, [21, 22, 23, 24]);
         assert_eq!(
             outcome.contract.target.gdn,
             GdnShadowCommit::AdoptFullShadow
@@ -573,8 +581,8 @@ mod tests {
             outcome.contract.target.gdn_range,
             ShadowCommitRange {
                 start: 7,
-                committed_end: 10,
-                verified_end: 10,
+                committed_end: 11,
+                verified_end: 11,
             }
         );
         assert_eq!(
@@ -584,31 +592,31 @@ mod tests {
         assert!(outcome.contract.mtp.materialize_final_proposal);
         assert_eq!(
             outcome.contract.next_positions,
-            CommittedPositions { base: 10, mtp: 10 }
+            CommittedPositions { base: 11, mtp: 11 }
         );
     }
 
     #[test]
     fn partial_accept_commits_only_prefix_and_discards_shadow_suffix() {
         let mut schedule = schedule(8);
-        let outcome = round(&mut schedule, 20, [21, 70]);
+        let outcome = round(&mut schedule, 20, [21, 70, 71]);
         assert_eq!(outcome.emitted, [21, 22]);
         assert_eq!(
             outcome.contract.target.gdn,
             GdnShadowCommit::ReplayPrefix { rows: 2 }
         );
         assert_eq!(outcome.contract.target.gdn_range.committed_rows(), 2);
-        assert_eq!(outcome.contract.target.gdn_range.discarded_rows(), 1);
-        assert_eq!(outcome.contract.target.kv_range.discarded_rows(), 1);
+        assert_eq!(outcome.contract.target.gdn_range.discarded_rows(), 2);
+        assert_eq!(outcome.contract.target.kv_range.discarded_rows(), 2);
         assert_eq!(outcome.contract.mtp.cache_range.committed_rows(), 2);
-        assert_eq!(outcome.contract.mtp.cache_range.discarded_rows(), 0);
+        assert_eq!(outcome.contract.mtp.cache_range.discarded_rows(), 1);
         assert!(!outcome.contract.mtp.materialize_final_proposal);
     }
 
     #[test]
     fn eos_and_output_budget_truncate_before_bonus_without_overcommit() {
         let mut eos_schedule = schedule(8);
-        let ticket = eos_schedule.begin_round(97, &[98, 70]).unwrap();
+        let ticket = eos_schedule.begin_round(97, &[98, 70, 71]).unwrap();
         let predictions = verify_incrementing(ticket.verification_inputs());
         let plan = eos_schedule.finish_round(ticket, &predictions).unwrap();
         assert_eq!(plan.emitted(), [98, 99]);
@@ -620,10 +628,10 @@ mod tests {
         );
         assert!(!eos.contract.mtp.materialize_final_proposal);
 
-        // Only two slots remain, so a full match publishes both drafts and no
-        // bonus even though all target rows were verified.
+        // Only two slots remain, so a full match publishes only two drafts and
+        // no bonus even though all target rows were verified.
         let mut budget_schedule = schedule(3);
-        let budget = round(&mut budget_schedule, 30, [31, 32]);
+        let budget = round(&mut budget_schedule, 30, [31, 32, 33]);
         assert_eq!(budget.emitted, [31, 32]);
         assert!(budget.finished);
         assert_eq!(budget_schedule.stats().bonus_tokens, 0);
@@ -638,7 +646,7 @@ mod tests {
     fn failed_or_stale_round_never_commits_positions_or_statistics() {
         let mut schedule = schedule(8);
         let before = schedule.clone();
-        let ticket = schedule.begin_round(20, &[21, 22]).unwrap();
+        let ticket = schedule.begin_round(20, &[21, 22, 23]).unwrap();
         assert!(matches!(
             schedule.finish_round(ticket.clone(), &[21, 22]),
             Err(MtpScheduleError::WrongPredictionCount { .. })
@@ -667,10 +675,18 @@ mod tests {
         let schedule = schedule(8);
         assert!(matches!(
             schedule.begin_round(20, &[21]),
-            Err(MtpScheduleError::WrongProposalCount { .. })
+            Ok(_)
         ));
         assert!(matches!(
-            schedule.begin_round(99, &[100, 101]),
+            schedule.begin_round(20, &[]),
+            Err(MtpScheduleError::DraftDepthOutOfRange { .. })
+        ));
+        assert!(matches!(
+            schedule.begin_round(20, &[21, 22, 23, 24]),
+            Err(MtpScheduleError::DraftDepthOutOfRange { .. })
+        ));
+        assert!(matches!(
+            schedule.begin_round(99, &[100, 101, 102]),
             Err(MtpScheduleError::PendingIsEos(99))
         ));
     }

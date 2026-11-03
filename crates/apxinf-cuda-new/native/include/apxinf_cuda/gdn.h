@@ -23,6 +23,22 @@ apxinf_status_t apxinf_gdn_chunk_scan_prepare(int32_t device);
 // Scratch bytes apxinf_gdn_prefill needs for TMA rewrites.
 int64_t apxinf_gdn_prefill_workspace_bytes(int64_t v_heads,
                                            int64_t num_seqs);
+apxinf_status_t apxinf_gdn_recurrent_verify(
+    void* state, const void* q, const void* k, const void* v,
+    const void* decay, const void* beta, void* output, void* checkpoints,
+    int64_t tokens, int64_t v_heads, int64_t k_heads, int64_t v_dim,
+    int64_t k_dim, int64_t q_row_stride, int64_t k_row_stride,
+    int64_t v_row_stride, apxinf_cuda_stream_t stream);
+
+apxinf_status_t apxinf_gdn_causal_conv_verify(
+    void* window, const void* input, const void* weight, void* output,
+    void* checkpoints, int64_t tokens, int64_t channels,
+    int64_t kernel_width, apxinf_cuda_stream_t stream);
+
+apxinf_status_t apxinf_gdn_l2_normalize_heads_seq(
+    void* data, int64_t tokens, int64_t heads, int64_t head_dim,
+    int64_t row_stride, float epsilon, apxinf_cuda_stream_t stream);
+
 
 #ifdef __cplusplus
 }

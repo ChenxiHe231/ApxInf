@@ -6,7 +6,7 @@
 //! prefill/decode a strong error guarantee without host snapshots.
 
 use apxinf_core::{Error, Result, Tensor};
-use apxinf_cuda_new::{transfers, CudaContext};
+use apxinf_cuda_new::{ops, transfers, CudaContext};
 
 use super::architecture::MixerKind;
 use super::decoder::{
@@ -15,7 +15,7 @@ use super::decoder::{
 };
 use super::device_weights::{DeviceMixerWeights, Qwen35DeviceWeights};
 use super::forward::{GdnState, GdnStateCheckpoints};
-use super::mtp_schedule::{MtpCommit, TokenId, QWEN35_MTP_DRAFT_STEPS, QWEN35_MTP_VERIFY_ROWS};
+use super::mtp_schedule::{MtpCommit, TokenId, QWEN35_MTP_VERIFY_ROWS};
 
 /// Device MTP execution boundary. The schedule already decides which rows are
 /// accepted; this trait owns the complete BF16 fusion, attention/cache, and
@@ -83,7 +83,7 @@ pub trait MtpBackend {
         prepared: Self::PreparedPrefill,
     );
 
-    /// Produce the fixed three-token chain. `weights` includes the shared token
+    /// Produce a one-to-three-token chain. `weights` includes the shared token
     /// embedding/lm_head and `weights.mtp`; `target_hidden` is the last
     /// committed post-final-norm target hidden row with shape `[1, hidden]`.
     fn draft(
@@ -95,7 +95,8 @@ pub trait MtpBackend {
         pending: TokenId,
         start_position: usize,
         target_hidden: &apxinf_core::Tensor,
-    ) -> Result<[TokenId; QWEN35_MTP_DRAFT_STEPS]>;
+        draft_steps: usize,
+    ) -> Result<MtpDraft>;
 
     /// Finish the MTP half of a speculative transaction. `weights` is needed
     /// when full acceptance plus a bonus requires materializing the final
@@ -115,6 +116,62 @@ pub trait MtpBackend {
         prepared: Self::PreparedCommit,
     );
 }
+
+/// Device-resident output of one MTP draft chain.
+///
+/// `verification_inputs` is `[pending, d0, d1, ...]` and can be consumed by
+/// the target verifier without synchronizing the stream or staging proposal
+/// IDs through the host. The compact proposal IDs are read only after target
+/// verification has completed, when the host schedule needs them.
+pub struct MtpDraft {
+    proposals: Tensor,
+    verification_inputs: Tensor,
+}
+
+impl MtpDraft {
+    pub fn new(proposals: Tensor, verification_inputs: Tensor) -> Result<Self> {
+        let draft_steps = proposals.shape().dims();
+        let verify_rows = verification_inputs.shape().dims();
+        if proposals.dtype() != apxinf_core::DType::I32
+            || verification_inputs.dtype() != apxinf_core::DType::I32
+            || proposals.device() != verification_inputs.device()
+            || draft_steps.len() != 1
+            || verify_rows.len() != 1
+            || verify_rows[0] != draft_steps[0] + 1
+        {
+            return Err(invalid(
+                "Qwen3.5 MTP draft tensors do not satisfy the device verification contract",
+            ));
+        }
+        Ok(Self {
+            proposals,
+            verification_inputs,
+        })
+    }
+
+    pub fn draft_steps(&self) -> usize {
+        self.proposals.shape().dims()[0]
+    }
+
+    pub fn verification_inputs(&self) -> &Tensor {
+        &self.verification_inputs
+    }
+
+    fn proposals(&self) -> &Tensor {
+        &self.proposals
+    }
+
+    pub fn read_proposals(&self) -> Result<Vec<TokenId>> {
+        let host = transfers::to_cpu(&self.proposals)?;
+        host.as_i32()?
+            .iter()
+            .map(|&token| {
+                u32::try_from(token)
+                    .map_err(|_| invalid(format!("Qwen3.5 MTP argmax returned {token}")))
+            })
+            .collect()
+    }
+}
 /// Opaque evidence that the fixed target-verification rows were
 /// evaluated against a particular committed session epoch. Dropping it aborts
 /// the target half of the speculative transaction.
@@ -122,18 +179,68 @@ pub struct TargetVerification {
     epoch: u64,
     shadow_generation: u64,
     start_position: usize,
-    inputs: Vec<TokenId>,
-    predictions: Vec<TokenId>,
+    input_rows: usize,
+    predictions: Tensor,
+    acceptance: Tensor,
     final_output: DecoderOutput,
 }
 
 impl TargetVerification {
-    pub fn inputs(&self) -> &[TokenId] {
-        &self.inputs
+    pub fn resolve(&self, ctx: &CudaContext, draft: &MtpDraft) -> Result<MtpResolution> {
+        if draft.draft_steps() + 1 != self.input_rows {
+            return Err(invalid(
+                "Qwen3.5 draft and target verification row counts diverged",
+            ));
+        }
+        ops::qwen35_mtp_accept(
+            ctx,
+            ops::Qwen35MtpAcceptArgs {
+                proposals: draft.proposals(),
+                target_predictions: &self.predictions,
+                output: &self.acceptance,
+            },
+        )?;
+        let host = transfers::to_cpu(&self.acceptance)?;
+        MtpResolution::from_packed(host.as_i32()?, draft.draft_steps())
     }
+}
 
-    pub fn predictions(&self) -> &[TokenId] {
-        &self.predictions
+pub struct MtpResolution {
+    pub accepted_proposals: usize,
+    pub proposals: Vec<TokenId>,
+    pub predictions: Vec<TokenId>,
+}
+
+impl MtpResolution {
+    fn from_packed(packed: &[i32], draft_steps: usize) -> Result<Self> {
+        if packed.len() != ops::QWEN35_MTP_ACCEPT_OUTPUT_I32
+            || !(1..=super::mtp_schedule::QWEN35_MTP_DRAFT_STEPS).contains(&draft_steps)
+        {
+            return Err(invalid("Qwen3.5 packed MTP acceptance shape is invalid"));
+        }
+        let accepted_proposals = usize::try_from(packed[0])
+            .map_err(|_| invalid("Qwen3.5 packed MTP accepted count is negative"))?;
+        if accepted_proposals > draft_steps {
+            return Err(invalid("Qwen3.5 packed MTP accepted count is too large"));
+        }
+        let decode = |values: &[i32]| {
+            values
+                .iter()
+                .map(|&token| {
+                    u32::try_from(token).map_err(|_| {
+                        invalid(format!("Qwen3.5 MTP argmax returned negative ID {token}"))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        };
+        Ok(Self {
+            accepted_proposals,
+            proposals: decode(&packed[1..1 + draft_steps])?,
+            predictions: decode(
+                &packed[1 + super::mtp_schedule::QWEN35_MTP_DRAFT_STEPS
+                    ..1 + super::mtp_schedule::QWEN35_MTP_DRAFT_STEPS + draft_steps + 1],
+            )?,
+        })
     }
 }
 
@@ -163,6 +270,20 @@ pub struct PreparedTargetPrefill {
     output: DecoderOutput,
 }
 
+/// Fixed-address verifier resources for one adaptive MTP depth. Draft depths
+/// 1/2/3 require target verifier row counts 2/3/4 respectively; keeping an
+/// independent scratch/checkpoint/graph set for each shape avoids padding a
+/// shallow round up to the maximum and doing work that the policy rejected.
+struct VerifyProfile {
+    rows: usize,
+    gdn_checkpoints: Vec<GdnStateCheckpoints>,
+    scratch: DecoderScratch,
+    committed_phases: Option<Vec<Qwen35VerifyPhase>>,
+    shadow_phases: Option<Vec<Qwen35VerifyPhase>>,
+    predictions: Tensor,
+    acceptance: Tensor,
+}
+
 impl PreparedTargetPrefill {
     pub fn output(&self) -> &DecoderOutput {
         &self.output
@@ -175,8 +296,6 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     attention: B,
     committed_gdn: Vec<GdnState>,
     shadow_gdn: Vec<GdnState>,
-    /// State after each row of the fixed target verification.
-    verify_gdn_checkpoints: Vec<GdnStateCheckpoints>,
     committed_attention: Vec<B::Cache>,
     shadow_attention: Vec<B::Cache>,
     /// Prefix of the inactive cache bank known to equal the committed bank.
@@ -188,18 +307,12 @@ pub struct Qwen35Session<B: FullAttentionBackend> {
     /// Persistent one-row workspace for ordinary decode. Variable-size prefill
     /// deliberately keeps using call-sized temporary scratch.
     decode_scratch: DecoderScratch,
-    /// Persistent fixed-row workspace for the batched target verifier.
-    verify_scratch: DecoderScratch,
     /// Graph sets follow their physical GDN state banks when transactions
     /// publish by swapping committed and shadow storage.
     committed_decode_phases: Option<Vec<Qwen35DecodePhase>>,
     shadow_decode_phases: Option<Vec<Qwen35DecodePhase>>,
-    /// Prepared fixed-row verifier sessions follow the same physical state
-    /// banks as scalar-decode graphs and are swapped on transaction publish.
-    committed_verify_phases: Option<Vec<Qwen35VerifyPhase>>,
-    shadow_verify_phases: Option<Vec<Qwen35VerifyPhase>>,
-    /// Device argmax outputs for the fixed-row verifier.
-    verify_predictions: Tensor,
+    /// One prepared target-verification profile for each draft depth 1/2/3.
+    verify_profiles: Vec<VerifyProfile>,
     capacity: usize,
     position: usize,
     epoch: u64,
@@ -237,7 +350,6 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         }
         let mut committed_gdn = Vec::with_capacity(architecture.gdn_layers().count());
         let mut shadow_gdn = Vec::with_capacity(architecture.gdn_layers().count());
-        let mut verify_gdn_checkpoints = Vec::with_capacity(architecture.gdn_layers().count());
         let mut committed_attention =
             Vec::with_capacity(architecture.full_attention_layers().count());
         let mut shadow_attention = Vec::with_capacity(architecture.full_attention_layers().count());
@@ -247,8 +359,6 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                 (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(_)) => {
                     committed_gdn.push(GdnState::new(ctx)?);
                     shadow_gdn.push(GdnState::new(ctx)?);
-                    verify_gdn_checkpoints
-                        .push(GdnStateCheckpoints::new(ctx, QWEN35_MTP_VERIFY_ROWS)?);
                 }
                 (
                     MixerKind::FullAttention(geometry),
@@ -271,25 +381,40 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             }
         }
 
-        let verify_zeros = vec![0i32; QWEN35_MTP_VERIFY_ROWS];
-        let verify_zeros = Tensor::from_i32(vec![QWEN35_MTP_VERIFY_ROWS], &verify_zeros)?;
-        let verify_predictions = transfers::to_cuda(&verify_zeros, ctx.device_id())?;
+        let gdn_layers = architecture.gdn_layers().count();
+        let mut verify_profiles = Vec::with_capacity(QWEN35_MTP_VERIFY_ROWS - 1);
+        for rows in 2..=QWEN35_MTP_VERIFY_ROWS {
+            let mut gdn_checkpoints = Vec::with_capacity(gdn_layers);
+            for _ in 0..gdn_layers {
+                gdn_checkpoints.push(GdnStateCheckpoints::new(ctx, rows)?);
+            }
+            let prediction_zeros = vec![0i32; rows];
+            let prediction_zeros = Tensor::from_i32(vec![rows], &prediction_zeros)?;
+            let acceptance_zeros = vec![0i32; ops::QWEN35_MTP_ACCEPT_OUTPUT_I32];
+            let acceptance_zeros =
+                Tensor::from_i32(vec![ops::QWEN35_MTP_ACCEPT_OUTPUT_I32], &acceptance_zeros)?;
+            verify_profiles.push(VerifyProfile {
+                rows,
+                gdn_checkpoints,
+                scratch: decoder.allocate_verify_scratch(ctx, rows)?,
+                committed_phases: None,
+                shadow_phases: None,
+                predictions: transfers::to_cuda(&prediction_zeros, ctx.device_id())?,
+                acceptance: transfers::to_cuda(&acceptance_zeros, ctx.device_id())?,
+            });
+        }
         let mut session = Self {
             attention,
             committed_gdn,
             shadow_gdn,
-            verify_gdn_checkpoints,
             committed_attention,
             shadow_attention,
             shadow_attention_valid: 0,
             decode_in_place: false,
             decode_scratch: decoder.allocate_decode_scratch(ctx)?,
-            verify_scratch: decoder.allocate_verify_scratch(ctx)?,
             committed_decode_phases: None,
             shadow_decode_phases: None,
-            committed_verify_phases: None,
-            shadow_verify_phases: None,
-            verify_predictions,
+            verify_profiles,
             capacity,
             position: 0,
             epoch: 0,
@@ -308,26 +433,30 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                 &session.shadow_gdn,
                 &mut session.decode_scratch,
             )?);
-            session.committed_verify_phases = Some(decoder.prepare_verify_phases(
-                ctx,
-                weights,
-                &mut session.attention,
-                &mut session.committed_attention,
-                &session.committed_gdn,
-                &session.verify_gdn_checkpoints,
-                0,
-                &mut session.verify_scratch,
-            )?);
-            session.shadow_verify_phases = Some(decoder.prepare_verify_phases(
-                ctx,
-                weights,
-                &mut session.attention,
-                &mut session.shadow_attention,
-                &session.shadow_gdn,
-                &session.verify_gdn_checkpoints,
-                0,
-                &mut session.verify_scratch,
-            )?);
+            for profile in &mut session.verify_profiles {
+                profile.committed_phases = Some(decoder.prepare_verify_phases(
+                    ctx,
+                    weights,
+                    &mut session.attention,
+                    &mut session.committed_attention,
+                    &session.committed_gdn,
+                    &profile.gdn_checkpoints,
+                    profile.rows,
+                    0,
+                    &mut profile.scratch,
+                )?);
+                profile.shadow_phases = Some(decoder.prepare_verify_phases(
+                    ctx,
+                    weights,
+                    &mut session.attention,
+                    &mut session.shadow_attention,
+                    &session.shadow_gdn,
+                    &profile.gdn_checkpoints,
+                    profile.rows,
+                    0,
+                    &mut profile.scratch,
+                )?);
+            }
             if std::env::var("APXINF_QWEN35_VERIFY_GRAPHS").as_deref() == Ok("1") {
                 decoder.verify_decode_phases(
                     ctx,
@@ -752,61 +881,66 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
     /// Each GDN layer records the state after every row, allowing partial
     /// acceptance to select the correct recurrent boundary without replaying
     /// the target model.
-    pub fn verify_target_chunk(
+    pub fn verify_target_chunk_device(
         &mut self,
         ctx: &CudaContext,
         decoder: &Qwen35Decoder,
         weights: &Qwen35DeviceWeights,
-        token_ids: &[u32],
+        token_ids: &Tensor,
     ) -> Result<TargetVerification> {
         if self.position == 0 {
             return Err(invalid(
                 "Qwen3.5 target verification requires a committed prompt",
             ));
         }
-        if token_ids.len() != QWEN35_MTP_VERIFY_ROWS {
+        let token_dims = token_ids.shape().dims();
+        if token_ids.device() != apxinf_core::Device::Cuda(ctx.device_id())
+            || token_ids.dtype() != apxinf_core::DType::I32
+            || token_dims.len() != 1
+        {
+            return Err(invalid(
+                "Qwen3.5 target verification token IDs must be a CUDA I32 vector",
+            ));
+        }
+        let input_rows = token_dims[0];
+        if !(2..=QWEN35_MTP_VERIFY_ROWS).contains(&input_rows) {
             return Err(invalid(format!(
-                "Qwen3.5 MTP verification requires {QWEN35_MTP_VERIFY_ROWS} rows, got {}",
-                token_ids.len()
+                "Qwen3.5 MTP verification requires 2..={QWEN35_MTP_VERIFY_ROWS} rows, got {}",
+                input_rows
             )));
         }
         let start_position = self.position;
-        self.validate_capacity(start_position, token_ids.len())?;
+        self.validate_capacity(start_position, input_rows)?;
         self.bump_shadow_generation()?;
         self.prepare_shadow_from_committed(ctx)?;
-        let final_output = decoder.run_verify_reusing(
+        let profile_index = input_rows - 2;
+        let profile = self
+            .verify_profiles
+            .get_mut(profile_index)
+            .ok_or_else(|| invalid("Qwen3.5 verifier profile is unavailable"))?;
+        if profile.rows != input_rows {
+            return Err(invalid("Qwen3.5 verifier profile row count changed"));
+        }
+        let final_output = decoder.run_verify_reusing_device(
             ctx,
             weights,
             &mut self.attention,
             &mut self.shadow_attention,
             &self.shadow_gdn,
-            &self.verify_gdn_checkpoints,
+            &profile.gdn_checkpoints,
             token_ids,
             start_position,
-            &mut self.verify_scratch,
-            self.shadow_verify_phases.as_deref(),
+            &mut profile.scratch,
+            profile.shadow_phases.as_deref(),
         )?;
-        final_output.enqueue_greedy_token_ids(ctx, &self.verify_predictions, 0)?;
-        ctx.synchronize().map_err(Error::Cuda)?;
-        let host_predictions = transfers::to_cpu(&self.verify_predictions)?;
-        let predictions = host_predictions
-            .as_i32()?
-            .iter()
-            .take(token_ids.len())
-            .map(|&token| {
-                u32::try_from(token).map_err(|_| {
-                    invalid(format!(
-                        "Qwen3.5 target argmax returned negative ID {token}"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        final_output.enqueue_greedy_token_ids(ctx, &profile.predictions, 0)?;
         Ok(TargetVerification {
             epoch: self.epoch,
             shadow_generation: self.shadow_generation,
             start_position,
-            inputs: token_ids.to_vec(),
-            predictions,
+            input_rows,
+            predictions: profile.predictions.clone(),
+            acceptance: profile.acceptance.clone(),
             final_output,
         })
     }
@@ -824,15 +958,19 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         committed_rows: usize,
     ) -> Result<PreparedTargetCommit> {
         self.validate_verification(&verification)?;
-        if committed_rows == 0 || committed_rows > verification.inputs.len() {
+        if committed_rows == 0 || committed_rows > verification.input_rows {
             return Err(invalid(format!(
                 "Qwen3.5 target commit rows must be in 1..={}, got {committed_rows}",
-                verification.inputs.len()
+                verification.input_rows
             )));
         }
-        if committed_rows < verification.inputs.len() {
+        if committed_rows < verification.input_rows {
             let row = committed_rows - 1;
-            for (checkpoint, shadow) in self.verify_gdn_checkpoints.iter().zip(&self.shadow_gdn) {
+            let profile = self
+                .verify_profiles
+                .get(verification.input_rows - 2)
+                .ok_or_else(|| invalid("Qwen3.5 verifier profile is unavailable"))?;
+            for (checkpoint, shadow) in profile.gdn_checkpoints.iter().zip(&self.shadow_gdn) {
                 checkpoint.copy_row_to(ctx, row, shadow)?;
             }
         }
@@ -1035,10 +1173,9 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             &mut self.committed_decode_phases,
             &mut self.shadow_decode_phases,
         );
-        std::mem::swap(
-            &mut self.committed_verify_phases,
-            &mut self.shadow_verify_phases,
-        );
+        for profile in &mut self.verify_profiles {
+            std::mem::swap(&mut profile.committed_phases, &mut profile.shadow_phases);
+        }
         self.position = position;
         self.epoch = next_epoch;
         self.shadow_attention_valid = preserved_prefix;
@@ -1073,7 +1210,9 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         if verification.epoch != self.epoch
             || verification.shadow_generation != self.shadow_generation
             || verification.start_position != self.position
-            || verification.predictions.len() != verification.inputs.len()
+            || verification.predictions.shape().dims() != [verification.input_rows]
+            || verification.acceptance.shape().dims()
+                != [ops::QWEN35_MTP_ACCEPT_OUTPUT_I32]
             // The verification forward runs every row with
             // LogitsSelection::All / HiddenSelection::All, so it carries one
             // logit and hidden row per verified token. It is
@@ -1082,20 +1221,20 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             // rows == 1. Demanding a single row here described the old
             // pre-`into_row` shape and rejected every well-formed fixed-row
             // verification, which made --mode mtp unusable.
-            || verification.final_output.rows != verification.inputs.len()
-            || verification.final_output.hidden_rows != verification.inputs.len()
+            || verification.final_output.rows != verification.input_rows
+            || verification.final_output.hidden_rows != verification.input_rows
             || verification.final_output.start_position != self.position
             || verification.final_output.end_position
                 != self
                     .position
-                    .checked_add(verification.inputs.len())
+                    .checked_add(verification.input_rows)
                     .unwrap_or(usize::MAX)
         {
             // One opaque message for eight different invariants made this
             // impossible to act on, so name the one that actually tripped.
             let expected_end = self
                 .position
-                .checked_add(verification.inputs.len())
+                .checked_add(verification.input_rows)
                 .unwrap_or(usize::MAX);
             let which = if verification.epoch != self.epoch {
                 format!("epoch {} != session {}", verification.epoch, self.epoch)
@@ -1109,23 +1248,28 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                     "start_position {} != session position {}",
                     verification.start_position, self.position
                 )
-            } else if verification.predictions.len() != verification.inputs.len() {
+            } else if verification.predictions.shape().dims() != [verification.input_rows] {
                 format!(
-                    "predictions {} != inputs {}",
-                    verification.predictions.len(),
-                    verification.inputs.len()
+                    "prediction rows {:?} != inputs {}",
+                    verification.predictions.shape().dims(),
+                    verification.input_rows
                 )
-            } else if verification.final_output.rows != verification.inputs.len() {
+            } else if verification.acceptance.shape().dims() != [ops::QWEN35_MTP_ACCEPT_OUTPUT_I32]
+            {
+                format!(
+                    "acceptance shape {:?} != [{}]",
+                    verification.acceptance.shape().dims(),
+                    ops::QWEN35_MTP_ACCEPT_OUTPUT_I32
+                )
+            } else if verification.final_output.rows != verification.input_rows {
                 format!(
                     "final_output.rows {} != inputs {}",
-                    verification.final_output.rows,
-                    verification.inputs.len()
+                    verification.final_output.rows, verification.input_rows
                 )
-            } else if verification.final_output.hidden_rows != verification.inputs.len() {
+            } else if verification.final_output.hidden_rows != verification.input_rows {
                 format!(
                     "final_output.hidden_rows {} != inputs {}",
-                    verification.final_output.hidden_rows,
-                    verification.inputs.len()
+                    verification.final_output.hidden_rows, verification.input_rows
                 )
             } else if verification.final_output.start_position != self.position {
                 format!(
@@ -1161,4 +1305,30 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_mtp_resolution_decodes_dynamic_depths() {
+        let packed = [2, 11, 12, 13, 11, 12, 99, 100];
+        let depth_three = MtpResolution::from_packed(&packed, 3).unwrap();
+        assert_eq!(depth_three.accepted_proposals, 2);
+        assert_eq!(depth_three.proposals, [11, 12, 13]);
+        assert_eq!(depth_three.predictions, [11, 12, 99, 100]);
+
+        let packed = [1, 21, -1, -1, 21, 22, -1, -1];
+        let depth_one = MtpResolution::from_packed(&packed, 1).unwrap();
+        assert_eq!(depth_one.accepted_proposals, 1);
+        assert_eq!(depth_one.proposals, [21]);
+        assert_eq!(depth_one.predictions, [21, 22]);
+    }
+
+    #[test]
+    fn packed_mtp_resolution_rejects_invalid_counts_and_tokens() {
+        assert!(MtpResolution::from_packed(&[4, 1, 2, 3, 1, 2, 3, 4], 3).is_err());
+        assert!(MtpResolution::from_packed(&[0, -1, 2, 3, 4, 5, 6, 7], 3).is_err());
+    }
 }

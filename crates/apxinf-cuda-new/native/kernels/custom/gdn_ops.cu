@@ -121,6 +121,82 @@ __global__ void recurrent_step_kernel(
   }
 }
 
+// Verification advances a short, fixed token sequence. Keeping the complete
+// 128-float state row resident across that sequence removes three redundant
+// state reads while still materializing every rollback checkpoint.
+__global__ void recurrent_verify_kernel(
+    float* __restrict__ state, const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
+    const float* __restrict__ decay, const float* __restrict__ beta,
+    __nv_bfloat16* __restrict__ output, float* __restrict__ checkpoints,
+    int tokens, int v_heads, int k_heads, int v_dim, int k_dim,
+    int q_row_stride, int k_row_stride, int v_row_stride) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int global_row = blockIdx.x * (blockDim.x >> 5) + warp;
+  const int total_rows = v_heads * v_dim;
+  if (global_row >= total_rows) return;
+
+  const int head = global_row / v_dim;
+  const int v_index = global_row % v_dim;
+  const int k_head = head / (v_heads / k_heads);
+  const int chunk = lane * 4;
+  if (chunk >= k_dim) return;
+
+  float4* row = reinterpret_cast<float4*>(
+      state + (long long)global_row * k_dim);
+  float4 s = row[lane];
+  const float q_scale = rsqrtf(static_cast<float>(k_dim));
+
+  for (int token = 0; token < tokens; ++token) {
+    const long long q_base =
+        (long long)token * q_row_stride + (long long)k_head * k_dim + chunk;
+    const long long k_base =
+        (long long)token * k_row_stride + (long long)k_head * k_dim + chunk;
+    const long long v_input_base =
+        (long long)token * v_row_stride + (long long)head * v_dim + v_index;
+    const long long v_output_base =
+        ((long long)token * v_heads + head) * v_dim + v_index;
+    const __nv_bfloat16* k_row = k + k_base;
+    const __nv_bfloat16* q_row = q + q_base;
+    const float k0 = __bfloat162float(k_row[0]);
+    const float k1 = __bfloat162float(k_row[1]);
+    const float k2 = __bfloat162float(k_row[2]);
+    const float k3 = __bfloat162float(k_row[3]);
+    const float head_decay = expf(decay[(long long)token * v_heads + head]);
+    s.x *= head_decay;
+    s.y *= head_decay;
+    s.z *= head_decay;
+    s.w *= head_decay;
+
+    float predicted = s.x * k0 + s.y * k1 + s.z * k2 + s.w * k3;
+    for (int offset = 16; offset > 0; offset >>= 1)
+      predicted += __shfl_down_sync(0xFFFFFFFFu, predicted, offset);
+    predicted = __shfl_sync(0xFFFFFFFFu, predicted, 0);
+    const float delta =
+        (__bfloat162float(v[v_input_base]) - predicted) *
+        beta[(long long)token * v_heads + head];
+    s.x += delta * k0;
+    s.y += delta * k1;
+    s.z += delta * k2;
+    s.w += delta * k3;
+
+    float4* checkpoint = reinterpret_cast<float4*>(
+        checkpoints + (((long long)token * total_rows + global_row) * k_dim));
+    checkpoint[lane] = s;
+
+    float out = s.x * __bfloat162float(q_row[0]) +
+                s.y * __bfloat162float(q_row[1]) +
+                s.z * __bfloat162float(q_row[2]) +
+                s.w * __bfloat162float(q_row[3]);
+    for (int offset = 16; offset > 0; offset >>= 1)
+      out += __shfl_down_sync(0xFFFFFFFFu, out, offset);
+    if (lane == 0)
+      output[v_output_base] = __float2bfloat16(out * q_scale);
+  }
+  row[lane] = s;
+}
+
 // Gated RMSNorm over each value head, then the z gate.
 //
 // Qwen3.5 uses `output_gate_type: swish`, so the gate is silu(z) rather than
@@ -184,6 +260,41 @@ __global__ void causal_conv_step_kernel(
       __float2bfloat16(accumulator / (1.0f + __expf(-accumulator)));
 }
 
+__global__ void causal_conv_verify_kernel(
+    float* __restrict__ window, const __nv_bfloat16* __restrict__ input,
+    const __nv_bfloat16* __restrict__ weight,
+    __nv_bfloat16* __restrict__ output, float* __restrict__ checkpoints,
+    int tokens, int channels, int kernel_width) {
+  const int channel = blockIdx.x * blockDim.x + threadIdx.x;
+  if (channel >= channels) return;
+  constexpr int kMaxWidth = 8;
+  float history[kMaxWidth];
+  float weights[kMaxWidth];
+  float* slot = window + (long long)channel * kernel_width;
+  for (int index = 0; index < kernel_width; ++index) {
+    history[index] = slot[index];
+    weights[index] =
+        __bfloat162float(weight[(long long)channel * kernel_width + index]);
+  }
+  for (int token = 0; token < tokens; ++token) {
+    for (int index = 0; index < kernel_width - 1; ++index)
+      history[index] = history[index + 1];
+    history[kernel_width - 1] =
+        __bfloat162float(input[(long long)token * channels + channel]);
+    float accumulator = 0.0f;
+    for (int index = 0; index < kernel_width; ++index)
+      accumulator += history[index] * weights[index];
+    output[(long long)token * channels + channel] =
+        __float2bfloat16(accumulator / (1.0f + __expf(-accumulator)));
+    float* checkpoint = checkpoints +
+        ((long long)token * channels + channel) * kernel_width;
+    for (int index = 0; index < kernel_width; ++index)
+      checkpoint[index] = history[index];
+  }
+  for (int index = 0; index < kernel_width; ++index)
+    slot[index] = history[index];
+}
+
 // L2-normalize each head of q and k, which the delta rule requires for
 // stability.
 __global__ void l2_normalize_heads_kernel(__nv_bfloat16* __restrict__ data,
@@ -210,6 +321,28 @@ __global__ void l2_normalize_heads_kernel(__nv_bfloat16* __restrict__ data,
     data[base + index] =
         __float2bfloat16(__bfloat162float(data[base + index]) * scale);
   }
+}
+
+__global__ void l2_normalize_heads_seq_kernel(
+    __nv_bfloat16* __restrict__ data, int tokens, int heads, int head_dim,
+    int row_stride, float epsilon) {
+  const int row = blockIdx.x;
+  if (row >= tokens * heads) return;
+  const int token = row / heads;
+  const int head = row % heads;
+  const long long base =
+      (long long)token * row_stride + (long long)head * head_dim;
+  float sum = 0.0f;
+  for (int index = threadIdx.x; index < head_dim; index += blockDim.x) {
+    const float value = __bfloat162float(data[base + index]);
+    sum += value * value;
+  }
+  for (int offset = 16; offset > 0; offset >>= 1)
+    sum += __shfl_down_sync(0xFFFFFFFFu, sum, offset);
+  const float scale = rsqrtf(__shfl_sync(0xFFFFFFFFu, sum, 0) + epsilon);
+  for (int index = threadIdx.x; index < head_dim; index += blockDim.x)
+    data[base + index] =
+        __float2bfloat16(__bfloat162float(data[base + index]) * scale);
 }
 
 // g = -exp(A_log) * softplus(a + dt_bias), the log decay; beta = sigmoid(b).
@@ -971,6 +1104,29 @@ int gdn_recurrent_step(void* state, const void* q, const void* k,
   return cudaGetLastError() == cudaSuccess ? 0 : -3;
 }
 
+int gdn_recurrent_verify(void* state, const void* q, const void* k,
+                         const void* v, const void* decay, const void* beta,
+                         void* output, void* checkpoints, int tokens,
+                         int v_heads, int k_heads, int v_dim, int k_dim,
+                         int q_row_stride, int k_row_stride,
+                         int v_row_stride, cudaStream_t stream) {
+  if (tokens <= 0 || v_heads <= 0 || k_heads <= 0 || v_dim <= 0 ||
+      k_dim <= 0 || v_heads % k_heads != 0) return -1;
+  if (k_dim != 128) return -4;
+  constexpr int kRowsPerBlock = 8;
+  const int threads = kRowsPerBlock * 32;
+  const int blocks =
+      (v_heads * v_dim + kRowsPerBlock - 1) / kRowsPerBlock;
+  recurrent_verify_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<float*>(state), static_cast<const __nv_bfloat16*>(q),
+      static_cast<const __nv_bfloat16*>(k),
+      static_cast<const __nv_bfloat16*>(v), static_cast<const float*>(decay),
+      static_cast<const float*>(beta), static_cast<__nv_bfloat16*>(output),
+      static_cast<float*>(checkpoints), tokens, v_heads, k_heads, v_dim,
+      k_dim, q_row_stride, k_row_stride, v_row_stride);
+  return cudaGetLastError() == cudaSuccess ? 0 : -3;
+}
+
 int gdn_gated_norm(const void* input, const void* gate, const void* weight,
                    void* output, int heads, int head_dim, float epsilon,
                    cudaStream_t stream) {
@@ -997,12 +1153,39 @@ int gdn_causal_conv_step(void* window, const void* input, const void* weight,
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 
+int gdn_causal_conv_verify(void* window, const void* input,
+                           const void* weight, void* output,
+                           void* checkpoints, int tokens, int channels,
+                           int kernel_width, cudaStream_t stream) {
+  if (tokens <= 0 || channels <= 0 || kernel_width <= 0 ||
+      kernel_width > 8) return -1;
+  const int threads = 256;
+  const int blocks = (channels + threads - 1) / threads;
+  causal_conv_verify_kernel<<<blocks, threads, 0, stream>>>(
+      static_cast<float*>(window), static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(output), static_cast<float*>(checkpoints),
+      tokens, channels, kernel_width);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
 int gdn_l2_normalize_heads(void* data, int heads, int head_dim, float epsilon,
                            cudaStream_t stream) {
   if (heads <= 0 || head_dim <= 0) return -1;
   const int threads = head_dim >= 32 ? 32 : head_dim;
   l2_normalize_heads_kernel<<<heads, threads, 0, stream>>>(
       static_cast<__nv_bfloat16*>(data), heads, head_dim, epsilon);
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int gdn_l2_normalize_heads_seq(void* data, int tokens, int heads,
+                               int head_dim, int row_stride, float epsilon,
+                               cudaStream_t stream) {
+  if (tokens <= 0 || heads <= 0 || head_dim <= 0) return -1;
+  const int threads = head_dim >= 32 ? 32 : head_dim;
+  l2_normalize_heads_seq_kernel<<<tokens * heads, threads, 0, stream>>>(
+      static_cast<__nv_bfloat16*>(data), tokens, heads, head_dim, row_stride,
+      epsilon);
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
 

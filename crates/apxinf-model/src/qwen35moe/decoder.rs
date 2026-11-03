@@ -13,6 +13,7 @@ use apxinf_cuda_new::{
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
+use std::time::Instant;
 
 use super::architecture::{AttentionGeometry, MixerKind, Qwen35MoeArchitecture};
 use super::config::Qwen35MoeConfig;
@@ -139,23 +140,23 @@ impl Qwen35DecodePhase {
 
 /// One fixed-shape target-verification layer traversal.
 ///
-/// Unlike scalar decode, verification keeps FA2 eager because the live prefix
-/// grows every round. The surrounding execution session still retains every
-/// fixed-address GEMM execution and supplies direct-op workspace, eliminating
-/// per-round cudaMalloc/cudaFree and per-GEMM synchronization.
+/// GDN layers are fixed-address and captured as one mixer-plus-MoE graph.
+/// Full-attention layers keep their dynamic KV traversal eager, but capture
+/// the fixed-address MoE tail. This removes thousands of per-round launches
+/// while preserving the changing cache offset.
 pub(super) struct Qwen35VerifyPhase {
-    session: ExecutionSession,
+    prepared: PreparedPhase,
 }
 
 impl Qwen35VerifyPhase {
-    fn prepare(ctx: &CudaContext, operation: impl FnOnce() -> Result<()>) -> Result<Self> {
+    fn prepare(ctx: &CudaContext, mut operation: impl FnMut() -> Result<()>) -> Result<Self> {
         let session = ExecutionSession::with_capacity(DECODE_PHASE_WORKSPACE, ctx.device_id())?;
-        session.prepare(operation)?;
-        Ok(Self { session })
+        let prepared = PreparedPhase::prepare_and_capture(ctx, session, &mut operation)?;
+        Ok(Self { prepared })
     }
 
-    fn run(&self, operation: impl FnOnce() -> Result<()>) -> Result<()> {
-        self.session.run(operation)
+    fn replay(&self) -> Result<()> {
+        self.prepared.replay()
     }
 }
 
@@ -491,11 +492,21 @@ impl Qwen35Decoder {
         )
     }
 
-    pub(super) fn allocate_verify_scratch(&self, ctx: &CudaContext) -> Result<DecoderScratch> {
+    pub(super) fn allocate_verify_scratch(
+        &self,
+        ctx: &CudaContext,
+        verify_rows: usize,
+    ) -> Result<DecoderScratch> {
+        if !(2..=super::mtp_schedule::QWEN35_MTP_VERIFY_ROWS).contains(&verify_rows) {
+            return Err(invalid(format!(
+                "Qwen3.5 MTP verifier rows must be in 2..={}, got {verify_rows}",
+                super::mtp_schedule::QWEN35_MTP_VERIFY_ROWS
+            )));
+        }
         let moe = self.architecture.layers[0].moe;
         DecoderScratch::new(
             ctx,
-            super::mtp_schedule::QWEN35_MTP_VERIFY_ROWS,
+            verify_rows,
             self.architecture.hidden_size,
             self.architecture.vocab_size,
             moe.experts,
@@ -506,8 +517,13 @@ impl Qwen35Decoder {
         )
     }
 
+    /// Target verification with token IDs already resident on CUDA.
+    ///
+    /// MTP uses this entry point so its draft proposals can flow directly
+    /// into the base verifier on the same stream. Proposal IDs originate from
+    /// device argmax and therefore already satisfy the vocabulary contract.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn run_verify_reusing<B: FullAttentionBackend>(
+    pub(super) fn run_verify_reusing_device<B: FullAttentionBackend>(
         &self,
         ctx: &CudaContext,
         weights: &Qwen35DeviceWeights,
@@ -515,16 +531,25 @@ impl Qwen35Decoder {
         attention_caches: &mut [B::Cache],
         gdn_states: &[GdnState],
         gdn_checkpoints: &[GdnStateCheckpoints],
-        token_ids: &[u32],
+        token_ids: &Tensor,
         start_position: usize,
         scratch: &mut DecoderScratch,
         verify_phases: Option<&[Qwen35VerifyPhase]>,
     ) -> Result<DecoderOutput> {
         self.validate_weights(weights)?;
-        self.validate_call(
+        if token_ids.device() != Device::Cuda(ctx.device_id())
+            || token_ids.dtype() != DType::I32
+            || token_ids.shape().dims().len() != 1
+        {
+            return Err(invalid(
+                "Qwen3.5 device verifier token IDs must be a CUDA I32 vector",
+            ));
+        }
+        let rows = token_ids.shape().dims()[0];
+        self.validate_call_dimensions(
             attention_caches.len(),
             gdn_states.len(),
-            token_ids,
+            rows,
             start_position,
             DecoderPhase::Prefill,
         )?;
@@ -532,20 +557,20 @@ impl Qwen35Decoder {
             return Err(invalid("Qwen3.5 GDN checkpoint count mismatch"));
         }
         scratch.validate_contract(
-            token_ids.len(),
+            rows,
             self.architecture.hidden_size,
             self.architecture.vocab_size,
             LogitsSelection::All,
             HiddenSelection::All,
         )?;
-        self.run_validated(
+        scratch.write_token_ids_device(ctx, token_ids)?;
+        self.run_after_token_ids(
             ctx,
             weights,
             attention,
             attention_caches,
             gdn_states,
             Some(gdn_checkpoints),
-            token_ids,
             start_position,
             DecoderPhase::Prefill,
             LogitsSelection::All,
@@ -568,6 +593,7 @@ impl Qwen35Decoder {
         attention_caches: &mut [B::Cache],
         gdn_states: &[GdnState],
         gdn_checkpoints: &[GdnStateCheckpoints],
+        verify_rows: usize,
         start_position: usize,
         scratch: &mut DecoderScratch,
     ) -> Result<Vec<Qwen35VerifyPhase>> {
@@ -580,7 +606,7 @@ impl Qwen35Decoder {
             ));
         }
         scratch.validate_contract(
-            super::mtp_schedule::QWEN35_MTP_VERIFY_ROWS,
+            verify_rows,
             self.architecture.hidden_size,
             self.architecture.vocab_size,
             LogitsSelection::All,
@@ -1086,6 +1112,8 @@ impl Qwen35Decoder {
         let parallel_gdn = graph_gdn_mode == "parallel";
         let graph_attention_moe =
             std::env::var("APXINF_QWEN35_GRAPH_ATTN_MOE").as_deref() != Ok("0");
+        let time_verify_layers =
+            std::env::var("APXINF_QWEN35_VERIFY_LAYER_TIMING").as_deref() == Ok("1");
         for (layer_offset, (layer, resident)) in self
             .architecture
             .layers
@@ -1093,6 +1121,10 @@ impl Qwen35Decoder {
             .zip(&weights.layers)
             .enumerate()
         {
+            if time_verify_layers && verify_phases.is_some() {
+                ctx.synchronize().map_err(Error::Cuda)?;
+            }
+            let verify_layer_started = Instant::now();
             trace_hash("pre", layer.index, &scratch.hidden);
             if let Some(phases) = verify_phases {
                 let checkpoints =
@@ -1114,19 +1146,38 @@ impl Qwen35Decoder {
                 };
                 match layer.mixer {
                     MixerKind::Gdn(_) => {
-                        phases[layer_offset].run(|| {
-                            run_mixer(scratch)?;
-                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
-                        })?;
+                        phases[layer_offset].replay()?;
                         gdn_index += 1;
                     }
                     MixerKind::FullAttention(_) => {
                         run_mixer(scratch)?;
-                        phases[layer_offset].run(|| {
-                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
-                        })?;
+                        let mixer_ms = if time_verify_layers {
+                            ctx.synchronize().map_err(Error::Cuda)?;
+                            Some(verify_layer_started.elapsed().as_secs_f64() * 1000.0)
+                        } else {
+                            None
+                        };
+                        phases[layer_offset].replay()?;
+                        if let Some(mixer_ms) = mixer_ms {
+                            ctx.synchronize().map_err(Error::Cuda)?;
+                            let total_ms = verify_layer_started.elapsed().as_secs_f64() * 1000.0;
+                            eprintln!(
+                                "[verify-attention-layer] index={} mixer_ms={mixer_ms:.3} moe_ms={:.3}",
+                                layer.index,
+                                total_ms - mixer_ms
+                            );
+                        }
                         attention_index += 1;
                     }
+                }
+                if time_verify_layers {
+                    ctx.synchronize().map_err(Error::Cuda)?;
+                    eprintln!(
+                        "[verify-layer] index={} mixer={:?} elapsed_ms={:.3}",
+                        layer.index,
+                        layer.mixer,
+                        verify_layer_started.elapsed().as_secs_f64() * 1000.0
+                    );
                 }
                 trace_hash("post", layer.index, &scratch.hidden);
                 continue;
@@ -1373,11 +1424,31 @@ impl Qwen35Decoder {
                 "Qwen3.5 decoder token ID is outside the vocabulary",
             ));
         }
-        if phase == DecoderPhase::Decode && token_ids.len() != 1 {
+        self.validate_call_dimensions(
+            attention_caches,
+            gdn_states,
+            token_ids.len(),
+            start_position,
+            phase,
+        )
+    }
+
+    fn validate_call_dimensions(
+        &self,
+        attention_caches: usize,
+        gdn_states: usize,
+        token_count: usize,
+        start_position: usize,
+        phase: DecoderPhase,
+    ) -> Result<()> {
+        if token_count == 0 {
+            return Err(invalid("Qwen3.5 decoder input must not be empty"));
+        }
+        if phase == DecoderPhase::Decode && token_count != 1 {
             return Err(invalid("Qwen3.5 decode requires exactly one token"));
         }
         let end = start_position
-            .checked_add(token_ids.len())
+            .checked_add(token_count)
             .ok_or_else(|| invalid("Qwen3.5 decoder position overflow"))?;
         if end > self.architecture.max_position_embeddings {
             return Err(invalid(format!(
@@ -1477,6 +1548,18 @@ impl DecoderScratch {
             .collect::<Result<Vec<_>>>()?;
         let host = Tensor::from_i32(vec![self.tokens], &values)?;
         transfers::copy_cpu_to_cuda(&host, &self.token_ids)
+    }
+
+    fn write_token_ids_device(&self, ctx: &CudaContext, token_ids: &Tensor) -> Result<()> {
+        if token_ids.device() != Device::Cuda(ctx.device_id())
+            || token_ids.dtype() != DType::I32
+            || token_ids.shape().dims() != [self.tokens]
+        {
+            return Err(invalid(
+                "Qwen3.5 device token IDs do not match reusable decoder scratch",
+            ));
+        }
+        transfers::copy_cuda_to_cuda(ctx, token_ids, &self.token_ids)
     }
 
     fn embed(&self, ctx: &CudaContext, embedding: &Tensor) -> Result<()> {
