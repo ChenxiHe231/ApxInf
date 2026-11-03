@@ -327,22 +327,39 @@ fn dynamic_cache_storage(
     cache: Qwen35DynamicFp8KvCache<'_>,
 ) -> Result<(usize, CudaBuffer, CudaBuffer, CudaBuffer, CudaBuffer)> {
     let shape = cache.key.shape().dims();
-    if shape.len() != 3
-        || shape[0] == 0
-        || shape[1..] != [QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM]
-        || cache.value.shape().dims() != shape
-    {
-        return Err(invalid(
-            "Qwen3.5 dynamic FP8 K/V caches must match [capacity,2,256]",
-        ));
+    let (capacity, scale_shape) = match shape {
+        [capacity, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM] if *capacity > 0 => {
+            (*capacity, vec![*capacity, QWEN35_ATTENTION_KV_HEADS])
+        }
+        [blocks, QWEN35_KV_CACHE_BLOCK_TOKENS, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM]
+            if *blocks > 0 =>
+        {
+            let capacity = blocks
+                .checked_mul(QWEN35_KV_CACHE_BLOCK_TOKENS)
+                .ok_or_else(|| invalid("dynamic cache physical capacity overflow"))?;
+            (
+                capacity,
+                vec![
+                    *blocks,
+                    QWEN35_KV_CACHE_BLOCK_TOKENS,
+                    QWEN35_ATTENTION_KV_HEADS,
+                ],
+            )
+        }
+        _ => {
+            return Err(invalid(
+                "Qwen3.5 dynamic FP8 K/V caches must be [capacity,2,256] or [blocks,128,2,256]",
+            ));
+        }
+    };
+    if cache.value.shape().dims() != shape {
+        return Err(invalid("Qwen3.5 dynamic FP8 K/V cache shapes differ"));
     }
-    let capacity = shape[0];
     if i32::try_from(capacity).is_err() {
         return Err(invalid("dynamic cache capacity exceeds native range"));
     }
     let key = tensor_storage(ctx, cache.key, DType::F8E4M3, shape)?;
     let value = tensor_storage(ctx, cache.value, DType::F8E4M3, shape)?;
-    let scale_shape = [capacity, QWEN35_ATTENTION_KV_HEADS];
     let key_scales = tensor_storage(ctx, cache.key_scales, DType::F32, &scale_shape)?;
     let value_scales = tensor_storage(ctx, cache.value_scales, DType::F32, &scale_shape)?;
     validate_disjoint(&[], &[&key, &value, &key_scales, &value_scales])?;

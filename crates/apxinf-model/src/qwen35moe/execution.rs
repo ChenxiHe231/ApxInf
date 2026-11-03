@@ -55,6 +55,8 @@ pub enum Qwen35KvCacheDType {
     Bf16,
     /// Quantize K and V with the checkpoint's fixed scales when appending them.
     Fp8,
+    /// Compute an independent FP8 scale for each token, KV head, and K/V tensor.
+    Fp8Dynamic,
 }
 
 impl Qwen35KvCacheDType {
@@ -62,13 +64,14 @@ impl Qwen35KvCacheDType {
         match self {
             Self::Bf16 => "bf16",
             Self::Fp8 => "fp8",
+            Self::Fp8Dynamic => "fp8_dynamic",
         }
     }
 
     pub const fn tensor_dtype(self) -> apxinf_core::DType {
         match self {
             Self::Bf16 => apxinf_core::DType::BF16,
-            Self::Fp8 => apxinf_core::DType::F8E4M3,
+            Self::Fp8 | Self::Fp8Dynamic => apxinf_core::DType::F8E4M3,
         }
     }
 }
@@ -86,8 +89,9 @@ impl FromStr for Qwen35KvCacheDType {
         match value.to_ascii_lowercase().as_str() {
             "bf16" => Ok(Self::Bf16),
             "fp8" | "f8e4m3" => Ok(Self::Fp8),
+            "fp8_dynamic" => Ok(Self::Fp8Dynamic),
             _ => Err(format!(
-                "unsupported Qwen3.5 KV-cache dtype `{value}`; use bf16 or fp8"
+                "unsupported Qwen3.5 KV-cache dtype `{value}`; use bf16, fp8 or fp8_dynamic"
             )),
         }
     }
@@ -110,6 +114,7 @@ mod tests {
         assert_eq!("nvfp4".parse(), Ok(Qwen35MoeActivation::Nvfp4));
         assert_eq!("bf16".parse(), Ok(Qwen35KvCacheDType::Bf16));
         assert_eq!("fp8".parse(), Ok(Qwen35KvCacheDType::Fp8));
+        assert_eq!("fp8_dynamic".parse(), Ok(Qwen35KvCacheDType::Fp8Dynamic));
     }
 
     #[test]

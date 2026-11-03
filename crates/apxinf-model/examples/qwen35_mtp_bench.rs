@@ -384,7 +384,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checkpoint = args.get(1).filter(|arg| !arg.starts_with("--")).ok_or(
         "usage: qwen35_mtp_bench <checkpoint-dir> [--device N] [--max-new N] \
              [--prompt-tokens N] [--warmups N] [--repeats N] [--mode scalar|mtp|both] \
-             [--qwen35-moe-activation nvfp4|bf16] [--qwen35-kv-cache bf16|fp8] \
+             [--qwen35-moe-activation nvfp4|bf16] [--qwen35-kv-cache bf16|fp8|fp8_dynamic] \
              [--tuning-dir ABSOLUTE_PATH] [--autotune]",
     )?;
     let device = arg_value(&args, "--device", 0);

@@ -204,7 +204,8 @@ fn load_qwen35_moe(
         kv_cache: options.qwen35_kv_cache.unwrap_or_default(),
     };
     let kv_cache_scales = match execution.kv_cache {
-        crate::qwen35moe::Qwen35KvCacheDType::Bf16 => None,
+        crate::qwen35moe::Qwen35KvCacheDType::Bf16
+        | crate::qwen35moe::Qwen35KvCacheDType::Fp8Dynamic => None,
         crate::qwen35moe::Qwen35KvCacheDType::Fp8 => {
             Some(crate::qwen35moe::load_trt_fp8_kv_cache_scales(
                 &model_dir.join("hf_quant_config.json"),

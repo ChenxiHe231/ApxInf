@@ -61,9 +61,7 @@ __device__ float block_sum(float value, float* partial) {
     partial[0] = total;
   }
   __syncthreads();
-  const float result = partial[0];
-  __syncthreads();  // All warps must read before a later reduction reuses partial.
-  return result;
+  return partial[0];
 }
 
 __device__ float block_max(float value, float* partial) {

@@ -1,9 +1,9 @@
 //! Concrete base-model full-attention backend for Qwen3.5-35B-A3B.
 //!
 //! The base checkpoint's ten full-attention layers use BF16 projections. Their
-//! persistent K/V cache is selected at load time: BF16 is consumed directly by
-//! FA2, while FP8-E4M3 is appended with the checkpoint calibration scales and
-//! dequantized into retained BF16 scratch before the same FA2 implementation.
+//! persistent K/V cache is selected at load time. BF16 uses FA2, fixed-scale
+//! FP8 retains the checkpoint-calibrated path, and dynamic FP8 computes one
+//! scale per token and KV head and reads the cache directly in decode.
 //! MTP attention has a separate cache contract and is not handled here.
 
 use std::cell::Cell;
@@ -28,8 +28,7 @@ const TARGET_LAYERS: usize = 40;
 const FULL_ATTENTION_INTERVAL: usize = 4;
 const DECODE_PROJECTION_WORKSPACE: usize = 4 * 1024 * 1024;
 /// Match TensorRT-LLM's engine configuration (`tokens_per_block=128`).
-/// Quantization remains one static K scale and one static V scale per layer;
-/// this constant is physical cache page granularity, not a scale group size.
+/// This constant is physical cache page granularity, not a scale group size.
 pub const QWEN35_KV_CACHE_BLOCK_TOKENS: usize = 128;
 
 /// Persistent cache for one base-model full-attention layer.
@@ -45,6 +44,8 @@ pub struct Qwen35AttentionCache {
     dtype: Qwen35KvCacheDType,
     key: Tensor,
     value: Tensor,
+    dynamic_key_scales: Option<Tensor>,
+    dynamic_value_scales: Option<Tensor>,
 }
 
 impl Qwen35AttentionCache {
@@ -79,6 +80,32 @@ impl Qwen35AttentionCache {
     pub fn value(&self) -> &Tensor {
         &self.value
     }
+
+    pub fn dynamic_key_scales(&self) -> Option<&Tensor> {
+        self.dynamic_key_scales.as_ref()
+    }
+
+    pub fn dynamic_value_scales(&self) -> Option<&Tensor> {
+        self.dynamic_value_scales.as_ref()
+    }
+
+    fn dynamic_fp8_cache(&self) -> Result<ops::Qwen35DynamicFp8KvCache<'_>> {
+        if self.dtype != Qwen35KvCacheDType::Fp8Dynamic {
+            return Err(invalid("dynamic FP8 cache requested from another KV mode"));
+        }
+        Ok(ops::Qwen35DynamicFp8KvCache {
+            key: &self.key,
+            value: &self.value,
+            key_scales: self
+                .dynamic_key_scales
+                .as_ref()
+                .ok_or_else(|| invalid("missing dynamic K scales"))?,
+            value_scales: self
+                .dynamic_value_scales
+                .as_ref()
+                .ok_or_else(|| invalid("missing dynamic V scales"))?,
+        })
+    }
 }
 
 /// CUDA implementation of the decoder's target-specific attention boundary.
@@ -89,7 +116,7 @@ pub struct Qwen35Fp8AttentionBackend {
     hidden_size: usize,
     rope_theta: f32,
     kv_cache_dtype: Qwen35KvCacheDType,
-    scratch: HashMap<(usize, usize, usize), AttentionScratch>,
+    scratch: HashMap<(usize, usize, usize, bool), AttentionScratch>,
     pre_projection_sessions: HashMap<(usize, usize, usize), Rc<PreparedExecution>>,
     post_projection_sessions: HashMap<(usize, usize, usize), Rc<PreparedExecution>>,
 }
@@ -131,6 +158,7 @@ impl Qwen35Fp8AttentionBackend {
         config.validate()?;
         match (kv_cache_dtype, scales) {
             (Qwen35KvCacheDType::Bf16, None) => {}
+            (Qwen35KvCacheDType::Fp8Dynamic, None) => {}
             (Qwen35KvCacheDType::Fp8, Some(scales)) => validate_scales(scales)?,
             (Qwen35KvCacheDType::Fp8, None) => {
                 return Err(invalid(
@@ -139,6 +167,9 @@ impl Qwen35Fp8AttentionBackend {
             }
             (Qwen35KvCacheDType::Bf16, Some(_)) => {
                 return Err(invalid("Qwen3.6 BF16 KV cache must not carry FP8 scales"));
+            }
+            (Qwen35KvCacheDType::Fp8Dynamic, Some(_)) => {
+                return Err(invalid("dynamic FP8 KV cache must not carry fixed scales"));
             }
         }
         Ok(Self {
@@ -160,10 +191,14 @@ impl Qwen35Fp8AttentionBackend {
         ctx: &CudaContext,
         tokens: usize,
         cache_capacity: usize,
+        phase: DecoderPhase,
     ) -> Result<&mut AttentionScratch> {
-        let key = (ctx.device_id(), tokens, cache_capacity);
+        let dynamic_decode =
+            self.kv_cache_dtype == Qwen35KvCacheDType::Fp8Dynamic && phase == DecoderPhase::Decode;
+        let key = (ctx.device_id(), tokens, cache_capacity, dynamic_decode);
         if !self.scratch.contains_key(&key) {
-            let profile = AttentionScratch::new(ctx, tokens, cache_capacity, self.kv_cache_dtype)?;
+            let profile =
+                AttentionScratch::new(ctx, tokens, cache_capacity, self.kv_cache_dtype, phase)?;
             self.scratch.insert(key, profile);
         }
         Ok(self
@@ -214,6 +249,20 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ];
         let dtype = self.kv_cache_dtype.tensor_dtype();
+        let (dynamic_key_scales, dynamic_value_scales) =
+            if self.kv_cache_dtype == Qwen35KvCacheDType::Fp8Dynamic {
+                let scale_shape = vec![
+                    blocks,
+                    QWEN35_KV_CACHE_BLOCK_TOKENS,
+                    ops::QWEN35_ATTENTION_KV_HEADS,
+                ];
+                (
+                    Some(zeros(ctx, scale_shape.clone(), DType::F32)?),
+                    Some(zeros(ctx, scale_shape, DType::F32)?),
+                )
+            } else {
+                (None, None)
+            };
         Ok(Qwen35AttentionCache {
             layer_index,
             geometry,
@@ -223,12 +272,18 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             dtype: self.kv_cache_dtype,
             key: zeros(ctx, shape.clone(), dtype)?,
             value: zeros(ctx, shape, dtype)?,
+            dynamic_key_scales,
+            dynamic_value_scales,
         })
     }
 
     fn reset_cache(&mut self, ctx: &CudaContext, cache: &mut Self::Cache) -> Result<()> {
         validate_cache_device(ctx, cache)?;
-        for tensor in [&cache.key, &cache.value] {
+        for tensor in [&cache.key, &cache.value]
+            .into_iter()
+            .chain(cache.dynamic_key_scales.iter())
+            .chain(cache.dynamic_value_scales.iter())
+        {
             CudaBuffer::from_tensor(tensor)
                 .map_err(Error::Cuda)?
                 .zero_async(ctx.stream())
@@ -273,6 +328,39 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
                 .map_err(Error::Cuda)?;
             transfers::copy_cuda_to_cuda(ctx, &source_view, &destination_view)?;
         }
+        if source.dtype == Qwen35KvCacheDType::Fp8Dynamic {
+            let row_bytes = ops::QWEN35_ATTENTION_KV_HEADS * DType::F32.size_in_bytes();
+            let offset = positions.start * row_bytes;
+            let len = rows * row_bytes;
+            let shape = Shape::new(vec![rows, ops::QWEN35_ATTENTION_KV_HEADS]);
+            for (src, dst) in [
+                (
+                    source.dynamic_key_scales.as_ref(),
+                    destination.dynamic_key_scales.as_ref(),
+                ),
+                (
+                    source.dynamic_value_scales.as_ref(),
+                    destination.dynamic_value_scales.as_ref(),
+                ),
+            ] {
+                let src = src.ok_or_else(|| invalid("missing source dynamic FP8 scale cache"))?;
+                let dst =
+                    dst.ok_or_else(|| invalid("missing destination dynamic FP8 scale cache"))?;
+                let src_view = CudaBuffer::from_tensor(src)
+                    .map_err(Error::Cuda)?
+                    .view(offset, len)
+                    .map_err(Error::Cuda)?
+                    .as_tensor(shape.clone(), DType::F32)
+                    .map_err(Error::Cuda)?;
+                let dst_view = CudaBuffer::from_tensor(dst)
+                    .map_err(Error::Cuda)?
+                    .view(offset, len)
+                    .map_err(Error::Cuda)?
+                    .as_tensor(shape.clone(), DType::F32)
+                    .map_err(Error::Cuda)?;
+                transfers::copy_cuda_to_cuda(ctx, &src_view, &dst_view)?;
+            }
+        }
         Ok(())
     }
 
@@ -298,7 +386,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             request.phase,
             tokens,
         )?;
-        let scratch = self.scratch(ctx, tokens, cache.capacity)?;
+        let scratch = self.scratch(ctx, tokens, cache.capacity, request.phase)?;
         scratch.ensure_text_positions(request.start_position)?;
 
         // ---- q/k/v projection GEMMs ----
@@ -328,6 +416,18 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             session.run(project_qkv)?;
         } else {
             project_qkv()?;
+        }
+
+        if cache.dtype == Qwen35KvCacheDType::Fp8Dynamic {
+            return run_dynamic_fp8_attention(
+                ctx,
+                &request,
+                cache,
+                scratch,
+                tokens,
+                rope_theta,
+                post_projection,
+            );
         }
 
         // Decode and fixed-row MTP verification consume the FP8 cache directly.
@@ -531,6 +631,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
                     args.scale = scale;
                     ops::quantization(ctx, args)?;
                 }
+                Qwen35KvCacheDType::Fp8Dynamic => unreachable!("dynamic path returned above"),
             }
         }
 
@@ -587,6 +688,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
                 }
                 (key_bf16, value_bf16)
             }
+            Qwen35KvCacheDType::Fp8Dynamic => unreachable!("dynamic path returned above"),
         };
         let query_fa2 = view(
             &scratch.query,
@@ -677,6 +779,163 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
     }
 }
 
+/// The dynamic mode owns a separate path, leaving BF16 and calibrated FP8
+/// dispatch identical to the 36d0d0f baseline.
+fn run_dynamic_fp8_attention(
+    ctx: &CudaContext,
+    request: &FullAttentionRequest<'_>,
+    cache: &Qwen35AttentionCache,
+    scratch: &AttentionScratch,
+    tokens: usize,
+    rope_theta: f32,
+    post_projection: Option<Rc<PreparedExecution>>,
+) -> Result<()> {
+    let query_gate = view(
+        &scratch.projected_query_gate,
+        vec![
+            tokens,
+            ops::QWEN35_ATTENTION_Q_HEADS,
+            2 * ops::QWEN35_ATTENTION_HEAD_DIM,
+        ],
+        DType::BF16,
+    )?;
+    ops::qwen35_query_prepare(
+        ctx,
+        tokens,
+        &query_gate,
+        &request.weights.q_norm,
+        &scratch.positions,
+        rope_theta,
+        &scratch.query,
+        &scratch.gate,
+    )?;
+    let key_heads = view(
+        &scratch.projected_key,
+        vec![
+            tokens,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_HEAD_DIM,
+        ],
+        DType::BF16,
+    )?;
+    let value_heads = view(
+        &scratch.projected_value,
+        vec![
+            tokens,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+            ops::QWEN35_ATTENTION_HEAD_DIM,
+        ],
+        DType::BF16,
+    )?;
+    ops::qwen35_dynamic_kv_prepare(
+        ctx,
+        tokens,
+        request.start_position,
+        &key_heads,
+        &value_heads,
+        &request.weights.k_norm,
+        &scratch.positions,
+        rope_theta,
+        cache.dynamic_fp8_cache()?,
+    )?;
+
+    let valid = request.start_position + tokens;
+    if request.phase == DecoderPhase::Decode {
+        ops::qwen35_dynamic_decode_attention_gated(
+            ctx,
+            valid,
+            &scratch.query,
+            &scratch.gate,
+            cache.dynamic_fp8_cache()?,
+            scratch.dynamic_decode_scratch()?,
+            &scratch.attention_output,
+        )?;
+    } else {
+        let key_bf16 = scratch.fp8_prefix_view(true, valid)?;
+        let value_bf16 = scratch.fp8_prefix_view(false, valid)?;
+        ops::qwen35_dynamic_kv_dequant(
+            ctx,
+            valid,
+            cache.dynamic_fp8_cache()?,
+            &key_bf16,
+            &value_bf16,
+        )?;
+        let query = view(
+            &scratch.query,
+            vec![
+                1,
+                tokens,
+                ops::QWEN35_ATTENTION_Q_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        let mut output = view(
+            &scratch.attention_output,
+            vec![
+                1,
+                tokens,
+                ops::QWEN35_ATTENTION_Q_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        let mut args = ops::KvCacheAttentionArgs::new(&query, &key_bf16, &value_bf16, &mut output);
+        args.valid_key_tokens = valid;
+        args.query_start = request.start_position;
+        args.scale = 1.0 / (ops::QWEN35_ATTENTION_HEAD_DIM as f32).sqrt();
+        args.policy.allow_fallback = true;
+        ops::kv_cache_attention(ctx, args)?;
+        let gate = view(
+            &scratch.gate,
+            vec![
+                tokens * ops::QWEN35_ATTENTION_Q_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        let output = view(
+            &scratch.attention_output,
+            vec![
+                tokens * ops::QWEN35_ATTENTION_Q_HEADS,
+                ops::QWEN35_ATTENTION_HEAD_DIM,
+            ],
+            DType::BF16,
+        )?;
+        ops::apply_output_gate(ctx, &output, &gate)?;
+    }
+
+    let attention_output = view(
+        &scratch.attention_output,
+        vec![
+            tokens,
+            ops::QWEN35_ATTENTION_Q_HEADS * ops::QWEN35_ATTENTION_HEAD_DIM,
+        ],
+        DType::BF16,
+    )?;
+    let mut output = request.output.clone();
+    let mut project_output = || {
+        quantize_static_fp8(
+            ctx,
+            &attention_output,
+            &scratch.fp8_output_input,
+            request.weights.o_proj.input_scale,
+        )?;
+        project_static_fp8_prequantized(
+            ctx,
+            &request.weights.o_proj,
+            &scratch.fp8_output_input,
+            &mut output,
+            tokens,
+        )
+    };
+    if let Some(session) = post_projection {
+        session.run(project_output)
+    } else {
+        project_output()
+    }
+}
+
 struct AttentionScratch {
     fp8_projection_input: Tensor,
     fp8_output_input: Tensor,
@@ -692,6 +951,9 @@ struct AttentionScratch {
     fp8_partial_stats: Tensor,
     fp8_key_bf16: Option<Tensor>,
     fp8_value_bf16: Option<Tensor>,
+    dynamic_partial_max: Option<Tensor>,
+    dynamic_partial_sum: Option<Tensor>,
+    dynamic_partial_output: Option<Tensor>,
     tokens: usize,
     positions_start: Option<usize>,
 }
@@ -702,6 +964,7 @@ impl AttentionScratch {
         tokens: usize,
         cache_capacity: usize,
         cache_dtype: Qwen35KvCacheDType,
+        phase: DecoderPhase,
     ) -> Result<Self> {
         if tokens == 0
             || cache_capacity == 0
@@ -732,13 +995,45 @@ impl AttentionScratch {
             ops::QWEN35_ATTENTION_KV_HEADS,
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ];
-        let (fp8_key_bf16, fp8_value_bf16) = if cache_dtype == Qwen35KvCacheDType::Fp8 {
+        let (fp8_key_bf16, fp8_value_bf16) = if cache_dtype == Qwen35KvCacheDType::Fp8
+            || (cache_dtype == Qwen35KvCacheDType::Fp8Dynamic && phase == DecoderPhase::Prefill)
+        {
             (
                 Some(zeros(ctx, fp8_cache_shape.clone(), DType::BF16)?),
                 Some(zeros(ctx, fp8_cache_shape, DType::BF16)?),
             )
         } else {
             (None, None)
+        };
+        let (dynamic_partial_max, dynamic_partial_sum, dynamic_partial_output) =
+            if cache_dtype == Qwen35KvCacheDType::Fp8Dynamic && phase == DecoderPhase::Decode {
+                let max_splits = ops::qwen35_dynamic_decode_max_splits(physical_cache_capacity)?;
+                let stats_shape = vec![ops::QWEN35_ATTENTION_Q_HEADS, max_splits];
+                (
+                    Some(zeros(ctx, stats_shape.clone(), DType::F32)?),
+                    Some(zeros(ctx, stats_shape, DType::F32)?),
+                    Some(zeros(
+                        ctx,
+                        vec![
+                            ops::QWEN35_ATTENTION_Q_HEADS,
+                            max_splits,
+                            ops::QWEN35_ATTENTION_HEAD_DIM,
+                        ],
+                        DType::F32,
+                    )?),
+                )
+            } else {
+                (None, None, None)
+            };
+        let static_fp8_capacity = if cache_dtype == Qwen35KvCacheDType::Fp8Dynamic {
+            1
+        } else {
+            physical_cache_capacity
+        };
+        let static_fp8_splits = if cache_dtype == Qwen35KvCacheDType::Fp8Dynamic {
+            1
+        } else {
+            ops::QWEN35_ATTENTION_MAX_SPLITS
         };
         Ok(Self {
             fp8_projection_input: zeros(ctx, vec![tokens, TARGET_HIDDEN_SIZE], DType::F8E4M3)?,
@@ -774,7 +1069,7 @@ impl AttentionScratch {
                 vec![
                     fp8_direct_tokens,
                     ops::QWEN35_ATTENTION_Q_HEADS,
-                    physical_cache_capacity,
+                    static_fp8_capacity,
                 ],
                 DType::F32,
             )?,
@@ -783,7 +1078,7 @@ impl AttentionScratch {
                 vec![
                     fp8_direct_tokens,
                     ops::QWEN35_ATTENTION_KV_HEADS,
-                    ops::QWEN35_ATTENTION_MAX_SPLITS,
+                    static_fp8_splits,
                     ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS,
                     ops::QWEN35_ATTENTION_HEAD_DIM,
                 ],
@@ -794,7 +1089,7 @@ impl AttentionScratch {
                 vec![
                     fp8_direct_tokens,
                     ops::QWEN35_ATTENTION_KV_HEADS,
-                    ops::QWEN35_ATTENTION_MAX_SPLITS,
+                    static_fp8_splits,
                     ops::QWEN35_ATTENTION_Q_HEADS / ops::QWEN35_ATTENTION_KV_HEADS,
                     2,
                 ],
@@ -802,6 +1097,9 @@ impl AttentionScratch {
             )?,
             fp8_key_bf16,
             fp8_value_bf16,
+            dynamic_partial_max,
+            dynamic_partial_sum,
+            dynamic_partial_output,
             tokens,
             positions_start: None,
         })
@@ -832,6 +1130,23 @@ impl AttentionScratch {
             ops::QWEN35_ATTENTION_HEAD_DIM,
             DType::BF16,
         )
+    }
+
+    fn dynamic_decode_scratch(&self) -> Result<ops::Qwen35DynamicDecodeScratch<'_>> {
+        Ok(ops::Qwen35DynamicDecodeScratch {
+            partial_max: self
+                .dynamic_partial_max
+                .as_ref()
+                .ok_or_else(|| invalid("missing dynamic decode max scratch"))?,
+            partial_sum: self
+                .dynamic_partial_sum
+                .as_ref()
+                .ok_or_else(|| invalid("missing dynamic decode sum scratch"))?,
+            partial_output: self
+                .dynamic_partial_output
+                .as_ref()
+                .ok_or_else(|| invalid("missing dynamic decode output scratch"))?,
+        })
     }
 }
 
@@ -976,12 +1291,16 @@ fn validate_cache_contract(
     }
     match (dtype, scales) {
         (Qwen35KvCacheDType::Bf16, None) => Ok(()),
+        (Qwen35KvCacheDType::Fp8Dynamic, None) => Ok(()),
         (Qwen35KvCacheDType::Fp8, Some(scales)) => validate_scales(scales),
         (Qwen35KvCacheDType::Fp8, None) => Err(invalid(
             "Qwen3.6 checkpoint has no FP8 KV calibration scales; use BF16 KV cache",
         )),
         (Qwen35KvCacheDType::Bf16, Some(_)) => Err(invalid(
             "Qwen3.6 BF16 KV cache must not carry fabricated FP8 scales",
+        )),
+        (Qwen35KvCacheDType::Fp8Dynamic, Some(_)) => Err(invalid(
+            "Qwen3.6 dynamic FP8 KV cache must not carry fixed scales",
         )),
     }
 }
@@ -1059,7 +1378,37 @@ fn validate_cache_device(ctx: &CudaContext, cache: &Qwen35AttentionCache) -> Res
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ],
         "value cache",
-    )
+    )?;
+    if cache.dtype == Qwen35KvCacheDType::Fp8Dynamic {
+        let scale_shape = [
+            cache.blocks,
+            QWEN35_KV_CACHE_BLOCK_TOKENS,
+            ops::QWEN35_ATTENTION_KV_HEADS,
+        ];
+        validate_tensor(
+            cache
+                .dynamic_key_scales
+                .as_ref()
+                .ok_or_else(|| invalid("missing dynamic K scales"))?,
+            ctx,
+            DType::F32,
+            &scale_shape,
+            "dynamic K scales",
+        )?;
+        validate_tensor(
+            cache
+                .dynamic_value_scales
+                .as_ref()
+                .ok_or_else(|| invalid("missing dynamic V scales"))?,
+            ctx,
+            DType::F32,
+            &scale_shape,
+            "dynamic V scales",
+        )?;
+    } else if cache.dynamic_key_scales.is_some() || cache.dynamic_value_scales.is_some() {
+        return Err(invalid("non-dynamic cache must not carry per-token scales"));
+    }
+    Ok(())
 }
 
 fn validate_cache_pair(
@@ -1251,6 +1600,10 @@ mod tests {
             cache_byte_range(4..9, Qwen35KvCacheDType::Fp8).unwrap(),
             (4 * fp8_row_bytes, 5 * fp8_row_bytes)
         );
+        assert_eq!(
+            cache_byte_range(4..9, Qwen35KvCacheDType::Fp8Dynamic).unwrap(),
+            (4 * fp8_row_bytes, 5 * fp8_row_bytes)
+        );
     }
 
     #[test]
@@ -1289,6 +1642,20 @@ mod tests {
             validate_cache_contract(target_geometry(), 4_096, None, Qwen35KvCacheDType::Fp8,)
                 .is_err()
         );
+        assert!(validate_cache_contract(
+            target_geometry(),
+            4_096,
+            None,
+            Qwen35KvCacheDType::Fp8Dynamic,
+        )
+        .is_ok());
+        assert!(validate_cache_contract(
+            target_geometry(),
+            4_096,
+            Some(scales),
+            Qwen35KvCacheDType::Fp8Dynamic,
+        )
+        .is_err());
 
         // Backend scales are dequant multipliers and are forwarded unchanged.
         let cuda_scales = ops::Qwen35KvCacheScales {
@@ -1318,5 +1685,109 @@ mod tests {
     #[test]
     fn target_hidden_size_matches_checkpoint_contract() {
         assert_eq!(TARGET_HIDDEN_SIZE, 2_048);
+    }
+    /// GPU integration smoke covers real projection/backend shapes, prefill,
+    /// single-token decode and scale-preserving shadow-cache copy/reset.
+    #[test]
+    #[ignore = "requires exclusive CUDA device"]
+    fn dynamic_fp8_model_attention_wiring_and_shadow_cache() {
+        let ctx = CudaContext::new(0).unwrap();
+        let config = super::super::config::tests::valid_config();
+        let mut backend =
+            Qwen35Fp8AttentionBackend::with_kv_cache(&config, Qwen35KvCacheDType::Fp8Dynamic, None)
+                .unwrap();
+        let geom = target_geometry();
+        let mut cache = backend.allocate_cache(&ctx, 3, geom, 32, None).unwrap();
+        let mut shadow = backend.allocate_cache(&ctx, 3, geom, 32, None).unwrap();
+        let linear = |input, output| {
+            let weight = zeros(&ctx, vec![output, input], DType::F8E4M3).unwrap();
+            let transposed = zeros(&ctx, vec![input, output], DType::F8E4M3).unwrap();
+            for t in [&weight, &transposed] {
+                CudaBuffer::from_tensor(t)
+                    .unwrap()
+                    .memset_async(0x38, ctx.stream())
+                    .unwrap();
+            }
+            DeviceStaticFp8Linear {
+                weight,
+                transposed,
+                input_features: input,
+                output_features: output,
+                input_scale: 1.0,
+                alpha: 0.001,
+            }
+        };
+        let weights = DeviceAttentionWeights {
+            q_proj: linear(2048, 8192),
+            k_proj: linear(2048, 512),
+            v_proj: linear(2048, 512),
+            o_proj: linear(4096, 2048),
+            q_norm: zeros(&ctx, vec![256], DType::BF16).unwrap(),
+            k_norm: zeros(&ctx, vec![256], DType::BF16).unwrap(),
+            kv_cache_scales: None,
+        };
+        for (phase, start, tokens) in [
+            (DecoderPhase::Prefill, 0, 2),
+            (DecoderPhase::Decode, 2, 1),
+            (DecoderPhase::Decode, 3, 1),
+        ] {
+            let input = zeros(&ctx, vec![tokens, 2048], DType::BF16).unwrap();
+            CudaBuffer::from_tensor(&input)
+                .unwrap()
+                .memset_async(0x3b, ctx.stream())
+                .unwrap();
+            let output = zeros(&ctx, vec![tokens, 2048], DType::BF16).unwrap();
+            backend
+                .run(
+                    &ctx,
+                    FullAttentionRequest {
+                        layer_index: 3,
+                        phase,
+                        start_position: start,
+                        geometry: geom,
+                        weights: &weights,
+                        normalized_hidden: &input,
+                        output: &output,
+                    },
+                    &mut cache,
+                )
+                .unwrap();
+            ctx.synchronize().unwrap();
+            let host = transfers::to_cpu(&output).unwrap();
+            assert!(host
+                .as_bf16()
+                .unwrap()
+                .iter()
+                .all(|v| v.to_f32().is_finite()));
+            assert!(host.as_bf16().unwrap().iter().any(|v| v.to_f32() != 0.0));
+        }
+        backend
+            .copy_cache_range(&ctx, &cache, &mut shadow, 1..4)
+            .unwrap();
+        ctx.synchronize().unwrap();
+        for (a, b) in [(&cache.key, &shadow.key), (&cache.value, &shadow.value)] {
+            let a = transfers::to_cpu(a).unwrap();
+            let b = transfers::to_cpu(b).unwrap();
+            assert_eq!(
+                &a.as_f8_e4m3().unwrap()[512..2048],
+                &b.as_f8_e4m3().unwrap()[512..2048]
+            );
+            assert!(b.as_f8_e4m3().unwrap()[..512].iter().all(|&v| v == 0));
+        }
+        for (a, b) in [
+            (cache.dynamic_key_scales(), shadow.dynamic_key_scales()),
+            (cache.dynamic_value_scales(), shadow.dynamic_value_scales()),
+        ] {
+            let a = transfers::to_cpu(a.unwrap()).unwrap();
+            let b = transfers::to_cpu(b.unwrap()).unwrap();
+            assert_eq!(&a.as_f32().unwrap()[2..8], &b.as_f32().unwrap()[2..8]);
+            assert!(b.as_f32().unwrap()[..2].iter().all(|&v| v == 0.0));
+        }
+        backend.reset_cache(&ctx, &mut shadow).unwrap();
+        ctx.synchronize().unwrap();
+        for tensor in [shadow.dynamic_key_scales(), shadow.dynamic_value_scales()] {
+            let host = transfers::to_cpu(tensor.unwrap()).unwrap();
+            assert!(host.as_f32().unwrap().iter().all(|&v| v == 0.0));
+        }
     }
 }

@@ -231,6 +231,7 @@ impl Qwen35Moe {
     ) -> Result<Self> {
         match (execution.kv_cache, kv_cache_scales) {
             (Qwen35KvCacheDType::Bf16, None) => {}
+            (Qwen35KvCacheDType::Fp8Dynamic, None) => {}
             (Qwen35KvCacheDType::Fp8, Some(_)) => {}
             (Qwen35KvCacheDType::Fp8, None) => {
                 return Err(Error::Other(
@@ -240,6 +241,11 @@ impl Qwen35Moe {
             (Qwen35KvCacheDType::Bf16, Some(_)) => {
                 return Err(Error::Other(
                     "Qwen3.6 BF16 KV cache must not carry FP8 scales".into(),
+                ));
+            }
+            (Qwen35KvCacheDType::Fp8Dynamic, Some(_)) => {
+                return Err(Error::Other(
+                    "Qwen3.6 dynamic FP8 KV cache must not carry fixed scales".into(),
                 ));
             }
         }
