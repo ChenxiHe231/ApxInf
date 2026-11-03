@@ -2,7 +2,7 @@
 
 Source: `fd6520a75f96ab5b1a90ed5cb5a9feb2df92012e`；tracked 工作区干净。
 
-Binary SHA256: `b08ad5a31cf7868c25bf00de67bc851c13f90cf41de9deb27f37cea6daed38fe`。
+Binary SHA256: `ef0760e8c3e9cb2c232f6dfa69e975b0953b6873378aeb321ebc92e767a5685c`。
 
 配置与逐轮记录：[JSON](doc/qwen35-thoru/optimization-history/evidence/fd6520a7-clean-weather.json)。
 
@@ -10,15 +10,15 @@ Binary SHA256: `b08ad5a31cf7868c25bf00de67bc851c13f90cf41de9deb27f37cea6daed38fe
 
 **不能报告为有效性能中位数**。回答错误或缺失计时不从总体中隐去。
 
-以下为同一真实请求 index=2，回答校验=True；不拼接不同请求的阶段分位数。
+以下为同一真实请求 index=0，回答校验=True；不拼接不同请求的阶段分位数。
 
 | 阶段 | 时间 | 占比 |
 |---|---:|---:|
 | 模型 Prefill/Decode 内部切分 | 无可验证计时 | — |
-| AMap天气查询1（AIOS工具计时） | 0.745400 s | 2.51% |
+| AMap天气查询1（AIOS工具计时） | 0.688700 s | 3.99% |
 | 其余未能进一步拆分的时间 | 保留原始 HTTP 记录，不估算 | — |
-| **端到端总计** | **29.727060 s** | **100%** |
+| **端到端总计** | **17.276390 s** | **100%** |
 
 TTFT 包括缓存恢复与首 token；余项含未归属的服务/调度/HTTP时间。工具时长为AIOS执行计时，不能声称等于纯网络时间。当前没有仅凭该单轮成立的单项优化提升百分比。
 
-Qualification (2026-11-03 recipe-directory audit): this acquisition used the historical runtime default thor-sm101/cuda12.8-cublas12.8 while the declared recipe manifest described an unused seed directory. The E2E and internal timings are real, but are not valid evidence of fully tuned performance or of kernel speedup. Corrected rerun is pending.
+正式测试前后 recipe 数：1284 → 1284；清单内容未变。旧版默认在线调优可能进入正式请求时间，不能直接当作纯GPU kernel性能。
