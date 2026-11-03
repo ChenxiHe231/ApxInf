@@ -1,0 +1,726 @@
+[
+  {
+    "state": {
+      "revision": "41a5bbc7bdd3ad019518e67b91f49862d746986d",
+      "run_directory": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/41a5bbc7-20261103T195551",
+      "status": "error",
+      "collector_returncode": 0,
+      "server_pid": null,
+      "binary_sha256": "c38235b9623ce5f82e86b4f6f4dc002008a79dd7b090ef4e876fc76a55e1c5dc",
+      "error": "profiler server failed: ERROR: The --cpuctxsw switch is not supported by the launch command after NVIDIA Nsight Systems v2021.5.\nThe cpuctxsw switch can be set on the profile and start commands.",
+      "performance_comparable": false,
+      "provenance_warning": "Configured recipe manifest was not the historical runtime default directory: actual thor-sm101/cuda12.8-cublas12.8. E2E/response/profile acquisition is real, but does not establish tuned performance; corrected rerun required."
+    },
+    "original_metadata": {
+      "source_commit": "41a5bbc7bdd3ad019518e67b91f49862d746986d",
+      "source_dirty": false,
+      "binary_sha256": "c38235b9623ce5f82e86b4f6f4dc002008a79dd7b090ef4e876fc76a55e1c5dc",
+      "case_target_date": "2026-11-04",
+      "configuration": {
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/apxinf-41a5bbc7",
+          "serve",
+          "--model",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--served-model-name",
+          "qwen3.6-35b-a3b",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000",
+          "--dtype",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--qwen35-kv-cache",
+          "bf16",
+          "--max-input-tokens",
+          "32768",
+          "--max-output-tokens",
+          "1024",
+          "--enable-context-reuse"
+        ],
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_QWEN35_SCALAR_TPOT_MS": "19.42"
+        },
+        "temperature": 0,
+        "compression": false,
+        "proxy_argv": [
+          "/Library/Developer/CommandLineTools/usr/bin/python3",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/scripts/qwen35_aios_proxy.py",
+          "--listen-host",
+          "0.0.0.0",
+          "--listen-port",
+          "18001",
+          "--upstream-host",
+          "127.0.0.1",
+          "--upstream-port",
+          "18000",
+          "--force-temperature",
+          "0",
+          "--normalize-time-context",
+          "--capture-dir",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/41a5bbc7-20261103T195551/captures",
+          "--log",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/41a5bbc7-20261103T195551/proxy.jsonl"
+        ],
+        "tuning_control": "historical runtime default autotune; no serve toggle exists",
+        "cwd": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-41a5bbc7",
+        "tuning_weather_requests": 3,
+        "formal_warmups": 0
+      },
+      "recipes": {
+        "count": 1198,
+        "manifest_sha256": "e7f89372b6686fb19727921fadc8a9bf63c982b5079fd86ac2a1b8e38d3b2c15"
+      },
+      "aios": {
+        "image_digest": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2"
+      },
+      "hardware": {
+        "host": "thor-u",
+        "max_gpu_hz": 1206000000,
+        "hugepages": 24576
+      },
+      "collector_sha256": "dfc050a48bc86949cf4e85e50db65d58b507386e2992da8ce30fa25ae3fc81cc",
+      "inputs_manifest": {
+        "model_directory": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "model_sha256": {
+          "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+          "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+          "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+          "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164"
+        },
+        "external_build_inputs_sha256": {
+          "libapxinf_edge_nvfp4_moe_sm110_cuda12.a": "7486d16d00dcb155647fb569b8c7eab0eba60df47103666369264f156648176e",
+          "libapxinf_edge_bf16_moe_sm110_cuda12.a": "f2fbcd381e968069ddcb1c4a45e0e3ecdd6a4f42bc296f0ff2d2c69ea8259ed5"
+        },
+        "aios_image_id": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2",
+        "pre_test_process": {
+          "pid": 25253,
+          "binary_sha256": "32af491f51ead198900de2dda1141013b7af4c2b937ecac99265d5fd73f595c5",
+          "backup_binary": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/pre-test-apxinf",
+          "status": "stopped_after_user_released_other_task"
+        },
+        "hardware_observed_before_test": {
+          "gpu_min_hz": 54000000,
+          "gpu_max_hz": 1206000000,
+          "gpu_governor": "simple_ondemand",
+          "cargo_build_jobs": 2,
+          "nvcc_parallelism": 2,
+          "nsys": "2025.3.3.80",
+          "ncu": "2025.1.1.0"
+        }
+      }
+    },
+    "runs": [
+      {
+        "index": 0,
+        "phase": "formal",
+        "answer_correct": true,
+        "aios": {
+          "request_id": "20261103120125036594",
+          "reply_text": "明天上海白天小雨，气温18度，夜间也是小雨，15度，出门记得带伞。",
+          "audio_base64": null,
+          "execution_time_ms": 32866.1,
+          "sop_matched": false,
+          "intent_type": "harness",
+          "language": "zh-CN"
+        },
+        "profiles": [
+          {
+            "prompt_tokens": 8853,
+            "reused_prompt_tokens": 8562,
+            "completion_tokens": 39,
+            "ttft_ms": 609.711158,
+            "total_latency_ms": 14642.495652,
+            "decode_ms": 14032.784494,
+            "computed_prompt_tokens": 291,
+            "decode_intervals": 38
+          },
+          {
+            "prompt_tokens": 9320,
+            "reused_prompt_tokens": 8562,
+            "completion_tokens": 24,
+            "ttft_ms": 1995.338037,
+            "total_latency_ms": 17083.599296,
+            "decode_ms": 15088.261259,
+            "computed_prompt_tokens": 758,
+            "decode_intervals": 23
+          }
+        ],
+        "stages": [
+          {
+            "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+            "time_ms": 609.711158,
+            "percent": 1.855136928324322
+          },
+          {
+            "stage": "模型调用1 Decode：38 个间隔",
+            "time_ms": 14032.784494,
+            "percent": 42.69683501845367
+          },
+          {
+            "stage": "AMap天气查询（AIOS工具计时）",
+            "time_ms": 553.6,
+            "percent": 1.6844103803006747
+          },
+          {
+            "stage": "模型调用2 Prefill/TTFT：新增 758 tokens",
+            "time_ms": 1995.338037,
+            "percent": 6.071112900526683
+          },
+          {
+            "stage": "模型调用2 Decode：23 个间隔",
+            "time_ms": 15088.261259,
+            "percent": 45.908280139718435
+          },
+          {
+            "stage": "AIOS、模型服务、HTTP及其他余项",
+            "time_ms": 586.4050519999946,
+            "percent": 1.7842246326762063
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "state": {
+      "revision": "ceba744b219527bdf81f7e3d226b93bf424349d9",
+      "run_directory": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/ceba744b-20261103T200404",
+      "status": "tested",
+      "collector_returncode": 0,
+      "server_pid": 54060,
+      "binary_sha256": "ad9e91847bb6a6a67477924e91f5159a14877967a5311ddd9c76883d9e4e87ac",
+      "performance_comparable": false,
+      "provenance_warning": "Configured recipe manifest was not the historical runtime default directory: actual thor-sm101/cuda12.8-cublas12.8. E2E/response/profile acquisition is real, but does not establish tuned performance; corrected rerun required."
+    },
+    "original_metadata": {
+      "source_commit": "ceba744b219527bdf81f7e3d226b93bf424349d9",
+      "source_dirty": false,
+      "binary_sha256": "ad9e91847bb6a6a67477924e91f5159a14877967a5311ddd9c76883d9e4e87ac",
+      "case_target_date": "2026-11-04",
+      "configuration": {
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/apxinf-ceba744b",
+          "serve",
+          "--model",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--served-model-name",
+          "qwen3.6-35b-a3b",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000",
+          "--dtype",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--qwen35-kv-cache",
+          "bf16",
+          "--max-input-tokens",
+          "32768",
+          "--max-output-tokens",
+          "1024",
+          "--enable-context-reuse"
+        ],
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_QWEN35_SCALAR_TPOT_MS": "19.42"
+        },
+        "temperature": 0,
+        "compression": false,
+        "proxy_argv": [
+          "/Library/Developer/CommandLineTools/usr/bin/python3",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/scripts/qwen35_aios_proxy.py",
+          "--listen-host",
+          "0.0.0.0",
+          "--listen-port",
+          "18001",
+          "--upstream-host",
+          "127.0.0.1",
+          "--upstream-port",
+          "18000",
+          "--force-temperature",
+          "0",
+          "--normalize-time-context",
+          "--capture-dir",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/ceba744b-20261103T200404/captures",
+          "--log",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/ceba744b-20261103T200404/proxy.jsonl"
+        ],
+        "tuning_control": "historical runtime default autotune; no serve toggle exists",
+        "cwd": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-ceba744b",
+        "tuning_weather_requests": 3,
+        "formal_warmups": 0
+      },
+      "recipes": {
+        "count": 1198,
+        "manifest_sha256": "e7f89372b6686fb19727921fadc8a9bf63c982b5079fd86ac2a1b8e38d3b2c15"
+      },
+      "aios": {
+        "image_digest": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2"
+      },
+      "hardware": {
+        "host": "thor-u",
+        "max_gpu_hz": 1206000000,
+        "hugepages": 24576
+      },
+      "collector_sha256": "9d94bbb8442193b9b4d76b75115a3b4219b5478fe61e8b136535bf4a55ce4ab5",
+      "inputs_manifest": {
+        "model_directory": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "model_sha256": {
+          "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+          "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+          "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+          "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164"
+        },
+        "external_build_inputs_sha256": {
+          "libapxinf_edge_nvfp4_moe_sm110_cuda12.a": "7486d16d00dcb155647fb569b8c7eab0eba60df47103666369264f156648176e",
+          "libapxinf_edge_bf16_moe_sm110_cuda12.a": "f2fbcd381e968069ddcb1c4a45e0e3ecdd6a4f42bc296f0ff2d2c69ea8259ed5"
+        },
+        "aios_image_id": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2",
+        "pre_test_process": {
+          "pid": 25253,
+          "binary_sha256": "32af491f51ead198900de2dda1141013b7af4c2b937ecac99265d5fd73f595c5",
+          "backup_binary": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/pre-test-apxinf",
+          "status": "stopped_after_user_released_other_task"
+        },
+        "hardware_observed_before_test": {
+          "gpu_min_hz": 54000000,
+          "gpu_max_hz": 1206000000,
+          "gpu_governor": "simple_ondemand",
+          "cargo_build_jobs": 2,
+          "nvcc_parallelism": 2,
+          "nsys": "2025.3.3.80",
+          "ncu": "2025.1.1.0"
+        }
+      }
+    },
+    "runs": [
+      {
+        "index": 0,
+        "phase": "formal",
+        "answer_correct": true,
+        "aios": {
+          "request_id": "20261103120916189460",
+          "reply_text": "明天上海白天小雨，气温18度，晚上小雨，气温15度，东南风1到3级，记得带伞。",
+          "audio_base64": null,
+          "execution_time_ms": 41504.75,
+          "sop_matched": false,
+          "intent_type": "harness",
+          "language": "zh-CN"
+        },
+        "profiles": [
+          {
+            "prompt_tokens": 8853,
+            "reused_prompt_tokens": 8562,
+            "completion_tokens": 38,
+            "ttft_ms": 656.719231,
+            "total_latency_ms": 19110.074978,
+            "decode_ms": 18453.355747,
+            "computed_prompt_tokens": 291,
+            "decode_intervals": 37
+          },
+          {
+            "prompt_tokens": 9319,
+            "reused_prompt_tokens": 8562,
+            "completion_tokens": 30,
+            "ttft_ms": 1357.448323,
+            "total_latency_ms": 21280.998542,
+            "decode_ms": 19923.550219,
+            "computed_prompt_tokens": 757,
+            "decode_intervals": 29
+          }
+        ],
+        "stages": [
+          {
+            "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+            "time_ms": 656.719231,
+            "percent": 1.5822748745625501
+          },
+          {
+            "stage": "模型调用1 Decode：37 个间隔",
+            "time_ms": 18453.355747,
+            "percent": 44.46082857263326
+          },
+          {
+            "stage": "AMap天气查询（AIOS工具计时）",
+            "time_ms": 402.5,
+            "percent": 0.9697685204705485
+          },
+          {
+            "stage": "模型调用2 Prefill/TTFT：新增 757 tokens",
+            "time_ms": 1357.448323,
+            "percent": 3.270585470337733
+          },
+          {
+            "stage": "模型调用2 Decode：29 个间隔",
+            "time_ms": 19923.550219,
+            "percent": 48.00306041838585
+          },
+          {
+            "stage": "AIOS、模型服务、HTTP及其他余项",
+            "time_ms": 711.1764799999946,
+            "percent": 1.7134821436100558
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "state": {
+      "revision": "fd6520a75f96ab5b1a90ed5cb5a9feb2df92012e",
+      "run_directory": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/fd6520a7-20261103T194555",
+      "status": "tested",
+      "collector_returncode": 1,
+      "server_pid": 48074,
+      "binary_sha256": "b08ad5a31cf7868c25bf00de67bc851c13f90cf41de9deb27f37cea6daed38fe",
+      "performance_comparable": false,
+      "provenance_warning": "Configured recipe manifest was not the historical runtime default directory: actual thor-sm101/cuda12.8-cublas12.8. E2E/response/profile acquisition is real, but does not establish tuned performance; corrected rerun required."
+    },
+    "original_metadata": {
+      "source_commit": "fd6520a75f96ab5b1a90ed5cb5a9feb2df92012e",
+      "source_dirty": false,
+      "binary_sha256": "b08ad5a31cf7868c25bf00de67bc851c13f90cf41de9deb27f37cea6daed38fe",
+      "case_target_date": "2026-11-04",
+      "configuration": {
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/apxinf-fd6520a7",
+          "serve",
+          "--model",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--served-model-name",
+          "qwen3.6-35b-a3b",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000",
+          "--dtype",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--qwen35-kv-cache",
+          "bf16",
+          "--max-input-tokens",
+          "32768",
+          "--max-output-tokens",
+          "1024",
+          "--enable-context-reuse"
+        ],
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_QWEN35_SCALAR_TPOT_MS": "19.42"
+        },
+        "temperature": 0,
+        "compression": false,
+        "proxy_argv": [
+          "/Library/Developer/CommandLineTools/usr/bin/python3",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/scripts/qwen35_aios_proxy.py",
+          "--listen-host",
+          "0.0.0.0",
+          "--listen-port",
+          "18001",
+          "--upstream-host",
+          "127.0.0.1",
+          "--upstream-port",
+          "18000",
+          "--force-temperature",
+          "0",
+          "--normalize-time-context",
+          "--capture-dir",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/fd6520a7-20261103T194555/captures",
+          "--log",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/fd6520a7-20261103T194555/proxy.jsonl"
+        ],
+        "tuning_control": "historical runtime default autotune; no serve toggle exists",
+        "cwd": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-fd6520a7"
+      },
+      "recipes": {
+        "count": 1198,
+        "manifest_sha256": "e7f89372b6686fb19727921fadc8a9bf63c982b5079fd86ac2a1b8e38d3b2c15"
+      },
+      "aios": {
+        "image_digest": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2"
+      },
+      "hardware": {
+        "host": "thor-u",
+        "max_gpu_hz": 1206000000,
+        "hugepages": 24576
+      },
+      "collector_sha256": "dfc050a48bc86949cf4e85e50db65d58b507386e2992da8ce30fa25ae3fc81cc",
+      "inputs_manifest": {
+        "model_directory": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "model_sha256": {
+          "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+          "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+          "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+          "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164"
+        },
+        "external_build_inputs_sha256": {
+          "libapxinf_edge_nvfp4_moe_sm110_cuda12.a": "7486d16d00dcb155647fb569b8c7eab0eba60df47103666369264f156648176e",
+          "libapxinf_edge_bf16_moe_sm110_cuda12.a": "f2fbcd381e968069ddcb1c4a45e0e3ecdd6a4f42bc296f0ff2d2c69ea8259ed5"
+        },
+        "aios_image_id": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2",
+        "pre_test_process": {
+          "pid": 25253,
+          "binary_sha256": "32af491f51ead198900de2dda1141013b7af4c2b937ecac99265d5fd73f595c5",
+          "backup_binary": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/pre-test-apxinf",
+          "status": "stopped_after_user_released_other_task"
+        },
+        "hardware_observed_before_test": {
+          "gpu_min_hz": 54000000,
+          "gpu_max_hz": 1206000000,
+          "gpu_governor": "simple_ondemand",
+          "cargo_build_jobs": 2,
+          "nvcc_parallelism": 2,
+          "nsys": "2025.3.3.80",
+          "ncu": "2025.1.1.0"
+        }
+      }
+    },
+    "runs": [
+      {
+        "index": 2,
+        "phase": "formal",
+        "answer_correct": true,
+        "aios": {
+          "request_id": "20261103115253729289",
+          "reply_text": "明天上海白天小雨，气温18到15度，东南风1到3级。建议出门带伞。",
+          "audio_base64": null,
+          "execution_time_ms": 29727.06,
+          "sop_matched": false,
+          "intent_type": "harness",
+          "language": "zh-CN"
+        },
+        "profiles": []
+      },
+      {
+        "index": 1,
+        "phase": "warmup",
+        "answer_correct": true,
+        "aios": {
+          "request_id": "20261103115214489619",
+          "reply_text": "明天上海白天小雨，气温18到15度，东南风1到3级。出门记得带伞。",
+          "audio_base64": null,
+          "execution_time_ms": 38619.05,
+          "sop_matched": false,
+          "intent_type": "harness",
+          "language": "zh-CN"
+        },
+        "profiles": []
+      },
+      {
+        "index": 0,
+        "phase": "warmup",
+        "answer_correct": false,
+        "aios": {
+          "request_id": "20261103115115056209",
+          "reply_text": "明天上海白天小雨转阴，气温18到19度，东南风1到3级，记得带伞。",
+          "audio_base64": null,
+          "execution_time_ms": 58792.58,
+          "sop_matched": false,
+          "intent_type": "harness",
+          "language": "zh-CN"
+        },
+        "profiles": []
+      }
+    ]
+  },
+  {
+    "state": {
+      "revision": "a6d50b55140dd33c00e32e7670913993a90b11dd",
+      "run_directory": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/a6d50b55-20261103T200959",
+      "status": "tested",
+      "collector_returncode": 0,
+      "server_pid": 56348,
+      "binary_sha256": "ae5401693381e081a60198f3477ed57d63737b75fb2a209cdb5de0ad432aa4aa",
+      "performance_comparable": false,
+      "provenance_warning": "Configured recipe manifest was not the historical runtime default directory: actual thor-sm101/cuda12.8-cublas12.8. E2E/response/profile acquisition is real, but does not establish tuned performance; corrected rerun required."
+    },
+    "original_metadata": {
+      "source_commit": "a6d50b55140dd33c00e32e7670913993a90b11dd",
+      "source_dirty": false,
+      "binary_sha256": "ae5401693381e081a60198f3477ed57d63737b75fb2a209cdb5de0ad432aa4aa",
+      "case_target_date": "2026-11-04",
+      "configuration": {
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/apxinf-a6d50b55",
+          "serve",
+          "--model",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--served-model-name",
+          "qwen3.6-35b-a3b",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000",
+          "--dtype",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--qwen35-kv-cache",
+          "bf16",
+          "--max-input-tokens",
+          "32768",
+          "--max-output-tokens",
+          "1024",
+          "--enable-context-reuse"
+        ],
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_QWEN35_SCALAR_TPOT_MS": "19.42"
+        },
+        "temperature": 0,
+        "compression": false,
+        "proxy_argv": [
+          "/Library/Developer/CommandLineTools/usr/bin/python3",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/scripts/qwen35_aios_proxy.py",
+          "--listen-host",
+          "0.0.0.0",
+          "--listen-port",
+          "18001",
+          "--upstream-host",
+          "127.0.0.1",
+          "--upstream-port",
+          "18000",
+          "--force-temperature",
+          "0",
+          "--normalize-time-context",
+          "--capture-dir",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/a6d50b55-20261103T200959/captures",
+          "--log",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/a6d50b55-20261103T200959/proxy.jsonl"
+        ],
+        "tuning_control": "historical runtime default autotune; no serve toggle exists",
+        "cwd": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-a6d50b55",
+        "tuning_weather_requests": 3,
+        "formal_warmups": 0
+      },
+      "recipes": {
+        "count": 1198,
+        "manifest_sha256": "e7f89372b6686fb19727921fadc8a9bf63c982b5079fd86ac2a1b8e38d3b2c15"
+      },
+      "aios": {
+        "image_digest": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2"
+      },
+      "hardware": {
+        "host": "thor-u",
+        "max_gpu_hz": 1206000000,
+        "hugepages": 24576
+      },
+      "collector_sha256": "9d94bbb8442193b9b4d76b75115a3b4219b5478fe61e8b136535bf4a55ce4ab5",
+      "inputs_manifest": {
+        "model_directory": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "model_sha256": {
+          "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+          "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+          "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+          "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164"
+        },
+        "external_build_inputs_sha256": {
+          "libapxinf_edge_nvfp4_moe_sm110_cuda12.a": "7486d16d00dcb155647fb569b8c7eab0eba60df47103666369264f156648176e",
+          "libapxinf_edge_bf16_moe_sm110_cuda12.a": "f2fbcd381e968069ddcb1c4a45e0e3ecdd6a4f42bc296f0ff2d2c69ea8259ed5"
+        },
+        "aios_image_id": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2",
+        "pre_test_process": {
+          "pid": 25253,
+          "binary_sha256": "32af491f51ead198900de2dda1141013b7af4c2b937ecac99265d5fd73f595c5",
+          "backup_binary": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/pre-test-apxinf",
+          "status": "stopped_after_user_released_other_task"
+        },
+        "hardware_observed_before_test": {
+          "gpu_min_hz": 54000000,
+          "gpu_max_hz": 1206000000,
+          "gpu_governor": "simple_ondemand",
+          "cargo_build_jobs": 2,
+          "nvcc_parallelism": 2,
+          "nsys": "2025.3.3.80",
+          "ncu": "2025.1.1.0"
+        }
+      }
+    },
+    "runs": [
+      {
+        "index": 0,
+        "phase": "formal",
+        "answer_correct": true,
+        "aios": {
+          "request_id": "20261103121531974742",
+          "reply_text": "明天上海白天小雨，气温18到19度，东南风1到3级；晚上也是小雨，气温15度左右。出门记得带伞。",
+          "audio_base64": null,
+          "execution_time_ms": 45862.45,
+          "sop_matched": false,
+          "intent_type": "harness",
+          "language": "zh-CN"
+        },
+        "profiles": [
+          {
+            "prompt_tokens": 8853,
+            "reused_prompt_tokens": 8562,
+            "completion_tokens": 38,
+            "ttft_ms": 616.794648,
+            "total_latency_ms": 14153.652519,
+            "decode_ms": 13536.857871,
+            "computed_prompt_tokens": 291,
+            "decode_intervals": 37
+          },
+          {
+            "prompt_tokens": 9319,
+            "reused_prompt_tokens": 8562,
+            "completion_tokens": 36,
+            "ttft_ms": 1755.231102,
+            "total_latency_ms": 30593.397122,
+            "decode_ms": 28838.166019999997,
+            "computed_prompt_tokens": 757,
+            "decode_intervals": 35
+          }
+        ],
+        "stages": [
+          {
+            "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+            "time_ms": 616.794648,
+            "percent": 1.3448794122424774
+          },
+          {
+            "stage": "模型调用1 Decode：37 个间隔",
+            "time_ms": 13536.857871,
+            "percent": 29.516211783278045
+          },
+          {
+            "stage": "AMap天气查询（AIOS工具计时）",
+            "time_ms": 514.5,
+            "percent": 1.121832784772728
+          },
+          {
+            "stage": "模型调用2 Prefill/TTFT：新增 757 tokens",
+            "time_ms": 1755.231102,
+            "percent": 3.8271638388267526
+          },
+          {
+            "stage": "模型调用2 Decode：35 个间隔",
+            "time_ms": 28838.166019999997,
+            "percent": 62.879689201078435
+          },
+          {
+            "stage": "AIOS、模型服务、HTTP及其他余项",
+            "time_ms": 600.9003589999993,
+            "percent": 1.3102229798015574
+          }
+        ]
+      }
+    ]
+  }
+]

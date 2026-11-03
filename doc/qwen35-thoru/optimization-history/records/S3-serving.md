@@ -1,6 +1,6 @@
 # S3 — Serving 模板/tokenization cache 与 SSE 合并
 
-天气 case：`明天上海的天气怎么样`。状态：**待 Thor-U 独占测试**。
+天气 case：`明天上海的天气怎么样`。已完成精确版本 CUDA 构建及真实天气测试。
 
 在服务端以消息与模板 options 为 key 缓存渲染后的 token IDs；system/tool prefix boundary 使用独立有界 LRU，避免热请求重复渲染/分词 8K+ Prompt。
 
@@ -10,22 +10,38 @@ SSE 首 delta 立即发送，随后每 8 个 delta 合并；worker/API 队列从
 
 没有本 commit 与 parent 的严格消融数据；历史 AIOS 余项 1.411→0.181 s 不能作为本次优化收益。
 
-用户要求本轮保持其他任务的 GPU 服务和编译不变。本页是测试记录占位，不是已执行的性能结果；
-不得将历史 dirty-worktree 的 1.520 s 结果归入此版本。
+
+## 精确版本重建实测（2026-11-03 起）
+
+Source: `679322b04571a4b3553acb132cd44bfac67a8854`；tracked 工作区干净。
+
+Binary SHA256: `29a3dcf892b5c9ea66ef431435381f3a5e9981d095ce291d571577e9dbf147dc`。
+
+配置与逐轮记录：[JSON](../evidence/679322b0-clean-weather.json)。
+
+正式 1 轮，回答校验通过 1 轮，完整有效阶段记录 1 轮。
+
+端到端单轮实测（不是统计中位数）：**1.985230 s**。
+
+以下为同一真实请求 index=2，回答校验=True；不拼接不同请求的阶段分位数。
 
 | 阶段 | 时间 | 占比 |
 |---|---:|---:|
-| 模型调用 1 Prefill/TTFT：full/reused/computed 待测 | 待测 | 待测 |
-| 模型调用 1 Decode：输出 token 和间隔数待测 | 待测 | 待测 |
-| AMap 查询及工具编排间隔 | 待测 | 待测 |
-| 模型调用 2 Prefill/TTFT：full/reused/computed 待测 | 待测 | 待测 |
-| 模型调用 2 Decode：输出 token 和间隔数待测 | 待测 | 待测 |
-| AIOS、模型服务、HTTP 及其他余项 | 待测 | 待测 |
-| **端到端总计** | **待测** | **待测** |
+| 模型调用1 Prefill/TTFT：新增 1 tokens | 0.205802 s | 10.37% |
+| 模型调用1 Decode：37 个间隔 | 0.487777 s | 24.57% |
+| AMap天气查询（AIOS工具计时） | 0.475100 s | 23.93% |
+| 模型调用2 Prefill/TTFT：新增 64 tokens | 0.154333 s | 7.77% |
+| 模型调用2 Decode：23 个间隔 | 0.480914 s | 24.22% |
+| AIOS、模型服务、HTTP及其他余项 | 0.181304 s | 9.13% |
+| **端到端总计** | **1.985230 s** | **100%** |
 
-Prefill/TTFT 包含首 token 生成和缓存恢复；工具间隔不等于纯 AMap API 时间。
-待测项目包括：该精确源码版本的 release 二进制哈希、recipe 清单、AIOS 请求参数、
-两轮预热与十轮正式结果、同轮 server profile、工具正确性及 profiler 消融。
-`temperature=0` 对应 greedy MTP；不得把非零 temperature 请求标签当成实际 sampling MTP。
-`scripts/bench_qwen35_aios_weather.py` 在最终提交中提供记录工具；本页以后使用该工具补测。
-record-path 与 commit 的映射由提交正文中的 `Weather-Record` trailer 固定。
+| 模型调用 | full tokens | reused tokens | computed tokens | output tokens | TPOT |
+|---|---:|---:|---:|---:|---:|
+| 1 | 8853 | 8852 | 1 | 38 | 13.183 ms |
+| 2 | 9322 | 9258 | 64 | 24 | 20.909 ms |
+
+TTFT 包括缓存恢复与首 token；余项含未归属的服务/调度/HTTP时间。工具时长为AIOS执行计时，不能声称等于纯网络时间。当前没有仅凭该单轮成立的单项优化提升百分比。
+
+正式测试前后 recipe 数：1236 → 1236；清单内容未变。旧版默认在线调优可能进入正式请求时间，不能直接当作纯GPU kernel性能。
+
+独立 Nsight capture：[kernel/API/memcpy 汇总](../evidence/679322b0-nsys-stats.csv)。采集时延不进入未插桩正式成绩。

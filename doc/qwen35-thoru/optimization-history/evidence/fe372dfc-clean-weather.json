@@ -1,0 +1,443 @@
+{
+  "schema": "apxinf.weather.commit-evidence.v2",
+  "metadata": {
+    "source_commit": "fe372dfcc1004b99e4fbef48df2edd743f189922",
+    "source_dirty": false,
+    "binary_sha256": "2b5db41c3a8d28ac595a5df48ce08c216020dfbc6bd1814825ed1f8669611d47",
+    "case_target_date": "2026-11-04",
+    "configuration": {
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/apxinf-fe372dfc",
+        "serve",
+        "--model",
+        "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "--served-model-name",
+        "qwen3.6-35b-a3b",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--dtype",
+        "bf16",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "bf16",
+        "--max-input-tokens",
+        "32768",
+        "--max-output-tokens",
+        "1024",
+        "--enable-context-reuse",
+        "--tuning-dir",
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/recipes-fe372dfc"
+      ],
+      "environment": {
+        "APXINF_QWEN35_CUDA_GRAPHS": "1",
+        "APXINF_QWEN35_GRAPH_GDN": "full",
+        "APXINF_QWEN35_SCALAR_TPOT_MS": "19.42"
+      },
+      "temperature": 0,
+      "compression": false,
+      "proxy_argv": [
+        "/Library/Developer/CommandLineTools/usr/bin/python3",
+        "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/scripts/qwen35_aios_proxy.py",
+        "--listen-host",
+        "0.0.0.0",
+        "--listen-port",
+        "18001",
+        "--upstream-host",
+        "127.0.0.1",
+        "--upstream-port",
+        "18000",
+        "--force-temperature",
+        "0",
+        "--normalize-time-context",
+        "--capture-dir",
+        "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/fe372dfc-20261103T211805/captures",
+        "--log",
+        "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/fe372dfc-20261103T211805/proxy.jsonl"
+      ],
+      "tuning_control": "explicit serve flags; formal autotune disabled",
+      "cwd": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-fe372dfc",
+      "default_recipe_directory": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-fe372dfc/configs/tuning/nvidia/thor-sm101/cuda12.8-cublas12.8",
+      "tuning_weather_requests": 3,
+      "formal_warmups": 2
+    },
+    "recipes": {
+      "count": 1220,
+      "manifest_sha256": "e88e5eca879678eb0566609a528a3c3f57e5094f726a1aa56f6783d0347727ac"
+    },
+    "aios": {
+      "image_digest": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2"
+    },
+    "hardware": {
+      "host": "thor-u",
+      "max_gpu_hz": 1206000000,
+      "hugepages": 24576
+    },
+    "collector_sha256": "5e5e277537d64dbdb37493a442517bdd406b47721a2c1db5ce09dd674accf59e",
+    "inputs_manifest": {
+      "model_directory": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+      "model_sha256": {
+        "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+        "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+        "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+        "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+        "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+        "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164"
+      },
+      "external_build_inputs_sha256": {
+        "libapxinf_edge_nvfp4_moe_sm110_cuda12.a": "7486d16d00dcb155647fb569b8c7eab0eba60df47103666369264f156648176e",
+        "libapxinf_edge_bf16_moe_sm110_cuda12.a": "f2fbcd381e968069ddcb1c4a45e0e3ecdd6a4f42bc296f0ff2d2c69ea8259ed5"
+      },
+      "aios_image_id": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2",
+      "pre_test_process": {
+        "pid": 25253,
+        "binary_sha256": "32af491f51ead198900de2dda1141013b7af4c2b937ecac99265d5fd73f595c5",
+        "backup_binary": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/pre-test-apxinf",
+        "status": "stopped_after_user_released_other_task"
+      },
+      "hardware_observed_before_test": {
+        "gpu_min_hz": 54000000,
+        "gpu_max_hz": 1206000000,
+        "gpu_governor": "simple_ondemand",
+        "cargo_build_jobs": 2,
+        "nvcc_parallelism": 2,
+        "nsys": "2025.3.3.80",
+        "ncu": "2025.1.1.0"
+      },
+      "cuda_toolkit_observed": {
+        "nvcc": "12.8.93",
+        "native_default_recipe_directory": "configs/tuning/nvidia/thor-sm101/cuda12.8-cublas12.8",
+        "discovery": "actual runtime-created directory and nvcc --version on 2026-11-03"
+      }
+    },
+    "clock_audit": {
+      "client_utc": "2026-11-03T13:22:10.837342+00:00",
+      "server_utc": "2026-11-02T12:15:16Z",
+      "policy": "Forecast date from Shanghai client time. Server profile and AIOS tool durations use monotonic clocks; HTTP gaps use only client timestamps. Do not subtract timestamps across hosts."
+    }
+  },
+  "summary": {
+    "formal_runs": 1,
+    "validated_answers": 0,
+    "valid_phase_records": 0,
+    "all_runs_valid": false,
+    "all_returned_requests_median_ms_including_invalid": 14250.55,
+    "representative_index": 2
+  },
+  "runs": [
+    {
+      "index": 0,
+      "phase": "warmup",
+      "answer_correct": false,
+      "correct": false,
+      "validation": "model stream contains error, including after partial answer",
+      "error": "model profiles and HTTP calls must match, with at least two calls",
+      "aios": {
+        "request_id": "20261103132211531106",
+        "reply_text": "明天上海白天小雨，气温18到1",
+        "execution_time_ms": 27429.4,
+        "sop_matched": false,
+        "intent_type": "harness",
+        "language": "zh-CN"
+      },
+      "wall_ms": 27436.975874999996,
+      "profiles": [
+        {
+          "prompt_tokens": 8853,
+          "reused_prompt_tokens": 0,
+          "completion_tokens": 38,
+          "ttft_ms": 14584.523201,
+          "total_latency_ms": 21823.283851,
+          "decode_ms": 7238.76065,
+          "computed_prompt_tokens": 8853,
+          "decode_intervals": 37
+        }
+      ],
+      "proxy_events": [
+        {
+          "event": "request",
+          "time": "2026-11-03T13:22:11.660759+00:00",
+          "capture_id": "13e8a3bc8f1e471fbe733f9cd1756248"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:22:33.739965+00:00",
+          "duration_ms": 22081.78,
+          "capture_id": "13e8a3bc8f1e471fbe733f9cd1756248",
+          "status": 200,
+          "tool_call_names": [
+            "mcp__amap__maps_weather"
+          ],
+          "finish_reasons": [
+            "tool_calls"
+          ]
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:22:34.337195+00:00",
+          "capture_id": "61c450baf26143c5b3ea666768935838"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:22:38.942014+00:00",
+          "duration_ms": 4605.88,
+          "capture_id": "61c450baf26143c5b3ea666768935838",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        }
+      ],
+      "server_profile_lines": [
+        "request profile: prompt_tokens=8853 reused_prompt_tokens=0 completion_tokens=38 ttft_ms=Some(14584.523201) tpot_ms=Some(195.64217972972975) generation_tps=Some(5.1113722070642025) total_latency_ms=Some(21823.283851)"
+      ],
+      "inter_model_gaps_ms": [
+        597.23
+      ],
+      "raw_record_sha256": "0bc3a2a21f2a4d71926a81dbdfc3c7ca5ba0a3b96355ca0a646624d2e75ecc28",
+      "stream_error_evidence": [
+        {
+          "capture_id": "61c450baf26143c5b3ea666768935838",
+          "response_sha256": "108cbd77c2f734a7f945050180e39da1adf28f8148d77cdc9a91699331aa3050",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: CUDA error: ApxInf native status 5: Attention Recipe miss and fallback is disabled",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        }
+      ],
+      "reanalysis": "Captured SSE error, including errors after partial answer, overrides text-only/raw validation.",
+      "aios_weather_tools": [
+        {
+          "time": "13:22:34",
+          "tool": "mcp__amap__maps_weather",
+          "status": "done",
+          "duration_ms": 560.9
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "phase": "warmup",
+      "answer_correct": true,
+      "correct": true,
+      "validation": "next-day temperatures/weather match",
+      "aios": {
+        "request_id": "20261103132239598218",
+        "reply_text": "明天上海白天小雨，气温18度，晚上也是小雨，气温15度，出门记得带伞。",
+        "execution_time_ms": 16345.5,
+        "sop_matched": false,
+        "intent_type": "harness",
+        "language": "zh-CN"
+      },
+      "wall_ms": 16351.923625000005,
+      "profiles": [
+        {
+          "prompt_tokens": 8853,
+          "reused_prompt_tokens": 8562,
+          "completion_tokens": 39,
+          "ttft_ms": 1011.248824,
+          "total_latency_ms": 8282.464915,
+          "decode_ms": 7271.216091,
+          "computed_prompt_tokens": 291,
+          "decode_intervals": 38
+        },
+        {
+          "prompt_tokens": 9319,
+          "reused_prompt_tokens": 8562,
+          "completion_tokens": 25,
+          "ttft_ms": 1344.88962,
+          "total_latency_ms": 7013.067248,
+          "decode_ms": 5668.177628,
+          "computed_prompt_tokens": 757,
+          "decode_intervals": 24
+        }
+      ],
+      "proxy_events": [
+        {
+          "event": "request",
+          "time": "2026-11-03T13:22:39.655484+00:00",
+          "capture_id": "8309d6a86dc2463ba964101a8af72f57"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:22:48.194808+00:00",
+          "duration_ms": 8539.73,
+          "capture_id": "8309d6a86dc2463ba964101a8af72f57",
+          "status": 200,
+          "tool_call_names": [
+            "mcp__amap__maps_weather"
+          ],
+          "finish_reasons": [
+            "tool_calls"
+          ]
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:22:48.705667+00:00",
+          "capture_id": "32a1d1d909a44bd49c0261e56223bc52"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:22:55.928604+00:00",
+          "duration_ms": 7223.32,
+          "capture_id": "32a1d1d909a44bd49c0261e56223bc52",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": [
+            "stop"
+          ]
+        }
+      ],
+      "server_profile_lines": [
+        "request profile: prompt_tokens=8853 reused_prompt_tokens=8562 completion_tokens=39 ttft_ms=Some(1011.248824) tpot_ms=Some(191.34779186842107) generation_tps=Some(5.226085915261791) total_latency_ms=Some(8282.464915)",
+        "request profile: prompt_tokens=9319 reused_prompt_tokens=8562 completion_tokens=25 ttft_ms=Some(1344.88962) tpot_ms=Some(236.17406783333334) generation_tps=Some(4.2341651188634915) total_latency_ms=Some(7013.067248)"
+      ],
+      "inter_model_gaps_ms": [
+        510.8589999999999
+      ],
+      "stages": [
+        {
+          "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+          "time_ms": 1011.248824,
+          "percent": 6.186710862316846
+        },
+        {
+          "stage": "模型调用1 Decode：38 个间隔",
+          "time_ms": 7271.216091,
+          "percent": 44.48451311370102
+        },
+        {
+          "stage": "AMap天气查询（AIOS工具计时）",
+          "time_ms": 459.2,
+          "percent": 2.8093359028478786
+        },
+        {
+          "stage": "模型调用2 Prefill/TTFT：新增 757 tokens",
+          "time_ms": 1344.88962,
+          "percent": 8.227889143801047
+        },
+        {
+          "stage": "模型调用2 Decode：24 个间隔",
+          "time_ms": 5668.177628,
+          "percent": 34.677297286715
+        },
+        {
+          "stage": "AIOS、模型服务、HTTP及其他余项",
+          "time_ms": 590.7678369999994,
+          "percent": 3.6142536906182094
+        }
+      ],
+      "raw_record_sha256": "771824d2b356700d2ee4313c1b7b714f192cd68c7a1a42074aa1ff6111141ade",
+      "aios_weather_tools": [
+        {
+          "time": "13:22:48",
+          "tool": "mcp__amap__maps_weather",
+          "status": "done",
+          "duration_ms": 459.2
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "phase": "formal",
+      "answer_correct": false,
+      "correct": false,
+      "validation": "model stream contains error, including after partial answer",
+      "error": "model profiles and HTTP calls must match, with at least two calls",
+      "aios": {
+        "request_id": "20261103132256525223",
+        "reply_text": "明天上海白天小雨，气温19度，晚上",
+        "execution_time_ms": 14250.55,
+        "sop_matched": false,
+        "intent_type": "harness",
+        "language": "zh-CN"
+      },
+      "wall_ms": 14258.489541000003,
+      "profiles": [
+        {
+          "prompt_tokens": 8853,
+          "reused_prompt_tokens": 8562,
+          "completion_tokens": 38,
+          "ttft_ms": 1059.699898,
+          "total_latency_ms": 8851.574424,
+          "decode_ms": 7791.8745260000005,
+          "computed_prompt_tokens": 291,
+          "decode_intervals": 37
+        }
+      ],
+      "proxy_events": [
+        {
+          "event": "request",
+          "time": "2026-11-03T13:22:56.572520+00:00",
+          "capture_id": "931b178985ae4aac886e2f8331921c5c"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:23:05.638634+00:00",
+          "duration_ms": 9067.16,
+          "capture_id": "931b178985ae4aac886e2f8331921c5c",
+          "status": 200,
+          "tool_call_names": [
+            "mcp__amap__maps_weather"
+          ],
+          "finish_reasons": [
+            "tool_calls"
+          ]
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:23:06.038572+00:00",
+          "capture_id": "5b361be385384f7cabbc4092a3b222d7"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:23:10.758710+00:00",
+          "duration_ms": 4720.68,
+          "capture_id": "5b361be385384f7cabbc4092a3b222d7",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        }
+      ],
+      "server_profile_lines": [
+        "request profile: prompt_tokens=8853 reused_prompt_tokens=8562 completion_tokens=38 ttft_ms=Some(1059.699898) tpot_ms=Some(210.5912034054054) generation_tps=Some(4.748536424263257) total_latency_ms=Some(8851.574424)"
+      ],
+      "inter_model_gaps_ms": [
+        399.938
+      ],
+      "raw_record_sha256": "6c9aba055dec2f2b5d36b7210be257fa7ddb956a2642f45ab84a6b207ef23cd2",
+      "stream_error_evidence": [
+        {
+          "capture_id": "5b361be385384f7cabbc4092a3b222d7",
+          "response_sha256": "a41e8ec4c34c5c710c3c491d2a4257044b7f55610985a223db3d0585a8c22bb1",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: CUDA error: ApxInf native status 5: Attention Recipe miss and fallback is disabled",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        }
+      ],
+      "reanalysis": "Captured SSE error, including errors after partial answer, overrides text-only/raw validation.",
+      "aios_weather_tools": [
+        {
+          "time": "13:23:06",
+          "tool": "mcp__amap__maps_weather",
+          "status": "done",
+          "duration_ms": 369.7
+        }
+      ]
+    }
+  ],
+  "formal_recipes_after": {
+    "count": 1220,
+    "manifest_sha256": "e88e5eca879678eb0566609a528a3c3f57e5094f726a1aa56f6783d0347727ac"
+  }
+}

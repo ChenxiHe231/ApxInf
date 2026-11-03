@@ -1,0 +1,65 @@
+{
+  "source_commit": "9d6642c523a36c929fedfdea3bf82488e300d96a",
+  "binary_sha256": "931fdb1ea757d5a99fb0bcf6936cf56cdaded918989586915d117e34c6b36207",
+  "profiled_only": true,
+  "extra_phase_synchronization": true,
+  "phase_wall_ms": {
+    "draft": {
+      "rounds": 12,
+      "total_ms": 109.51899999999999,
+      "mean_ms": 9.126583333333333
+    },
+    "verify": {
+      "rounds": 12,
+      "total_ms": 447.496,
+      "mean_ms": 37.291333333333334
+    },
+    "commit": {
+      "rounds": 12,
+      "total_ms": 37.914,
+      "mean_ms": 3.1595
+    }
+  },
+  "profile_lines": [
+    "[mtp-round] draft 23.365 ms",
+    "[mtp-round] verify 55.012 ms",
+    "[mtp-round] commit 0.894 ms",
+    "[mtp-round] draft 8.103 ms",
+    "[mtp-round] verify 33.046 ms",
+    "[mtp-round] commit 0.914 ms",
+    "[mtp-round] draft 7.957 ms",
+    "[mtp-round] verify 33.470 ms",
+    "[mtp-round] commit 0.878 ms",
+    "[mtp-round] draft 5.398 ms",
+    "[mtp-round] verify 34.004 ms",
+    "[mtp-round] commit 4.755 ms",
+    "[mtp-round] draft 5.502 ms",
+    "[mtp-round] verify 36.740 ms",
+    "[mtp-round] commit 4.758 ms",
+    "[mtp-round] draft 6.150 ms",
+    "[mtp-round] verify 39.175 ms",
+    "[mtp-round] commit 4.835 ms",
+    "MTP profile: draft_steps=3 rounds=6 zero_accept=1 partial_accept=2 full_accept=3 proposed=15 accepted=9 emitted=15 rolled_back_rows=6 accepted_by_depth=[5, 4, 0]",
+    "request profile: prompt_tokens=8853 reused_prompt_tokens=8562 completion_tokens=39 ttft_ms=Some(398.352138) tpot_ms=Some(20.52136805263158) generation_tps=Some(48.72969469848595) total_latency_ms=Some(1178.164124)",
+    "[mtp-round] draft 8.697 ms",
+    "[mtp-round] verify 39.234 ms",
+    "[mtp-round] commit 0.920 ms",
+    "[mtp-round] draft 10.182 ms",
+    "[mtp-round] verify 39.463 ms",
+    "[mtp-round] commit 5.030 ms",
+    "[mtp-round] draft 10.148 ms",
+    "[mtp-round] verify 39.171 ms",
+    "[mtp-round] commit 4.736 ms",
+    "[mtp-round] draft 8.017 ms",
+    "[mtp-round] verify 32.575 ms",
+    "[mtp-round] commit 4.657 ms",
+    "[mtp-round] draft 8.008 ms",
+    "[mtp-round] verify 32.258 ms",
+    "[mtp-round] commit 4.643 ms",
+    "[mtp-round] draft 7.992 ms",
+    "[mtp-round] verify 33.348 ms",
+    "[mtp-round] commit 0.894 ms",
+    "MTP profile: draft_steps=3 rounds=6 zero_accept=0 partial_accept=1 full_accept=5 proposed=18 accepted=16 emitted=19 rolled_back_rows=5 accepted_by_depth=[6, 5, 5]",
+    "request profile: prompt_tokens=9059 reused_prompt_tokens=8852 completion_tokens=20 ttft_ms=Some(401.827833) tpot_ms=Some(15.276291684210527) generation_tps=Some(65.46091294090655) total_latency_ms=Some(692.077375)"
+  ]
+}

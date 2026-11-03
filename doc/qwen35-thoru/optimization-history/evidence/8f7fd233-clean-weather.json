@@ -1,0 +1,681 @@
+{
+  "schema": "apxinf.weather.commit-evidence.v2",
+  "metadata": {
+    "source_commit": "8f7fd233ee133a0cb0859719ef85f270b6b0d136",
+    "source_dirty": false,
+    "binary_sha256": "6924d69593e1d5787923b47c7b19888f2b155a4087b4d1ca140d66df9be77594",
+    "case_target_date": "2026-11-04",
+    "configuration": {
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/apxinf-8f7fd233",
+        "serve",
+        "--model",
+        "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "--served-model-name",
+        "qwen3.6-35b-a3b",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--dtype",
+        "bf16",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "bf16",
+        "--max-input-tokens",
+        "32768",
+        "--max-output-tokens",
+        "1024",
+        "--enable-context-reuse",
+        "--tuning-dir",
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/recipes-8f7fd233"
+      ],
+      "environment": {
+        "APXINF_QWEN35_CUDA_GRAPHS": "1",
+        "APXINF_QWEN35_GRAPH_GDN": "full",
+        "APXINF_QWEN35_SCALAR_TPOT_MS": "19.42"
+      },
+      "temperature": 0,
+      "compression": false,
+      "proxy_argv": [
+        "/Library/Developer/CommandLineTools/usr/bin/python3",
+        "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/scripts/qwen35_aios_proxy.py",
+        "--listen-host",
+        "0.0.0.0",
+        "--listen-port",
+        "18001",
+        "--upstream-host",
+        "127.0.0.1",
+        "--upstream-port",
+        "18000",
+        "--force-temperature",
+        "0",
+        "--normalize-time-context",
+        "--capture-dir",
+        "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/8f7fd233-20261103T212312/captures",
+        "--log",
+        "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/8f7fd233-20261103T212312/proxy.jsonl"
+      ],
+      "tuning_control": "explicit serve flags; formal autotune disabled",
+      "cwd": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-8f7fd233",
+      "default_recipe_directory": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-8f7fd233/configs/tuning/nvidia/thor-sm101/cuda12.8-cublas12.8",
+      "tuning_weather_requests": 3,
+      "formal_warmups": 2
+    },
+    "recipes": {
+      "count": 1199,
+      "manifest_sha256": "dea3e3d1f3c2699fe32cb5eab0d64d3ec457ad9cec7c8162445eff614c54ad29"
+    },
+    "aios": {
+      "image_digest": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2"
+    },
+    "hardware": {
+      "host": "thor-u",
+      "max_gpu_hz": 1206000000,
+      "hugepages": 24576
+    },
+    "collector_sha256": "5e5e277537d64dbdb37493a442517bdd406b47721a2c1db5ce09dd674accf59e",
+    "inputs_manifest": {
+      "model_directory": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+      "model_sha256": {
+        "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+        "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+        "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+        "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+        "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+        "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164"
+      },
+      "external_build_inputs_sha256": {
+        "libapxinf_edge_nvfp4_moe_sm110_cuda12.a": "7486d16d00dcb155647fb569b8c7eab0eba60df47103666369264f156648176e",
+        "libapxinf_edge_bf16_moe_sm110_cuda12.a": "f2fbcd381e968069ddcb1c4a45e0e3ecdd6a4f42bc296f0ff2d2c69ea8259ed5"
+      },
+      "aios_image_id": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2",
+      "pre_test_process": {
+        "pid": 25253,
+        "binary_sha256": "32af491f51ead198900de2dda1141013b7af4c2b937ecac99265d5fd73f595c5",
+        "backup_binary": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/pre-test-apxinf",
+        "status": "stopped_after_user_released_other_task"
+      },
+      "hardware_observed_before_test": {
+        "gpu_min_hz": 54000000,
+        "gpu_max_hz": 1206000000,
+        "gpu_governor": "simple_ondemand",
+        "cargo_build_jobs": 2,
+        "nvcc_parallelism": 2,
+        "nsys": "2025.3.3.80",
+        "ncu": "2025.1.1.0"
+      },
+      "cuda_toolkit_observed": {
+        "nvcc": "12.8.93",
+        "native_default_recipe_directory": "configs/tuning/nvidia/thor-sm101/cuda12.8-cublas12.8",
+        "discovery": "actual runtime-created directory and nvcc --version on 2026-11-03"
+      }
+    },
+    "clock_audit": {
+      "client_utc": "2026-11-03T13:27:12.572522+00:00",
+      "server_utc": "2026-11-02T12:20:18Z",
+      "policy": "Forecast date from Shanghai client time. Server profile and AIOS tool durations use monotonic clocks; HTTP gaps use only client timestamps. Do not subtract timestamps across hosts."
+    }
+  },
+  "summary": {
+    "formal_runs": 1,
+    "validated_answers": 0,
+    "valid_phase_records": 0,
+    "all_runs_valid": false,
+    "all_returned_requests_median_ms_including_invalid": 25691.15,
+    "representative_index": 2
+  },
+  "runs": [
+    {
+      "index": 0,
+      "phase": "warmup",
+      "answer_correct": false,
+      "correct": false,
+      "validation": "model stream contains error, including after partial answer",
+      "error": "cannot attribute AIOS weather-tool timings to each model gap",
+      "aios": {
+        "request_id": "20261103132713264846",
+        "reply_text": "",
+        "execution_time_ms": 40602.23,
+        "sop_matched": false,
+        "intent_type": "harness",
+        "language": "zh-CN"
+      },
+      "wall_ms": 40614.70925,
+      "profiles": [],
+      "proxy_events": [
+        {
+          "event": "request",
+          "time": "2026-11-03T13:27:13.407973+00:00",
+          "capture_id": "b4106cf331904ffb9143f7fd7508de8d"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:27:28.867877+00:00",
+          "duration_ms": 15461.32,
+          "capture_id": "b4106cf331904ffb9143f7fd7508de8d",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:27:29.395551+00:00",
+          "capture_id": "78153fac6dd74326ae8bed07340cacd5"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:27:31.062326+00:00",
+          "duration_ms": 1667.3,
+          "capture_id": "78153fac6dd74326ae8bed07340cacd5",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:27:32.149826+00:00",
+          "capture_id": "8d114bf5ed3f4689a8b4952181b88fb4"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:27:34.015744+00:00",
+          "duration_ms": 1867.03,
+          "capture_id": "8d114bf5ed3f4689a8b4952181b88fb4",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:27:36.218652+00:00",
+          "capture_id": "b811fa7d0df64e39bdf19ebba155362d"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:27:37.813259+00:00",
+          "duration_ms": 1596.29,
+          "capture_id": "b811fa7d0df64e39bdf19ebba155362d",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:27:41.790712+00:00",
+          "capture_id": "3a0105e09ed142cfa2dad5c0f3a3cd21"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:27:43.465046+00:00",
+          "duration_ms": 1676.04,
+          "capture_id": "3a0105e09ed142cfa2dad5c0f3a3cd21",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:27:52.224938+00:00",
+          "capture_id": "06823655ec4a49b9ad2b4d0b9f9187e5"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:27:53.839124+00:00",
+          "duration_ms": 1615.45,
+          "capture_id": "06823655ec4a49b9ad2b4d0b9f9187e5",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        }
+      ],
+      "server_profile_lines": [],
+      "raw_record_sha256": "84178778134f347e4212682724f1c9beca1d88a890ab002eb5466177c195f576",
+      "stream_error_evidence": [
+        {
+          "capture_id": "b4106cf331904ffb9143f7fd7508de8d",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "78153fac6dd74326ae8bed07340cacd5",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "8d114bf5ed3f4689a8b4952181b88fb4",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "b811fa7d0df64e39bdf19ebba155362d",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "3a0105e09ed142cfa2dad5c0f3a3cd21",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "06823655ec4a49b9ad2b4d0b9f9187e5",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        }
+      ],
+      "reanalysis": "Captured SSE error, including errors after partial answer, overrides text-only/raw validation.",
+      "aios_weather_tools": []
+    },
+    {
+      "index": 1,
+      "phase": "warmup",
+      "answer_correct": false,
+      "correct": false,
+      "validation": "model stream contains error, including after partial answer",
+      "error": "cannot attribute AIOS weather-tool timings to each model gap",
+      "aios": {
+        "request_id": "20261103132754486767",
+        "reply_text": "",
+        "execution_time_ms": 24935.9,
+        "sop_matched": false,
+        "intent_type": "harness",
+        "language": "zh-CN"
+      },
+      "wall_ms": 24940.252832999995,
+      "profiles": [],
+      "proxy_events": [
+        {
+          "event": "request",
+          "time": "2026-11-03T13:27:54.542882+00:00",
+          "capture_id": "6feb6c436e0f4ce391525d2d2c04a06b"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:27:56.155256+00:00",
+          "duration_ms": 1613.15,
+          "capture_id": "6feb6c436e0f4ce391525d2d2c04a06b",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:27:56.680958+00:00",
+          "capture_id": "20ae126d91f94718a3fe5084f336c685"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:27:58.384445+00:00",
+          "duration_ms": 1704.21,
+          "capture_id": "20ae126d91f94718a3fe5084f336c685",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:27:59.335901+00:00",
+          "capture_id": "4dd42145e4324b189b46465caafbe8ad"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:00.950085+00:00",
+          "duration_ms": 1615.11,
+          "capture_id": "4dd42145e4324b189b46465caafbe8ad",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:28:02.802354+00:00",
+          "capture_id": "6aa6195eca884f479ab380a7f228c5a6"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:04.463233+00:00",
+          "duration_ms": 1662.18,
+          "capture_id": "6aa6195eca884f479ab380a7f228c5a6",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:28:08.613616+00:00",
+          "capture_id": "88f5216fc1d44d3f90a5d336c00fd6db"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:10.263342+00:00",
+          "duration_ms": 1650.7,
+          "capture_id": "88f5216fc1d44d3f90a5d336c00fd6db",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:28:17.774565+00:00",
+          "capture_id": "63a07bb13e264365bf5bc179a4baaead"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:19.413267+00:00",
+          "duration_ms": 1640.43,
+          "capture_id": "63a07bb13e264365bf5bc179a4baaead",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        }
+      ],
+      "server_profile_lines": [],
+      "raw_record_sha256": "8df07ee5b6b54289922fa46c963590cb2eb8f13d6fcd3c160234896528880877",
+      "stream_error_evidence": [
+        {
+          "capture_id": "6feb6c436e0f4ce391525d2d2c04a06b",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "20ae126d91f94718a3fe5084f336c685",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "4dd42145e4324b189b46465caafbe8ad",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "6aa6195eca884f479ab380a7f228c5a6",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "88f5216fc1d44d3f90a5d336c00fd6db",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "63a07bb13e264365bf5bc179a4baaead",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        }
+      ],
+      "reanalysis": "Captured SSE error, including errors after partial answer, overrides text-only/raw validation.",
+      "aios_weather_tools": []
+    },
+    {
+      "index": 2,
+      "phase": "formal",
+      "answer_correct": false,
+      "correct": false,
+      "validation": "model stream contains error, including after partial answer",
+      "error": "cannot attribute AIOS weather-tool timings to each model gap",
+      "aios": {
+        "request_id": "20261103132820023550",
+        "reply_text": "",
+        "execution_time_ms": 25691.15,
+        "sop_matched": false,
+        "intent_type": "harness",
+        "language": "zh-CN"
+      },
+      "wall_ms": 25700.882707999994,
+      "profiles": [],
+      "proxy_events": [
+        {
+          "event": "request",
+          "time": "2026-11-03T13:28:20.092950+00:00",
+          "capture_id": "e632aa29757e4756b17ac7dcadaa7202"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:21.643892+00:00",
+          "duration_ms": 1555.92,
+          "capture_id": "e632aa29757e4756b17ac7dcadaa7202",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:28:22.165219+00:00",
+          "capture_id": "4f96985060ee41c8ab516b2c69c58aa8"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:23.899665+00:00",
+          "duration_ms": 1735.92,
+          "capture_id": "4f96985060ee41c8ab516b2c69c58aa8",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:28:24.971032+00:00",
+          "capture_id": "0e4fedeeafbc4713a6096495f2b4e80e"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:26.657184+00:00",
+          "duration_ms": 1687.86,
+          "capture_id": "0e4fedeeafbc4713a6096495f2b4e80e",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:28:28.697442+00:00",
+          "capture_id": "d7504d7a7fae40f2b4a433a9426b4e5e"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:30.310097+00:00",
+          "duration_ms": 1614.06,
+          "capture_id": "d7504d7a7fae40f2b4a433a9426b4e5e",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:28:34.583695+00:00",
+          "capture_id": "89b77ba7c4a04158b3e5e32d1235eff2"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:36.192062+00:00",
+          "duration_ms": 1609.14,
+          "capture_id": "89b77ba7c4a04158b3e5e32d1235eff2",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:28:44.062934+00:00",
+          "capture_id": "a49fcf19c5fc4e4db3a3f99b66deaf2a"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:28:45.698897+00:00",
+          "duration_ms": 1637.01,
+          "capture_id": "a49fcf19c5fc4e4db3a3f99b66deaf2a",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        }
+      ],
+      "server_profile_lines": [],
+      "raw_record_sha256": "bd351033d131ecdfe4edd120e28408f093d12061fa8ea66c704660d5672609a5",
+      "stream_error_evidence": [
+        {
+          "capture_id": "e632aa29757e4756b17ac7dcadaa7202",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "4f96985060ee41c8ab516b2c69c58aa8",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "0e4fedeeafbc4713a6096495f2b4e80e",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "d7504d7a7fae40f2b4a433a9426b4e5e",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "89b77ba7c4a04158b3e5e32d1235eff2",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "a49fcf19c5fc4e4db3a3f99b66deaf2a",
+          "response_sha256": "e37499498dba791e56e8566773aeab71d4b1ccd3ddcccb5200f5472f4259bbf3",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 layer 3 attention: Attention execution cache miss during capture; prepare the same bindings first",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        }
+      ],
+      "reanalysis": "Captured SSE error, including errors after partial answer, overrides text-only/raw validation.",
+      "aios_weather_tools": []
+    }
+  ],
+  "formal_recipes_after": {
+    "count": 1199,
+    "manifest_sha256": "dea3e3d1f3c2699fe32cb5eab0d64d3ec457ad9cec7c8162445eff614c54ad29"
+  }
+}

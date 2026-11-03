@@ -1,0 +1,356 @@
+{
+  "schema": "apxinf.weather.commit-evidence.v2",
+  "metadata": {
+    "source_commit": "11f638b8234e70b279593110b071da828f696601",
+    "source_dirty": false,
+    "binary_sha256": "db1d2266e243e6698f80939d6eb16c72ee7a4986309a111495bb16c5a3b2a53b",
+    "case_target_date": "2026-11-04",
+    "configuration": {
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/apxinf-11f638b8",
+        "serve",
+        "--model",
+        "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "--served-model-name",
+        "qwen3.6-35b-a3b",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--dtype",
+        "bf16",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8",
+        "--max-input-tokens",
+        "32768",
+        "--max-output-tokens",
+        "1024",
+        "--enable-context-reuse",
+        "--tuning-dir",
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/recipes-11f638b8"
+      ],
+      "environment": {
+        "APXINF_QWEN35_CUDA_GRAPHS": "1",
+        "APXINF_QWEN35_GRAPH_GDN": "full",
+        "APXINF_QWEN35_SCALAR_TPOT_MS": "19.42"
+      },
+      "temperature": 0,
+      "compression": false,
+      "proxy_argv": [
+        "/Library/Developer/CommandLineTools/usr/bin/python3",
+        "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/scripts/qwen35_aios_proxy.py",
+        "--listen-host",
+        "0.0.0.0",
+        "--listen-port",
+        "18001",
+        "--upstream-host",
+        "127.0.0.1",
+        "--upstream-port",
+        "18000",
+        "--force-temperature",
+        "0",
+        "--normalize-time-context",
+        "--capture-dir",
+        "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/11f638b8-20261103T214557/captures",
+        "--log",
+        "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/commit-audit/live/11f638b8-20261103T214557/proxy.jsonl"
+      ],
+      "tuning_control": "explicit serve flags; formal autotune disabled",
+      "cwd": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-11f638b8",
+      "default_recipe_directory": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-11f638b8/configs/tuning/nvidia/thor-sm101/cuda12.8-cublas12.8",
+      "tuning_weather_requests": 1,
+      "formal_warmups": 0,
+      "structural_failure_during_warmup": true
+    },
+    "recipes": {
+      "count": 1198,
+      "manifest_sha256": "e7f89372b6686fb19727921fadc8a9bf63c982b5079fd86ac2a1b8e38d3b2c15"
+    },
+    "aios": {
+      "image_digest": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2"
+    },
+    "hardware": {
+      "host": "thor-u",
+      "max_gpu_hz": 1206000000,
+      "hugepages": 24576
+    },
+    "collector_sha256": "a18dd44cb68f7864ef2e91713e4eea560df60d2fbbaef4ecde20813c8c2fe4a9",
+    "inputs_manifest": {
+      "model_directory": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+      "model_sha256": {
+        "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+        "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+        "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+        "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+        "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+        "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164"
+      },
+      "external_build_inputs_sha256": {
+        "libapxinf_edge_nvfp4_moe_sm110_cuda12.a": "7486d16d00dcb155647fb569b8c7eab0eba60df47103666369264f156648176e",
+        "libapxinf_edge_bf16_moe_sm110_cuda12.a": "f2fbcd381e968069ddcb1c4a45e0e3ecdd6a4f42bc296f0ff2d2c69ea8259ed5"
+      },
+      "aios_image_id": "sha256:de9cc679678ac6b22113b5d40a8f9d1c6cf3d69401d482d69ccf49c29de16af2",
+      "pre_test_process": {
+        "pid": 25253,
+        "binary_sha256": "32af491f51ead198900de2dda1141013b7af4c2b937ecac99265d5fd73f595c5",
+        "backup_binary": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/pre-test-apxinf",
+        "status": "stopped_after_user_released_other_task"
+      },
+      "hardware_observed_before_test": {
+        "gpu_min_hz": 54000000,
+        "gpu_max_hz": 1206000000,
+        "gpu_governor": "simple_ondemand",
+        "cargo_build_jobs": 2,
+        "nvcc_parallelism": 2,
+        "nsys": "2025.3.3.80",
+        "ncu": "2025.1.1.0"
+      },
+      "cuda_toolkit_observed": {
+        "nvcc": "12.8.93",
+        "native_default_recipe_directory": "configs/tuning/nvidia/thor-sm101/cuda12.8-cublas12.8",
+        "discovery": "actual runtime-created directory and nvcc --version on 2026-11-03"
+      }
+    },
+    "clock_audit": {
+      "client_utc": "2026-11-03T13:50:04.337675+00:00",
+      "server_utc": "2026-11-02T12:43:09Z",
+      "policy": "Forecast date from Shanghai client time. Server profile and AIOS tool durations use monotonic clocks; HTTP gaps use only client timestamps. Do not subtract timestamps across hosts."
+    }
+  },
+  "summary": {
+    "formal_runs": 1,
+    "validated_answers": 0,
+    "valid_phase_records": 0,
+    "all_runs_valid": false,
+    "all_returned_requests_median_ms_including_invalid": 98995.97,
+    "representative_index": 0
+  },
+  "runs": [
+    {
+      "index": 0,
+      "phase": "formal",
+      "answer_correct": false,
+      "correct": false,
+      "validation": "model stream contains error, including after partial answer",
+      "error": "cannot attribute AIOS weather-tool timings to each model gap",
+      "aios": {
+        "request_id": "20261103135005009649",
+        "reply_text": "",
+        "execution_time_ms": 98995.97,
+        "sop_matched": false,
+        "intent_type": "harness",
+        "language": "zh-CN"
+      },
+      "wall_ms": 99009.6575,
+      "profiles": [],
+      "proxy_events": [
+        {
+          "event": "request",
+          "time": "2026-11-03T13:50:05.136131+00:00",
+          "capture_id": "3b6515bcc86148ea90d83b1a93788b9b"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:50:19.111793+00:00",
+          "duration_ms": 13978.69,
+          "capture_id": "3b6515bcc86148ea90d83b1a93788b9b",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:50:19.660057+00:00",
+          "capture_id": "ff6042f8c4fd4f2dac91603bf4cc639f"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:50:33.309834+00:00",
+          "duration_ms": 13652.66,
+          "capture_id": "ff6042f8c4fd4f2dac91603bf4cc639f",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:50:34.392464+00:00",
+          "capture_id": "ec4471d4a5254f67a175a144e9c4826d"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:50:47.991010+00:00",
+          "duration_ms": 13598.57,
+          "capture_id": "ec4471d4a5254f67a175a144e9c4826d",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:50:50.238350+00:00",
+          "capture_id": "8c6fc91d258d4e93821a1e4c65228912"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:51:03.735896+00:00",
+          "duration_ms": 13505.54,
+          "capture_id": "8c6fc91d258d4e93821a1e4c65228912",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:51:08.215815+00:00",
+          "capture_id": "ab066e1fcd06496ea68b97ec395c47c2"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:51:21.816115+00:00",
+          "duration_ms": 13601.35,
+          "capture_id": "ab066e1fcd06496ea68b97ec395c47c2",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        },
+        {
+          "event": "request",
+          "time": "2026-11-03T13:51:30.173337+00:00",
+          "capture_id": "7a719b00ae3d4833a0b94dc98aa71d0e"
+        },
+        {
+          "event": "response",
+          "time": "2026-11-03T13:51:43.981417+00:00",
+          "duration_ms": 13809.11,
+          "capture_id": "7a719b00ae3d4833a0b94dc98aa71d0e",
+          "status": 200,
+          "tool_call_names": [],
+          "finish_reasons": []
+        }
+      ],
+      "server_profile_lines": [],
+      "stream_errors": [
+        {
+          "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+          "type": "server_error",
+          "param": null,
+          "code": null
+        },
+        {
+          "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+          "type": "server_error",
+          "param": null,
+          "code": null
+        },
+        {
+          "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+          "type": "server_error",
+          "param": null,
+          "code": null
+        },
+        {
+          "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+          "type": "server_error",
+          "param": null,
+          "code": null
+        },
+        {
+          "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+          "type": "server_error",
+          "param": null,
+          "code": null
+        },
+        {
+          "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+          "type": "server_error",
+          "param": null,
+          "code": null
+        }
+      ],
+      "raw_record_sha256": "254ee2b897473ee2e4eb28e0cd1eda68dca55dfa91949f97083d330683eef094",
+      "stream_error_evidence": [
+        {
+          "capture_id": "3b6515bcc86148ea90d83b1a93788b9b",
+          "response_sha256": "6bf33b0b2b6a29e633bfa9532965c579bcd0922b2f81733483277db6a85e8da0",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "ff6042f8c4fd4f2dac91603bf4cc639f",
+          "response_sha256": "6bf33b0b2b6a29e633bfa9532965c579bcd0922b2f81733483277db6a85e8da0",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "ec4471d4a5254f67a175a144e9c4826d",
+          "response_sha256": "6bf33b0b2b6a29e633bfa9532965c579bcd0922b2f81733483277db6a85e8da0",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "8c6fc91d258d4e93821a1e4c65228912",
+          "response_sha256": "6bf33b0b2b6a29e633bfa9532965c579bcd0922b2f81733483277db6a85e8da0",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "ab066e1fcd06496ea68b97ec395c47c2",
+          "response_sha256": "6bf33b0b2b6a29e633bfa9532965c579bcd0922b2f81733483277db6a85e8da0",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        },
+        {
+          "capture_id": "7a719b00ae3d4833a0b94dc98aa71d0e",
+          "response_sha256": "6bf33b0b2b6a29e633bfa9532965c579bcd0922b2f81733483277db6a85e8da0",
+          "errors": [
+            {
+              "message": "generation failed: Qwen3.5 cache copy requires matching dtype, layer, geometry and metadata",
+              "type": "server_error",
+              "param": null,
+              "code": null
+            }
+          ]
+        }
+      ],
+      "reanalysis": "Captured SSE error, including errors after partial answer, overrides text-only/raw validation.",
+      "aios_weather_tools": []
+    }
+  ],
+  "formal_recipes_after": {
+    "count": 1198,
+    "manifest_sha256": "e7f89372b6686fb19727921fadc8a9bf63c982b5079fd86ac2a1b8e38d3b2c15"
+  }
+}

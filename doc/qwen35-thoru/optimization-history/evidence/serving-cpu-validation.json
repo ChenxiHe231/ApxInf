@@ -1,0 +1,11 @@
+{
+  "source_commit": "9596e6f844fe993d68ec78dc3105c849048ad837",
+  "patched_remote_files_match": true,
+  "serving_tests": {
+    "lib": 5,
+    "anthropic": 4,
+    "openai": 13
+  },
+  "features": "--release --no-default-features",
+  "weather_evidence_tests": 9
+}

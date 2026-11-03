@@ -1,6 +1,6 @@
 # Reproduce a revision's weather record
 
-以下命令用于 GPU 空闲后的补测。本轮只提交工具与历史记录，没有执行以下服务切换/测试。
+以下是本轮已执行并归档的逐版本重建、调优和天气测试方法。完整实际 argv、environment、recipe 与模型哈希以每个版本 JSON 为准。
 
 ## Build and identity
 
@@ -27,11 +27,12 @@ python3 scripts/qwen35_aios_proxy.py \
   --listen-host 0.0.0.0 --listen-port 18001 \
   --upstream-host 127.0.0.1 --upstream-port 18000 \
   --force-temperature 0 --normalize-time-context \
+  --compress-amap-weather --single-tool-call \
   --capture-dir devlocal/commit-audit/run-<revision>/captures \
   --log devlocal/commit-audit/run-<revision>/proxy.jsonl
 ```
 
-此命令固定为 greedy MTP 对照；仅在 S4 后的压缩消融组增加 `--compress-amap-weather`。时间归一化是缓存实验条件，应同时记录真实动态时间的部署表现，不能把规范化测试等同于生产所有请求。
+此命令对应最新4424f1b7的greedy MTP热态配置；旧版逐版本实验的压缩/单工具开关以JSON为准，不能给不支持的版本补开关。时间归一化是缓存实验条件，应同时记录真实动态时间的部署表现，不能把规范化测试等同于生产所有请求。
 原始捕获可能有私有 Prompt/tool 数据，保留 devlocal，不上传鉴权信息、工具 key、完整业务 Prompt 或大体积二进制。维护台账仅保留脱敏计时、profile、摘要与哈希。
 
 创建 `metadata.json`，所有值从实际运行现场核验：
@@ -64,7 +65,7 @@ python3 scripts/bench_qwen35_aios_weather.py \
   --warmups 2 --repeats 10
 ```
 
-单一独占顺序请求下按 log 增量对应 profile；出现并发、重试、缺少两次调用或日志轮转时拒绝自动生成完整阶段表。采样中文数字/同义天气描述可能被保守校验器判失败，应人工复核并保存理由，不能删除失败样本。
+单一独占顺序请求下按 log 增量对应 profile；按全部实际模型调用逐个归属；出现并发、模型/HTTP记录不匹配、SSE错误或日志轮转时拒绝生成有效完整阶段表。重复查天气的额外调用不能删掉。采样中文数字/同义天气描述可能被保守校验器判失败，应人工复核并保存理由，不能删除失败样本。
 所有正式轮正确才输出正式分布表；失败时 summary 里的 successful_subset 指标只供诊断。
 
 ## Prefill/Decode profiler
@@ -79,4 +80,35 @@ python3 scripts/bench_qwen35_aios_weather.py \
 使用 `nsys profile --trace=cuda,nvtx,osrt --output=<run>/weather <相同服务启动命令>` 收集诊断 trace，重放同一个脱敏保留请求；用 `nsys stats` 对比 CUDA kernel、API 同步、memcpy 和 NVTX。使用 ncu 的带宽/算力指标需另跑，插桩耗时不用于正式 E2E。
 单项归因必须 parent/new 同权重、同请求、同工具结果、同缓存热度和采样语义；报告原始/新增/复用 tokens 和 completion长度。不能把外部 AMap 波动或余项下降计为 Prefill/Decode kernel 收益。
 
-CPU 工具回归：`python3 -m unittest discover -s scripts -p test_qwen35_aios_weather.py -v`。CUDA 全量编译、数值精度和各版本硬件验收仍需补测。
+CPU 工具回归：`python3 -m unittest discover -s scripts -p test_qwen35_aios_weather.py -v`。已完成本报告列出的逐版本CUDA构建/天气测试、最新11项Python回归及22项serving CPU测试；完整长上下文精度/任务覆盖仍未验收。
+
+## 最新服务的确切启动配置
+
+Thor-U使用已归档的二进制（模型与静态scale在现有checkpoint中），先补齐真实请求recipes，再不带autotune重启正式测量：
+
+```sh
+cd /opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runtime-4424f1b7
+export APXINF_QWEN35_CUDA_GRAPHS=1 APXINF_QWEN35_GRAPH_GDN=full
+export APXINF_QWEN35_SCALAR_TPOT_MS=19.42
+../apxinf-4424f1b7 serve \
+  --model /opt/data/models/Qwen3.6-35B-A3B-NVFP4 \
+  --served-model-name qwen3.6-35b-a3b --host 0.0.0.0 --port 8000 \
+  --dtype bf16 --qwen35-moe-activation nvfp4 --qwen35-kv-cache fp8 \
+  --max-input-tokens 32768 --max-output-tokens 1024 \
+  --enable-context-reuse \
+  --tuning-dir /opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/recipes-4424f1b7
+```
+
+相同命令增加 `--autotune` 运行3轮真实天气请求；确认recipe补齐后停止本次服务，不带该flag重启，预热2轮再计时。该二进制面向Thor AArch64/CUDA12.8，不是Mac或x86服务器的可执行文件；AIOS x86镜像通过HTTP接入。
+
+Mac上 `ssh -N -L 18000:127.0.0.1:8000 thor-u` 转发模型端口；代理18001转发至18000。AIOS 20261026容器当前配置接入Mac代理，测试调用 `POST http://127.0.0.1:8081/v1/process`，输入 `asr_text=明天上海的天气怎么样`、独立session/new_session。鉴权与工具key保留在原镜像/运行环境，不写入仓库。
+
+读取逐commit附注：
+
+```sh
+git fetch fork refs/notes/weather-e2e:refs/notes/weather-e2e
+git log --notes=weather-e2e codex/qwen35-aios-optimization-series
+git notes --ref=weather-e2e show 4424f1b7
+```
+
+附注保留后补实测，历史源码hash不变。个别历史版本无法完成天气链路时，附注保留错误和返回时间，不补造Prefill/Decode阶段。

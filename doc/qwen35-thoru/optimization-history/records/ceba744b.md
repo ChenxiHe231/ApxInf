@@ -1,27 +1,36 @@
 # ceba744b — fix(qwen35): reuse AIOS system prefix for sampled requests
 
-天气 case：`明天上海的天气怎么样`。状态：**待 Thor-U 独占测试**。
+天气 case：`明天上海的天气怎么样`。历史提交不改 hash。
 
-源码版本：`ceba744b219527bdf81f7e3d226b93bf424349d9`。这是已存在的历史提交，保留原有 hash，不重写公共历史。
+## 精确版本重建实测（2026-11-03 起）
 
-精确版本的天气端到端 trace 尚未建立；已有 microbenchmark 或旧报告不能代替本页的天气实测。
+Source: `ceba744b219527bdf81f7e3d226b93bf424349d9`；tracked 工作区干净。
 
-用户要求本轮保持其他任务的 GPU 服务和编译不变。本页是测试记录占位，不是已执行的性能结果；
-不得将历史 dirty-worktree 的 1.520 s 结果归入此版本。
+Binary SHA256: `0b4c26d5182282e6e387eff153d8bc495c9396b5956c21fc5d283626f7208ae7`。
+
+配置与逐轮记录：[JSON](../evidence/ceba744b-clean-weather.json)。
+
+正式 1 轮，回答校验通过 1 轮，完整有效阶段记录 1 轮。
+
+端到端单轮实测（不是统计中位数）：**18.746520 s**。
+
+以下为同一真实请求 index=0，回答校验=True；不拼接不同请求的阶段分位数。
 
 | 阶段 | 时间 | 占比 |
 |---|---:|---:|
-| 模型调用 1 Prefill/TTFT：full/reused/computed 待测 | 待测 | 待测 |
-| 模型调用 1 Decode：输出 token 和间隔数待测 | 待测 | 待测 |
-| AMap 查询及工具编排间隔 | 待测 | 待测 |
-| 模型调用 2 Prefill/TTFT：full/reused/computed 待测 | 待测 | 待测 |
-| 模型调用 2 Decode：输出 token 和间隔数待测 | 待测 | 待测 |
-| AIOS、模型服务、HTTP 及其他余项 | 待测 | 待测 |
-| **端到端总计** | **待测** | **待测** |
+| 模型调用1 Prefill/TTFT：新增 291 tokens | 0.920414 s | 4.91% |
+| 模型调用1 Decode：38 个间隔 | 7.785081 s | 41.53% |
+| AMap天气查询（AIOS工具计时） | 0.407100 s | 2.17% |
+| 模型调用2 Prefill/TTFT：新增 757 tokens | 1.320699 s | 7.05% |
+| 模型调用2 Decode：24 个间隔 | 7.619853 s | 40.65% |
+| AIOS、模型服务、HTTP及其他余项 | 0.693373 s | 3.70% |
+| **端到端总计** | **18.746520 s** | **100%** |
 
-Prefill/TTFT 包含首 token 生成和缓存恢复；工具间隔不等于纯 AMap API 时间。
-待测项目包括：该精确源码版本的 release 二进制哈希、recipe 清单、AIOS 请求参数、
-两轮预热与十轮正式结果、同轮 server profile、工具正确性及 profiler 消融。
-`temperature=0` 对应 greedy MTP；不得把非零 temperature 请求标签当成实际 sampling MTP。
-`scripts/bench_qwen35_aios_weather.py` 在最终提交中提供记录工具；本页以后使用该工具补测。
-record-path 与 commit 的映射由提交正文中的 `Weather-Record` trailer 固定。
+| 模型调用 | full tokens | reused tokens | computed tokens | output tokens | TPOT |
+|---|---:|---:|---:|---:|---:|
+| 1 | 8853 | 8562 | 291 | 39 | 204.871 ms |
+| 2 | 9319 | 8562 | 757 | 25 | 317.494 ms |
+
+TTFT 包括缓存恢复与首 token；余项含未归属的服务/调度/HTTP时间。工具时长为AIOS执行计时，不能声称等于纯网络时间。当前没有仅凭该单轮成立的单项优化提升百分比。
+
+正式测试前后 recipe 数：1287 → 1288；清单内容发生变化。旧版默认在线调优可能进入正式请求时间，不能直接当作纯GPU kernel性能。

@@ -1,0 +1,620 @@
+{
+  "schema": "apxinf.prefill.same-payload.v1",
+  "date": "2026-11-04T00:05:11.826038+08:00",
+  "payloads": {
+    "291": {
+      "model": "qwen3.6-35b-a3b",
+      "messages": [
+        {
+          "role": "user",
+          "content": "a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a "
+        }
+      ],
+      "max_tokens": 1,
+      "temperature": 0,
+      "stream": false
+    },
+    "320": {
+      "model": "qwen3.6-35b-a3b",
+      "messages": [
+        {
+          "role": "user",
+          "content": "a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a a "
+        }
+      ],
+      "max_tokens": 1,
+      "temperature": 0,
+      "stream": false
+    }
+  },
+  "versions": [
+    {
+      "source_commit": "b452e715c716953261fcda73cc58c2764289b70a",
+      "binary_sha256": "99d82484c4dfa6ce78a4c2f157f9db0d6405006406fa76358c2dcfab620aed4e",
+      "configuration": {
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/apxinf-b452e715",
+          "serve",
+          "--model",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--served-model-name",
+          "qwen3.6-35b-a3b",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000",
+          "--dtype",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--qwen35-kv-cache",
+          "fp8",
+          "--max-input-tokens",
+          "32768",
+          "--max-output-tokens",
+          "1024",
+          "--tuning-dir",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/prefill-control-recipes-b452e715"
+        ],
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_QWEN35_SCALAR_TPOT_MS": "19.42"
+        },
+        "cwd": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/prefill-control-runtime-b452e715",
+        "context_reuse": false,
+        "max_tokens": 1
+      },
+      "recipes_before": {
+        "count": 1274,
+        "sha256": "6e0bb724db5fbcde40c3ca0b07ef8cb262a41ca9db8900e668afb423a96af714"
+      },
+      "recipes_after": {
+        "count": 1274,
+        "sha256": "6e0bb724db5fbcde40c3ca0b07ef8cb262a41ca9db8900e668afb423a96af714"
+      },
+      "runs": [
+        {
+          "profile": {
+            "prompt_tokens": 291,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 685.473676,
+            "total_latency_ms": 685.474564,
+            "decode_ms": 0.0008880000000317523,
+            "computed_prompt_tokens": 291,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 745.5227500000063,
+          "profile_line": "request profile: prompt_tokens=291 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(685.473676) tpot_ms=None generation_tps=None total_latency_ms=Some(685.474564)",
+          "response": {
+            "id": "chatcmpl-0000000000000002",
+            "object": "chat.completion",
+            "created": 1793631356,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 291,
+              "completion_tokens": 1,
+              "total_tokens": 292,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 291,
+          "index": 0,
+          "payload_sha256": "6779c72d9d28837460196098ad173e2a4d0c486454e4a80e7477367ee715bfe9"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 291,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 580.277833,
+            "total_latency_ms": 580.278648,
+            "decode_ms": 0.0008149999999886859,
+            "computed_prompt_tokens": 291,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 639.2435419999742,
+          "profile_line": "request profile: prompt_tokens=291 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(580.277833) tpot_ms=None generation_tps=None total_latency_ms=Some(580.278648)",
+          "response": {
+            "id": "chatcmpl-0000000000000003",
+            "object": "chat.completion",
+            "created": 1793631357,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 291,
+              "completion_tokens": 1,
+              "total_tokens": 292,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 291,
+          "index": 1,
+          "payload_sha256": "6779c72d9d28837460196098ad173e2a4d0c486454e4a80e7477367ee715bfe9"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 291,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 566.639731,
+            "total_latency_ms": 566.640667,
+            "decode_ms": 0.0009360000000242508,
+            "computed_prompt_tokens": 291,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 635.8057089999818,
+          "profile_line": "request profile: prompt_tokens=291 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(566.639731) tpot_ms=None generation_tps=None total_latency_ms=Some(566.640667)",
+          "response": {
+            "id": "chatcmpl-0000000000000004",
+            "object": "chat.completion",
+            "created": 1793631358,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 291,
+              "completion_tokens": 1,
+              "total_tokens": 292,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 291,
+          "index": 2,
+          "payload_sha256": "6779c72d9d28837460196098ad173e2a4d0c486454e4a80e7477367ee715bfe9"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 320,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 182.867973,
+            "total_latency_ms": 182.868899,
+            "decode_ms": 0.0009259999999926549,
+            "computed_prompt_tokens": 320,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 251.57329199998912,
+          "profile_line": "request profile: prompt_tokens=320 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(182.867973) tpot_ms=None generation_tps=None total_latency_ms=Some(182.868899)",
+          "response": {
+            "id": "chatcmpl-0000000000000006",
+            "object": "chat.completion",
+            "created": 1793631360,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 320,
+              "completion_tokens": 1,
+              "total_tokens": 321,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 320,
+          "index": 0,
+          "payload_sha256": "043a36f69162611c03625a0c33e46b72395965a30b7bd5d61bc8a57b258eb2a0"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 320,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 245.040407,
+            "total_latency_ms": 245.041296,
+            "decode_ms": 0.0008890000000008058,
+            "computed_prompt_tokens": 320,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 329.31562499999245,
+          "profile_line": "request profile: prompt_tokens=320 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(245.040407) tpot_ms=None generation_tps=None total_latency_ms=Some(245.041296)",
+          "response": {
+            "id": "chatcmpl-0000000000000007",
+            "object": "chat.completion",
+            "created": 1793631361,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 320,
+              "completion_tokens": 1,
+              "total_tokens": 321,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 320,
+          "index": 1,
+          "payload_sha256": "043a36f69162611c03625a0c33e46b72395965a30b7bd5d61bc8a57b258eb2a0"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 320,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 189.626046,
+            "total_latency_ms": 189.626963,
+            "decode_ms": 0.000916999999986956,
+            "computed_prompt_tokens": 320,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 258.12845900000525,
+          "profile_line": "request profile: prompt_tokens=320 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(189.626046) tpot_ms=None generation_tps=None total_latency_ms=Some(189.626963)",
+          "response": {
+            "id": "chatcmpl-0000000000000008",
+            "object": "chat.completion",
+            "created": 1793631362,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 320,
+              "completion_tokens": 1,
+              "total_tokens": 321,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 320,
+          "index": 2,
+          "payload_sha256": "043a36f69162611c03625a0c33e46b72395965a30b7bd5d61bc8a57b258eb2a0"
+        }
+      ]
+    },
+    {
+      "source_commit": "118337ceb5ef9cdbd440f28da728314bd7cfbb13",
+      "binary_sha256": "bcf0702de3388e751d890e87b8aa1119666fc1791a60433bdd3795777e8105bd",
+      "configuration": {
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/apxinf-118337ce",
+          "serve",
+          "--model",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--served-model-name",
+          "qwen3.6-35b-a3b",
+          "--host",
+          "0.0.0.0",
+          "--port",
+          "8000",
+          "--dtype",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--qwen35-kv-cache",
+          "fp8",
+          "--max-input-tokens",
+          "32768",
+          "--max-output-tokens",
+          "1024",
+          "--tuning-dir",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/prefill-control-recipes-118337ce"
+        ],
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_QWEN35_SCALAR_TPOT_MS": "19.42"
+        },
+        "cwd": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/prefill-control-runtime-118337ce",
+        "context_reuse": false,
+        "max_tokens": 1
+      },
+      "recipes_before": {
+        "count": 1259,
+        "sha256": "877710acef639ab11daf26b6fdb5f2a87931cba5e06bc78976cc17efa4dd15c7"
+      },
+      "recipes_after": {
+        "count": 1259,
+        "sha256": "877710acef639ab11daf26b6fdb5f2a87931cba5e06bc78976cc17efa4dd15c7"
+      },
+      "runs": [
+        {
+          "profile": {
+            "prompt_tokens": 291,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 254.34137,
+            "total_latency_ms": 254.344407,
+            "decode_ms": 0.003036999999977752,
+            "computed_prompt_tokens": 291,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 396.6886670000349,
+          "profile_line": "request profile: prompt_tokens=291 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(254.34137) tpot_ms=None generation_tps=None total_latency_ms=Some(254.344407)",
+          "response": {
+            "id": "chatcmpl-0000000000000002",
+            "object": "chat.completion",
+            "created": 1793631487,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 291,
+              "completion_tokens": 1,
+              "total_tokens": 292,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 291,
+          "index": 0,
+          "payload_sha256": "6779c72d9d28837460196098ad173e2a4d0c486454e4a80e7477367ee715bfe9"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 291,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 292.309584,
+            "total_latency_ms": 292.312592,
+            "decode_ms": 0.003008000000022548,
+            "computed_prompt_tokens": 291,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 396.99991700001647,
+          "profile_line": "request profile: prompt_tokens=291 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(292.309584) tpot_ms=None generation_tps=None total_latency_ms=Some(292.312592)",
+          "response": {
+            "id": "chatcmpl-0000000000000003",
+            "object": "chat.completion",
+            "created": 1793631488,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 291,
+              "completion_tokens": 1,
+              "total_tokens": 292,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 291,
+          "index": 1,
+          "payload_sha256": "6779c72d9d28837460196098ad173e2a4d0c486454e4a80e7477367ee715bfe9"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 291,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 295.534473,
+            "total_latency_ms": 295.537324,
+            "decode_ms": 0.002851000000021031,
+            "computed_prompt_tokens": 291,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 383.3662089999734,
+          "profile_line": "request profile: prompt_tokens=291 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(295.534473) tpot_ms=None generation_tps=None total_latency_ms=Some(295.537324)",
+          "response": {
+            "id": "chatcmpl-0000000000000004",
+            "object": "chat.completion",
+            "created": 1793631489,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 291,
+              "completion_tokens": 1,
+              "total_tokens": 292,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 291,
+          "index": 2,
+          "payload_sha256": "6779c72d9d28837460196098ad173e2a4d0c486454e4a80e7477367ee715bfe9"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 320,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 232.459417,
+            "total_latency_ms": 232.46262,
+            "decode_ms": 0.003202999999984968,
+            "computed_prompt_tokens": 320,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 334.60295800000495,
+          "profile_line": "request profile: prompt_tokens=320 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(232.459417) tpot_ms=None generation_tps=None total_latency_ms=Some(232.46262)",
+          "response": {
+            "id": "chatcmpl-0000000000000006",
+            "object": "chat.completion",
+            "created": 1793631491,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 320,
+              "completion_tokens": 1,
+              "total_tokens": 321,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 320,
+          "index": 0,
+          "payload_sha256": "043a36f69162611c03625a0c33e46b72395965a30b7bd5d61bc8a57b258eb2a0"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 320,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 196.62351,
+            "total_latency_ms": 196.626639,
+            "decode_ms": 0.0031290000000012697,
+            "computed_prompt_tokens": 320,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 255.65574999995988,
+          "profile_line": "request profile: prompt_tokens=320 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(196.62351) tpot_ms=None generation_tps=None total_latency_ms=Some(196.626639)",
+          "response": {
+            "id": "chatcmpl-0000000000000007",
+            "object": "chat.completion",
+            "created": 1793631492,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 320,
+              "completion_tokens": 1,
+              "total_tokens": 321,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 320,
+          "index": 1,
+          "payload_sha256": "043a36f69162611c03625a0c33e46b72395965a30b7bd5d61bc8a57b258eb2a0"
+        },
+        {
+          "profile": {
+            "prompt_tokens": 320,
+            "reused_prompt_tokens": 0,
+            "completion_tokens": 1,
+            "ttft_ms": 220.207963,
+            "total_latency_ms": 220.211028,
+            "decode_ms": 0.003064999999992324,
+            "computed_prompt_tokens": 320,
+            "decode_intervals": 0
+          },
+          "client_wall_ms": 306.6105830000083,
+          "profile_line": "request profile: prompt_tokens=320 reused_prompt_tokens=0 completion_tokens=1 ttft_ms=Some(220.207963) tpot_ms=None generation_tps=None total_latency_ms=Some(220.211028)",
+          "response": {
+            "id": "chatcmpl-0000000000000008",
+            "object": "chat.completion",
+            "created": 1793631493,
+            "model": "qwen3.6-35b-a3b",
+            "choices": [
+              {
+                "index": 0,
+                "message": {
+                  "role": "assistant",
+                  "content": "It"
+                },
+                "finish_reason": "length"
+              }
+            ],
+            "usage": {
+              "prompt_tokens": 320,
+              "completion_tokens": 1,
+              "total_tokens": 321,
+              "prompt_tokens_details": {
+                "cached_tokens": 0
+              }
+            }
+          },
+          "target_prompt_tokens": 320,
+          "index": 2,
+          "payload_sha256": "043a36f69162611c03625a0c33e46b72395965a30b7bd5d61bc8a57b258eb2a0"
+        }
+      ]
+    }
+  ]
+}
