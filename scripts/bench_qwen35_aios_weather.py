@@ -92,11 +92,14 @@ def validate_weather(args, requests, responses, reply):
     if not arguments.get("city"):
         return False, "empty city argument"
     payload = json.loads((Path(args.capture_dir) / (requests[1]["capture_id"] + ".request")).read_text())
-    content = "\n".join(str(m.get("content", "")) for m in payload.get("messages", []))
-    dates = re.findall(r"Time sampled while preparing turn \d+, step \d+: (\d{4}-\d{2}-\d{2})T", content)
-    if not dates:
-        return False, "missing request date; cannot validate tomorrow"
-    tomorrow = (dt.date.fromisoformat(dates[-1]) + dt.timedelta(days=1)).isoformat()
+    # The harness may inject UTC while the task's user timezone is Shanghai;
+    # time normalization can also erase the original hour. Require the date
+    # fixed in the case manifest rather than silently adding a day to UTC.
+    expected_date = getattr(args, "expected_target_date", None)
+    try:
+        tomorrow = dt.date.fromisoformat(expected_date).isoformat()
+    except (TypeError, ValueError):
+        return False, "explicit case_target_date is required for tomorrow validation"
     for message in payload.get("messages", []):
         if message.get("role") != "tool":
             continue
@@ -138,6 +141,10 @@ def main():
         parser.error("metadata.source_commit must be a full verified Git SHA")
     if not re.fullmatch(r"[0-9a-f]{64}", metadata.get("binary_sha256", "")):
         parser.error("metadata.binary_sha256 must be a verified binary SHA256")
+    try:
+        args.expected_target_date = dt.date.fromisoformat(metadata["case_target_date"]).isoformat()
+    except (KeyError, TypeError, ValueError):
+        parser.error("metadata.case_target_date must explicitly specify the forecast date in the user's timezone")
     if args.warmups < 0 or args.repeats < 1:
         parser.error("warmups >= 0 and repeats >= 1 are required")
     output = Path(args.output)

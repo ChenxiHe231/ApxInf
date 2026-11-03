@@ -1,0 +1,574 @@
+{
+  "provenance": {
+    "source_commit_declared_by_package": "2c24e07d67565ee9251fb71fc480ef9d86823665",
+    "source_commit_verified_from_clean_build": false,
+    "binary_sha256_verified_now": "13da7d5c0473d10e28fd01e966603520d443cb23768ceb3b1eb67a7ece6f0b03",
+    "package_readme_sha256": "1b36bcdca552f284435d8713755f8dc4023a9b8f63c5f30e953e04cf435ce90e",
+    "raw_profile_sha256": "14a94088e9a62ff2dd56466d78dea5fbe806d1bcba6c5f431d4ab5226de73e23",
+    "proxy_log_sha256": "d431710329ac40c1d25764099d31c96a1a3fa3fea37d40ef1fed4e6db8223a50"
+  },
+  "case": "明天上海的天气怎么样",
+  "runs": [
+    {
+      "run": 1,
+      "request_id": "20261031162403988886",
+      "execution_time_ms": 3391.19,
+      "reply": "明天上海是晴天，白天22度，夜间14度，北风1到3级。",
+      "profiles": [
+        {
+          "prompt_tokens": 8853,
+          "reused_prompt_tokens": 8562,
+          "completion_tokens": 39,
+          "ttft_ms": 683.749963,
+          "total_latency_ms": 1205.526232,
+          "decode_ms": 521.776269,
+          "computed_prompt_tokens": 291,
+          "decode_intervals": 38
+        },
+        {
+          "prompt_tokens": 9322,
+          "reused_prompt_tokens": 8891,
+          "completion_tokens": 22,
+          "ttft_ms": 884.433231,
+          "total_latency_ms": 1313.805295,
+          "decode_ms": 429.3720639999999,
+          "computed_prompt_tokens": 431,
+          "decode_intervals": 21
+        }
+      ],
+      "raw_server_profile_lines": [
+        "request profile: prompt_tokens=8853 reused_prompt_tokens=8562 completion_tokens=39 ttft_ms=Some(683.749963) tpot_ms=Some(13.73095444736842) generation_tps=Some(72.82814926180555) total_latency_ms=Some(1205.526232)",
+        "request profile: prompt_tokens=9322 reused_prompt_tokens=8891 completion_tokens=22 ttft_ms=Some(884.433231) tpot_ms=Some(20.446288761904764) generation_tps=Some(48.90863137290646) total_latency_ms=Some(1313.805295)"
+      ],
+      "stages": [
+        {
+          "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+          "time_ms": 683.749963,
+          "percent": 20.162537722746293
+        },
+        {
+          "stage": "模型调用1 Decode：38 个间隔",
+          "time_ms": 521.776269,
+          "percent": 15.386229288243948
+        },
+        {
+          "stage": "AMap 查询及工具编排间隔",
+          "time_ms": 414.507,
+          "percent": 12.223054444015226
+        },
+        {
+          "stage": "模型调用2 Prefill/TTFT：新增 431 tokens",
+          "time_ms": 884.433231,
+          "percent": 26.08032080184242
+        },
+        {
+          "stage": "模型调用2 Decode：21 个间隔",
+          "time_ms": 429.3720639999999,
+          "percent": 12.661398034318333
+        },
+        {
+          "stage": "AIOS、模型服务、HTTP及其他余项",
+          "time_ms": 457.35147300000017,
+          "percent": 13.486459708833777
+        }
+      ],
+      "http_events": [
+        {
+          "event": "request",
+          "capture_id": "e265e33dbf97405cbe0cec2929038097",
+          "time": "2026-10-31T16:24:04.049676+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "e265e33dbf97405cbe0cec2929038097",
+          "time": "2026-10-31T16:24:05.436032+00:00",
+          "duration_ms": 1386.33,
+          "finish_reasons": [
+            "tool_calls"
+          ],
+          "tool_call_names": [
+            "mcp__amap__maps_weather"
+          ]
+        },
+        {
+          "event": "request",
+          "capture_id": "ce6b89fe1c6548b69fb8387ba89b791e",
+          "time": "2026-10-31T16:24:05.850539+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "ce6b89fe1c6548b69fb8387ba89b791e",
+          "time": "2026-10-31T16:24:07.367527+00:00",
+          "duration_ms": 1517.5,
+          "finish_reasons": [
+            "stop"
+          ],
+          "tool_call_names": []
+        }
+      ],
+      "date_audit": {
+        "request_timestamp": "2026-10-31T16:24:05+00:00",
+        "utc_tomorrow": "2026-11-01",
+        "shanghai_tomorrow": "2026-11-02",
+        "shanghai_expected": {
+          "date": "2026-11-02",
+          "daytemp": "22",
+          "nighttemp": "14",
+          "dayweather": "晴",
+          "nightweather": "阴"
+        },
+        "reply_temperature_matches_shanghai_tomorrow": true,
+        "qualification": "Shanghai timezone is an explicit retrospective audit assumption; original run lacked a declared date policy."
+      }
+    },
+    {
+      "run": 2,
+      "request_id": "20261031162407404351",
+      "execution_time_ms": 3715.36,
+      "reply": "明天上海是晴天，白天最高22度，夜间最低14度，北风1到3级。建议带件外套，早晚比较凉。",
+      "profiles": [
+        {
+          "prompt_tokens": 8853,
+          "reused_prompt_tokens": 8562,
+          "completion_tokens": 39,
+          "ttft_ms": 683.459833,
+          "total_latency_ms": 1207.075216,
+          "decode_ms": 523.615383,
+          "computed_prompt_tokens": 291,
+          "decode_intervals": 38
+        },
+        {
+          "prompt_tokens": 9322,
+          "reused_prompt_tokens": 8891,
+          "completion_tokens": 33,
+          "ttft_ms": 879.315389,
+          "total_latency_ms": 1503.3136,
+          "decode_ms": 623.998211,
+          "computed_prompt_tokens": 431,
+          "decode_intervals": 32
+        }
+      ],
+      "raw_server_profile_lines": [
+        "request profile: prompt_tokens=8853 reused_prompt_tokens=8562 completion_tokens=39 ttft_ms=Some(683.459833) tpot_ms=Some(13.779352184210525) generation_tps=Some(72.57235221448794) total_latency_ms=Some(1207.075216)",
+        "request profile: prompt_tokens=9322 reused_prompt_tokens=8891 completion_tokens=33 ttft_ms=Some(879.315389) tpot_ms=Some(19.49994409375) generation_tps=Some(51.28219830745637) total_latency_ms=Some(1503.3136)"
+      ],
+      "stages": [
+        {
+          "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+          "time_ms": 683.459833,
+          "percent": 18.39552110697214
+        },
+        {
+          "stage": "模型调用1 Decode：38 个间隔",
+          "time_ms": 523.615383,
+          "percent": 14.093261029886738
+        },
+        {
+          "stage": "AMap 查询及工具编排间隔",
+          "time_ms": 491.348,
+          "percent": 13.224774988157272
+        },
+        {
+          "stage": "模型调用2 Prefill/TTFT：新增 431 tokens",
+          "time_ms": 879.315389,
+          "percent": 23.667030624219457
+        },
+        {
+          "stage": "模型调用2 Decode：32 个间隔",
+          "time_ms": 623.998211,
+          "percent": 16.79509417660738
+        },
+        {
+          "stage": "AIOS、模型服务、HTTP及其他余项",
+          "time_ms": 513.623184,
+          "percent": 13.824318074157013
+        }
+      ],
+      "http_events": [
+        {
+          "event": "request",
+          "capture_id": "87c2730f694a4b139553a2564b83c7f3",
+          "time": "2026-10-31T16:24:07.440996+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "87c2730f694a4b139553a2564b83c7f3",
+          "time": "2026-10-31T16:24:08.913067+00:00",
+          "duration_ms": 1471.8,
+          "finish_reasons": [
+            "tool_calls"
+          ],
+          "tool_call_names": [
+            "mcp__amap__maps_weather"
+          ]
+        },
+        {
+          "event": "request",
+          "capture_id": "22233e294ee74a548d5a222c24fa01be",
+          "time": "2026-10-31T16:24:09.404415+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "22233e294ee74a548d5a222c24fa01be",
+          "time": "2026-10-31T16:24:11.108655+00:00",
+          "duration_ms": 1705.02,
+          "finish_reasons": [
+            "stop"
+          ],
+          "tool_call_names": []
+        }
+      ],
+      "date_audit": {
+        "request_timestamp": "2026-10-31T16:24:09+00:00",
+        "utc_tomorrow": "2026-11-01",
+        "shanghai_tomorrow": "2026-11-02",
+        "shanghai_expected": {
+          "date": "2026-11-02",
+          "daytemp": "22",
+          "nighttemp": "14",
+          "dayweather": "晴",
+          "nightweather": "阴"
+        },
+        "reply_temperature_matches_shanghai_tomorrow": true,
+        "qualification": "Shanghai timezone is an explicit retrospective audit assumption; original run lacked a declared date policy."
+      }
+    },
+    {
+      "run": 3,
+      "request_id": "20261031162411176709",
+      "execution_time_ms": 3494.44,
+      "reply": "明天上海小雨，白天26度，夜间16度，西北风1到3级，记得带伞。",
+      "profiles": [
+        {
+          "prompt_tokens": 8853,
+          "reused_prompt_tokens": 8562,
+          "completion_tokens": 38,
+          "ttft_ms": 685.20438,
+          "total_latency_ms": 1206.231151,
+          "decode_ms": 521.0267709999999,
+          "computed_prompt_tokens": 291,
+          "decode_intervals": 37
+        },
+        {
+          "prompt_tokens": 9321,
+          "reused_prompt_tokens": 8890,
+          "completion_tokens": 26,
+          "ttft_ms": 877.560815,
+          "total_latency_ms": 1343.846584,
+          "decode_ms": 466.28576899999985,
+          "computed_prompt_tokens": 431,
+          "decode_intervals": 25
+        }
+      ],
+      "raw_server_profile_lines": [
+        "request profile: prompt_tokens=8853 reused_prompt_tokens=8562 completion_tokens=38 ttft_ms=Some(685.20438) tpot_ms=Some(14.081804621621623) generation_tps=Some(71.01362551675871) total_latency_ms=Some(1206.231151)",
+        "request profile: prompt_tokens=9321 reused_prompt_tokens=8890 completion_tokens=26 ttft_ms=Some(877.560815) tpot_ms=Some(18.65143076) generation_tps=Some(53.61518978718821) total_latency_ms=Some(1343.846584)"
+      ],
+      "stages": [
+        {
+          "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+          "time_ms": 685.20438,
+          "percent": 19.60841737159602
+        },
+        {
+          "stage": "模型调用1 Decode：37 个间隔",
+          "time_ms": 521.0267709999999,
+          "percent": 14.910165033596225
+        },
+        {
+          "stage": "AMap 查询及工具编排间隔",
+          "time_ms": 424.009,
+          "percent": 12.133818294204508
+        },
+        {
+          "stage": "模型调用2 Prefill/TTFT：新增 431 tokens",
+          "time_ms": 877.560815,
+          "percent": 25.113060032508784
+        },
+        {
+          "stage": "模型调用2 Decode：25 个间隔",
+          "time_ms": 466.28576899999985,
+          "percent": 13.34364788063323
+        },
+        {
+          "stage": "AIOS、模型服务、HTTP及其他余项",
+          "time_ms": 520.3532650000002,
+          "percent": 14.89089138746123
+        }
+      ],
+      "http_events": [
+        {
+          "event": "request",
+          "capture_id": "a30d17a9c8314548a963b4cc82949756",
+          "time": "2026-10-31T16:24:11.251266+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "a30d17a9c8314548a963b4cc82949756",
+          "time": "2026-10-31T16:24:12.700443+00:00",
+          "duration_ms": 1449.53,
+          "finish_reasons": [
+            "tool_calls"
+          ],
+          "tool_call_names": [
+            "mcp__amap__maps_weather"
+          ]
+        },
+        {
+          "event": "request",
+          "capture_id": "46ded6e678c44a77a1126314d8360bd9",
+          "time": "2026-10-31T16:24:13.124452+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "46ded6e678c44a77a1126314d8360bd9",
+          "time": "2026-10-31T16:24:14.654068+00:00",
+          "duration_ms": 1528.98,
+          "finish_reasons": [
+            "stop"
+          ],
+          "tool_call_names": []
+        }
+      ],
+      "date_audit": {
+        "request_timestamp": "2026-10-31T16:24:13+00:00",
+        "utc_tomorrow": "2026-11-01",
+        "shanghai_tomorrow": "2026-11-02",
+        "shanghai_expected": {
+          "date": "2026-11-02",
+          "daytemp": "22",
+          "nighttemp": "14",
+          "dayweather": "晴",
+          "nightweather": "阴"
+        },
+        "reply_temperature_matches_shanghai_tomorrow": false,
+        "qualification": "Shanghai timezone is an explicit retrospective audit assumption; original run lacked a declared date policy."
+      }
+    },
+    {
+      "run": 4,
+      "request_id": "20261031162414701956",
+      "execution_time_ms": 3547.28,
+      "reply": "明天上海是晴天，白天最高22度，夜间转阴，最低14度，北风1到3级。",
+      "profiles": [
+        {
+          "prompt_tokens": 8853,
+          "reused_prompt_tokens": 8562,
+          "completion_tokens": 39,
+          "ttft_ms": 687.266815,
+          "total_latency_ms": 1247.66616,
+          "decode_ms": 560.399345,
+          "computed_prompt_tokens": 291,
+          "decode_intervals": 38
+        },
+        {
+          "prompt_tokens": 9322,
+          "reused_prompt_tokens": 8891,
+          "completion_tokens": 27,
+          "ttft_ms": 874.186407,
+          "total_latency_ms": 1344.384065,
+          "decode_ms": 470.19765799999993,
+          "computed_prompt_tokens": 431,
+          "decode_intervals": 26
+        }
+      ],
+      "raw_server_profile_lines": [
+        "request profile: prompt_tokens=8853 reused_prompt_tokens=8562 completion_tokens=39 ttft_ms=Some(687.266815) tpot_ms=Some(14.747351184210528) generation_tps=Some(67.80878732112008) total_latency_ms=Some(1247.66616)",
+        "request profile: prompt_tokens=9322 reused_prompt_tokens=8891 completion_tokens=27 ttft_ms=Some(874.186407) tpot_ms=Some(18.084525307692306) generation_tps=Some(55.29589430664497) total_latency_ms=Some(1344.384065)"
+      ],
+      "stages": [
+        {
+          "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+          "time_ms": 687.266815,
+          "percent": 19.374473258383887
+        },
+        {
+          "stage": "模型调用1 Decode：38 个间隔",
+          "time_ms": 560.399345,
+          "percent": 15.798001426445051
+        },
+        {
+          "stage": "AMap 查询及工具编排间隔",
+          "time_ms": 407.842,
+          "percent": 11.497316253580207
+        },
+        {
+          "stage": "模型调用2 Prefill/TTFT：新增 431 tokens",
+          "time_ms": 874.186407,
+          "percent": 24.643851260684244
+        },
+        {
+          "stage": "模型调用2 Decode：26 个间隔",
+          "time_ms": 470.19765799999993,
+          "percent": 13.25516051735414
+        },
+        {
+          "stage": "AIOS、模型服务、HTTP及其他余项",
+          "time_ms": 547.3877750000001,
+          "percent": 15.431197283552471
+        }
+      ],
+      "http_events": [
+        {
+          "event": "request",
+          "capture_id": "6a3cda096d994ec3b6b644d5b8c7e827",
+          "time": "2026-10-31T16:24:14.750730+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "6a3cda096d994ec3b6b644d5b8c7e827",
+          "time": "2026-10-31T16:24:16.286152+00:00",
+          "duration_ms": 1534.48,
+          "finish_reasons": [
+            "tool_calls"
+          ],
+          "tool_call_names": [
+            "mcp__amap__maps_weather"
+          ]
+        },
+        {
+          "event": "request",
+          "capture_id": "a14f6b395abc4401951bfaa5c196121a",
+          "time": "2026-10-31T16:24:16.693994+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "a14f6b395abc4401951bfaa5c196121a",
+          "time": "2026-10-31T16:24:18.239490+00:00",
+          "duration_ms": 1546.63,
+          "finish_reasons": [
+            "stop"
+          ],
+          "tool_call_names": []
+        }
+      ],
+      "date_audit": {
+        "request_timestamp": "2026-10-31T16:24:16+00:00",
+        "utc_tomorrow": "2026-11-01",
+        "shanghai_tomorrow": "2026-11-02",
+        "shanghai_expected": {
+          "date": "2026-11-02",
+          "daytemp": "22",
+          "nighttemp": "14",
+          "dayweather": "晴",
+          "nightweather": "阴"
+        },
+        "reply_temperature_matches_shanghai_tomorrow": true,
+        "qualification": "Shanghai timezone is an explicit retrospective audit assumption; original run lacked a declared date policy."
+      }
+    },
+    {
+      "run": 5,
+      "request_id": "20261031162418286018",
+      "execution_time_ms": 3494.76,
+      "reply": "明天上海白天小雨，气温26到16度，西北风1到3级。记得带伞。",
+      "profiles": [
+        {
+          "prompt_tokens": 8853,
+          "reused_prompt_tokens": 8562,
+          "completion_tokens": 39,
+          "ttft_ms": 681.771759,
+          "total_latency_ms": 1240.347316,
+          "decode_ms": 558.5755570000001,
+          "computed_prompt_tokens": 291,
+          "decode_intervals": 38
+        },
+        {
+          "prompt_tokens": 9322,
+          "reused_prompt_tokens": 8891,
+          "completion_tokens": 25,
+          "ttft_ms": 873.871657,
+          "total_latency_ms": 1302.104919,
+          "decode_ms": 428.2332620000001,
+          "computed_prompt_tokens": 431,
+          "decode_intervals": 24
+        }
+      ],
+      "raw_server_profile_lines": [
+        "request profile: prompt_tokens=8853 reused_prompt_tokens=8562 completion_tokens=39 ttft_ms=Some(681.771759) tpot_ms=Some(14.699356763157894) generation_tps=Some(68.03018772266114) total_latency_ms=Some(1240.347316)",
+        "request profile: prompt_tokens=9322 reused_prompt_tokens=8891 completion_tokens=25 ttft_ms=Some(873.871657) tpot_ms=Some(17.843052583333336) generation_tps=Some(56.04422199226551) total_latency_ms=Some(1302.104919)"
+      ],
+      "stages": [
+        {
+          "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+          "time_ms": 681.771759,
+          "percent": 19.508399975964014
+        },
+        {
+          "stage": "模型调用1 Decode：38 个间隔",
+          "time_ms": 558.5755570000001,
+          "percent": 15.983230808410308
+        },
+        {
+          "stage": "AMap 查询及工具编排间隔",
+          "time_ms": 398.863,
+          "percent": 11.413172864517163
+        },
+        {
+          "stage": "模型调用2 Prefill/TTFT：新增 431 tokens",
+          "time_ms": 873.871657,
+          "percent": 25.005197982121803
+        },
+        {
+          "stage": "模型调用2 Decode：24 个间隔",
+          "time_ms": 428.2332620000001,
+          "percent": 12.253581419038792
+        },
+        {
+          "stage": "AIOS、模型服务、HTTP及其他余项",
+          "time_ms": 553.4447649999997,
+          "percent": 15.836416949947914
+        }
+      ],
+      "http_events": [
+        {
+          "event": "request",
+          "capture_id": "0d20208a18e54dcdab461c795a6c273e",
+          "time": "2026-10-31T16:24:18.336056+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "0d20208a18e54dcdab461c795a6c273e",
+          "time": "2026-10-31T16:24:19.870562+00:00",
+          "duration_ms": 1533.95,
+          "finish_reasons": [
+            "tool_calls"
+          ],
+          "tool_call_names": [
+            "mcp__amap__maps_weather"
+          ]
+        },
+        {
+          "event": "request",
+          "capture_id": "8bd5b93601e541c7b9c226159f4c7e3a",
+          "time": "2026-10-31T16:24:20.269425+00:00"
+        },
+        {
+          "event": "response",
+          "capture_id": "8bd5b93601e541c7b9c226159f4c7e3a",
+          "time": "2026-10-31T16:24:21.768769+00:00",
+          "duration_ms": 1499.61,
+          "finish_reasons": [
+            "stop"
+          ],
+          "tool_call_names": []
+        }
+      ],
+      "date_audit": {
+        "request_timestamp": "2026-10-31T16:24:20+00:00",
+        "utc_tomorrow": "2026-11-01",
+        "shanghai_tomorrow": "2026-11-02",
+        "shanghai_expected": {
+          "date": "2026-11-02",
+          "daytemp": "22",
+          "nighttemp": "14",
+          "dayweather": "晴",
+          "nightweather": "阴"
+        },
+        "reply_temperature_matches_shanghai_tomorrow": false,
+        "qualification": "Shanghai timezone is an explicit retrospective audit assumption; original run lacked a declared date policy."
+      }
+    }
+  ],
+  "qualification": "Recovered historical timings, not a new GPU run. Original 5/5 success claim established tool-chain completion only; next-day timezone semantics were not consistently validated."
+}

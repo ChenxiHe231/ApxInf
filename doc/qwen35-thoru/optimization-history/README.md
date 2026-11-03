@@ -18,6 +18,7 @@
 | Adaptive MTP + GPU acceptance + GDN verification | depth 1/2/3、独立 verifier shape、GPU token 链/接受打包、GDN checkpoint、精确 prompt cache | [S2](records/S2-adaptive-mtp.md) |
 | Serving prompt/SSE cache | 缓存模板/tokenization、prefix boundary 和 SSE 合并/缓冲 | [S3](records/S3-serving.md) |
 | Weather adapter and reproducible evidence tooling | opt-in 天气结果压缩、请求记录代理、阶段统计脚本和历史原始数据 | [S4](records/S4-weather-adapter.md) |
+| Historical evidence and date-policy audit | 恢复2c24e07包的同轮profile；要求显式目标预报日期 | [S5](records/S5-date-audit.md) |
 
 MTP depth、backend proposal 常量、verifier 资源、GDN checkpoint 与 host commit 合约耦合，作为一个完整提交；不能拆成中间运行时相互不匹配的版本。
 
@@ -49,13 +50,15 @@ MTP depth、backend proposal 常量、verifier 资源、GDN checkpoint 与 host 
 | `c3606422` | feat(qwen35): page KV cache in 128-token blocks | [待测](records/c3606422.md) |
 | `11f638b8` | feat(qwen35): load TensorRT static FP8 KV scales | [待测](records/11f638b8.md) |
 | `6265b8fa` | Optimize Qwen3.6 MTP2 and FP8 prefix reuse | [待测](records/6265b8fa.md) |
-| `2c24e07d` | fix(qwen35): reuse live MTP context across tool turns | [待测](records/2c24e07d.md) |
+| `2c24e07d` | fix(qwen35): reuse live MTP context across tool turns | [历史包记录已恢复；重建重测待执行](records/2c24e07d.md) |
 | `36d0d0f6` | fix(qwen35): recover missing recipes and share cuBLAS handles | [待测](records/36d0d0f6.md) |
 
 ## 历史成绩的适用范围
 
 2026-11-03 的 10 轮天气 case 中位数 1.519645 s、最快 1.48636 s，是当时未提交工作区与特定 recipe/代理配置的运行记录。它证明该次运行的端到端结果，**无法证明本目录任一精确 commit 的性能**。原始输出整理在最终提交的 `evidence/` 中。
 无法复原的二进制/源码哈希标为 unknown，不从文件名猜测。新序列继承并行任务的 36d0d0f，也不同于此前历史测试的源码组合。
+
+另已恢复声明为 `2c24e07` 的历史部署包：二进制 SHA256 已核对，5轮 AIOS 输出、逐调用 profile 和 HTTP 时间戳可复查；源码归属只有包内声明，未建立干净重建证明。日期审计发现 UTC/上海跨午夜歧义，旧“5/5成功”不能当成5轮日期正确。详见该版本记录与 `evidence/2c24e07-package-weather.json`。
 
 AMap 记录为两次模型 HTTP 之间的间隔，包含调度与序列化，不等于纯 API 时间。模型时间以 server profile 为准；TTFT 包括缓存恢复及首 token。其余为差值，不能据此宣称 AIOS 或 AMap 被 kernel 优化加速。旧 3.92 s 表无可定位的完整 trace，不能用于分阶段增益归因。
 

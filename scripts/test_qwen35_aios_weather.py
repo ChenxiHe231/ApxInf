@@ -81,10 +81,28 @@ class WeatherEvidenceTests(unittest.TestCase):
             event = {"choices": [{"delta": {"tool_calls": [{"function": {"name": "mcp__amap__maps_weather", "arguments": '{"city":"上海"}'}}]}}]}
             (path / "a.response").write_text("data: " + json.dumps(event) + "\n\ndata: [DONE]\n")
             (path / "b.request").write_text(json.dumps({"messages": self.messages()}, ensure_ascii=False))
-            args = SimpleNamespace(capture_dir=directory)
+            args = SimpleNamespace(capture_dir=directory, expected_target_date="2026-11-04")
             reqs = [{"capture_id": "a"}, {"capture_id": "b"}]
             self.assertTrue(validate_weather(args, reqs, [{}, {}], "明天上海小雨，15到19度")[0])
             self.assertFalse(validate_weather(args, reqs, [{}, {}], "明天上海小雨转中雨，16到20度")[0])
+
+    def test_utc_date_cannot_override_case_target_date(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            event = {"choices": [{"delta": {"tool_calls": [{"function": {"name": "mcp__amap__maps_weather", "arguments": '{"city":"上海"}'}}]}}]}
+            (path / "a.response").write_text("data: " + json.dumps(event) + "\n\ndata: [DONE]\n")
+            messages = self.messages()
+            messages[1]["content"] = "Time sampled while preparing turn 1, step 2: 2026-11-03T16:24:00+00:00[UTC]"
+            (path / "b.request").write_text(json.dumps({"messages": messages}, ensure_ascii=False))
+            reqs = [{"capture_id": "a"}, {"capture_id": "b"}]
+            # Shanghai is already Nov 4, so tomorrow is Nov 5, even though
+            # adding a day to the injected UTC date would select Nov 4.
+            args = SimpleNamespace(capture_dir=directory, expected_target_date="2026-11-05")
+            self.assertFalse(validate_weather(args, reqs, [{}, {}], "明天上海小雨，15到19度")[0])
+            args.expected_target_date = None
+            valid, reason = validate_weather(args, reqs, [{}, {}], "明天上海小雨，15到19度")
+            self.assertFalse(valid)
+            self.assertIn("explicit case_target_date", reason)
 
 
 if __name__ == "__main__":

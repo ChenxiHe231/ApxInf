@@ -41,6 +41,7 @@ python3 scripts/qwen35_aios_proxy.py \
   "source_commit": "<40位完整SHA>",
   "binary_sha256": "<实际进程二进制64位SHA256>",
   "source_dirty": false,
+  "case_target_date": "2026-11-04",
   "configuration": {"argv": [], "environment": {}, "temperature": 0},
   "recipes": {"path": "<绝对路径>", "manifest_sha256": "<清单SHA256>"},
   "hardware": {"host": "thor-u", "power_mode": "<实测>", "clock_policy": "<实测>"},
@@ -49,6 +50,8 @@ python3 scripts/qwen35_aios_proxy.py \
 ```
 
 collector 会校验 SHA 字段格式，身份内容仍需操作者对应运行进程核验；不要只对某个磁盘文件计算 hash 后假定它就是运行中的 executable。
+
+`case_target_date` 必须按测试用户时区明确给定。例如上海用户在 2026-11-03 询问“明天”，目标为 2026-11-04；UTC 2026-11-03 16:00 后上海已是 11 月 4 日，目标应为 11 月 5 日。跨本地午夜需新建 run 和 manifest，不能从被归一化的 UTC 日期静默推导目标日期。
 
 ```sh
 python3 scripts/bench_qwen35_aios_weather.py \
