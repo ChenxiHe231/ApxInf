@@ -286,6 +286,67 @@ fn kv_cache_attention_all_candidates_match_reference() {
 }
 
 #[test]
+fn kv_cache_cold_fa2_fallback_matches_reference_without_autotune() {
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    let (queries, keys, heads, dim) = (3, 17, 2, 128);
+    let q: Vec<_> = (0..queries * heads * dim)
+        .map(|i| ((i * 3 % 17) as f32 - 8.0) / 16.0).collect();
+    let k: Vec<_> = (0..keys * heads * dim)
+        .map(|i| ((i * 5 % 19) as f32 - 9.0) / 16.0).collect();
+    let v: Vec<_> = (0..keys * heads * dim)
+        .map(|i| ((i * 7 % 23) as f32 - 11.0) / 16.0).collect();
+    let query = tensor(0, vec![1, queries, heads, dim], &q);
+    let key = tensor(0, vec![1, keys, heads, dim], &k);
+    let value = tensor(0, vec![1, keys, heads, dim], &v);
+    let mut out = zeros_tensor(0, vec![1, queries, heads, dim], DType::BF16);
+    let mut args = KvCacheAttentionArgs::new(&query, &key, &value, &mut out);
+    args.valid_key_tokens = keys;
+    args.query_start = keys - queries;
+    args.policy.online_tune = false;
+    args.policy.cache_dir = Some(String::new());
+    let execution = super::attention_execution::prepare(
+        &ctx, super::normalize_kv_cache_attention(&ctx, args).unwrap(),
+    ).unwrap();
+    assert!(execution.summary().starts_with("flash-attention-2-kv-cache "));
+    assert!(execution.summary().contains("source=fallback"));
+    execution.enqueue_for_test().unwrap();
+    let graph = crate::capture(&ctx, || execution.enqueue_for_test()).unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    let expected = kv_cache_attention_reference(
+        &q, &k, &v, 1, queries, keys, keys, heads, heads, dim,
+        keys - queries, 1.0 / (dim as f32).sqrt(), true,
+    );
+    for (actual, expected) in values(&out).iter().zip(&expected) {
+        assert!((actual - expected).abs() < 0.01,
+                "FA2 fallback mismatch: {actual} vs {expected}");
+    }
+}
+
+#[test]
+fn fp8_cold_fallback_keeps_weights_packed_and_matches_reference() {
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    let (m, k, n) = (3, 256, 512);
+    let a = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
+    let b = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
+    let mut out = zeros_tensor(0, vec![m, n], DType::BF16);
+    let mut args = GemmArgs::new(&a, &b, &mut out);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.alpha = 0.375;
+    args.policy.cache_dir = Some(String::new());
+    args.policy.online_tune = false;
+    let execution = super::execution::prepare(
+        &ctx, super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap(),
+    ).unwrap();
+    assert!(execution.summary().starts_with("cutlass-fp8-baseline config=0 workspace=0 "));
+    execution.enqueue().unwrap();
+    let graph = crate::capture(&ctx, || execution.enqueue()).unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    assert!(values(&out).iter().all(|&v| v == 96.0));
+}
+
+#[test]
 fn segmented_attention_all_candidates_match_reference() {
     let ctx = CudaContext::new(0).unwrap();
     let (tokens, heads, head_dim) = (4, 2, 8);

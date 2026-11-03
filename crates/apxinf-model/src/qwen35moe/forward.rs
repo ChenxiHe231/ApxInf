@@ -509,8 +509,7 @@ impl BaseMoeScratch {
                 alpha: f32,
                 out: &mut Tensor,
             ) -> Result<()> {
-                let mut args = ops::GemmArgs::nvfp4(a, a_s, b, b_s, NVFP4_BLOCK_SIZE, alpha, out);
-                args.policy.allow_fallback = false;
+                let args = ops::GemmArgs::nvfp4(a, a_s, b, b_s, NVFP4_BLOCK_SIZE, alpha, out);
                 ops::gemm(ctx, args)
             }
 
@@ -938,9 +937,8 @@ impl BaseMoeScratch {
                           alpha: f32,
                           output: &mut Tensor|
          -> Result<()> {
-            let mut args =
+            let args =
                 ops::GemmArgs::nvfp4(a, a_scales, b, b_scales, NVFP4_BLOCK_SIZE, alpha, output);
-            args.policy.allow_fallback = false;
             ops::gemm(ctx, args)
         };
 

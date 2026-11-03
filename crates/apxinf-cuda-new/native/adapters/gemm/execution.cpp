@@ -521,7 +521,11 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
         source = "fallback";
       } else {
         throw Failure(APXINF_STATUS_CACHE_MISS,
-                      "GEMM recipe miss and tuning/fallback are disabled");
+                      "GEMM recipe miss and tuning/fallback are disabled: "
+                      "M=" + std::to_string(normalized_spec.m) +
+                      " N=" + std::to_string(normalized_spec.n) +
+                      " K=" + std::to_string(normalized_spec.k) +
+                      " key=" + key + " cache_dir=" + cache_dir);
       }
 
       if (!persist_recipe) {

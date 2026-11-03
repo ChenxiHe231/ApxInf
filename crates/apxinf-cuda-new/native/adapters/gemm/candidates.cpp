@@ -389,6 +389,23 @@ void cutlass_nvfp4_configurations(const Spec& spec, std::vector<int>& configs) {
     }
   }
 }
+
+// One-CTA 128x128x128 avoids the cluster requirement of the tuned 2-CTA
+// variants and also supports K divisible by 128 rather than only 256.
+bool supports_cutlass_nvfp4_baseline(const Spec& spec) {
+  return spec.semantic == APXINF_GEMM_SEMANTIC_GEMM &&
+         spec.quantization == APXINF_GEMM_QUANT_NVFP4_BLOCK &&
+         spec.a_dtype == APXINF_DTYPE_E2M1_PAIR &&
+         spec.b_dtype == APXINF_DTYPE_E2M1_PAIR &&
+         spec.output_dtype == APXINF_DTYPE_BF16 &&
+         apxinf::cuda_new::cutlass_ops::nvfp4_gemm_tactic_supported(
+             3, static_cast<int>(spec.m), static_cast<int>(spec.n),
+             static_cast<int>(spec.k), static_cast<int>(spec.sf_vec_size));
+}
+
+void cutlass_nvfp4_baseline_configuration(const Spec&, std::vector<int>& configs) {
+  configs.push_back(3);
+}
 #endif
 
 #ifdef APXINF_GEMM_CUTLASS_SM89
@@ -465,8 +482,8 @@ AlignmentRequirements exact_gelu_alignment(const Spec&) {
 void exact_gelu_configurations(const Spec&,std::vector<int>& out) { for(int i=0;i<6;++i)out.push_back(i); }
 #endif
 const ImplementationRegistry& registry(uint32_t semantic) {
-  // Every L3 semantic has exactly one baseline fallback. cuBLAS owns that role;
-  // faster or more specialized providers remain autotuning candidates only.
+  // Prefer precision-preserving baselines to avoid per-execution FP8 weight
+  // expansion. cuBLAS remains the generic baseline for other contracts.
   static const ImplementationRegistry gemm_bias_gelu_entries = {
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", WeightLayout::Canonical, 0, true, true, true,
        supports_cublas, vendor_alignment, cublas_resource_requirements,
@@ -559,6 +576,11 @@ const ImplementationRegistry& registry(uint32_t semantic) {
       {kProviderCutlass, 4, 1, "cutlass-nvfp4-blockscaled", WeightLayout::NK, kDeviceFeatureCutlassSm100, true, true, false,
        supports_cutlass_nvfp4, cutlass_nvfp4_alignment,
        cutlass_nvfp4_resource_requirements, cutlass_nvfp4_configurations,
+       prepare_cutlass_nvfp4, launch_cutlass_nvfp4, destroy_cutlass},
+      {kProviderCutlass, 5, 1, "cutlass-nvfp4-baseline",
+       kDeviceFeatureCutlassSm100, true, true, true,
+       supports_cutlass_nvfp4_baseline, cutlass_nvfp4_alignment,
+       cutlass_nvfp4_resource_requirements, cutlass_nvfp4_baseline_configuration,
        prepare_cutlass_nvfp4, launch_cutlass_nvfp4, destroy_cutlass},
 #endif
 #ifdef APXINF_GEMM_CUTLASS_SM87_W8A8
@@ -676,9 +698,14 @@ const ImplementationRegistry& registry(uint32_t semantic) {
       [](const Implementation& implementation) {
         return implementation.fallback;
       });
-  if (fallback_count != 1) {
+  const auto expected_fallbacks =
+#ifdef APXINF_GEMM_CUTLASS
+      semantic == APXINF_GEMM_SEMANTIC_GEMM ? 3 :
+#endif
+      1;
+  if (fallback_count != expected_fallbacks) {
     throw Failure(APXINF_STATUS_INTERNAL_ERROR,
-                  "GEMM semantic must register exactly one fallback");
+                  "GEMM semantic has an invalid baseline registry");
   }
   return *selected;
 }

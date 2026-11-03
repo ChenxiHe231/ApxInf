@@ -1,3 +1,4 @@
+#include <tuple>
 #include "vendor.h"
 #include "../../../kernels/custom/gemm.cuh"
 #include "../../../kernels/elementwise/broadcast_bf16_f32.cuh"
@@ -5,8 +6,34 @@
 namespace apxinf::gemm {
 namespace {
 
+struct SharedCublasHandle {
+  cublasHandle_t handle = nullptr;
+  std::mutex mutex;
+
+  ~SharedCublasHandle() {
+    if (handle != nullptr) cublasDestroy(handle);
+  }
+};
+
+std::shared_ptr<SharedCublasHandle> stream_handle(int device, void* stream, bool legacy) {
+  // Handles have a substantial hidden device allocation on Thor. Prepared
+  // executions on one thread/device/stream can share a handle while keeping
+  // their graph-bound workspaces independent. Weak entries do not extend a
+  // handle beyond the last execution (including captured graph retention).
+  using Key = std::tuple<int, void*, bool>;
+  static thread_local std::map<Key, std::weak_ptr<SharedCublasHandle>> handles;
+  auto& slot = handles[{device, stream, legacy}];
+  if (auto handle = slot.lock()) return handle;
+  auto handle = std::make_shared<SharedCublasHandle>();
+  check_cublas(cublasCreate(&handle->handle));
+  check_cublas(cublasSetMathMode(handle->handle, legacy ? CUBLAS_DEFAULT_MATH : CUBLAS_PEDANTIC_MATH));
+  slot = handle;
+  return handle;
+}
+
 struct CublasState {
   vendor::CommonResources common;
+  std::shared_ptr<SharedCublasHandle> shared_handle;
   cublasHandle_t handle = nullptr;
   void* workspace = nullptr;
   size_t workspace_bytes = 0;
@@ -15,7 +42,6 @@ struct CublasState {
 
   ~CublasState() {
     release_resources();
-    if (handle != nullptr) cublasDestroy(handle);
   }
 
   void release_resources() noexcept {
@@ -113,11 +139,8 @@ void prepare_cublas(Execution& state) {
     check_cuda(cudaMalloc(&resources->dequant_a, a_bytes));
     check_cuda(cudaMalloc(&resources->dequant_b, b_bytes));
   }
-  check_cublas(cublasCreate(&resources->handle));
-  check_cublas(cublasSetMathMode(
-      resources->handle, uses_legacy_cublas_numerics(state.spec)
-                             ? CUBLAS_DEFAULT_MATH
-                             : CUBLAS_PEDANTIC_MATH));
+  resources->shared_handle = stream_handle(state.device, state.bindings.stream, uses_legacy_cublas_numerics(state.spec));
+  resources->handle = resources->shared_handle->handle;
   resources->workspace_bytes = 4 * 1024 * 1024;
   check_cuda(cudaMalloc(&resources->workspace, resources->workspace_bytes));
   state.resource_bytes =
@@ -198,6 +221,7 @@ cudaError_t launch_cublas(Execution& state) {
       resources.common.unpack_a != nullptr
           ? data_type
           : input_cuda_dtype(compute_spec.a_dtype);
+  std::lock_guard<std::mutex> lock(resources.shared_handle->mutex);
   check_cublas(cublasSetStream(resources.handle, stream));
   check_cublas(cublasSetWorkspace(resources.handle, resources.workspace,
                                   resources.workspace_bytes));

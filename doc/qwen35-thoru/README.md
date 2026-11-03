@@ -195,10 +195,23 @@ After the server is healthy, send one representative AIOS request with its real
 roughly 13K system/tool prefix and at least two output tokens. The request must
 explicitly use `temperature=1.0`, `top_k=20`, and `top_p=0.95`. Stop this warmup
 server, then start the production server **without** `--autotune`, using the
-same `--tuning-dir`. Qwen3.6 production execution is strict: an uncovered
-shape returns an explicit `recipe miss` error instead of silently tuning or
-changing kernels inside a measured request. Warm up every AIOS prompt/binding
-shape that production will use.
+same `--tuning-dir`. Valid exact-key recipes are restored without benchmarking.
+Unseen NVFP4 GEMM shapes use the one-CTA CUTLASS baseline; unit-scale FP8 GEMM
+uses a zero-workspace CUTLASS baseline instead of expanding weights to BF16.
+Eligible exact-view
+KV-cache attention uses fixed-config FA2; neither requires online tuning.
+Fallback executions are not written as tuned winners. Warm up representative
+AIOS prompt/binding shapes with `--autotune` before measuring optimized latency,
+and report whether a measured request used a recipe or a baseline.
+
+Prepared cuBLAS GEMMs share a handle per preparation thread/device/stream while
+retaining independent graph workspaces. Thor's library handle itself reserves
+about 64 MiB; creating one per GEMM can exhaust the device pool while preparing
+the MTP verifier, even though the reported operator workspaces are small.
+Serving admission includes input, output budget and three MTP lookahead slots:
+for a Harness input cap of 32,768, use `--max-input-tokens 32768` and explicitly
+set the output budget (for example `--max-output-tokens 1024`). Reapply the GPU
+clock cap above after reboot and reserve a sufficient HugeTLB pool before load.
 
 ## 4. Supported runtime precision choices
 

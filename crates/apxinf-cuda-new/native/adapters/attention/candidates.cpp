@@ -397,7 +397,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        fa2_splitkv_resource_requirements, splitkv_configurations,
        prepare_fa2_splitkv, launch_fa2_splitkv, destroy_fa2_splitkv},
       {kProviderFa2, 1, 1, "flash-attention-2-kv-cache",
-       apxinf::gemm::kDeviceFeatureFa2, true, true, false, supports_fa2,
+       apxinf::gemm::kDeviceFeatureFa2, true, true, true, supports_fa2,
        fa2_alignment, fa2_resource_requirements, one_configuration,
        prepare_fa2, launch_fa2, destroy_fa2},
 #endif

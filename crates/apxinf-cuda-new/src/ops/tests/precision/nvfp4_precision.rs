@@ -141,7 +141,18 @@ fn nvfp4_all_candidates_match_reference() {
 }
 
 fn nvfp4_candidates_match_reference_for_rows(m: usize) {
-    let ctx = CudaContext::new(0).unwrap();
+    nvfp4_reference_for_rows(m, false);
+}
+
+#[test]
+fn nvfp4_cold_cache_fallback_matches_reference_without_autotune() {
+    for rows in [1, 63, 137] {
+        nvfp4_reference_for_rows(rows, true);
+    }
+}
+
+fn nvfp4_reference_for_rows(m: usize, fallback_only: bool) {
+    let ctx = CudaContext::new_with_autotune(0, !fallback_only).unwrap();
     let device = ctx.device_id();
     let (n, k, block_size) = (256usize, 512usize, 16u32);
     let blocks = k / block_size as usize;
@@ -181,7 +192,39 @@ fn nvfp4_candidates_match_reference_for_rows(m: usize) {
         GemmArgs::block_quantized(&a, &a_scales, &b, &b_scales, block_size, alpha, &mut out);
     args.policy.allow_fallback = false;
     args.policy.graph_safe = true;
-    validate_all_candidates(&ctx, args, None, &expected).unwrap();
+    if fallback_only {
+        // Disable disk recipes too: the test must exercise a genuinely unseen
+        // shape, with benchmarking forbidden at the context and operator levels.
+        args.policy.cache_dir = Some(String::new());
+        args.policy.online_tune = false;
+        args.policy.allow_fallback = false;
+        let normalized = super::contracts::normalize(
+            &ctx, args, super::contracts::Semantic::Gemm, None,
+        ).unwrap();
+        let error = super::execution::prepare(&ctx, normalized).err().unwrap();
+        assert!(error.to_string().contains("GEMM recipe miss"));
+        let mut args = GemmArgs::nvfp4(&a, &a_scales, &b, &b_scales, block_size, alpha, &mut out);
+        args.policy.cache_dir = Some(String::new());
+        args.policy.online_tune = false;
+        let normalized = super::contracts::normalize(
+            &ctx, args, super::contracts::Semantic::Gemm, None,
+        ).unwrap();
+        let execution = super::execution::prepare(&ctx, normalized).unwrap();
+        assert!(execution.summary().starts_with("cutlass-nvfp4-baseline config=3 "));
+        assert!(execution.summary().contains("source=fallback"));
+        execution.enqueue().unwrap();
+        let graph = crate::capture(&ctx, || execution.enqueue()).unwrap();
+        graph.replay().unwrap();
+        graph.replay().unwrap();
+        ctx.synchronize().unwrap();
+        for (actual, expected) in values(&out).iter().zip(&expected) {
+            assert!((actual - expected).abs() <= expected.abs() * 0.01 + 0.05,
+                    "fallback mismatch: {actual} vs {expected}");
+        }
+    } else {
+        args.policy.allow_fallback = false;
+        validate_all_candidates(&ctx, args, None, &expected).unwrap();
+    }
 }
 
 #[test]

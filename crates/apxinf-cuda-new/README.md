@@ -185,6 +185,22 @@ Recipe hit → resolve Candidate → validate → prepare → Execution
 | no usable recipe and both tune/fallback unavailable | Return cache miss/unsupported |
 | Persistence condition | Real prepare of the tune winner succeeds |
 
+Plain GEMM prefers a zero-workspace CUTLASS FP8 baseline (configuration 0) on
+Blackwell over cuBLAS's FP8-to-BF16 weight expansion. It also has a deterministic
+one-CTA CUTLASS NVFP4 baseline
+(128x128x128, tactic 3) for packed block-scaled operands. cuBLAS handles the
+remaining contracts. Production can use
+the latter for unseen shapes without online benchmarking. It is not saved
+as a tuned winner; `--autotune` still benchmarks and persists exact-key winners.
+Recipe writes fsync the temporary file before rename and then fsync the
+directory so a successful write does not rely only on buffered contents.
+For exact-view KV-cache attention, an eligible fixed-config FA2 execution is
+the first fallback; unsupported layouts retain the custom correctness kernel.
+cuBLAS executions on the same preparation thread/device/stream share a
+reference-counted handle, with serialized host submission and independent
+execution workspaces. This avoids one hidden library allocation per prepared
+GEMM while preserving captured graph workspace lifetimes.
+
 ### Default Persistence and Autotune
 
 GEMM and Attention resolve `Policy.cache_dir=None` to

@@ -614,7 +614,9 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
         fa2_args.valid_key_tokens = valid;
         fa2_args.query_start = request.start_position;
         fa2_args.scale = scale;
-        fa2_args.policy.allow_fallback = false;
+        // An unseen append length can use fixed-config FA2 without tuning.
+        // The native adapter selects FA2 before its scalar correctness fallback.
+        fa2_args.policy.allow_fallback = true;
         // The live KV view changes on every decode step. Caching this execution
         // would require a capacity-shaped dynamic binding, which excludes FA2
         // and falls back to the scalar correctness kernel (seconds/token at

@@ -86,6 +86,40 @@ fn recipe_db_round_trips_updates_and_rejects_invalid_reads() {
 }
 
 #[test]
+fn cublas_prepared_executions_share_handle_and_retain_graph_resources() {
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    let a = tensor(0, vec![4, 8], &[0.5; 32]);
+    let b = tensor(0, vec![8, 6], &[0.25; 48]);
+    let mut outputs: Vec<_> = (0..32).map(|_| tensor(0, vec![4, 6], &[0.0; 24])).collect();
+    let before = ctx.memory_info().unwrap().0;
+    let mut executions = Vec::new();
+    for output in &mut outputs {
+        let mut args = GemmArgs::new(&a, &b, output);
+        args.policy.online_tune = false;
+        args.policy.cache_dir = Some(String::new());
+        let execution = prepare_test_gemm(&ctx, args).unwrap();
+        assert!(execution.summary().starts_with("cublas+custom-epilogue "));
+        executions.push(execution);
+    }
+    let after = ctx.memory_info().unwrap().0;
+    let bytes = before.saturating_sub(after);
+    eprintln!("CUBLAS_32_EXECUTIONS_DEVICE_BYTES={bytes}");
+    // Independent 4 MiB workspaces plus one library handle fit well below
+    // this bound. One handle per execution costs over 2 GiB on Thor.
+    assert!(bytes < 512 * 1024 * 1024, "cuBLAS resources grew by {bytes} bytes");
+    for execution in &executions { execution.enqueue().unwrap(); }
+    let graph = crate::capture(&ctx, || {
+        executions[0].enqueue()?;
+        executions[31].enqueue()
+    }).unwrap();
+    drop(executions);
+    graph.replay().unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    for output in outputs { assert!(values(&output).iter().all(|&v| v == 1.0)); }
+}
+
+#[test]
 fn autotune_filters_failures_and_times_every_valid_configuration() {
     run_framework_contract("CUDA autotune selection", |error, capacity| unsafe {
         apxinf_framework_test_autotune_contract(0, error, capacity)
