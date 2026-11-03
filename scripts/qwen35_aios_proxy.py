@@ -179,6 +179,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     payload["disable_spec_decode"] = True
                     request_meta["disable_spec_decode"] = True
                     outbound = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                if self.server.single_tool_call:
+                    payload["parallel_tool_calls"] = False
+                    request_meta["parallel_tool_calls"] = False
+                    outbound = json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 if self.server.reuse_context:
                     payload["reuse_context"] = True
                     request_meta["reuse_context"] = True
@@ -384,6 +388,7 @@ def main():
     parser.add_argument("--sampling-defaults", action="store_true")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--disable-spec-decode", action="store_true")
+    parser.add_argument("--single-tool-call", action="store_true", help="Request one tool call per model response; enables native tool-terminator stopping on supporting models")
     parser.add_argument("--reuse-context", action="store_true")
     parser.add_argument("--no-reuse-context", action="store_true")
     parser.add_argument("--no-cache-generated-tokens", action="store_true")
@@ -406,6 +411,7 @@ def main():
     server.sampling_defaults = args.sampling_defaults
     server.seed = args.seed
     server.disable_spec_decode = args.disable_spec_decode
+    server.single_tool_call = args.single_tool_call
     server.reuse_context = args.reuse_context
     server.no_reuse_context = args.no_reuse_context
     server.no_cache_generated_tokens = args.no_cache_generated_tokens

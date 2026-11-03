@@ -45,7 +45,11 @@ impl ChatEngine for FakeEngine {
         {
             return Err(ApiError::internal("fake generation failure"));
         }
-        let text = if request.tools.is_empty() {
+        let text = if request.messages.iter().any(|message| {
+            message.content.as_ref().and_then(Value::as_str) == Some("inspect tool stop policy")
+        }) {
+            request.stop_after_tool_call.to_string()
+        } else if request.tools.is_empty() {
             "你好，我是离线 fake engine。".to_owned()
         } else {
             "<tool_call>\n<function=weather.get>\n<parameter=city>\n上海\n</parameter>\n<parameter=date>\n2026-10-22\n</parameter>\n</function>\n</tool_call>".to_owned()
@@ -202,6 +206,28 @@ async fn converts_qwen_xml_to_openai_tool_calls() {
         arguments,
         serde_json::json!({"city":"上海","date":"2026-10-22"})
     );
+}
+
+#[tokio::test]
+async fn single_tool_requests_enable_native_tool_termination() {
+    let (app, _) = app().await;
+    for parallel in [None, Some(true), Some(false)] {
+        let mut body = serde_json::json!({
+            "messages":[{"role":"user","content":"inspect tool stop policy"}],
+            "tools":[{"type":"function","function":{
+                "name":"weather.get","parameters":{"type":"object"}
+            }}]
+        });
+        if let Some(parallel) = parallel {
+            body["parallel_tool_calls"] = Value::Bool(parallel);
+        }
+        let (status, response) = json_response(app.clone(), body).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            (parallel == Some(false)).to_string()
+        );
+    }
 }
 
 #[tokio::test]
@@ -597,6 +623,7 @@ fn empty_engine_request() -> EngineRequest {
         presence_penalty: None,
         seed: None,
         disable_spec_decode: false,
+        stop_after_tool_call: false,
     }
 }
 

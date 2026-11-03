@@ -27,6 +27,8 @@ pub struct EngineRequest {
     pub presence_penalty: Option<f32>,
     pub seed: Option<u64>,
     pub disable_spec_decode: bool,
+    /// Stop at a model-native tool terminator when the caller permits one call.
+    pub stop_after_tool_call: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -293,16 +295,46 @@ impl ChatEngine for ApxInfChatEngine {
             .map_err(|error| ApiError::internal(error.to_string()))?
             .eos_token_ids
             .clone();
-        let eos_token_ids = default_eos
+        let mut eos_token_ids = default_eos
             .clone()
             .or_else(|| self.tokenizer.eos_token_id().map(|id| vec![id]));
+        let mut generation_eos_token_ids = eos_token_ids.clone();
+        if request.stop_after_tool_call && !request.tools.is_empty() {
+            // Qwen3.6 has a single, non-special </tool_call> token. Use the
+            // runtime's EOS transaction so MTP commits only the accepted rows
+            // through that token, rather than cancelling a partially committed
+            // speculative round from a text callback. Other tokenizers retain
+            // the existing path when this delimiter is not one token.
+            if let Ok(ids) = self.tokenizer.encode("</tool_call>") {
+                if let [tool_end] = ids.as_slice() {
+                    // An unknown-token fallback is not a tool terminator.
+                    if self
+                        .tokenizer
+                        .decode_with_options(&ids, false)
+                        .ok()
+                        .as_deref()
+                        == Some("</tool_call>")
+                    {
+                        let stop_ids = generation_eos_token_ids.get_or_insert_with(Vec::new);
+                        if !stop_ids.contains(tool_end) {
+                            stop_ids.push(*tool_end);
+                        }
+                        // Preserve the delimiter in both streamed and final text:
+                        // the structured-tool parser needs the closing tag.
+                        if let Some(hidden_eos) = eos_token_ids.as_mut() {
+                            hidden_eos.retain(|id| id != tool_end);
+                        }
+                    }
+                }
+            }
+        }
         let max_tokens = request
             .max_tokens
             .max(1)
             .min(self.default_max_tokens.max(1));
         let generation = GenerationOptions {
             max_new_tokens: Some(max_tokens),
-            eos_token_ids: eos_token_ids.clone(),
+            eos_token_ids: generation_eos_token_ids,
             sampling_mode: request.temperature.map(|temperature| {
                 if temperature == 0.0 {
                     SamplingMode::Greedy
