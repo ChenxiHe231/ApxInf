@@ -1,0 +1,27 @@
+# dfcbb255 — perf(attention): bucket live decode recipes
+
+天气 case：`明天上海的天气怎么样`。状态：**待 Thor-U 独占测试**。
+
+源码版本：`dfcbb25547d4cc1a2b376daa8a8bdd5ff05560bb`。这是已存在的历史提交，保留原有 hash，不重写公共历史。
+
+精确版本的天气端到端 trace 尚未建立；已有 microbenchmark 或旧报告不能代替本页的天气实测。
+
+用户要求本轮保持其他任务的 GPU 服务和编译不变。本页是测试记录占位，不是已执行的性能结果；
+不得将历史 dirty-worktree 的 1.520 s 结果归入此版本。
+
+| 阶段 | 时间 | 占比 |
+|---|---:|---:|
+| 模型调用 1 Prefill/TTFT：full/reused/computed 待测 | 待测 | 待测 |
+| 模型调用 1 Decode：输出 token 和间隔数待测 | 待测 | 待测 |
+| AMap 查询及工具编排间隔 | 待测 | 待测 |
+| 模型调用 2 Prefill/TTFT：full/reused/computed 待测 | 待测 | 待测 |
+| 模型调用 2 Decode：输出 token 和间隔数待测 | 待测 | 待测 |
+| AIOS、模型服务、HTTP 及其他余项 | 待测 | 待测 |
+| **端到端总计** | **待测** | **待测** |
+
+Prefill/TTFT 包含首 token 生成和缓存恢复；工具间隔不等于纯 AMap API 时间。
+待测项目包括：该精确源码版本的 release 二进制哈希、recipe 清单、AIOS 请求参数、
+两轮预热与十轮正式结果、同轮 server profile、工具正确性及 profiler 消融。
+`temperature=0` 对应 greedy MTP；不得把非零 temperature 请求标签当成实际 sampling MTP。
+`scripts/bench_qwen35_aios_weather.py` 在最终提交中提供记录工具；本页以后使用该工具补测。
+record-path 与 commit 的映射由提交正文中的 `Weather-Record` trailer 固定。

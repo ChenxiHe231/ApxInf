@@ -1,0 +1,69 @@
+# Qwen3.6 Thor-U / AIOS optimization history
+
+本目录是版本与证据台账。**源码已整理；逐 commit 的 GPU 重测尚未执行。** 用户确认另一个任务正在使用 thor-u，因此本轮未停止服务、未重新编译 CUDA、未运行 AIOS 请求。
+
+## 版本边界
+
+- 历史起点：`fd6520a`，对应最初 AIOS 优化前的分支状态。
+- 收集开始时远端：`2c24e07d67565ee9251fb71fc480ef9d86823665`。
+- 并行任务随后已推送 `36d0d0f66141bce7944c5041fae9f61d9294a32b`；本序列保留它并在其后增量提交。
+- 本序列在 `codex/qwen35-aios-optimization-series` 独立分支整理，不覆盖并行任务分支。
+- 原工作区以及 thor-u 的额外未提交改动保留；来源不确定的 norm/精度测试、工具参数转换等不混入此序列。
+
+## 新增提交顺序
+
+| 提交主题 | 主要内容 | 天气记录 |
+|---|---|---|
+| FP8 attention tensor-core QK | BF16 WMMA QK 和 split 上限配置 | [S1](records/S1-fp8-attention.md) |
+| Adaptive MTP + GPU acceptance + GDN verification | depth 1/2/3、独立 verifier shape、GPU token 链/接受打包、GDN checkpoint、精确 prompt cache | [S2](records/S2-adaptive-mtp.md) |
+| Serving prompt/SSE cache | 缓存模板/tokenization、prefix boundary 和 SSE 合并/缓冲 | [S3](records/S3-serving.md) |
+| Weather adapter and reproducible evidence tooling | opt-in 天气结果压缩、请求记录代理、阶段统计脚本和历史原始数据 | [S4](records/S4-weather-adapter.md) |
+
+MTP depth、backend proposal 常量、verifier 资源、GDN checkpoint 与 host commit 合约耦合，作为一个完整提交；不能拆成中间运行时相互不匹配的版本。
+
+每个新提交正文包含 `Weather-Record: <path>` 和 `Weather-Status: pending-exclusive-thor-u`。历史 commit 不改 hash，使用下面的台账关联测试页。
+
+## 历史 commit 台账
+
+| Commit | 改动 | 天气 case / profile 状态 |
+|---|---|---|
+| `fd6520a` | 原始起点 | [待测](records/fd6520a.md) |
+| `ceba744b` | fix(qwen35): reuse AIOS system prefix for sampled requests | [待测](records/ceba744b.md) |
+| `a6d50b55` | perf(cuda): accelerate small top-k sampling | [待测](records/a6d50b55.md) |
+| `294eb1a9` | fix(qwen35): make context autotune bench match scalar serving | [待测](records/294eb1a9.md) |
+| `c67fa795` | Revert "perf(cuda): accelerate small top-k sampling" | [待测](records/c67fa795.md) |
+| `5db33206` | docs(qwen35): make deployment autotune explicit | [待测](records/5db33206.md) |
+| `9fba8543` | perf(qwen35): reuse scalar benchmark argmax output | [待测](records/9fba8543.md) |
+| `dcf5e497` | fix(qwen35): keep live decode attention on FA2 | [待测](records/dcf5e497.md) |
+| `dfcbb255` | perf(attention): bucket live decode recipes | [待测](records/dfcbb255.md) |
+| `8ad5b97c` | feat(serving): accept OpenAI top-k sampling | [待测](records/8ad5b97c.md) |
+| `3423907f` | feat(qwen35): make sampling autotune explicit | [待测](records/3423907f.md) |
+| `54e22691` | fix(qwen35): retain sampling prefix variants | [待测](records/54e22691.md) |
+| `dd5d7374` | style(qwen35): format prefix cache LRU | [待测](records/dd5d7374.md) |
+| `a50a058c` | docs(qwen35): require complete sampling recipes | [待测](records/a50a058c.md) |
+| `96344b12` | feat(serving): allow forcing scalar decode | [待测](records/96344b12.md) |
+| `c6f02352` | bench(qwen35): make MTP recipes explicit | [待测](records/c6f02352.md) |
+| `fe372dfc` | perf(qwen35): annotate MTP phases for profiling | [待测](records/fe372dfc.md) |
+| `8f7fd233` | perf(qwen35): prepare fixed-shape MTP verification | [待测](records/8f7fd233.md) |
+| `4868a580` | fix(qwen35): keep live attention outside verifier session | [待测](records/4868a580.md) |
+| `c3606422` | feat(qwen35): page KV cache in 128-token blocks | [待测](records/c3606422.md) |
+| `11f638b8` | feat(qwen35): load TensorRT static FP8 KV scales | [待测](records/11f638b8.md) |
+| `6265b8fa` | Optimize Qwen3.6 MTP2 and FP8 prefix reuse | [待测](records/6265b8fa.md) |
+| `2c24e07d` | fix(qwen35): reuse live MTP context across tool turns | [待测](records/2c24e07d.md) |
+| `36d0d0f6` | fix(qwen35): recover missing recipes and share cuBLAS handles | [待测](records/36d0d0f6.md) |
+
+## 历史成绩的适用范围
+
+2026-11-03 的 10 轮天气 case 中位数 1.519645 s、最快 1.48636 s，是当时未提交工作区与特定 recipe/代理配置的运行记录。它证明该次运行的端到端结果，**无法证明本目录任一精确 commit 的性能**。原始输出整理在最终提交的 `evidence/` 中。
+无法复原的二进制/源码哈希标为 unknown，不从文件名猜测。新序列继承并行任务的 36d0d0f，也不同于此前历史测试的源码组合。
+
+AMap 记录为两次模型 HTTP 之间的间隔，包含调度与序列化，不等于纯 API 时间。模型时间以 server profile 为准；TTFT 包括缓存恢复及首 token。其余为差值，不能据此宣称 AIOS 或 AMap 被 kernel 优化加速。旧 3.92 s 表无可定位的完整 trace，不能用于分阶段增益归因。
+
+## 补测要求
+
+GPU 空闲后依序在干净 checkout 构建各 commit，记录源码树、二进制 SHA256、完整 argv/environment、checkpoint/recipe 哈希与功耗时钟。各版本先单独 autotune，再关闭 autotune，预热 2 轮、正式 10 轮；未命中 recipe、重试与失败必须记录。
+每轮输出用户要求的阶段表，标明 full/reused/computed tokens、completion tokens/间隔数；同一轮的所有阶段之和应等于该轮 E2E。不得拼接不同样本的分位数。
+正确性须检查结构化 AMap tool call、非空 city、工具成功、次日日期和返回温度/天气一致；仅有天气文本不足以判定通过。
+
+性能消融需固定真实请求/工具结果、采样语义、缓存热度；分别比较 prefill TTFT、decode TPOT/接受率、HTTP 和 E2E。Nsight 插桩会改变时延，profiler 与未插桩正式计时分开记录。
+建议启用 `APXINF_QWEN35_MTP_TIMING=1` / `APXINF_QWEN35_VERIFY_LAYER_TIMING=1` 做诊断，配合 `nsys profile --trace=cuda,nvtx,osrt` 检查 kernel、graph launch、同步和 D2H；没有 trace 不填写带宽/算力利用率或单项性能提升百分比。
