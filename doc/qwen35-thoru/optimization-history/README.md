@@ -19,6 +19,7 @@
 | Serving prompt/SSE cache | 缓存模板/tokenization、prefix boundary 和 SSE 合并/缓冲 | [S3](records/S3-serving.md) |
 | Weather adapter and reproducible evidence tooling | opt-in 天气结果压缩、请求记录代理、阶段统计脚本和历史原始数据 | [S4](records/S4-weather-adapter.md) |
 | Historical evidence and date-policy audit | 恢复2c24e07包的同轮profile；要求显式目标预报日期 | [S5](records/S5-date-audit.md) |
+| Scalar historical evidence | 恢复a50a058和96344b1包的原始E2E/HTTP计时与报告精度限制 | [S6](records/S6-scalar-history.md) |
 
 MTP depth、backend proposal 常量、verifier 资源、GDN checkpoint 与 host commit 合约耦合，作为一个完整提交；不能拆成中间运行时相互不匹配的版本。
 
@@ -41,8 +42,8 @@ MTP depth、backend proposal 常量、verifier 资源、GDN checkpoint 与 host 
 | `3423907f` | feat(qwen35): make sampling autotune explicit | [待测](records/3423907f.md) |
 | `54e22691` | fix(qwen35): retain sampling prefix variants | [待测](records/54e22691.md) |
 | `dd5d7374` | style(qwen35): format prefix cache LRU | [待测](records/dd5d7374.md) |
-| `a50a058c` | docs(qwen35): require complete sampling recipes | [待测](records/a50a058c.md) |
-| `96344b12` | feat(serving): allow forcing scalar decode | [待测](records/96344b12.md) |
+| `a50a058c` | docs(qwen35): require complete sampling recipes | [历史包记录已恢复；模型切分为报告估算，重测待执行](records/a50a058c.md) |
+| `96344b12` | feat(serving): allow forcing scalar decode | [历史包记录已恢复；模型切分为报告估算，重测待执行](records/96344b12.md) |
 | `c6f02352` | bench(qwen35): make MTP recipes explicit | [待测](records/c6f02352.md) |
 | `fe372dfc` | perf(qwen35): annotate MTP phases for profiling | [待测](records/fe372dfc.md) |
 | `8f7fd233` | perf(qwen35): prepare fixed-shape MTP verification | [待测](records/8f7fd233.md) |

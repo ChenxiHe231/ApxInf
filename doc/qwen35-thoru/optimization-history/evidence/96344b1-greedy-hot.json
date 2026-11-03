@@ -1,0 +1,120 @@
+{
+  "tag": "96344b1-greedy-hot",
+  "provenance": {
+    "source_commit_declared_by_package": "96344b12bbe0faa756e54d4fe6a747be2a31a19b",
+    "source_commit_verified_from_clean_build": false,
+    "binary_sha256_verified_now": "43161b3cc09593a7a81c29c9cf08d33bdf84a2b5858b1c448c0ae02bbb15d491",
+    "profile_report_sha256": "0f3f238f164a1e767e8476f31b4e9893f5577d1da3cb4d3158ebc8dc99207aa9",
+    "aios_sse_sha256": "5fe3943176e5a7a785df46079b4366297873a9de1a0cfff57d1ef687eb70b09a",
+    "proxy_log_sha256": "2d81c1595b6e93f2757c38f06191e5bab3a2e529a1e6d1281968e7a02f5ac3bd"
+  },
+  "case": "明天上海的天气怎么样",
+  "aios": {
+    "request_id": "20261030115125151827",
+    "reply_text": "明天上海晴天，气温24到17度，东风1到3级。",
+    "audio_base64": null,
+    "execution_time_ms": 4593.39,
+    "sop_matched": false,
+    "intent_type": "harness",
+    "language": "zh-CN"
+  },
+  "configuration": {
+    "temperature": 0,
+    "disable_spec_decode": true
+  },
+  "profiles_reported_rounded": [
+    {
+      "prompt_tokens": 8853,
+      "reused_prompt_tokens": 8562,
+      "computed_prompt_tokens": 291,
+      "completion_tokens": 39,
+      "decode_intervals": 38,
+      "ttft_ms": 732.36,
+      "decode_ms": 780.7900000000001,
+      "source_precision": "rounded values from package PROFILE.md, not raw server profile",
+      "decode_derivation": "reported model total minus reported TTFT"
+    },
+    {
+      "prompt_tokens": 9318,
+      "reused_prompt_tokens": 8562,
+      "computed_prompt_tokens": 756,
+      "completion_tokens": 19,
+      "decode_intervals": 18,
+      "ttft_ms": 1290.74,
+      "decode_ms": 373.26,
+      "source_precision": "rounded values from package PROFILE.md, not raw server profile",
+      "decode_derivation": "reported model total minus reported TTFT"
+    }
+  ],
+  "stages_estimated": [
+    {
+      "stage": "模型调用1 Prefill/TTFT：新增 291 tokens",
+      "time_ms": 732.36,
+      "percent": 15.943780083990255
+    },
+    {
+      "stage": "模型调用1 Decode：38 个间隔",
+      "time_ms": 780.7900000000001,
+      "percent": 16.998121213308693
+    },
+    {
+      "stage": "AMap 查询及工具编排间隔",
+      "time_ms": 422.20099999999996,
+      "percent": 9.191490380742762
+    },
+    {
+      "stage": "模型调用2 Prefill/TTFT：新增 756 tokens",
+      "time_ms": 1290.74,
+      "percent": 28.099943614628845
+    },
+    {
+      "stage": "模型调用2 Decode：18 个间隔",
+      "time_ms": 373.26,
+      "percent": 8.126024570088758
+    },
+    {
+      "stage": "AIOS、模型服务、HTTP及其他余项",
+      "time_ms": 994.0389999999998,
+      "percent": 21.64064013724068
+    }
+  ],
+  "http_events": [
+    {
+      "event": "request",
+      "time": "2026-10-30T11:51:25.269285+00:00",
+      "temperature": 0,
+      "top_k": null,
+      "top_p": null,
+      "disable_spec_decode": true
+    },
+    {
+      "event": "response",
+      "time": "2026-10-30T11:51:26.988300+00:00",
+      "duration_ms": 1719.46,
+      "tool_call_names": [
+        "mcp__amap__maps_weather"
+      ],
+      "finish_reasons": [
+        "tool_calls"
+      ]
+    },
+    {
+      "event": "request",
+      "time": "2026-10-30T11:51:27.410501+00:00",
+      "temperature": 0,
+      "top_k": null,
+      "top_p": null,
+      "disable_spec_decode": true
+    },
+    {
+      "event": "response",
+      "time": "2026-10-30T11:51:29.280277+00:00",
+      "duration_ms": 1872.54,
+      "tool_call_names": [],
+      "finish_reasons": [
+        "stop"
+      ]
+    }
+  ],
+  "qualification": "Historical package-declared revision only. Model phases use rounded report fields, not raw CUDA/server profiling. Tool-chain completion is recorded but target-date/forecast semantics cannot be revalidated without retained raw request/tool payloads. Do not use as exact-revision correctness or formal performance acceptance."
+}
