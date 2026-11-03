@@ -11,6 +11,7 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#include <mma.h>
 #include <math_constants.h>
 #include <mma.h>
 
@@ -380,23 +381,30 @@ __global__ void attention_fused_split_kernel(
   // Keep Q/K in BF16. FP8 values (and the unit TRT scale used by this model)
   // are represented exactly, while halving shared storage from 64 KiB to
   // 32 KiB and allowing multiple split blocks to reside on one SM.
-  __shared__ __nv_bfloat16 shared_query[kQueriesPerKvHead][kHeadDim];
+  // The QK product is a 8x256 by 256x32 GEMM. Pad Q to 16 rows so two
+  // warp-level BF16 tensor-core tiles can produce all 8x32 scores. The old
+  // path evaluated the same product with scalar FP32 FMAs, leaving the tensor
+  // cores idle during the dominant part of long-context verification.
+  __shared__ __align__(16) __nv_bfloat16 shared_query[16][kHeadDim];
   __shared__ __nv_bfloat16 shared_key[kScorePositionsPerBlock][kHeadDim];
-  __shared__ float shared_scores[kQueriesPerKvHead][kScorePositionsPerBlock];
+  __shared__ __align__(16) float shared_scores[16][kScorePositionsPerBlock];
   __shared__ float shared_weights[kQueriesPerKvHead][kScorePositionsPerBlock];
   __shared__ float maxima[kQueriesPerKvHead];
   __shared__ float denominators[kQueriesPerKvHead];
   __shared__ float rescale[kQueriesPerKvHead];
 
-  for (int index = dim; index < kQueriesPerKvHead * kHeadDim;
-       index += kThreads) {
+  for (int index = dim; index < 16 * kHeadDim; index += kThreads) {
     const int head = index / kHeadDim;
     const int component = index % kHeadDim;
-    const int query_head = kv_head * kQueriesPerKvHead + head;
-    const int64_t query_index =
-        (static_cast<int64_t>(token) * kQHeads + query_head) * kHeadDim +
-        component;
-    shared_query[head][component] = query[query_index];
+    if (head < kQueriesPerKvHead) {
+      const int query_head = kv_head * kQueriesPerKvHead + head;
+      const int64_t query_index =
+          (static_cast<int64_t>(token) * kQHeads + query_head) * kHeadDim +
+          component;
+      shared_query[head][component] = query[query_index];
+    } else {
+      shared_query[head][component] = __float2bfloat16(0.0F);
+    }
   }
   if (dim < kQueriesPerKvHead) {
     maxima[dim] = -CUDART_INF_F;
@@ -425,22 +433,30 @@ __global__ void attention_fused_split_kernel(
     }
     __syncthreads();
 
-    const int query_head = local_query_head;
-    for (int item = 0; item < count; ++item) {
-      float dot = 0.0F;
+    const int warp = dim >> 5;
+    if (warp < 2) {
+      using namespace nvcuda;
+      wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
+      wmma::fill_fragment(accumulator, 0.0F);
 #pragma unroll
-      for (int pair = lane; pair < kHeadDim / 2; pair += 32) {
-        const float2 query_pair = __bfloat1622float2(
-            *reinterpret_cast<const __nv_bfloat162*>(
-                &shared_query[query_head][2 * pair]));
-        const float2 key_pair = __bfloat1622float2(
-            *reinterpret_cast<const __nv_bfloat162*>(
-                &shared_key[item][2 * pair]));
-        dot = fmaf(query_pair.x, key_pair.x,
-                   fmaf(query_pair.y, key_pair.y, dot));
+      for (int component = 0; component < kHeadDim; component += 16) {
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16,
+                       wmma::row_major>
+            query_fragment;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16,
+                       wmma::col_major>
+            key_fragment;
+        wmma::load_matrix_sync(query_fragment, &shared_query[0][component],
+                               kHeadDim);
+        wmma::load_matrix_sync(key_fragment, &shared_key[warp * 16][component],
+                               kHeadDim);
+        wmma::mma_sync(accumulator, query_fragment, key_fragment, accumulator);
       }
-      dot = warp_sum(dot);
-      if (lane == 0) shared_scores[query_head][item] = dot * 0.0625F;
+#pragma unroll
+      for (int element = 0; element < accumulator.num_elements; ++element)
+        accumulator.x[element] *= 0.0625F;
+      wmma::store_matrix_sync(&shared_scores[0][warp * 16], accumulator,
+                              kScorePositionsPerBlock, wmma::mem_row_major);
     }
     __syncthreads();
 
@@ -1609,10 +1625,16 @@ extern "C" apxinf_status_t apxinf_qwen35_attention_fp8(
     apxinf::framework::check_cuda(cudaGetLastError());
 
     const int valid_tokens = spec->cache_offset + spec->tokens;
-    const int splits = min(
+    const int automatic_splits = min(
         static_cast<int>(APXINF_QWEN35_ATTENTION_MAX_SPLITS),
         max(1, (valid_tokens + kValuePositionsPerTile - 1) /
                    kValuePositionsPerTile));
+    int splits = automatic_splits;
+    if (const char* configured =
+            std::getenv("APXINF_QWEN35_FP8_ATTENTION_MAX_SPLITS")) {
+      const int limit = std::atoi(configured);
+      if (limit > 0) splits = min(automatic_splits, limit);
+    }
     const dim3 split_grid(splits, kKvHeads, spec->tokens);
     const char* fused_attention =
         std::getenv("APXINF_QWEN35_FP8_FUSED_ATTENTION");
