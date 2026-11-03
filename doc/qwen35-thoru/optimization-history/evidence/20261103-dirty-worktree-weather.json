@@ -1,0 +1,161 @@
+{
+  "date": "2026-11-03",
+  "case": "明天上海的天气怎么样",
+  "aios_image": "aios-harness-x86-20261026",
+  "model": "Qwen3.6-35B-A3B-NVFP4",
+  "apxinf": {
+    "mtp_depth": 3,
+    "adaptive_mtp": true,
+    "kv_cache": "fp8",
+    "prefix_cache": true,
+    "tool_result_compression": "amap_weather_next_day"
+  },
+  "warmup_runs": 2,
+  "runs": [
+    {
+      "run": 1,
+      "request_id": "20261103050512439853",
+      "execution_time_ms": 1568.56,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级。出门记得带伞。"
+    },
+    {
+      "run": 2,
+      "request_id": "20261103050514015172",
+      "execution_time_ms": 1499.59,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级，记得带伞。"
+    },
+    {
+      "run": 3,
+      "request_id": "20261103050515531297",
+      "execution_time_ms": 1488.94,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级，记得带伞。"
+    },
+    {
+      "run": 4,
+      "request_id": "20261103050517030913",
+      "execution_time_ms": 1649.21,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级。记得带伞。"
+    },
+    {
+      "run": 5,
+      "request_id": "20261103050518688025",
+      "execution_time_ms": 1629.9,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级。出门记得带伞。"
+    },
+    {
+      "run": 6,
+      "request_id": "20261103050520324883",
+      "execution_time_ms": 1526.96,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级，出门记得带伞。"
+    },
+    {
+      "run": 7,
+      "request_id": "20261103050521859559",
+      "execution_time_ms": 1486.36,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级。出门记得带伞。"
+    },
+    {
+      "run": 8,
+      "request_id": "20261103050547515677",
+      "execution_time_ms": 1598.09,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级。出门记得带伞。"
+    },
+    {
+      "run": 9,
+      "request_id": "20261103050549124519",
+      "execution_time_ms": 1512.33,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级，记得带伞。"
+    },
+    {
+      "run": 10,
+      "request_id": "20261103050550644618",
+      "execution_time_ms": 1490.12,
+      "reply": "明天上海小雨，气温15到19度，东南风1到3级。出门记得带伞。"
+    }
+  ],
+  "summary": {
+    "correct": 10,
+    "total": 10,
+    "median_ms": 1519.645,
+    "p90_nearest_rank_ms": 1629.9,
+    "min_ms": 1486.36,
+    "max_ms": 1649.21,
+    "trt_baseline_ms": 2123,
+    "faster_than_trt_percent": 28.419925
+  },
+  "representative_profile": {
+    "run": 6,
+    "execution_time_ms": 1526.96,
+    "model_call_1_prefill_ms": 47.45874,
+    "model_call_1_decode_ms": 421.493843,
+    "amap_and_tool_orchestration_gap_ms": 419.903,
+    "model_call_2_prefill_ms": 123.387574,
+    "model_call_2_decode_ms": 334.019668,
+    "aios_http_and_other_ms": 180.697175,
+    "call_1_prompt_reused_computed": [
+      8853,
+      8852,
+      1
+    ],
+    "call_2_prompt_reused_computed": [
+      9058,
+      8994,
+      64
+    ]
+  },
+  "provenance": {
+    "source_kind": "historical_dirty_worktree",
+    "exact_source_commit": null,
+    "binary_sha256": null,
+    "performance_attributable_to_new_commit": false,
+    "qualification": "Historical run only; the new series inherits a later concurrent recovery commit and has not been GPU retested."
+  },
+  "representative_http_events": [
+    {
+      "event": "request",
+      "capture_id": "d81c093b65244d3bb968d924e52795f3",
+      "time": "2026-11-03T05:05:20.387974+00:00"
+    },
+    {
+      "event": "response",
+      "capture_id": "d81c093b65244d3bb968d924e52795f3",
+      "time": "2026-11-03T05:05:20.876107+00:00",
+      "duration_ms": 489.39,
+      "first_body_ms": 489.35,
+      "finish_reasons": [
+        "tool_calls"
+      ],
+      "tool_call_names": [
+        "mcp__amap__maps_weather"
+      ]
+    },
+    {
+      "event": "request",
+      "capture_id": "ba2f5ced36b94598a02635f58d295092",
+      "time": "2026-11-03T05:05:21.296010+00:00",
+      "amap_weather_compression": {
+        "target_date": "2026-11-04",
+        "original_chars": 902,
+        "compressed_chars": 196
+      }
+    },
+    {
+      "event": "response",
+      "capture_id": "ba2f5ced36b94598a02635f58d295092",
+      "time": "2026-11-03T05:05:21.835343+00:00",
+      "duration_ms": 541.26,
+      "first_body_ms": 541.2,
+      "finish_reasons": [
+        "stop"
+      ],
+      "tool_call_names": []
+    }
+  ],
+  "profile_boundary_notes": {
+    "prefill": "server TTFT; includes cache restoration and first-token work",
+    "tool": "inter-model HTTP gap; not isolated AMap API latency",
+    "other": "E2E minus internal model times and inter-model gap; includes serving/network overhead",
+    "proxy_streaming": "upstream.read(65536) buffers short streams; first_body_ms is not a reliable model TTFT"
+  },
+  "source_file_sha256": "446b38f60c696a3e71e9779ac1c8e6da6661c2e9df3df17776ea7048cb122df5"
+}
