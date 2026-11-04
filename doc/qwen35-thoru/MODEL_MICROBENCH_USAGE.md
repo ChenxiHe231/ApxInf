@@ -83,7 +83,7 @@ python3 scripts/bench_qwen35_model_matrix.py "${matrix_args[@]}" \
   --output devlocal/model-microbench/runs/profile-01
 ```
 
-profiler使用CUDA profiler API圈定测量，不包含权重加载、warmup或初始KV构建；生成真实非空`.nsys-rep`后保存SHA256并独立导出stats CSV。NVTX仅标注实际有range的路径：没有Prefill内部标记时仍可按kernel/API分析，不能伪造阶段拆分。默认正式运行不启用NVTX/REPORT。profile/audit的日志和工具开销不作为正式性能。
+profiler使用CUDA profiler API圈定测量轮，不包含权重加载与warmup。context Prefill在初始KV准备完成后开始捕获；Decode benchmark捕获完整的本轮generate，**包含该轮prompt Prefill/TTFT和随后1023个Decode间隔**。自动导出的kernel/API/mem汇总属于整个capture，不能标为Decode专属。现有NVTX仅标注MTP draft、verify、commit，三段之和也不包含全部Decode调度、同步及scalar fallback。生成真实非空`.nsys-rep`后保存SHA256并独立导出stats CSV；不能伪造阶段拆分。默认正式运行不启用NVTX/REPORT。profile/audit的日志和工具开销不作为正式性能。
 
 若默认重复输出一致性检查失败，原始失败必须保留。只有明确的探索运行才添加 `--allow-repeat-divergence`：它保留全部轮次、token digest和首差异窗口，结果始终为 `accuracy_status=unresolved`、`performance_accepted=false`；表中只能称诊断中位数。不能用该选项绕过算子精度门禁或MTP正确性验收。
 

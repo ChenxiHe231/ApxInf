@@ -1,6 +1,6 @@
 # 15 个模型基准的精度与测量门禁
 
-状态：起点为 `f267f5ae`。现已在同stream初始化修复后执行prepared-BF16短/长attention、9个完整Prefill shape的选定行独立参考、短GDN独立数学参考及9组长GDN调度/状态对照；见[实际验收记录](model-microbench/evidence/precision-gates.json)。完整P2仍未完成。P1 可采集“当前版本表征”，但未过本门禁的数值路径不宣称完成 P2、也不凭吞吐发布新的算子优化。所有新增阈值必须在候选之前声明、独立评审并冻结；不能在候选失败后静默放宽。
+状态：起点为 `f267f5ae`。现已在同stream初始化修复后执行prepared-BF16短/长attention、9个完整Prefill shape的选定行独立参考、短GDN独立数学参考及9组长GDN调度/状态对照；见[实际验收记录](model-microbench/evidence/precision-gates.json)。另已通过 same-prepared BF16→FP8 存储门禁，见[FP8 存储证据](model-microbench/evidence/fp8-prepared-storage-gate.json)；这不认证 FP8 attention 或模型质量。完整P2仍未完成。P1 可采集“当前版本表征”，但未过本门禁的数值路径不宣称完成 P2、也不凭吞吐发布新的算子优化。所有新增阈值必须在候选之前声明、独立评审并冻结；不能在候选失败后静默放宽。
 
 ## 先区分实际执行路径
 
@@ -36,12 +36,12 @@
 |---|---|---|
 | `qwen35_mixers::decode_matches_independent_cpu_reference_at_qwen35_geometry` | conv逐位；convolved/recurrent cosine≥0.99999、relL2≤0.01；gated cosine≥0.9999、relL2≤0.025；decay/beta maxabs<2e-5 | 是独立CPU短step reference的起点，不能替代长state累积 |
 | `chunk_prefill_and_decode_share_exact_qwen35_state_contract` | 64-token；conv逐位；state cosine≥0.9998、relL2≤0.025；output cosine≥0.999、relL2≤0.05，并检查下一token | 冻结为既有上限，不理解为候选可新增2.5%/5%误差 |
-| `long_prefill_output_window_and_state_match_canonical_decode` 与 `long_prefill_{4096,8192,16384}_matches_canonical_decode`、`long_prefix_{4096,8192,16384,32768,49152}_append_4096_matches_canonical_decode` | 全部 ignored；各段 full output、首64输出、完整conv/recurrent状态及下一步decode；conv无条件逐位，数值上限保持state cosine≥0.9998/relL2≤0.025、output cosine≥0.999/relL2≤0.05；bitwise flag仅追加诊断要求 | 新测试代码已准备，尚非 GPU 通过证据。长reference是相同CUDA逐token recurrence的调度/状态对照；独立数学覆盖仍是CPU单步reference加CPU纯解析四步decay sanity，不能把2049或短数学测试当16K实测通过 |
+| `long_prefill_output_window_and_state_match_canonical_decode` 与 `long_prefill_{4096,8192,16384}_matches_canonical_decode`、`long_prefix_{4096,8192,16384,32768,49152}_append_4096_matches_canonical_decode` | 全部 ignored；各段 full output、首64输出、完整conv/recurrent状态及下一步decode；conv无条件逐位，数值上限保持state cosine≥0.9998/relL2≤0.025、output cosine≥0.999/relL2≤0.05；bitwise flag仅追加诊断要求 | 已在同stream初始化修复后显式执行9个长case并通过，源码与日志身份见[验收记录](model-microbench/evidence/precision-gates.json)。长reference是相同CUDA逐token recurrence的调度/状态对照；独立数学覆盖仍是CPU单步reference加CPU纯解析四步decay sanity，不能把长GPU调度对照称作16K独立数学参考 |
 | `cake_matches_chunk_scan_at_qwen35_head_ratio` | ignored，覆盖64/128/1024/2048/4096和非零初态，但比较包含BF16/F16路径且相对L2仅报告 | 可辅助诊断，不代替same-representation独立reference，也不能把仅cosine过线当本P2全部指标合格 |
 | `attention_bf16_qwen35_causal_cache_uses_fa2` | 仅全零Q/K/V，(Q,K)=(128,128)/(1,129)，只查provider名称 | 仅路由测试，**不是48K BF16数值证明** |
 | native attention candidate validator | 对其给定reference执行逐元素 finite 与 `abs_error ≤0.03+0.02×abs(ref)` | 既有library admission上限；它不是35B模型官方无损承诺，不代替逐row/冻结baseline更严格的case合同；新增BF16专用上限需在候选前明确冻结 |
 | `mtp_schedule.rs` tests | 精确0/partial/full、EOS/budget、失败/stale不可提交 | 无GPU数学证明；必须与GPU实际checkpoint/状态测试相接 |
-| `qwen35_real_checkpoint::neutral_mtp_matches_forced_scalar_greedy` | 文件顶层`cfg(feature="cuda")`，ignored；默认prompt16、输出32；实际断言token IDs、rollback统计 | `qwen35-cuda`构建可能得到0个测试；先`--list`确认存在。若需要feature迁移，单独明确记录。默认短prompt不认证48K/1K输出 |
+| `qwen35_real_checkpoint::neutral_mtp_matches_forced_scalar_greedy` | 文件顶层现为`cfg(feature="qwen35-cuda")`，ignored；默认prompt16、输出32；实际断言token IDs、rollback统计 | 仍须先`--list`确认存在并显式执行ignored测试；feature修正不代表已完成GPU验收。默认短prompt不认证48K/1K输出 |
 
 算子改写若宣称“仅调度/复制改变”，同输入的原始KV/state应逐位一致。不同CPU/GPU的FP32归约或trig发生合法舍入差异时，应先隔离该stage；不能对不同prequant输入的FP8 bytes机械要求相等，也不能因此放宽真正同输入量化或数据复制的要求。
 
@@ -51,14 +51,42 @@ NVFP4 MoE可能存在非逐位可重现的expert reduction。重复输出不一�
 
 `CudaContext::new_with_options(..., autotune=false, ...)`会把native runtime的`allow_online_tune`关闭。native GEMM及attention只有在 `runtime.allow_online_tune && policy.online_tune`时进入tune分支，当前源码未发现另一个绕过该许可的recover_missing_recipe调优入口。
 
-但模型BF16 FA2边界显式 `allow_fallback=true`。正式无recipe时可使用固定配置FA2 fallback，且不会写recipe，所以 **recipe目录hash不变不足以证明正式全程命中recipe**。正式前的调优必须覆盖所有实际KV长度/bucket、scalar与MTP verifier形状。调优只是选择最快支持实现，不自动等价于本数值P2验收。
+普通生产路径的BF16 FA2边界显式 `allow_fallback=true`。没有strict guard时，无recipe可使用固定配置FA2 fallback，且不会写recipe，所以 **recipe目录hash不变不足以证明全程命中recipe**。当前正式runner额外启用下述strict guard。正式前的独立调优必须覆盖所有实际KV长度/bucket、scalar与MTP verifier形状；调优不自动等价于数值P2验收。
 
-P0建议：提供仅benchmark的strict-recipe策略禁用fallback；若暂不提供，则在准备/预热审计及正式进程启用 `APXINF_GEMM_REPORT=1` 与 `APXINF_ATTENTION_REPORT=1`，只接受 `source=recipe` / `source=memory-recipe`。任何 `fallback`、`fallback-after-tune`、fresh tune或unknown source均拒绝正式结果；保留该失败，补全独立调优后开新正式进程重测。日志开销须前后同配置；不要用有日志的baseline比较无日志的candidate。直接固定kernel/GDN没有recipe概念，列入执行路径清单，不伪造“recipe命中”。
+native strict-recipe guard现已实现：正式新进程设置 `APXINF_REQUIRE_RECIPES=1`，GEMM/attention recipe缺失或不可恢复时在在线调优/fallback之前返回cache-miss；该flag按进程读取，不复用调优进程的prepared executions。独立audit/profile进程另启用 `APXINF_GEMM_REPORT=1` 与 `APXINF_ATTENTION_REPORT=1`，只接受 `source=recipe` / `source=memory-recipe`。正式无插桩进程关闭这些REPORT变量，依靠native strict guard拒绝miss。发现 `fallback`、`fallback-after-tune`、fresh tune或unknown source时保留失败，补全独立调优后开新正式进程重测。日志开销须前后同配置；不要用有日志的baseline比较无日志的candidate。直接固定kernel/GDN没有recipe概念，列入执行路径清单，不伪造“recipe命中”。
 
 初始KV预建、weight load、autotune和graph/resource预备不计入测量；但它们必须成功且不能在正式decode循环里重新发生。调优/正式进程的recipe清单、实际argv及`source`审计都归档。P0代码改动只能修测量，不顺便接受旧未验证R01或新的算术变化。
 
 ## MTP策略的测量身份
 
-本起点的 `benchmark_mtp_decode` 直接传入 `QWEN35_MTP_DRAFT_STEPS=3`，并未调用 `AdaptiveMtpController`。`APXINF_QWEN35_MTP_FIXED_DEPTH`只影响ordinary generation controller，不能仅设该变量就把此hook标成depth1/2或adaptive。P0必须输出实际策略；P4若扩hook深度或另用ordinary path，分别建立同scope消融。容量至少覆盖实际prompt +1024输出 +最大lookahead，并记录物理padding；不能通过减少可验证row或scope缩短Decode。
+当前Decode矩阵使用 ordinary generation 路径的 `qwen35_mtp_bench`：可分开测 scalar、固定depth1/2/3及adaptive；`APXINF_QWEN35_MTP_FIXED_DEPTH`控制ordinary controller的固定深度，adaptive需显式绑定同配置scalar校准，不能把内置默认成本当实测校准。策略身份及完整输出必须写入记录，GPU策略矩阵尚未完成。`qwen35_context_bench`调用的 `benchmark_mtp_decode` hook仍直接传入 `QWEN35_MTP_DRAFT_STEPS=3`，未调用 `AdaptiveMtpController`；仅设该变量不能把此hook标成depth1/2或adaptive。不同路径分别建立同scope消融，不能互换成绩。容量至少覆盖实际prompt +1024输出 +最大lookahead，并记录物理padding；不能通过减少可验证row或scope缩短Decode。
 
-本文保留未完成门禁，不把已执行的局部测试扩写为完整模型认证。P0已实现native strict-recipe guard；后续正式矩阵、MTP协议和FP8分别验收。固定路由的真实MoE诊断观察到小幅非逐位重复输出，原始差异保留，不能推断为某个单一kernel根因或放宽阈值。
+本文保留未完成门禁，不把已执行的局部测试扩写为完整模型认证。P0已实现native strict-recipe guard；后续正式矩阵、MTP协议、FP8 attention与模型质量分别验收。固定路由的真实MoE诊断观察到小幅非逐位重复输出，原始差异保留，不能推断为某个单一kernel根因或放宽阈值。
+
+## Same-prepared BF16 → FP8 KV 独立门禁
+
+`qwen35_prepared_fp8_cache_precision` 只调用公开
+`ops::quantization(FixedScaleE4m3)`，它也是分解式 target KV append 使用的边界。
+输入直接由固定 BF16 bit-pattern 准备，不包含 projection、QKNorm、RoPE 或
+attention。CPU oracle 以数值公式枚举127个非负有限 E4M3 编码（含零），用
+nearest/ties-even 选取，不复刻 GPU converter 的位运算实现。
+
+实际 native 阶段是 **host F32 `1/scale` → device F32 乘法 → clamp ±448 → E4M3**。
+融合式短行 attention 的 device `x/scale` 是另一个阶段合同，此测试不认证该路径。
+power2 scales 0.25/0.5/1/2/4 要求全部65,280个有限 BF16、正负零、subnormal、
+ties 和 saturation 逐 byte 一致；synthetic nonpower2 scales 同样要求 GPU 精确
+匹配 reciprocal-product 阶段，F64 division / direct F32 division 的边界差异单独报告，
+不能让 GPU 在两个相邻编码之间任选，也不能据此放宽阈值。
+
+缓存写入门禁覆盖 page128、prefix127/128/129及跨页 append，逐 byte 检查旧 prefix、
+写入范围和未来 canary。ignored 长门禁覆盖 prefix4K/8K/16K/32K/48K追加4K。
+这认证的是静态存储量化/写入，不是 FP8 attention、完整模型质量、动态量化或 MTP。
+
+当前 checkpoint 的初始 header 查询没有找到所查询命名的序列化 K/V scale tensor；
+扩展命名查询因网络中断未完成，不能记为零匹配。源码 deployment manifest loader
+使用 K/V=1.0 unit default；这与 TRT engine 的 serialized calibration 参数、真实 trace
+校准得到的 per-layer scales 是不同的证据，`kv_cache_quant_algo=FP8` 也不是校准证明。
+
+实际 GPU executable 已执行：`--list` 为10项；默认套件9通过、1 ignored（含6项CPU oracle与3项GPU测试）；ignored长门禁另行精确执行1通过、9 filtered。14条scale/domain记录、14条短K/V范围与10条长K/V范围均完整，逐byte断言全部通过。零差异结论来自冻结断言之后的 `byte_exact=PASS`，不是日志另行打印的数值误差计数。离线解析器的8种缺项/重复/错误退出码/字节错误负例均拒绝；实际源码、ELF、日志及解析产物哈希见[维护证据](model-microbench/evidence/fp8-prepared-storage-gate.json)。
+
+该通过结论仅限同一prepared BF16输入的静态E4M3量化与指定cache view的写入范围；没有执行模型权重、工具选择、长文理解或生成一致性验收，不认证 fused FP8 attention、动态量化、checkpoint/TRT scale校准、模型质量、MTP、Prefix Cache复用或性能。

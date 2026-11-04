@@ -8,28 +8,21 @@ The guide includes fast builds,
 the fixed 4,096-token benchmark, precision comparisons, text generation and
 the OpenAI-compatible server.
 
-> **Current validation status (two separate things, do not conflate them):**
+> **Historical observations; current acceptance uses the model-microbench gates.**
 >
-> *Long prefill is fixed.* The 4,096-token FP8 prefill is validated on Thor-U
-> **subject to the 1206 MHz GPU cap** described in the root `README.md`
-> section “Thor-U Qwen3.6 long-prefill stability”. With that cap applied,
-> repeated 4,096-token prefills complete with the host fully responsive and no
-> OOM, CUDA Xid, or kernel panic; a cache-warm run measures 1.02-1.06 s TTFT
-> (3,874-4,008 prefill tokens/s). The earlier claim that this workload
-> exhausts unified memory and renders the host unreachable was a
-> clock-frequency problem, not a memory-layout problem, and is superseded.
-> The cap is **not persistent across reboot** - re-apply it every session and
-> read the values back before benchmarking.
+> Historical cache-warm 4,096-token “FP8 prefill” runs under the 1206 MHz
+> cap recorded 1.02–1.06 s TTFT (3,874–4,008 input tokens/s). These are historical
+> shape-specific observations with their own revision/configuration, not the
+> current 15-case matrix or evidence that every previous host failure had one
+> clock-related cause. Keep clock-policy observations separate from the OOM
+> incident in [MODEL_MICROBENCH_RECOVERY.md](MODEL_MICROBENCH_RECOVERY.md).
+> Reapply and read back the baseline clock policy after every reboot.
 >
-> *The section 3 benchmark still does not complete,* for an unrelated reason:
-> scalar decode is not reproducible across repeated identical generate calls,
-> so `qwen35_mtp_bench`'s own token-equality assertion aborts the run at the
-> second iteration. The divergence is always at generated token 1 (token 0,
-> produced by the fixed-shape prefill, is stable). Root cause: the attention
-> autotuner's recipe key includes the live KV length, so every decode step is
-> a cache miss and re-selects `num_splits` by noisy timing, changing the
-> floating-point reduction order and occasionally flipping the greedy argmax.
-> Until that is fixed, treat the section 3 command as a target benchmark.
+> Earlier scalar repeat divergence prompted investigation of attention split
+> selection. Attention autotuning has not been established as its sole cause;
+> current precision checks also retain unresolved repeatability evidence.
+> See [MODEL_MICROBENCH_PRECISION.md](MODEL_MICROBENCH_PRECISION.md) and
+> [MODEL_MICROBENCH_USAGE.md](MODEL_MICROBENCH_USAGE.md) for current acceptance.
 
 ## 1. Connect and prepare the environment
 
@@ -87,21 +80,18 @@ MoE and `lm_head`, and BF16 MTP tensors. The old all-NVFP4/BF16-mixer
 
 ## 2. Build
 
-For daily development and quick benchmark iteration:
+Use the guarded release build for the current model matrix. It builds both
+benchmark examples and records the actual ELF identities:
 
 ```bash
-cargo build -p apxinf-model \
-  --features qwen35-cuda \
-  --example qwen35_mtp_bench
+python3 scripts/build_qwen35_thor_benchmarks.py --plan --target-dir "$CARGO_TARGET_DIR"
+python3 scripts/build_qwen35_thor_benchmarks.py --execute --target-dir "$CARGO_TARGET_DIR"
 ```
 
-For final performance records, build the release binary:
-
-```bash
-cargo build --release -p apxinf-model \
-  --features qwen35-cuda \
-  --example qwen35_mtp_bench
-```
+The guard targets these two examples. CLI/server/check snippets later in this
+guide are reference argv outside that target set; queue any such compilation
+separately in the same owned, locked small-pool phase with the same memory and
+two-worker limits. Complete all builds before reserving the inference pool.
 
 Always use `qwen35-cuda` for this model. The broader `cuda` feature enables all
 CUDA model families and intentionally links the legacy `apxinf-cuda` runtime;
@@ -211,14 +201,21 @@ clock cap above after reboot and reserve a sufficient HugeTLB pool before load.
 
 ## 4. Supported runtime precision choices
 
-The checkpoint does not contain `kv_cache_scheme`, `k_scale`, or `v_scale`.
-Use BF16 KV cache for correctness. A request for FP8 KV cache must fail rather
-than fabricate a scale and silently change model accuracy.
+BF16 target KV remains the current precision baseline. Explicit FP8 KV is
+implemented: the builtin loader and context benchmark read `hf_quant_config.json`;
+`config.rs::parse_trt_fp8_kv_cache_scales` requires `MIXED_PRECISION` / `FP8`
+manifest flags and returns unit K/V dequantization defaults `(1.0, 1.0)`.
+Missing/invalid manifests or an FP8 runtime without scales fail validation.
+These are deployment defaults from source, not serialized per-layer checkpoint
+calibration or verified TRT engine-export parameters. Storage/attention and
+long-Agent quality must pass their separate gates before FP8 results are accepted.
 
 | Arguments | MoE execution | KV-cache storage |
 | --- | --- | --- |
 | `nvfp4` + `bf16` | W4A4, runtime NVFP4 activations | BF16 |
 | `bf16` + `bf16` | W4A16, BF16 activations | BF16 |
+| `nvfp4` + `fp8` | W4A4, runtime NVFP4 activations | FP8, unit defaults; acceptance pending |
+| `bf16` + `fp8` | W4A16, BF16 activations | FP8, unit defaults; acceptance pending |
 
 Do not compare runs with different `--mode`, warmup count, repeat count, power
 mode or thermal state.

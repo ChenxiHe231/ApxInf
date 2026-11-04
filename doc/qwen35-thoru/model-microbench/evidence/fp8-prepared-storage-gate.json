@@ -1,0 +1,477 @@
+{
+  "schema": "apxinf.model-microbench.fp8-prepared-storage-gate.v1",
+  "status": "passed, storage-only; full P2 incomplete",
+  "source": {
+    "commit": "fcbff980eec5af299cd3bb6d3e391e0dcd35964f",
+    "status": "?? crates/apxinf-cuda-new/tests/qwen35_prepared_fp8_cache_precision.rs\n?? crates/apxinf-cuda-new/tests/support/e4m3_nearest_reference.rs\n",
+    "patch_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "untracked_sha256": {
+      "crates/apxinf-cuda-new/tests/qwen35_prepared_fp8_cache_precision.rs": "41523ff5a5141a77ad514d5f005c990b3a60b81eecf7597015ad960ccaa3f5d7",
+      "crates/apxinf-cuda-new/tests/support/e4m3_nearest_reference.rs": "06fd48d158eb7134216e60b3e29d9d74cd3a55e11bd15f0001f2f07052fc0340"
+    }
+  },
+  "test_elf": {
+    "sha256": "54c2df4a4ae0ff32cc8fba17661c4bf7c0e12f1f1267158e432ed75311b562c1",
+    "size_bytes": 32243624,
+    "source_before_equals_after": true
+  },
+  "build": {
+    "argv": [
+      "/home/nvidia/.cargo/bin/cargo",
+      "test",
+      "--release",
+      "-p",
+      "apxinf-cuda-new",
+      "--no-default-features",
+      "--test",
+      "qwen35_prepared_fp8_cache_precision",
+      "--no-run",
+      "--jobs",
+      "2",
+      "--target-dir",
+      "/opt/data/dev/apxinf-qwen35-thoru-perf/target",
+      "--message-format=json-render-diagnostics"
+    ],
+    "environment": {
+      "CARGO_BUILD_JOBS": "2",
+      "APXINF_NVCC_PARALLELISM": "2"
+    },
+    "exit_code": 0,
+    "owned_group_cleanup_proven": true,
+    "receipt_sha256": "1d436b56c850d765cd758b0d33ea80a3eb57c5d81b8d6db749714f2a67b8839e"
+  },
+  "runs": [
+    {
+      "name": "list",
+      "argv_suffix": [
+        "--list"
+      ],
+      "exit_code": 0,
+      "log_sha256": "d8a5e5a958394aef66e8bc2a94444d4281328f84738b4adeea9b312fe20a5a1a"
+    },
+    {
+      "name": "default",
+      "argv_suffix": [
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log_sha256": "f53ae0993f148e0b940b990819dcbd543cee082a4d7eac7a1c1c8fac0f4d9eed"
+    },
+    {
+      "name": "long",
+      "argv_suffix": [
+        "prepared_fp8_cache_append_preserves_long_prefix_and_future",
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit_code": 0,
+      "log_sha256": "96df88c9f18b1529d1d3c319eb5690bfb1bf8a1d16a47fa837058d7b637dac90"
+    }
+  ],
+  "run_receipt_sha256": "16ac68692842c0034776b844f7b143fe5f824f88c450f3b620db70fb48980d5e",
+  "results": {
+    "listed_tests": 10,
+    "default": {
+      "passed": 9,
+      "failed": 0,
+      "ignored": 1,
+      "filtered_out": 0,
+      "cpu_oracle_tests": 6,
+      "gpu_tests": 3
+    },
+    "long_exact": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "filtered_out": 9
+    },
+    "scale_domain_records": 14,
+    "short_kv_range_records": 14,
+    "long_kv_range_records": 10,
+    "byte_mismatches": 0,
+    "zero_basis": "all frozen gate post-assert PASS markers; no independent numerical counter is printed on success"
+  },
+  "contract": {
+    "input": "same prepared finite BF16 bit patterns; no projection, QKNorm or RoPE",
+    "reference": "independent numerical enumeration of finite E4M3 magnitudes with nearest/ties-even",
+    "actual_stage": "host F32 reciprocal -> device F32 product -> clamp +/-448 -> E4M3",
+    "threshold": "exact byte equality; unchanged source and full old-prefix/future-canary assertions",
+    "finite_bf16_domain_elements": 65280,
+    "power2_tail_elements": 13,
+    "page_tokens": 128,
+    "scale_records": [
+      {
+        "scale_text": "0.1",
+        "scale_bits": "3dcccccd",
+        "elements": 65280,
+        "power2": false,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "0.3",
+        "scale_bits": "3e99999a",
+        "elements": 65280,
+        "power2": false,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "0.11216518",
+        "scale_bits": "3de5b6dc",
+        "elements": 65280,
+        "power2": false,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "0.032226563",
+        "scale_bits": "3d040000",
+        "elements": 65280,
+        "power2": false,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "0.25",
+        "scale_bits": "3e800000",
+        "elements": 65280,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "0.25",
+        "scale_bits": "3e800000",
+        "elements": 13,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "0.5",
+        "scale_bits": "3f000000",
+        "elements": 65280,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "0.5",
+        "scale_bits": "3f000000",
+        "elements": 13,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "1.0",
+        "scale_bits": "3f800000",
+        "elements": 65280,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "1.0",
+        "scale_bits": "3f800000",
+        "elements": 13,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "2.0",
+        "scale_bits": "40000000",
+        "elements": 65280,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "2.0",
+        "scale_bits": "40000000",
+        "elements": 13,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "4.0",
+        "scale_bits": "40800000",
+        "elements": 65280,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      },
+      {
+        "scale_text": "4.0",
+        "scale_bits": "40800000",
+        "elements": 13,
+        "power2": true,
+        "byte_mismatches": 0,
+        "basis": "post-assert byte_exact marker, not a separately printed numerical error counter"
+      }
+    ],
+    "short_ranges": [
+      {
+        "kind": "K",
+        "prefix": 0,
+        "append": 1,
+        "capacity": 128,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 0,
+        "append": 1,
+        "capacity": 128,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 127,
+        "append": 1,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 127,
+        "append": 1,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 128,
+        "append": 1,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 128,
+        "append": 1,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 128,
+        "append": 2,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 128,
+        "append": 2,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 129,
+        "append": 3,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 129,
+        "append": 3,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 127,
+        "append": 4,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 127,
+        "append": 4,
+        "capacity": 256,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 4095,
+        "append": 4,
+        "capacity": 4224,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 4095,
+        "append": 4,
+        "capacity": 4224,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      }
+    ],
+    "long_ranges": [
+      {
+        "kind": "K",
+        "prefix": 4096,
+        "append": 4096,
+        "capacity": 8320,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 4096,
+        "append": 4096,
+        "capacity": 8320,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 8192,
+        "append": 4096,
+        "capacity": 12416,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 8192,
+        "append": 4096,
+        "capacity": 12416,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 16384,
+        "append": 4096,
+        "capacity": 20608,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 16384,
+        "append": 4096,
+        "capacity": 20608,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 32768,
+        "append": 4096,
+        "capacity": 36992,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 32768,
+        "append": 4096,
+        "capacity": 36992,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "K",
+        "prefix": 49152,
+        "append": 4096,
+        "capacity": 53376,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      },
+      {
+        "kind": "V",
+        "prefix": 49152,
+        "append": 4096,
+        "capacity": 53376,
+        "page": 128,
+        "byte_mismatches": 0,
+        "range_assertions": "post whole-cache and source-unchanged asserts"
+      }
+    ]
+  },
+  "parser": {
+    "sha256": "4f120f55389e54090858b70d3a4f37319af4d0195aadbce2df88a01855bf05a0",
+    "parsed_json_sha256": "4aa877ed29bea0e040fe97335a568a1d62804e4fce03716b1267525f2d4cec4d",
+    "identity_check_sha256": "b9551b65edf4bc3fdbd31c6cfb6611f1b2f798a52c02cef038635c3ce96de4a2",
+    "negative_checks_sha256": "c306fa20a8b1ab9160d0b558cab4b871e9651b093a91df2e34e3e285f3a1dd24",
+    "negative_cases_rejected": [
+      "missing_scale_marker",
+      "missing_long_range",
+      "duplicate_scale",
+      "bad_page_capacity",
+      "missing_exit_receipt",
+      "nonzero_exit_receipt",
+      "zero_test_summary",
+      "explicit_byte_mismatch"
+    ],
+    "negative_cases_count": 8,
+    "negative_inputs": "in-memory corrupted copies of actual logs; original logs unchanged",
+    "separate_identity": "parser completeness checks supplement but do not replace frozen Rust assertions or source/ELF receipts"
+  },
+  "scale_provenance": {
+    "power2_and_nonpower2_test_scales": "synthetic test inputs, not checkpoint calibration",
+    "deployment_loader": "explicit FP8 opt-in with K/V unit-default 1.0; not serialized TRT calibration",
+    "initial_checkpoint_header_search": "no matching tensors for initial queried naming patterns",
+    "expanded_scale_alias_search": "incomplete due disconnect; no zero-match claim"
+  },
+  "not_certified": [
+    "fused FP8 attention or its device division stage",
+    "QKNorm/RoPE accuracy",
+    "dynamic quantization",
+    "checkpoint or serialized TRT calibration",
+    "complete-model or Agent quality",
+    "MTP verifier/commit",
+    "Prefix Cache reuse",
+    "performance"
+  ],
+  "artifact_location": "devlocal/model-microbench/recovery-build/fp8-gate (raw owner build/run evidence; ignored development artifacts)",
+  "clock_note": "Build receipt server wall clock differs from workstation incident date; event identity uses source/hashes/uptime evidence, not an inferred date order."
+}
