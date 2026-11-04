@@ -1557,7 +1557,7 @@ fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
             bytes.checked_mul(*dimension)
         })
         .ok_or_else(|| invalid("Qwen3.5 attention CUDA allocation size overflow"))?;
-    Ok(CudaBuffer::alloc_zeros(bytes, ctx.device_id())
+    Ok(CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
         .map_err(Error::Cuda)?
         .as_tensor(Shape::new(shape), dtype)
         .map_err(Error::Cuda)?)

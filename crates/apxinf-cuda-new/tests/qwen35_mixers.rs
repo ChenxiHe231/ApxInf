@@ -40,7 +40,10 @@ fn upload_f32(ctx: &CudaContext, values: &[f32], shape: Vec<usize>) -> Tensor {
 
 fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Tensor {
     let bytes = shape.iter().product::<usize>() * dtype.size_in_bytes();
-    let buffer = CudaBuffer::alloc_zeros(bytes, ctx.device_id()).unwrap();
+    // Initialization must precede consumers on the nonblocking context stream.
+    // Plain alloc_zeros uses legacy-default-stream cudaMemset, which has no
+    // ordering dependency with this stream and can erase computed Q/K/V later.
+    let buffer = CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream()).unwrap();
     buffer.as_tensor(Shape::new(shape), dtype).unwrap()
 }
 

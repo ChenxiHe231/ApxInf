@@ -1,0 +1,203 @@
+{
+  "schema": "apxinf.qwen35.stream-zero-order.validation.v1",
+  "correctness_change": "default-stream memset -> consuming-context stream memsetAsync in four Qwen35 zeros helpers; no dtype/math/kernel or threshold change",
+  "before_gdn_short_independent_process_rounds": [
+    "pass",
+    "fail",
+    "pass",
+    "fail",
+    "pass"
+  ],
+  "after_gdn_short_independent_process_rounds": [
+    "pass",
+    "pass",
+    "pass",
+    "pass",
+    "pass"
+  ],
+  "after_suites": [
+    {
+      "file": "bf16-prefill.log",
+      "sha256": "8cd3cd9c96c14eee40f6c98e7663b7e48da41833a1196c55711b483adfd9c47c",
+      "test_results": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 23.70s"
+      ]
+    },
+    {
+      "file": "bf16-short-long.log",
+      "sha256": "065202d21413388d179b2033f64425a406e6d2f226e48f53935a592266f84fff",
+      "test_results": [
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.08s"
+      ]
+    },
+    {
+      "file": "build.log",
+      "sha256": "f94c61fc06c5dc1e35f89098a1f0beb29779f408d11fd4d1230d55cf79da2d5f",
+      "test_results": []
+    },
+    {
+      "file": "gdn-long.log",
+      "sha256": "2eacafd29ef8a6a1de28eb1d0d558567d78db4fad32daa93597caf5d5956332d",
+      "test_results": [
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 27.23s"
+      ]
+    },
+    {
+      "file": "gdn-order-round-1.log",
+      "sha256": "a821246084f34592568eaee29ae8ef8672e4288cb658bfd45eebe44e82ac7377",
+      "test_results": [
+        "test result: ok. 5 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.10s"
+      ]
+    },
+    {
+      "file": "gdn-order-round-2.log",
+      "sha256": "287292f4d7571dbaca482f8e83b8903dbb1a8bd7c28d70f1f2048a25169f646f",
+      "test_results": [
+        "test result: ok. 5 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.06s"
+      ]
+    },
+    {
+      "file": "gdn-order-round-3.log",
+      "sha256": "287292f4d7571dbaca482f8e83b8903dbb1a8bd7c28d70f1f2048a25169f646f",
+      "test_results": [
+        "test result: ok. 5 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.06s"
+      ]
+    },
+    {
+      "file": "gdn-order-round-4.log",
+      "sha256": "93cb05ea4685f64d8e8c2bb18b44210c22f5d4225830ae6b8f9e704f65fb2580",
+      "test_results": [
+        "test result: ok. 5 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.10s"
+      ]
+    },
+    {
+      "file": "gdn-order-round-5.log",
+      "sha256": "d7ae49a7eb6e7157eb4f61a7e04f17c714117d734bf0c2818a14ac12feff24f6",
+      "test_results": [
+        "test result: ok. 5 passed; 0 failed; 9 ignored; 0 measured; 0 filtered out; finished in 0.06s"
+      ]
+    }
+  ],
+  "model_cold_i2k": {
+    "case": "cold-i2k",
+    "valid": true,
+    "performance_accepted": true,
+    "accuracy_status": "repeat_consistent",
+    "comparison_policy": "strict-repeat-consistency-v1",
+    "observed": {
+      "input_identity": {
+        "seed_hex": "35a3bf0440960001",
+        "tokens": 2048,
+        "fnv1a64": "3469a1395a5bfd83",
+        "sha256": "e1e08828d10406baae6a19c984c88ae903dbfb113156f30135b681d4a2032b78"
+      },
+      "measured_iterations": 5,
+      "primary_metric": "prefill_ttft_ms",
+      "observed_median": 442.69966700000003,
+      "observed_p90": 457.255741,
+      "min": 439.32760199999996,
+      "max": 457.255741,
+      "decode_tpot_ms": null,
+      "output_digest": "093124af99b00793",
+      "output_digests": [
+        "093124af99b00793",
+        "093124af99b00793",
+        "093124af99b00793",
+        "093124af99b00793",
+        "093124af99b00793",
+        "093124af99b00793",
+        "093124af99b00793"
+      ],
+      "measured_primary_values": [
+        441.792315,
+        442.69966700000003,
+        457.255741,
+        439.32760199999996,
+        449.978842
+      ],
+      "measured_decode_tpot_ms": [],
+      "total_iterations": 7,
+      "warmup_iterations": 2,
+      "decode_tpot_distribution": null,
+      "repeat_divergences": [],
+      "comparison_policy": "strict-repeat-consistency-v1",
+      "diagnostic_only": false
+    }
+  },
+  "model_identity": {
+    "source": {
+      "source_commit": "f267f5ae6b597e5a410dcd4d66bdad407fc2b310",
+      "source_dirty": true,
+      "source_status": " M crates/apxinf-cuda-new/native/adapters/attention/execution.cpp\n M crates/apxinf-cuda-new/native/adapters/gemm/execution.cpp\n M crates/apxinf-cuda-new/tests/qwen35_mixers.rs\n M crates/apxinf-model/examples/qwen35_context_bench.rs\n M crates/apxinf-model/examples/qwen35_mtp_bench.rs\n M crates/apxinf-model/src/profiling/trace.rs\n M crates/apxinf-model/src/qwen35moe/attention_backend.rs\n M crates/apxinf-model/src/qwen35moe/decoder.rs\n M crates/apxinf-model/src/qwen35moe/forward.rs\n M crates/apxinf-model/src/qwen35moe/llm.rs\n M crates/apxinf-model/src/qwen35moe/mtp_runtime.rs\n M crates/apxinf-model/tests/qwen35_real_checkpoint.rs\n?? crates/apxinf-cuda-new/native/framework/strict_recipe.h\n?? crates/apxinf-cuda-new/tests/qwen35_bf16_attention_precision.rs\n?? crates/apxinf-cuda-new/tests/qwen35_bf16_prefill_precision.rs\n?? crates/apxinf-cuda-new/tests/strict_recipes.rs\n?? crates/apxinf-cuda-new/tests/support/bf16_attention_reference.rs\n?? crates/apxinf-model/examples/support/qwen35_benchmark.rs\n?? crates/apxinf-model/examples/support/qwen35_cuda_profile.rs\n",
+      "source_patch_sha256": "6cd21a2028116bf769f3e7bd365c1629da6e136cbd9e699cb79689017278f2bc",
+      "source_untracked_sha256": {
+        "crates/apxinf-cuda-new/native/framework/strict_recipe.h": "73b84cbde04b0886601034dc44a7dda69fb30d70119e504724fc9ba00c1e8328",
+        "crates/apxinf-cuda-new/tests/qwen35_bf16_attention_precision.rs": "98549d5f6299bae89c3b5fcf7aaab3dc5d648fc3a25cf678b3c4c57d08e86476",
+        "crates/apxinf-cuda-new/tests/qwen35_bf16_prefill_precision.rs": "62c88174ffddbbaa1b7138d4e62ad2067f9b289b888624bdf964940700c19fb3",
+        "crates/apxinf-cuda-new/tests/strict_recipes.rs": "e60c92569d40c4d809fe61a76c1de6d76fb6cf01206a429421aa41952395bfd5",
+        "crates/apxinf-cuda-new/tests/support/bf16_attention_reference.rs": "59599714bf83e05a9d93b89cdb8a9018eb48492149f3ad29490024872e783959",
+        "crates/apxinf-model/examples/support/qwen35_benchmark.rs": "03d804e049c72b88b5c45052cf65a73fd452d4a060ce97f6ec8eb166f6b18434",
+        "crates/apxinf-model/examples/support/qwen35_cuda_profile.rs": "2bd4ea009ff21e0b1d4d99512d1831127fd602cd33176aad2ecfa1832bc6aef7"
+      }
+    },
+    "binary_sha256": {
+      "context": "82fd64ce508d73b618fdb661f41c563169dc47dc8b4815d3bc67937fa09610fb",
+      "decode": "28ab983cacce9709799e0af6592585cb6a04b79b1d96c74ae3c7c2ec92c65cfc"
+    },
+    "recipes": {
+      "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+      "count": 1267,
+      "manifest_sha256": "9f081d4c2d5d09e096a69f9ea38d2fcf44d4c672f57f188997050bfbdeb1c8e1"
+    },
+    "model_sha256": {
+      "chat_template.jinja": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+      "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+      "configuration.json": "c1b09db419119513247e9b8b912c4b9897106c9b20c6cada7e107d993c5435eb",
+      "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+      "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+      "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+      "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+      "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164",
+      "model.safetensors.index.json": "d67403a4e9793c0ba8a136baf14b3b76ec7b32c822267978084895e07ebd8a3e",
+      "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+      "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+      "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b",
+      "video_preprocessor_config.json": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+      "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+    },
+    "hardware_observed": {
+      "hostname": "tegra-ubuntu",
+      "platform": "Linux-6.1.119-rt45-rt-tegra-aarch64-with-glibc2.39",
+      "gpu_clocks": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000",
+          "governor": "simple_ondemand"
+        }
+      ],
+      "memory": {
+        "CmaTotal": "524288 kB",
+        "CmaFree": "28836 kB",
+        "HugePages_Total": "21814",
+        "HugePages_Free": "21799",
+        "HugePages_Rsvd": "0",
+        "HugePages_Surp": "0",
+        "Hugepagesize": "2048 kB"
+      }
+    }
+  },
+  "performance_claim": "correctness repair only; no speedup ratio because pre-fix formal acquisition failed",
+  "remaining": [
+    "full15 baseline",
+    "MTP model parity/rollback",
+    "Graph eager equality",
+    "MoE independent fixed-routing diagnostic"
+  ],
+  "gpu_test_executable_sha256": {
+    "qwen35_mixers": "0fef61e45b4e849efb486909b1666270f23ce04c5cca2ec188c3a98170a74f46",
+    "qwen35_bf16_attention_precision": "3df6ff5ec35ce1ff8631c059343c666ef307ba06293de10cea546d650cc15b3e",
+    "qwen35_bf16_prefill_precision": "33995bbc984c14cb50801a21fca57b4fa1c6e4dc5d9116328fe072f125ab142d"
+  }
+}
