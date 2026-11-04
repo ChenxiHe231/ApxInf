@@ -11,7 +11,7 @@ use apxinf_cuda_new::{ops, transfers, CudaContext};
 use super::architecture::MixerKind;
 use super::decoder::{
     DecoderOutput, DecoderPhase, DecoderScratch, FullAttentionBackend, HiddenSelection,
-    LogitsSelection, Qwen35DecodePhase, Qwen35Decoder, Qwen35VerifyPhase,
+    LogitsSelection, Qwen35DecodePhase, Qwen35Decoder, Qwen35VerifyPhase, VerifyPhaseMode,
 };
 use super::device_weights::{DeviceMixerWeights, Qwen35DeviceWeights};
 use super::forward::{GdnState, GdnStateCheckpoints};
@@ -420,7 +420,10 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             epoch: 0,
             shadow_generation: 0,
         };
-        if std::env::var("APXINF_QWEN35_CUDA_GRAPHS").as_deref() == Ok("1") {
+        let cuda_graphs = std::env::var("APXINF_QWEN35_CUDA_GRAPHS").as_deref() == Ok("1");
+        let eager_verify_sessions =
+            std::env::var("APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS").as_deref() == Ok("1");
+        if cuda_graphs {
             session.committed_decode_phases = Some(decoder.capture_decode_phases(
                 ctx,
                 weights,
@@ -433,6 +436,8 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                 &session.shadow_gdn,
                 &mut session.decode_scratch,
             )?);
+        }
+        if let Some(mode) = VerifyPhaseMode::from_flags(cuda_graphs, eager_verify_sessions) {
             for profile in &mut session.verify_profiles {
                 profile.committed_phases = Some(decoder.prepare_verify_phases(
                     ctx,
@@ -444,6 +449,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                     profile.rows,
                     0,
                     &mut profile.scratch,
+                    mode,
                 )?);
                 profile.shadow_phases = Some(decoder.prepare_verify_phases(
                     ctx,
@@ -455,8 +461,11 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                     profile.rows,
                     0,
                     &mut profile.scratch,
+                    mode,
                 )?);
             }
+        }
+        if cuda_graphs {
             if std::env::var("APXINF_QWEN35_VERIFY_GRAPHS").as_deref() == Ok("1") {
                 decoder.verify_decode_phases(
                     ctx,

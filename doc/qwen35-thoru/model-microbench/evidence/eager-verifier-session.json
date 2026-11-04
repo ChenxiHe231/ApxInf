@@ -1,0 +1,416 @@
+{
+  "schema": "apxinf.eager_verifier.commit_evidence.v1",
+  "scope": "Historical dirty-overlay4K Decode receipts only, not isolated clean draft acceptance",
+  "code_patch_sha256": "2b64eedb8a593a1777885b4ebf70e149cabc7b20f017b31a5d8ab8a5de4add0f",
+  "runs": [
+    {
+      "name": "decode4k-fixed1206-control-02",
+      "scope": "Original dirty-overlay single4K Decode measurement; no isolated clean commit, full15, model-math or AIOS acceptance",
+      "raw_bindings": [
+        {
+          "path": "devlocal/model-microbench/recovery-build/decode4k-fixed1206-control-02/identity.json",
+          "bytes": 522540,
+          "sha256": "c8b828c21f3c04551d9f30adc26397dd77618debfe94de2d36648319813663b1"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/decode4k-fixed1206-control-02/formal/summary.json",
+          "bytes": 2958057,
+          "sha256": "d15006cdc89eda4f58339373173cd40e1580ed5ee206cf5466adec3dbb48159b"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/decode4k-fixed1206-control-02/controller-receipt.json",
+          "bytes": 10305,
+          "sha256": "73d09c9f371814784d5d83e65927302def55a7fffef953f8cf134c0ecb337054"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/decode4k-fixed1206-control-02/profile/summary.json",
+          "bytes": 2981670,
+          "sha256": "e916af8db331f2a47630494923093b27d9c19b62e6b868168be597c53672e0ec"
+        }
+      ],
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "cde5d31be17eaa4b9aa7a728d831e8ded3fc0f51ab9c4edfde034f6a92410bd1",
+        "full_source_object_sha256": "f9cd463e896fd2bd659314e77b67b0d1762b44ba188cebaa9a978c58e7654647"
+      },
+      "binary_sha256": {
+        "context": "a376e62eec438abf7b6f78ac744e1aae7f2a2b9b8288c09ec3375647a1755642",
+        "decode": "30946cf2b342df36da1586fc0621c6d3eecac89bd5138c451caa07b31b0809a1"
+      },
+      "model_asset_manifest_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+      "case": "decode-kv4k-o1k",
+      "environment": {
+        "APXINF_QWEN35_CUDA_GRAPHS": "0",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_NVTX": "0",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+      },
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/source28-protocol-frozen-01/bin/qwen35_mtp_bench",
+        "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "--mode",
+        "mtp",
+        "--qwen35-kv-cache",
+        "bf16",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--tuning-dir",
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--prompt-tokens",
+        "4096",
+        "--max-new",
+        "1024"
+      ],
+      "measured_iterations": 5,
+      "warmups": 2,
+      "output_tokens": 1024,
+      "decode_intervals": 1023,
+      "timing_method": "host-callback-first-last-v2",
+      "median_tps": 9.568961578073695,
+      "median_tpot_ms": 104.50454752492668,
+      "measured_tps": [
+        9.558614949493183,
+        9.566640147036196,
+        9.568961578073695,
+        9.60041615710531,
+        9.581433394678537
+      ],
+      "measured_tpot_ms": [
+        104.61766744281525,
+        104.52990649071359,
+        104.50454752492668,
+        104.1621512688172,
+        104.36851761192571
+      ],
+      "seven_output_digests": [
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392"
+      ],
+      "native_accuracy_status": "repeat_consistent",
+      "native_performance_accepted": true,
+      "broader_model_quality_accepted": false,
+      "recipe_manifest_before_after_sha256": "e03a098500c697bdf9ea0e15709e702e92bbddb3a9742d1ce14b4a894a9166a6",
+      "exit_and_lock": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false
+      },
+      "clock_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ],
+      "clock_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ]
+    },
+    {
+      "name": "eager-verifier-decode4k-ab-01",
+      "scope": "Original dirty-overlay single4K Decode measurement; no isolated clean commit, full15, model-math or AIOS acceptance",
+      "raw_bindings": [
+        {
+          "path": "devlocal/model-microbench/recovery-build/eager-verifier-decode4k-ab-01/identity.json",
+          "bytes": 523387,
+          "sha256": "a2f5d9fbde12680877c8e03007c19217433d53320c8ddbacf39dc930f321631d"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/eager-verifier-decode4k-ab-01/formal/summary.json",
+          "bytes": 2959282,
+          "sha256": "9d2a40c47931b4b69b64eda422dcde0d4cbfa17eacbbba0f0bce1df58810f8f4"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/eager-verifier-decode4k-ab-01/controller-receipt.json",
+          "bytes": 15017,
+          "sha256": "cd776a642976cddaf6ffcd88ea0af1848384f9a8201b0cca51e45b663aaed590"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/eager-verifier-decode4k-ab-01/profile/summary.json",
+          "bytes": 2982726,
+          "sha256": "878575082b7ccba2cd8d893b40d639870a5f11a19c95f9d8211e8cd1615b722f"
+        }
+      ],
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "774ee979ebe6d2ef527cdc3bfb34b077a039fc96710b036f447c8e0d54b69416",
+        "full_source_object_sha256": "59e72865271339e2caf186d93cf4fc922453adbd1c730e5b1b36fb66c8f35fd6"
+      },
+      "binary_sha256": {
+        "context": "30ff0fba03d9c2371c82c23215165cf850d3a434f03115ea34847d76b90ee28f",
+        "decode": "b181a6f9b020ae6f8a60f6ad33402a80d91df943e2be8cae2175c7fab5ed3b9f"
+      },
+      "model_asset_manifest_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+      "case": "decode-kv4k-o1k",
+      "environment": {
+        "APXINF_QWEN35_CUDA_GRAPHS": "0",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_NVTX": "0",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "1",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+      },
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/four-candidate-frozen-01/bin/qwen35_mtp_bench",
+        "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "--mode",
+        "mtp",
+        "--qwen35-kv-cache",
+        "bf16",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--tuning-dir",
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--prompt-tokens",
+        "4096",
+        "--max-new",
+        "1024"
+      ],
+      "measured_iterations": 5,
+      "warmups": 2,
+      "output_tokens": 1024,
+      "decode_intervals": 1023,
+      "timing_method": "host-callback-first-last-v2",
+      "median_tps": 82.12525265024165,
+      "median_tpot_ms": 12.176522661779082,
+      "measured_tps": [
+        82.16416595173776,
+        82.09143775963695,
+        82.12525265024165,
+        82.06818257178622,
+        82.16159938401103
+      ],
+      "measured_tpot_ms": [
+        12.170755808406648,
+        12.181538383186707,
+        12.176522661779082,
+        12.18499019550342,
+        12.171135999022482
+      ],
+      "seven_output_digests": [
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392"
+      ],
+      "native_accuracy_status": "repeat_consistent",
+      "native_performance_accepted": true,
+      "broader_model_quality_accepted": false,
+      "recipe_manifest_before_after_sha256": "e03a098500c697bdf9ea0e15709e702e92bbddb3a9742d1ce14b4a894a9166a6",
+      "exit_and_lock": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false
+      },
+      "clock_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ],
+      "clock_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ]
+    },
+    {
+      "name": "existing-graph1-decode4k-control-01",
+      "scope": "Original dirty-overlay single4K Decode measurement; no isolated clean commit, full15, model-math or AIOS acceptance",
+      "raw_bindings": [
+        {
+          "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/identity.json",
+          "bytes": 523388,
+          "sha256": "6b1e3e46a59a96b2c5374463b8064f8432fbb03d6cb1f673bfaf965a6a351dc5"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/formal/summary.json",
+          "bytes": 2959287,
+          "sha256": "0d29e49d03e4526ce089b5cecdbb843f589ac855cb0771b7843949b9d387e31f"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/controller-receipt.json",
+          "bytes": 15101,
+          "sha256": "19a57096197352988fb3c1aada3184507a9626d9e7c3126b7afc8db076f446a8"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/profile/summary.json",
+          "bytes": 2982883,
+          "sha256": "328144844cd7fa6a347442f37ffd82a834b51193e9f3647162e2884d221488f2"
+        }
+      ],
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "774ee979ebe6d2ef527cdc3bfb34b077a039fc96710b036f447c8e0d54b69416",
+        "full_source_object_sha256": "59e72865271339e2caf186d93cf4fc922453adbd1c730e5b1b36fb66c8f35fd6"
+      },
+      "binary_sha256": {
+        "context": "30ff0fba03d9c2371c82c23215165cf850d3a434f03115ea34847d76b90ee28f",
+        "decode": "b181a6f9b020ae6f8a60f6ad33402a80d91df943e2be8cae2175c7fab5ed3b9f"
+      },
+      "model_asset_manifest_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+      "case": "decode-kv4k-o1k",
+      "environment": {
+        "APXINF_QWEN35_CUDA_GRAPHS": "1",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_NVTX": "0",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+      },
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/existing-graph1-frozen-01/bin/qwen35_mtp_bench",
+        "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "--mode",
+        "mtp",
+        "--qwen35-kv-cache",
+        "bf16",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--tuning-dir",
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--prompt-tokens",
+        "4096",
+        "--max-new",
+        "1024"
+      ],
+      "measured_iterations": 5,
+      "warmups": 2,
+      "output_tokens": 1024,
+      "decode_intervals": 1023,
+      "timing_method": "host-callback-first-last-v2",
+      "median_tps": 88.54484135374035,
+      "median_tpot_ms": 11.293712707722385,
+      "measured_tps": [
+        88.52324218233913,
+        88.5496999777156,
+        88.61722147075243,
+        88.54484135374035,
+        88.49251212135721
+      ],
+      "measured_tpot_ms": [
+        11.296468309872923,
+        11.2930930342131,
+        11.284488312805474,
+        11.293712707722385,
+        11.300391140762464
+      ],
+      "seven_output_digests": [
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392"
+      ],
+      "native_accuracy_status": "repeat_consistent",
+      "native_performance_accepted": true,
+      "broader_model_quality_accepted": false,
+      "recipe_manifest_before_after_sha256": "e03a098500c697bdf9ea0e15709e702e92bbddb3a9742d1ce14b4a894a9166a6",
+      "exit_and_lock": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false
+      },
+      "clock_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ],
+      "clock_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ]
+    }
+  ],
+  "comparisons": {
+    "eager_vs_older_eager_control": {
+      "baseline_tps": 9.568961578073695,
+      "candidate_tps": 82.12525265024165,
+      "tpot_reduction_percent": 88.34833224948923,
+      "same_ELF": false,
+      "claim": "Historical eager-path resource-overhead comparison, not superior to existing Graph1 or an isolated clean-commit speedup"
+    },
+    "eager_vs_existing_graph1": {
+      "eager_tps": 82.12525265024165,
+      "graph_tps": 88.54484135374035,
+      "eager_faster": false,
+      "same_ELF": true
+    }
+  },
+  "clean_draft_Cargo_GPU_weather_full15_run": false,
+  "public_model_Rust_API_changed": false,
+  "precision_or_sampling_changed": false,
+  "dependency_analysis": [
+    {
+      "path": "crates/apxinf-model/src/qwen35moe/session.rs",
+      "excluded_suffix_bytes": 14295,
+      "excluded_suffix_sha256": "1fabdd185cdde89e411f00d67a3ab42ae204ee93e9ff4ef6521d82605af03925",
+      "scope": "test-only raw-bank module; no production dependency"
+    }
+  ]
+}

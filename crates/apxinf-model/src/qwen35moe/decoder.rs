@@ -138,25 +138,58 @@ impl Qwen35DecodePhase {
     }
 }
 
-/// One fixed-shape target-verification layer traversal.
-///
-/// GDN layers are fixed-address and captured as one mixer-plus-MoE graph.
-/// Full-attention layers keep their dynamic KV traversal eager, but capture
-/// the fixed-address MoE tail. This removes thousands of per-round launches
-/// while preserving the changing cache offset.
-pub(super) struct Qwen35VerifyPhase {
-    prepared: PreparedPhase,
+/// Selection is frozen when a session owns its fixed-shape verifier banks.
+/// CUDA Graphs retain their existing precedence; eager sessions are opt-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum VerifyPhaseMode {
+    Graph,
+    Eager,
+}
+
+impl VerifyPhaseMode {
+    pub(super) fn from_flags(cuda_graphs: bool, eager_sessions: bool) -> Option<Self> {
+        if cuda_graphs {
+            Some(Self::Graph)
+        } else if eager_sessions {
+            Some(Self::Eager)
+        } else {
+            None
+        }
+    }
+}
+
+/// One fixed-shape, fixed-bank target-verification layer traversal.
+/// GDN owns mixer plus MoE; full attention keeps its changing live KV view
+/// outside this phase and owns only its fixed-address MoE tail here.
+pub(super) enum Qwen35VerifyPhase {
+    Graph(PreparedPhase),
+    Eager(ExecutionSession),
 }
 
 impl Qwen35VerifyPhase {
-    fn prepare(ctx: &CudaContext, mut operation: impl FnMut() -> Result<()>) -> Result<Self> {
+    fn prepare(
+        ctx: &CudaContext,
+        mode: VerifyPhaseMode,
+        mut operation: impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
         let session = ExecutionSession::with_capacity(DECODE_PHASE_WORKSPACE, ctx.device_id())?;
-        let prepared = PreparedPhase::prepare_and_capture(ctx, session, &mut operation)?;
-        Ok(Self { prepared })
+        match mode {
+            VerifyPhaseMode::Graph => {
+                let prepared = PreparedPhase::prepare_and_capture(ctx, session, &mut operation)?;
+                Ok(Self::Graph(prepared))
+            }
+            VerifyPhaseMode::Eager => {
+                session.prepare(&mut operation)?;
+                Ok(Self::Eager(session))
+            }
+        }
     }
 
-    fn replay(&self) -> Result<()> {
-        self.prepared.replay()
+    fn run(&self, operation: impl FnOnce() -> Result<()>) -> Result<()> {
+        match self {
+            Self::Graph(prepared) => prepared.replay(),
+            Self::Eager(session) => session.run(operation),
+        }
     }
 }
 
@@ -596,6 +629,7 @@ impl Qwen35Decoder {
         verify_rows: usize,
         start_position: usize,
         scratch: &mut DecoderScratch,
+        mode: VerifyPhaseMode,
     ) -> Result<Vec<Qwen35VerifyPhase>> {
         if attention_caches.len() != self.architecture.full_attention_layers().count()
             || gdn_states.len() != self.architecture.gdn_layers().count()
@@ -621,7 +655,7 @@ impl Qwen35Decoder {
             let resident = &weights.layers[layer_offset];
             match self.architecture.layers[layer_offset].mixer {
                 MixerKind::Gdn(_) => {
-                    phases.push(Qwen35VerifyPhase::prepare(ctx, || {
+                    phases.push(Qwen35VerifyPhase::prepare(ctx, mode, || {
                         self.run_verify_mixer(
                             ctx,
                             weights,
@@ -657,7 +691,7 @@ impl Qwen35Decoder {
                         start_position,
                         scratch,
                     )?;
-                    phases.push(Qwen35VerifyPhase::prepare(ctx, || {
+                    phases.push(Qwen35VerifyPhase::prepare(ctx, mode, || {
                         run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
                     })?);
                     attention_index += 1;
@@ -1146,7 +1180,10 @@ impl Qwen35Decoder {
                 };
                 match layer.mixer {
                     MixerKind::Gdn(_) => {
-                        phases[layer_offset].replay()?;
+                        phases[layer_offset].run(|| {
+                            run_mixer(scratch)?;
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        })?;
                         gdn_index += 1;
                     }
                     MixerKind::FullAttention(_) => {
@@ -1157,7 +1194,9 @@ impl Qwen35Decoder {
                         } else {
                             None
                         };
-                        phases[layer_offset].replay()?;
+                        phases[layer_offset].run(|| {
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        })?;
                         if let Some(mixer_ms) = mixer_ms {
                             ctx.synchronize().map_err(Error::Cuda)?;
                             let total_ms = verify_layer_started.elapsed().as_secs_f64() * 1000.0;
@@ -1818,6 +1857,14 @@ fn layer_error(layer: usize, stage: &str, error: Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verifier_execution_policy_defaults_off_and_keeps_graph_precedence() {
+        assert_eq!(VerifyPhaseMode::from_flags(false, false), None);
+        assert_eq!(VerifyPhaseMode::from_flags(false, true), Some(VerifyPhaseMode::Eager));
+        assert_eq!(VerifyPhaseMode::from_flags(true, false), Some(VerifyPhaseMode::Graph));
+        assert_eq!(VerifyPhaseMode::from_flags(true, true), Some(VerifyPhaseMode::Graph));
+    }
 
     #[test]
     fn persistent_decode_scratch_is_exactly_one_row() {
