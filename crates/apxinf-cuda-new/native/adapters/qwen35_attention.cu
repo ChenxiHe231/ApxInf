@@ -19,6 +19,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -807,7 +808,7 @@ __device__ __forceinline__ bool safe_tensor_operand(float value) {
 // scale after the matrix product. PV decomposes the FP32 probability*V-scale
 // into three BF16 components, rather than rounding the probability once.
 // Unsafe components/products use the FP32 SIMT path for that tile.
-template <int kSplitTokens>
+template <int kSplitTokens, int kQkWarps = 1>
 __global__ void dynamic_decode_tensor_kernel(
     const __nv_bfloat16* __restrict__ query,
     const __nv_fp8_e4m3* __restrict__ key_cache,
@@ -839,6 +840,12 @@ __global__ void dynamic_decode_tensor_kernel(
   auto* scores = reinterpret_cast<float*>(weights);
   auto* parts = reinterpret_cast<__nv_bfloat16*>(weights);
   constexpr int kPartElements = kQueriesPerKvHead * kTile;
+  static_assert(kQkWarps == 1 || kQkWarps == 4 || kQkWarps == 8);
+  static_assert(kPartElements == kThreads);
+  // One full 8x32 partial per QK producer warp. The single-warp path keeps the
+  // original zero-extra-shared-memory schedule.
+  __shared__ __align__(32)
+      float qk_partial[kQkWarps > 1 ? kQkWarps * kPartElements : 1];
   bool unsafe_query = false;
   for (int i = threadIdx.x; i < kQueriesPerKvHead * kHeadDim; i += kThreads) {
     const __nv_bfloat16 q = query[kv_head * kQueriesPerKvHead * kHeadDim + i];
@@ -879,20 +886,34 @@ __global__ void dynamic_decode_tensor_kernel(
         dot = warp_sum(dot);
         if (lane == 0) scores[warp * kTile + t] = dot;
       }
-    } else if (warp == 0) {
+    } else if (warp < kQkWarps) {
       wmma::fragment<wmma::matrix_a, 8, 32, 16, __nv_bfloat16, wmma::row_major> a;
       wmma::fragment<wmma::matrix_b, 8, 32, 16, __nv_bfloat16, wmma::col_major> b;
       wmma::fragment<wmma::accumulator, 8, 32, 16, float> c;
       wmma::fill_fragment(c, 0.0F);
+      constexpr int kDimsPerWarp = kHeadDim / kQkWarps;
 #pragma unroll
-      for (int d = 0; d < kHeadDim; d += 16) {
+      for (int d = warp * kDimsPerWarp; d < (warp + 1) * kDimsPerWarp; d += 16) {
         wmma::load_matrix_sync(a, &shared_query[0][d], kHeadDim);
         wmma::load_matrix_sync(b, raw + d, kHeadDim);
         wmma::mma_sync(c, a, b, c);
       }
-      wmma::store_matrix_sync(scores, c, kTile, wmma::mem_row_major);
+      wmma::store_matrix_sync(
+          kQkWarps == 1 ? scores : qk_partial + warp * kPartElements, c, kTile,
+          wmma::mem_row_major);
     }
     __syncthreads(); // QK finished; K storage may become V storage.
+    if (kQkWarps > 1 && !scalar_qk) {
+      // Every thread owns exactly one score; the fold order is fixed so the
+      // reduction is bit-reproducible across runs and warp counts.
+      const int index = threadIdx.x;
+      float value = qk_partial[index];
+#pragma unroll
+      for (int producer = 1; producer < kQkWarps; ++producer) {
+        value += qk_partial[producer * kPartElements + index];
+      }
+      scores[index] = value;
+    }
     float score = lane < count ? scores[warp * kTile + lane] * ks[lane] * 0.0625F : -CUDART_INF_F;
     float maximum = score;
 #pragma unroll
@@ -989,6 +1010,271 @@ __global__ void dynamic_decode_tensor_kernel(
 #endif
 }
 
+__device__ __forceinline__ uint4 load_decode_raw16(
+    const __nv_fp8_e4m3* cache, int first, int count, int kv_head,
+    int group) {
+  const int token = group >> 4;
+  const int dim = (group & 15) * 16;
+  const int cache_token = token < count ? first + token : first;
+  const int64_t index =
+      (static_cast<int64_t>(cache_token) * kKvHeads + kv_head) *
+          kHeadDim +
+      dim;
+  return *reinterpret_cast<const uint4*>(cache + index);
+}
+
+__device__ __forceinline__ void store_decode_raw16(
+    uint4 bytes, __nv_bfloat16* data, int group) {
+  auto* output = reinterpret_cast<unsigned int*>(data) + group * 8;
+  store_e4m3x4_bf16(bytes.x, output);
+  store_e4m3x4_bf16(bytes.y, output + 2);
+  store_e4m3x4_bf16(bytes.z, output + 4);
+  store_e4m3x4_bf16(bytes.w, output + 6);
+}
+
+// The vector path has exactly two uint4 loads per thread for each 32x256 FP8
+// tile. Invalid tail rows reload the tile's first valid row; their scores are
+// masked to -inf, so their probabilities and PV weights are exactly zero.
+template <int kSplitTokens, int kQkWarps>
+__global__ void dynamic_decode_register_prefetch_kernel(
+    const __nv_bfloat16* __restrict__ query,
+    const __nv_fp8_e4m3* __restrict__ key_cache,
+    const __nv_fp8_e4m3* __restrict__ value_cache,
+    const float* __restrict__ key_scales,
+    const float* __restrict__ value_scales,
+    float* __restrict__ partial_max, float* __restrict__ partial_sum,
+    float* __restrict__ partial_output, int valid_tokens, int max_splits) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  namespace wmma = nvcuda::wmma;
+  static_assert(kQkWarps == 1 || kQkWarps == 4 || kQkWarps == 8);
+  constexpr int kTile = 32;
+  constexpr int kPartElements = kQueriesPerKvHead * kTile;
+  const int split = blockIdx.x;
+  const int kv_head = blockIdx.y;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int query_head = kv_head * kQueriesPerKvHead + warp;
+  const int begin = split * static_cast<int>(kSplitTokens);
+  const int end = begin + min(static_cast<int>(kSplitTokens), valid_tokens - begin);
+  if (begin >= end || kv_head >= kKvHeads) return;
+
+  __shared__ __align__(32) unsigned char data[kTile * kHeadDim * sizeof(__nv_bfloat16)];
+  __shared__ __align__(32) __nv_bfloat16 shared_query[kQueriesPerKvHead][kHeadDim];
+  __shared__ __align__(32) unsigned char weights[3 * kPartElements * sizeof(__nv_bfloat16)];
+  // QK partial scores and the PV tile output have disjoint lifetimes, so they
+  // share one buffer that never aliases the K/V data tile.
+  __shared__ __align__(32) float exchange[kQueriesPerKvHead * kHeadDim];
+  static_assert(kQkWarps * kPartElements <= kQueriesPerKvHead * kHeadDim);
+  float* qk_partial = exchange;
+  float* tile_output = exchange;
+  __shared__ float ks[kTile];
+  __shared__ float vs[kTile];
+  auto* raw = reinterpret_cast<__nv_bfloat16*>(data);
+  auto* scores = reinterpret_cast<float*>(weights);
+  auto* parts = reinterpret_cast<__nv_bfloat16*>(weights);
+
+  bool unsafe_query = false;
+  for (int i = threadIdx.x; i < kQueriesPerKvHead * kHeadDim; i += kThreads) {
+    const __nv_bfloat16 q = query[kv_head * kQueriesPerKvHead * kHeadDim + i];
+    shared_query[i / kHeadDim][i % kHeadDim] = q;
+    unsafe_query |= !safe_tensor_operand(__bfloat162float(q));
+  }
+  const bool scalar_qk = __syncthreads_or(unsafe_query);
+  float accumulator[8] = {};
+  float running_max = -CUDART_INF_F;
+  float running_sum = 0.0F;
+
+  const int initial_group0 = threadIdx.x;
+  const int initial_group1 = threadIdx.x + kThreads;
+  const int initial_count = min(kTile, end - begin);
+  const uint4 initial_k0 =
+      load_decode_raw16(key_cache, begin, initial_count, kv_head, initial_group0);
+  const uint4 initial_k1 =
+      load_decode_raw16(key_cache, begin, initial_count, kv_head, initial_group1);
+  store_decode_raw16(initial_k0, raw, initial_group0);
+  store_decode_raw16(initial_k1, raw, initial_group1);
+  if (threadIdx.x < kTile) {
+    const int token = threadIdx.x;
+    const int64_t row = static_cast<int64_t>(begin + token) * kKvHeads + kv_head;
+    ks[token] = token < initial_count ? key_scales[row] : 0.0F;
+    vs[token] = token < initial_count ? value_scales[row] : 0.0F;
+  }
+  __syncthreads();
+
+  for (int first = begin; first < end; first += kTile) {
+    const int count = min(kTile, end - first);
+    const bool has_next = end - first > kTile;
+    const int next = has_next ? first + kTile : end;
+    const int next_count = has_next ? min(kTile, end - next) : 0;
+    const int group0 = threadIdx.x;
+    const int group1 = threadIdx.x + kThreads;
+
+    // V(current) is resident before QK starts. The bytes stay in registers
+    // until every QK reader of the reused smem buffer has reached the barrier.
+    const uint4 v0 = load_decode_raw16(value_cache, first, count, kv_head, group0);
+    const uint4 v1 = load_decode_raw16(value_cache, first, count, kv_head, group1);
+
+    if (scalar_qk) {
+      for (int token = 0; token < kTile; ++token) {
+        float dot = 0.0F;
+#pragma unroll
+        for (int item = 0; item < 8; ++item) {
+          const int dim = lane + item * 32;
+          dot += __bfloat162float(shared_query[warp][dim]) *
+              __bfloat162float(raw[token * kHeadDim + dim]);
+        }
+        dot = warp_sum(dot);
+        if (lane == 0) scores[warp * kTile + token] = dot;
+      }
+    } else if (warp < kQkWarps) {
+      wmma::fragment<wmma::matrix_a, 8, 32, 16, __nv_bfloat16, wmma::row_major> a;
+      wmma::fragment<wmma::matrix_b, 8, 32, 16, __nv_bfloat16, wmma::col_major> b;
+      wmma::fragment<wmma::accumulator, 8, 32, 16, float> c;
+      wmma::fill_fragment(c, 0.0F);
+      constexpr int kDimsPerWarp = kHeadDim / kQkWarps;
+#pragma unroll
+      for (int dim = warp * kDimsPerWarp;
+           dim < (warp + 1) * kDimsPerWarp; dim += 16) {
+        wmma::load_matrix_sync(a, &shared_query[0][dim], kHeadDim);
+        wmma::load_matrix_sync(b, raw + dim, kHeadDim);
+        wmma::mma_sync(c, a, b, c);
+      }
+      wmma::store_matrix_sync(qk_partial + warp * kPartElements, c, kTile,
+          wmma::mem_row_major);
+    }
+    __syncthreads();
+    if (!scalar_qk) {
+      const int index = threadIdx.x;
+      float value = qk_partial[index];
+#pragma unroll
+      for (int producer = 1; producer < kQkWarps; ++producer) {
+        value += qk_partial[producer * kPartElements + index];
+      }
+      scores[index] = value;
+    }
+
+    const float score =
+        lane < count ? scores[warp * kTile + lane] * ks[lane] * 0.0625F
+                     : -CUDART_INF_F;
+    float maximum = score;
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+      maximum = fmaxf(maximum, __shfl_down_sync(0xffffffffU, maximum, delta));
+    }
+    maximum = __shfl_sync(0xffffffffU, maximum, 0);
+    const float next_max = fmaxf(running_max, maximum);
+    const float old_weight = __expf(running_max - next_max);
+    const float probability = lane < count ? __expf(score - next_max) : 0.0F;
+    running_sum = running_sum * old_weight +
+        __shfl_sync(0xffffffffU, warp_sum(probability), 0);
+    running_max = next_max;
+
+    const float weight = probability * vs[lane];
+    const __nv_bfloat16 high = __float2bfloat16(weight);
+    const float hf = __bfloat162float(high);
+    const float r1 = weight - hf;
+    const __nv_bfloat16 middle = __float2bfloat16(r1);
+    const float mf = __bfloat162float(middle);
+    const float r2 = r1 - mf;
+    const __nv_bfloat16 low = __float2bfloat16(r2);
+    const float lf = __bfloat162float(low);
+    const bool unsafe_weight = !isfinite(weight) || r2 - lf != 0.0F ||
+        !safe_tensor_operand(hf) || !safe_tensor_operand(mf) ||
+        !safe_tensor_operand(lf);
+    const bool scalar_pv = __syncthreads_or(unsafe_weight);
+    const int weight_index = warp * kTile + lane;
+    if (scalar_pv) {
+      scores[weight_index] = weight;
+    } else {
+      parts[weight_index] = high;
+      parts[kPartElements + weight_index] = middle;
+      parts[2 * kPartElements + weight_index] = low;
+    }
+
+    store_decode_raw16(v0, raw, group0);
+    store_decode_raw16(v1, raw, group1);
+    const uint4 next_k0 = has_next
+        ? load_decode_raw16(key_cache, next, next_count, kv_head, group0)
+        : make_uint4(0, 0, 0, 0);
+    const uint4 next_k1 = has_next
+        ? load_decode_raw16(key_cache, next, next_count, kv_head, group1)
+        : make_uint4(0, 0, 0, 0);
+    __syncthreads();
+
+    if (scalar_pv) {
+#pragma unroll
+      for (int item = 0; item < 8; ++item) accumulator[item] *= old_weight;
+      for (int token = 0; token < count; ++token) {
+        const float token_weight = scores[warp * kTile + token];
+#pragma unroll
+        for (int item = 0; item < 8; ++item) {
+          accumulator[item] += __bfloat162float(
+              raw[token * kHeadDim + lane + item * 32]) * token_weight;
+        }
+      }
+    } else {
+      wmma::fragment<wmma::matrix_a, 8, 32, 16, __nv_bfloat16, wmma::row_major> a;
+      wmma::fragment<wmma::matrix_b, 8, 32, 16, __nv_bfloat16, wmma::row_major> b;
+      wmma::fragment<wmma::accumulator, 8, 32, 16, float> c;
+      wmma::fill_fragment(c, 0.0F);
+#pragma unroll
+      for (int token = 0; token < kTile; token += 16) {
+        wmma::load_matrix_sync(
+            b, raw + token * kHeadDim + warp * 32, kHeadDim);
+#pragma unroll
+        for (int part = 0; part < 3; ++part) {
+          wmma::load_matrix_sync(
+              a, parts + part * kPartElements + token, kTile);
+          wmma::mma_sync(c, a, b, c);
+        }
+      }
+      wmma::store_matrix_sync(
+          tile_output + warp * 32, c, kHeadDim, wmma::mem_row_major);
+    }
+    // Every warp has finished reading V and PV weights, and each column
+    // owner's output for all eight query heads is visible.
+    __syncthreads();
+    if (!scalar_pv) {
+#pragma unroll
+      for (int item = 0; item < 8; ++item) {
+        accumulator[item] = accumulator[item] * old_weight +
+            tile_output[warp * kHeadDim + lane + item * 32];
+      }
+    }
+    if (!has_next) break;
+
+    // The data tile has no remaining V readers. Tile output lives in the
+    // separate exchange buffer, which the next QK reuses only after the
+    // following barrier.
+    store_decode_raw16(next_k0, raw, group0);
+    store_decode_raw16(next_k1, raw, group1);
+    if (threadIdx.x < kTile) {
+      const int token = threadIdx.x;
+      const int64_t row =
+          static_cast<int64_t>(next + token) * kKvHeads + kv_head;
+      ks[token] = token < next_count ? key_scales[row] : 0.0F;
+      vs[token] = token < next_count ? value_scales[row] : 0.0F;
+    }
+    __syncthreads();
+  }
+  const int64_t partial_index =
+      static_cast<int64_t>(query_head) * max_splits + split;
+  if (lane == 0) {
+    partial_max[partial_index] = running_max;
+    partial_sum[partial_index] = running_sum;
+  }
+#pragma unroll
+  for (int item = 0; item < 8; ++item) {
+    partial_output[partial_index * kHeadDim + lane + item * 32] =
+        accumulator[item];
+  }
+#else
+  dynamic_decode_simt<kSplitTokens>(query, key_cache, value_cache, key_scales,
+      value_scales, partial_max, partial_sum, partial_output, valid_tokens,
+      max_splits);
+#endif
+}
+
 __global__ void dynamic_decode_reduce_kernel(
     const float* __restrict__ partial_max,
     const float* __restrict__ partial_sum,
@@ -1062,21 +1348,140 @@ __global__ void dynamic_kv_dequant_kernel(
                                  value_scales[scale_index]);
 }
 
+enum class DecodeKernel {
+  Baseline,
+  RegisterQk1,
+  RegisterQk4,
+  RegisterQk8,
+  TensorQk1,
+  TensorQk4,
+  TensorQk8,
+};
+
+struct DecodeOptions {
+  DecodeKernel kernel = DecodeKernel::Baseline;
+  int split_tokens = kDecodeSplitTokens;
+  const char* error = nullptr;
+};
+
+const DecodeOptions& decode_options() {
+  // Frozen per process so a captured CUDA Graph always launches one schedule.
+  static const DecodeOptions options = [] {
+    DecodeOptions result;
+    const char* kernel = std::getenv("APXINF_QWEN35_DECODE_KERNEL");
+    if (kernel && *kernel) {
+      if (!std::strcmp(kernel, "baseline")) {
+        result.kernel = DecodeKernel::Baseline;
+      } else if (!std::strcmp(kernel, "reg-qk1")) {
+        result.kernel = DecodeKernel::RegisterQk1;
+      } else if (!std::strcmp(kernel, "reg-qk4")) {
+        result.kernel = DecodeKernel::RegisterQk4;
+      } else if (!std::strcmp(kernel, "reg-qk8")) {
+        result.kernel = DecodeKernel::RegisterQk8;
+      } else if (!std::strcmp(kernel, "tensor-qk1")) {
+        result.kernel = DecodeKernel::TensorQk1;
+      } else if (!std::strcmp(kernel, "tensor-qk4")) {
+        result.kernel = DecodeKernel::TensorQk4;
+      } else if (!std::strcmp(kernel, "tensor-qk8")) {
+        result.kernel = DecodeKernel::TensorQk8;
+      } else {
+        result.error = "invalid APXINF_QWEN35_DECODE_KERNEL";
+      }
+    }
+    const char* split = std::getenv("APXINF_QWEN35_DECODE_SPLIT_TOKENS");
+    if (split && *split) {
+      if (!std::strcmp(split, "256")) {
+        result.split_tokens = 256;
+      } else if (!std::strcmp(split, "128")) {
+        result.split_tokens = 128;
+      } else if (!std::strcmp(split, "512")) {
+        result.split_tokens = 512;
+      } else if (!std::strcmp(split, "1024")) {
+        result.split_tokens = 1024;
+      } else {
+        result.error = "invalid APXINF_QWEN35_DECODE_SPLIT_TOKENS";
+      }
+    }
+    return result;
+  }();
+  return options;
+}
+
+template <int kSplitTokens, int kQkWarps>
+void launch_dynamic_decode_register(
+    const apxinf_qwen35_dynamic_decode_spec_t& spec,
+    const apxinf_qwen35_dynamic_decode_bindings_t& bindings,
+    cudaStream_t stream, int num_splits) {
+  dynamic_decode_register_prefetch_kernel<kSplitTokens, kQkWarps>
+      <<<dim3(num_splits, kKvHeads), kThreads, 0, stream>>>(
+          static_cast<const __nv_bfloat16*>(bindings.query),
+          static_cast<const __nv_fp8_e4m3*>(bindings.key_cache),
+          static_cast<const __nv_fp8_e4m3*>(bindings.value_cache),
+          static_cast<const float*>(bindings.key_scales),
+          static_cast<const float*>(bindings.value_scales),
+          static_cast<float*>(bindings.partial_max),
+          static_cast<float*>(bindings.partial_sum),
+          static_cast<float*>(bindings.partial_output), spec.valid_tokens,
+          spec.max_splits);
+}
+
+template <int kSplitTokens, int kQkWarps>
+void launch_dynamic_decode_tensor(
+    const apxinf_qwen35_dynamic_decode_spec_t& spec,
+    const apxinf_qwen35_dynamic_decode_bindings_t& bindings,
+    cudaStream_t stream, int num_splits) {
+  dynamic_decode_tensor_kernel<kSplitTokens, kQkWarps>
+      <<<dim3(num_splits, kKvHeads), kThreads, 0, stream>>>(
+          static_cast<const __nv_bfloat16*>(bindings.query),
+          static_cast<const __nv_fp8_e4m3*>(bindings.key_cache),
+          static_cast<const __nv_fp8_e4m3*>(bindings.value_cache),
+          static_cast<const float*>(bindings.key_scales),
+          static_cast<const float*>(bindings.value_scales),
+          static_cast<float*>(bindings.partial_max),
+          static_cast<float*>(bindings.partial_sum),
+          static_cast<float*>(bindings.partial_output), spec.valid_tokens,
+          spec.max_splits);
+}
+
 template <int kSplitTokens>
 void launch_dynamic_decode_split(
     const apxinf_qwen35_dynamic_decode_spec_t& spec,
     const apxinf_qwen35_dynamic_decode_bindings_t& bindings,
-    cudaStream_t stream, int num_splits) {
+    cudaStream_t stream, int num_splits, DecodeKernel kernel) {
   if (spec.valid_tokens >= 256) {
-    dynamic_decode_tensor_kernel<kSplitTokens><<<dim3(num_splits, kKvHeads), kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(bindings.query),
-        static_cast<const __nv_fp8_e4m3*>(bindings.key_cache),
-        static_cast<const __nv_fp8_e4m3*>(bindings.value_cache),
-        static_cast<const float*>(bindings.key_scales),
-        static_cast<const float*>(bindings.value_scales),
-        static_cast<float*>(bindings.partial_max),
-        static_cast<float*>(bindings.partial_sum),
-        static_cast<float*>(bindings.partial_output), spec.valid_tokens, spec.max_splits);
+    const bool aligned =
+        (reinterpret_cast<uintptr_t>(bindings.key_cache) & 15U) == 0 &&
+        (reinterpret_cast<uintptr_t>(bindings.value_cache) & 15U) == 0;
+    if (aligned) {
+      switch (kernel) {
+        case DecodeKernel::RegisterQk1:
+          return launch_dynamic_decode_register<kSplitTokens, 1>(
+              spec, bindings, stream, num_splits);
+        case DecodeKernel::RegisterQk4:
+          return launch_dynamic_decode_register<kSplitTokens, 4>(
+              spec, bindings, stream, num_splits);
+        case DecodeKernel::RegisterQk8:
+          return launch_dynamic_decode_register<kSplitTokens, 8>(
+              spec, bindings, stream, num_splits);
+        case DecodeKernel::Baseline:
+        case DecodeKernel::TensorQk1:
+        case DecodeKernel::TensorQk4:
+        case DecodeKernel::TensorQk8:
+          break;
+      }
+    }
+    switch (kernel) {
+      case DecodeKernel::TensorQk4:
+        return launch_dynamic_decode_tensor<kSplitTokens, 4>(
+            spec, bindings, stream, num_splits);
+      case DecodeKernel::TensorQk8:
+        return launch_dynamic_decode_tensor<kSplitTokens, 8>(
+            spec, bindings, stream, num_splits);
+      default:
+        break;
+    }
+    launch_dynamic_decode_tensor<kSplitTokens, 1>(
+        spec, bindings, stream, num_splits);
   } else {
     dynamic_decode_split_kernel<kSplitTokens><<<dim3(num_splits, kKvHeads), kThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(bindings.query),
@@ -1341,14 +1746,37 @@ extern "C" apxinf_status_t apxinf_qwen35_dynamic_decode_attention(
     }
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
     auto stream = static_cast<cudaStream_t>(bindings->stream);
-    // Short prefixes need more CTAs to fill the device; long prefixes retain
-    // 256-token splits to bound partial traffic. Workspace covers the minimum.
-    const int split_tokens = spec->valid_tokens <= 8192 ? 128 : kDecodeSplitTokens;
-    const int num_splits = (spec->valid_tokens + split_tokens - 1) / split_tokens;
-    if (split_tokens == 128) {
-      launch_dynamic_decode_split<128>(*spec, *bindings, stream, num_splits);
-    } else {
-      launch_dynamic_decode_split<kDecodeSplitTokens>(*spec, *bindings, stream, num_splits);
+    const auto& options = decode_options();
+    if (options.error) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, options.error);
+    }
+    // Short prefixes need more CTAs to fill the device. Long prefixes default
+    // to 256-token splits, with process-level alternatives for device tuning.
+    const int split_tokens =
+        spec->valid_tokens <= 8192 ? 128 : options.split_tokens;
+    const int num_splits = static_cast<int>(
+        (static_cast<uint64_t>(spec->valid_tokens) + split_tokens - 1) /
+        split_tokens);
+    switch (split_tokens) {
+      case 128:
+        launch_dynamic_decode_split<128>(
+            *spec, *bindings, stream, num_splits, options.kernel);
+        break;
+      case 256:
+        launch_dynamic_decode_split<256>(
+            *spec, *bindings, stream, num_splits, options.kernel);
+        break;
+      case 512:
+        launch_dynamic_decode_split<512>(
+            *spec, *bindings, stream, num_splits, options.kernel);
+        break;
+      case 1024:
+        launch_dynamic_decode_split<1024>(
+            *spec, *bindings, stream, num_splits, options.kernel);
+        break;
+      default:
+        throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+            "unsupported Qwen3.5 decode split tokens");
     }
     apxinf::framework::check_cuda(cudaGetLastError());
     dynamic_decode_reduce_kernel<<<kQHeads, kThreads, 0, stream>>>(

@@ -13,6 +13,16 @@ fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Tensor {
     .unwrap()
 }
 
+// Pageable cudaMemcpy may return before its DMA reaches device memory, while
+// kernels run on the context's non-blocking stream. The device-synchronizing
+// readback orders the upload before any later stream work and verifies it.
+fn ordered_to_cuda(tensor: &Tensor, device: usize) -> apxinf_core::Result<Tensor> {
+    let uploaded = transfers::to_cuda(tensor, device)?;
+    let readback = transfers::to_cpu(&uploaded)?;
+    assert_eq!(readback.storage().as_cpu(), tensor.storage().as_cpu());
+    Ok(uploaded)
+}
+
 fn patterned_bf16(length: usize, multiplier: usize, period: usize, divisor: f32) -> Vec<bf16> {
     (0..length)
         .map(|index| {
@@ -61,7 +71,7 @@ fn dynamic_fp8_decode_matches_quantized_reference_across_splits() {
         }
     }
     query_host[..256].fill(bf16::ZERO);
-    let key = transfers::to_cuda(
+    let key = ordered_to_cuda(
         &Tensor::from_bf16(
             vec![
                 tokens,
@@ -74,7 +84,7 @@ fn dynamic_fp8_decode_matches_quantized_reference_across_splits() {
         0,
     )
     .unwrap();
-    let value = transfers::to_cuda(
+    let value = ordered_to_cuda(
         &Tensor::from_bf16(
             vec![
                 tokens,
@@ -87,7 +97,7 @@ fn dynamic_fp8_decode_matches_quantized_reference_across_splits() {
         0,
     )
     .unwrap();
-    let query = transfers::to_cuda(
+    let query = ordered_to_cuda(
         &Tensor::from_bf16(
             vec![
                 1,
@@ -268,7 +278,7 @@ fn dynamic_fp8_decode_matches_quantized_reference_across_splits() {
     let gh: Vec<_> = (0..query_elements)
         .map(|i| bf16::from_f32([-80.0, -8.0, -1.0, 0.0, 1.0, 8.0, 80.0][i % 7]))
         .collect();
-    let gate = transfers::to_cuda(&Tensor::from_bf16(vec![1, 16, 256], &gh).unwrap(), 0).unwrap();
+    let gate = ordered_to_cuda(&Tensor::from_bf16(vec![1, 16, 256], &gh).unwrap(), 0).unwrap();
     let gated = zeros(&ctx, vec![1, 16, 256], DType::BF16);
     ops::qwen35_dynamic_decode_attention_gated(
         &ctx,
@@ -313,17 +323,17 @@ fn fused_prepare_matches_separate_bf16_norm_rope_and_quantization() {
         vh[..256].fill(bf16::ZERO);
         vh[256] = bf16::from_f32(8192.0);
         let key =
-            transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
+            ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
         let value =
-            transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
-        let weight = transfers::to_cuda(
+            ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
+        let weight = ordered_to_cuda(
             &Tensor::from_bf16(vec![256], &patterned_bf16(256, 7, 97, 173.0)).unwrap(),
             0,
         )
         .unwrap();
         let pos: Vec<i32> = (0..tokens).map(|i| position + i as i32).collect();
-        let pos1 = transfers::to_cuda(&Tensor::from_i32(vec![tokens], &pos).unwrap(), 0).unwrap();
-        let pos3 = transfers::to_cuda(
+        let pos1 = ordered_to_cuda(&Tensor::from_i32(vec![tokens], &pos).unwrap(), 0).unwrap();
+        let pos3 = ordered_to_cuda(
             &Tensor::from_i32(
                 vec![3, tokens],
                 &pos.iter()
@@ -388,17 +398,17 @@ fn fused_query_prepare_matches_separate_norm_rope_exactly() {
         host[..256].fill(bf16::ZERO);
         host[1024] = bf16::from_f32(8192.0);
         let projected =
-            transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 16, 512], &host).unwrap(), 0)
+            ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 16, 512], &host).unwrap(), 0)
                 .unwrap();
-        let norm = transfers::to_cuda(
+        let norm = ordered_to_cuda(
             &Tensor::from_bf16(vec![256], &patterned_bf16(256, 7, 97, 173.0)).unwrap(),
             0,
         )
         .unwrap();
         let p: Vec<i32> = (0..tokens).map(|i| start + i as i32).collect();
-        let pos1 = transfers::to_cuda(&Tensor::from_i32(vec![tokens], &p).unwrap(), 0).unwrap();
+        let pos1 = ordered_to_cuda(&Tensor::from_i32(vec![tokens], &p).unwrap(), 0).unwrap();
         let p3: Vec<i32> = p.iter().copied().cycle().take(tokens * 3).collect();
-        let pos3 = transfers::to_cuda(&Tensor::from_i32(vec![3, tokens], &p3).unwrap(), 0).unwrap();
+        let pos3 = ordered_to_cuda(&Tensor::from_i32(vec![3, tokens], &p3).unwrap(), 0).unwrap();
         let q1 = zeros(&ctx, vec![tokens, 16, 256], DType::BF16);
         let g1 = zeros(&ctx, vec![tokens, 16, 256], DType::BF16);
         let q2 = zeros(&ctx, vec![tokens, 16, 256], DType::BF16);
@@ -464,10 +474,10 @@ fn dynamic_decode_negative_scores_and_large_merge() {
         .map(|i| bf16::from_f32(if (i / 256) % 2 == 0 { 2.0 } else { -3.0 }))
         .collect();
     let key =
-        transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
+        ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
     let value =
-        transfers::to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
-    let query = transfers::to_cuda(
+        ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
+    let query = ordered_to_cuda(
         &Tensor::from_bf16(vec![1, 16, 256], &vec![bf16::from_f32(-10.0); 4096]).unwrap(),
         0,
     )
@@ -514,7 +524,15 @@ fn dynamic_decode_negative_scores_and_large_merge() {
 #[test]
 fn dynamic_decode_long_tail_matches_f64_with_tiny_query_and_weights() {
     let ctx = CudaContext::new(0).unwrap();
-    let tokens = 8193;
+    // 8193 crosses the short-prefix split boundary with a 1-token tail. The
+    // override lets the stress matrix also cover 16K+ so that the 256/512/1024
+    // split schedules are checked against the f64 oracle well past the
+    // boundary, where the tile count per split actually differs.
+    let tokens = std::env::var("APXINF_QWEN35_TEST_LONG_TOKENS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(8193);
     let mut state = 0x31415926u32;
     let mut bytes = || {
         state ^= state << 13;
@@ -531,11 +549,11 @@ fn dynamic_decode_long_tail_matches_f64_with_tiny_query_and_weights() {
         .map(|i| 0.015625 * (1u32 << ((i * 3) % 7)) as f32)
         .collect();
     let kc =
-        transfers::to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
+        ordered_to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
     let vc =
-        transfers::to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
-    let ks = transfers::to_cuda(&Tensor::from_f32(vec![tokens, 2], &ksh).unwrap(), 0).unwrap();
-    let vs = transfers::to_cuda(&Tensor::from_f32(vec![tokens, 2], &vsh).unwrap(), 0).unwrap();
+        ordered_to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
+    let ks = ordered_to_cuda(&Tensor::from_f32(vec![tokens, 2], &ksh).unwrap(), 0).unwrap();
+    let vs = ordered_to_cuda(&Tensor::from_f32(vec![tokens, 2], &vsh).unwrap(), 0).unwrap();
     let cache = || ops::Qwen35DynamicFp8KvCache {
         key: &kc,
         value: &vc,
@@ -557,7 +575,7 @@ fn dynamic_decode_long_tail_matches_f64_with_tiny_query_and_weights() {
             qh[256..512].fill(bf16::from_f32(1.0e-39));
         }
         let query =
-            transfers::to_cuda(&Tensor::from_bf16(vec![1, 16, 256], &qh).unwrap(), 0).unwrap();
+            ordered_to_cuda(&Tensor::from_bf16(vec![1, 16, 256], &qh).unwrap(), 0).unwrap();
         ops::qwen35_dynamic_decode_attention(
             &ctx,
             valid,
@@ -633,27 +651,27 @@ fn dynamic_decode_preserves_tiny_value_scale() {
     let ctx = CudaContext::new(0).unwrap();
     let tokens = 273;
     for (value_code, scale) in [(0x38, 1.234567e-33f32), (0x01, 2.0f32.powi(-118))] {
-        let q = transfers::to_cuda(
+        let q = ordered_to_cuda(
             &Tensor::from_bf16(vec![1, 16, 256], &vec![bf16::ZERO; 4096]).unwrap(),
             0,
         )
         .unwrap();
-        let kc = transfers::to_cuda(
+        let kc = ordered_to_cuda(
             &Tensor::from_f8_e4m3(vec![tokens, 2, 256], &vec![0x38; tokens * 512]).unwrap(),
             0,
         )
         .unwrap();
-        let vc = transfers::to_cuda(
+        let vc = ordered_to_cuda(
             &Tensor::from_f8_e4m3(vec![tokens, 2, 256], &vec![value_code; tokens * 512]).unwrap(),
             0,
         )
         .unwrap();
-        let ks = transfers::to_cuda(
+        let ks = ordered_to_cuda(
             &Tensor::from_f32(vec![tokens, 2], &vec![1.0; tokens * 2]).unwrap(),
             0,
         )
         .unwrap();
-        let vs = transfers::to_cuda(
+        let vs = ordered_to_cuda(
             &Tensor::from_f32(vec![tokens, 2], &vec![scale; tokens * 2]).unwrap(),
             0,
         )
@@ -696,7 +714,7 @@ fn benchmark_dynamic_fp8_decode_against_dequant_fa2() {
     use std::time::Instant;
     let ctx = CudaContext::new(0).unwrap();
     for tokens in [4096, 8192, 16384, 24576, 32768, 49152] {
-        let key = transfers::to_cuda(
+        let key = ordered_to_cuda(
             &Tensor::from_bf16(
                 vec![tokens, 2, 256],
                 &patterned_bf16(tokens * 512, 17, 257, 91.0),
@@ -705,7 +723,7 @@ fn benchmark_dynamic_fp8_decode_against_dequant_fa2() {
             0,
         )
         .unwrap();
-        let value = transfers::to_cuda(
+        let value = ordered_to_cuda(
             &Tensor::from_bf16(
                 vec![tokens, 2, 256],
                 &patterned_bf16(tokens * 512, 29, 251, 83.0),
@@ -714,7 +732,7 @@ fn benchmark_dynamic_fp8_decode_against_dequant_fa2() {
             0,
         )
         .unwrap();
-        let query = transfers::to_cuda(
+        let query = ordered_to_cuda(
             &Tensor::from_bf16(vec![1, 16, 256], &patterned_bf16(4096, 31, 263, 97.0)).unwrap(),
             0,
         )
