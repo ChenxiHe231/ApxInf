@@ -5,12 +5,18 @@
 #if defined(APXINF_ATTENTION_FA2)
 
 #include <algorithm>
+#include <cuda.h>
+#include <cstdlib>
+#include <cstring>
+#include <map>
 #include <limits>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
 
 namespace apxinf::cuda_new::cutlass_ops {
+
+int fa2_bf16_packed_gqa_splitkv(const void*,const void*,const void*,void*,void*,void*,void*,void*,void*,void*,int,int,float,int,cudaStream_t);
 
 int fa2_bf16_decode_splitkv(const void* q, const void* k, const void* v,
                            void* output, void* workspace, int key_tokens,
@@ -433,6 +439,129 @@ void destroy_fa2(Execution& execution) noexcept {
   delete state;
   execution.provider_state = nullptr;
 }
+
+
+namespace {
+constexpr size_t kPackedQBytes=4*16*256*2;
+constexpr size_t kPackedSlabBytes=2*kPackedQBytes+4*16*sizeof(float); //65792, all offsets256B aligned.
+constexpr size_t kPackedIdleByteLimit=32*kPackedSlabBytes;
+struct PackedScratch { void* raw=nullptr; int device=0; CUcontext context=nullptr; PackedScratch* next=nullptr; };
+struct PackedPool {
+  std::mutex mutex;
+  std::map<int,CUcontext> retained_primary;
+  std::map<std::pair<int,uintptr_t>,std::vector<std::unique_ptr<PackedScratch>>> idle;
+  std::map<int,size_t> idle_bytes;
+  PackedScratch* quarantined=nullptr;
+};
+// Bound idle storage survives until process exit, as does the retained primary
+// context. It is never shared between live executions or capture graphs.
+PackedPool& packed_pool() { static auto* pool=new PackedPool; return *pool; }
+std::unique_ptr<PackedScratch> acquire_packed_scratch(int device) {
+  CUcontext current=nullptr;
+  if(cuCtxGetCurrent(&current)!=CUDA_SUCCESS || !current)
+    throw Failure(APXINF_STATUS_PROVIDER_ERROR,"packed GQA requires current CUDA context");
+  auto& pool=packed_pool();std::lock_guard<std::mutex> guard(pool.mutex);
+  auto found=pool.retained_primary.find(device);
+  if(found==pool.retained_primary.end()) {
+    CUcontext primary=nullptr;
+    if(cuDevicePrimaryCtxRetain(&primary,device)!=CUDA_SUCCESS)
+      throw Failure(APXINF_STATUS_PROVIDER_ERROR,"packed GQA primary context retain failed");
+    try { found=pool.retained_primary.emplace(device,primary).first; }
+    catch(...) { (void)cuDevicePrimaryCtxRelease(device); throw; }
+  }
+  if(current!=found->second)
+    throw Failure(APXINF_STATUS_UNSUPPORTED,"packed GQA pooled execution requires primary context");
+  pool.idle_bytes.try_emplace(device,0); // no map-node allocation during noexcept retirement
+  auto key=std::make_pair(device,reinterpret_cast<uintptr_t>(current));
+  auto& slots=pool.idle[key];
+  if(!slots.empty()) { auto result=std::move(slots.back());slots.pop_back();pool.idle_bytes[device]-=kPackedSlabBytes;return result; }
+  auto result=std::make_unique<PackedScratch>();result->device=device;result->context=current;
+  check_cuda(cudaMalloc(&result->raw,kPackedSlabBytes));return result;
+}
+void retire_packed_scratch(std::unique_ptr<PackedScratch> scratch,bool safe) noexcept {
+  if(!scratch)return;
+  auto& pool=packed_pool();CUcontext current=nullptr;
+  safe=safe && cuCtxGetCurrent(&current)==CUDA_SUCCESS && current==scratch->context;
+  std::lock_guard<std::mutex> guard(pool.mutex);
+  if(!safe) {
+    // A failed CUDA retirement must never make this memory available again.
+    scratch->next=pool.quarantined;pool.quarantined=scratch.release();return;
+  }
+  if(pool.idle_bytes[scratch->device]+kPackedSlabBytes<=kPackedIdleByteLimit) {
+    auto key=std::make_pair(scratch->device,reinterpret_cast<uintptr_t>(scratch->context));
+    try { pool.idle[key].push_back(std::move(scratch));pool.idle_bytes[key.first]+=kPackedSlabBytes;return; }
+    catch(...) { /* retired memory may be freed if host retention allocation fails */ }
+  }
+  if(scratch && cudaFree(scratch->raw)!=cudaSuccess) {
+    scratch->next=pool.quarantined;pool.quarantined=scratch.release();
+  }
+}
+struct Fa2PackedState {
+  float* softmax_lse=nullptr;float* lse_accum=nullptr;float* output_accum=nullptr;
+  std::unique_ptr<PackedScratch> scratch;
+  bool enqueued=false;
+  ~Fa2PackedState() {
+    bool safe=true,had_nonnull_free=false;
+    // Same three cudaMalloc/cudaFree boundaries as ordinary split-KV. Successful
+    // non-async frees retire preceding work before a private slab is reusable.
+    for(void* ptr:{static_cast<void*>(output_accum),static_cast<void*>(lse_accum),static_cast<void*>(softmax_lse)})
+      if(ptr) { had_nonnull_free=true;safe=(cudaFree(ptr)==cudaSuccess)&&safe; }
+    retire_packed_scratch(std::move(scratch),safe&&(had_nonnull_free||!enqueued));
+  }
+};
+} // namespace
+bool fa2_packed_gqa_requested(const Spec& spec) {
+  static const int mode=[] {
+    const char* value=std::getenv("APXINF_FA2_PACKED_GQA");
+    if(!value || std::strcmp(value,"0")==0)return 0;
+    if(std::strcmp(value,"1")==0)return 1;
+    return -1;
+  }();
+  if(mode<0)throw Failure(APXINF_STATUS_INVALID_ARGUMENT,"APXINF_FA2_PACKED_GQA requires0/1");
+  if(mode==0)return false;
+  return spec.dtype==APXINF_DTYPE_BF16 && spec.output_dtype==APXINF_DTYPE_BF16 &&
+    spec.batch==1 && spec.query_heads==16 && spec.kv_heads==2 && spec.head_dim==256 &&
+    spec.query_tokens>=1 && spec.query_tokens<=4 && spec.key_tokens>64 &&
+    spec.key_tokens>spec.query_tokens && spec.key_capacity==spec.key_tokens &&
+    spec.mask==APXINF_ATTENTION_MASK_CAUSAL && spec.dynamic_decode==0 &&
+    spec.query_start==spec.key_tokens-spec.query_tokens &&
+    (spec.semantic==APXINF_ATTENTION_SEMANTIC_DENSE || spec.semantic==APXINF_ATTENTION_SEMANTIC_KV_CACHE);
+}
+size_t fa2_packed_gqa_resource_requirements(const Spec& spec,int configuration) {
+  const size_t old=fa2_splitkv_resource_requirements(spec,configuration);
+  if(old>std::numeric_limits<size_t>::max()-kPackedSlabBytes)
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,"packed GQA workspace overflow");
+  return old+kPackedSlabBytes;
+}
+void prepare_fa2_packed_gqa(Execution& execution) {
+  const auto& spec=execution.spec;
+  if(!fa2_packed_gqa_requested(spec))throw Failure(APXINF_STATUS_UNSUPPORTED,"packed GQA unsupported Spec/policy");
+  const size_t limit=std::min<size_t>(128,std::min<size_t>((spec.key_tokens+63)/64,cached_multiprocessor_count(execution.device)*2));
+  if(execution.configuration<2 || static_cast<size_t>(execution.configuration)>limit)
+    throw Failure(APXINF_STATUS_UNSUPPORTED,"packed GQA split count exceeds device limit");
+  const size_t required=fa2_packed_gqa_resource_requirements(spec,execution.configuration);
+  if(required>execution.resource_limit)throw Failure(APXINF_STATUS_UNSUPPORTED,"packed GQA workspace exceeds policy");
+  auto state=std::make_unique<Fa2PackedState>();state->scratch=acquire_packed_scratch(execution.device);
+  const size_t count=splitkv_lse_elements(spec),lse_bytes=count*sizeof(float);
+  const size_t accum_bytes=execution.configuration*lse_bytes;
+  check_cuda(cudaMalloc(&state->softmax_lse,lse_bytes));
+  check_cuda(cudaMalloc(&state->lse_accum,accum_bytes));
+  check_cuda(cudaMalloc(&state->output_accum,accum_bytes*spec.head_dim));
+  const auto stream=static_cast<cudaStream_t>(execution.bindings.stream);
+  check_cuda(cudaMemsetAsync(state->softmax_lse,0,lse_bytes,stream));
+  check_cuda(cudaMemsetAsync(state->lse_accum,0,accum_bytes,stream));
+  check_cuda(cudaMemsetAsync(state->output_accum,0,accum_bytes*spec.head_dim,stream));
+  execution.resource_bytes=required;execution.provider_state=state.release();
+}
+cudaError_t launch_fa2_packed_gqa(Execution& execution) {
+  auto* state=static_cast<Fa2PackedState*>(execution.provider_state);auto* raw=static_cast<unsigned char*>(state->scratch->raw);
+  const auto& b=execution.bindings;state->enqueued=true;
+  return static_cast<cudaError_t>(apxinf::cuda_new::cutlass_ops::fa2_bf16_packed_gqa_splitkv(
+    b.query,b.key,b.value,b.output,state->softmax_lse,state->lse_accum,state->output_accum,
+    raw,raw+kPackedQBytes,raw+2*kPackedQBytes,static_cast<int>(execution.spec.query_tokens),
+    static_cast<int>(execution.spec.key_tokens),b.scale,execution.configuration,static_cast<cudaStream_t>(b.stream)));
+}
+void destroy_fa2_packed_gqa(Execution& execution) noexcept { delete static_cast<Fa2PackedState*>(execution.provider_state); }
 
 }  // namespace apxinf::attention
 

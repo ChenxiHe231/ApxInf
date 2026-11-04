@@ -30,11 +30,17 @@ bool supports_custom(const Spec& spec) {
 }
 
 bool supports_dense_custom(const Spec& spec) {
+#if defined(APXINF_ATTENTION_FA2)
+  if (fa2_packed_gqa_requested(spec)) return false;
+#endif
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
          supports_custom(spec);
 }
 
 bool supports_kv_cache_custom(const Spec& spec) {
+#if defined(APXINF_ATTENTION_FA2)
+  if (fa2_packed_gqa_requested(spec)) return false;
+#endif
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
          supports_custom(spec);
 }
@@ -159,6 +165,7 @@ int stable_split_count(const Spec& spec) {
 }
 
 bool supports_fa2(const Spec& spec) {
+  if (fa2_packed_gqa_requested(spec)) return false;
   const bool layout_supported =
       spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE ||
       (spec.semantic == APXINF_ATTENTION_SEMANTIC_KV_CACHE &&
@@ -204,6 +211,7 @@ bool supports_fa2_packed_qkv(const Spec& spec) {
 }
 
 bool supports_fa2_splitkv(const Spec& spec) {
+  if (fa2_packed_gqa_requested(spec)) return false;
   if (std::getenv("APXINF_DISABLE_FA2_SPLITKV") != nullptr) return false;
   return splitkv_shape_supported(spec) &&
          (spec.numerics == APXINF_ATTENTION_NUMERICS_FLEXIBLE ||
@@ -248,6 +256,9 @@ AlignmentRequirements fa2_alignment(const Spec&) {
 
 #if defined(APXINF_ATTENTION_CUTLASS)
 bool supports_cutlass(const Spec& spec) {
+#if defined(APXINF_ATTENTION_FA2)
+  if (fa2_packed_gqa_requested(spec)) return false;
+#endif
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
          spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
          spec.mask == APXINF_ATTENTION_MASK_NONE &&
@@ -358,6 +369,11 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        fa2_resource_requirements, one_configuration, prepare_fa2, launch_fa2,
        destroy_fa2},
 #endif
+      {kProviderFa2, 4, 1, "flash-attention-2-packed-gqa-q1to4-v1",
+       apxinf::gemm::kDeviceFeatureFa2, true, true, false,
+       fa2_packed_gqa_requested, fa2_alignment,
+       fa2_packed_gqa_resource_requirements, splitkv_configurations,
+       prepare_fa2_packed_gqa, launch_fa2_packed_gqa, destroy_fa2_packed_gqa},
       {kProviderFa2, 3, 1, "flash-attention-2-split-kv",
        apxinf::gemm::kDeviceFeatureFa2, true, true, false,
        supports_fa2_splitkv, fa2_alignment,
@@ -391,6 +407,11 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        destroy_d256_kv_split_sm110},
 #endif
 #if defined(APXINF_ATTENTION_FA2)
+      {kProviderFa2, 4, 1, "flash-attention-2-packed-gqa-q1to4-v1",
+       apxinf::gemm::kDeviceFeatureFa2, true, true, false,
+       fa2_packed_gqa_requested, fa2_alignment,
+       fa2_packed_gqa_resource_requirements, splitkv_configurations,
+       prepare_fa2_packed_gqa, launch_fa2_packed_gqa, destroy_fa2_packed_gqa},
       {kProviderFa2, 3, 1, "flash-attention-2-split-kv",
        apxinf::gemm::kDeviceFeatureFa2, true, true, false,
        supports_fa2_splitkv, fa2_alignment,

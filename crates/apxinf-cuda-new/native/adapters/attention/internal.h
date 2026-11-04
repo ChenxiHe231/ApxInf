@@ -116,6 +116,11 @@ cudaError_t launch_cublas_f16(Execution& execution);
 void destroy_cublas_f16(Execution& execution) noexcept;
 
 #if defined(APXINF_ATTENTION_FA2)
+bool fa2_packed_gqa_requested(const Spec& spec);
+size_t fa2_packed_gqa_resource_requirements(const Spec&, int);
+void prepare_fa2_packed_gqa(Execution&);
+cudaError_t launch_fa2_packed_gqa(Execution&);
+void destroy_fa2_packed_gqa(Execution&) noexcept;
 size_t fa2_resource_requirements(const Spec& spec, int configuration);
 void prepare_fa2(Execution& execution);
 cudaError_t launch_fa2(Execution& execution);

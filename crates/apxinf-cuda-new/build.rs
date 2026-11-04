@@ -639,6 +639,7 @@ fn main() {
             [
                 "fa2.cu",
                 "fa2_decode_splitkv.cu",
+                "fa2_packed_gqa.cu",
                 "flash_attn/flash_fwd_hdim128_bf16_sm80.cu",
                 "flash_attn/flash_fwd_hdim256_bf16_sm80.cu",
                 "flash_attn/flash_fwd_split_hdim256_bf16_sm80.cu",

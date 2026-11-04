@@ -98,6 +98,10 @@ TuningKeys tuning_keys(const Spec& spec,
       << alignment_class(spec.offsets_alignment, 4) << '|'
       << policy.workspace_limit << '|' << policy.graph_safe << '|'
       << policy.deterministic;
+#if defined(APXINF_ATTENTION_FA2)
+  // A new provider/layout must never inherit the ordinary split-KV recipe.
+  if (fa2_packed_gqa_requested(spec)) key << "|packed-gqa-q1to4-v1";
+#endif
   return {key.str()};
 }
 
