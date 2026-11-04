@@ -1,0 +1,280 @@
+{
+  "schema": "apxinf.mtp_materialize.commit_evidence.v1",
+  "scope": "Original dirty-overlay same-ELF Graph1 control versus optional materialization; not isolated clean draft acceptance",
+  "code_patch_sha256": "75777d0977fa72772c0b98a0e2b4a3b24c07bc511b62a90c3613b7f2eb913789",
+  "runs": [
+    {
+      "name": "existing-graph1-decode4k-control-01",
+      "scope": "Original dirty-overlay single4K Decode measurement; no isolated clean commit, full15, model-math or AIOS acceptance",
+      "raw_bindings": [
+        {
+          "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/identity.json",
+          "bytes": 523388,
+          "sha256": "6b1e3e46a59a96b2c5374463b8064f8432fbb03d6cb1f673bfaf965a6a351dc5"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/formal/summary.json",
+          "bytes": 2959287,
+          "sha256": "0d29e49d03e4526ce089b5cecdbb843f589ac855cb0771b7843949b9d387e31f"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/controller-receipt.json",
+          "bytes": 15101,
+          "sha256": "19a57096197352988fb3c1aada3184507a9626d9e7c3126b7afc8db076f446a8"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/profile/summary.json",
+          "bytes": 2982883,
+          "sha256": "328144844cd7fa6a347442f37ffd82a834b51193e9f3647162e2884d221488f2"
+        }
+      ],
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "774ee979ebe6d2ef527cdc3bfb34b077a039fc96710b036f447c8e0d54b69416",
+        "full_source_object_sha256": "59e72865271339e2caf186d93cf4fc922453adbd1c730e5b1b36fb66c8f35fd6"
+      },
+      "binary_sha256": {
+        "context": "30ff0fba03d9c2371c82c23215165cf850d3a434f03115ea34847d76b90ee28f",
+        "decode": "b181a6f9b020ae6f8a60f6ad33402a80d91df943e2be8cae2175c7fab5ed3b9f"
+      },
+      "model_asset_manifest_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+      "case": "decode-kv4k-o1k",
+      "environment": {
+        "APXINF_QWEN35_CUDA_GRAPHS": "1",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_NVTX": "0",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+      },
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/existing-graph1-frozen-01/bin/qwen35_mtp_bench",
+        "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "--mode",
+        "mtp",
+        "--qwen35-kv-cache",
+        "bf16",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--tuning-dir",
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--prompt-tokens",
+        "4096",
+        "--max-new",
+        "1024"
+      ],
+      "measured_iterations": 5,
+      "warmups": 2,
+      "output_tokens": 1024,
+      "decode_intervals": 1023,
+      "timing_method": "host-callback-first-last-v2",
+      "median_tps": 88.54484135374035,
+      "median_tpot_ms": 11.293712707722385,
+      "measured_tps": [
+        88.52324218233913,
+        88.5496999777156,
+        88.61722147075243,
+        88.54484135374035,
+        88.49251212135721
+      ],
+      "measured_tpot_ms": [
+        11.296468309872923,
+        11.2930930342131,
+        11.284488312805474,
+        11.293712707722385,
+        11.300391140762464
+      ],
+      "seven_output_digests": [
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392"
+      ],
+      "native_accuracy_status": "repeat_consistent",
+      "native_performance_accepted": true,
+      "broader_model_quality_accepted": false,
+      "recipe_manifest_before_after_sha256": "e03a098500c697bdf9ea0e15709e702e92bbddb3a9742d1ce14b4a894a9166a6",
+      "exit_and_lock": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false
+      },
+      "clock_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ],
+      "clock_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ]
+    },
+    {
+      "name": "graph1-materialize-decode4k-ab-01",
+      "scope": "Original dirty-overlay single4K Decode measurement; no isolated clean commit, full15, model-math or AIOS acceptance",
+      "raw_bindings": [
+        {
+          "path": "devlocal/model-microbench/recovery-build/graph1-materialize-decode4k-ab-01/identity.json",
+          "bytes": 523387,
+          "sha256": "0beb6e2eb74b2392a4033764f05aa643615a7cdd776c66167b05d6ac05a3332d"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/graph1-materialize-decode4k-ab-01/formal/summary.json",
+          "bytes": 2959305,
+          "sha256": "73db01db65610deb074afa5aa4095089e78ab9578fbfd6dc5cf09957e3bde584"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/graph1-materialize-decode4k-ab-01/controller-receipt.json",
+          "bytes": 15104,
+          "sha256": "ad02d44e8e9ba98b7f3d65292839ef8d9fbb01b1d5a5af22e6250a0c45d52c5c"
+        },
+        {
+          "path": "devlocal/model-microbench/recovery-build/graph1-materialize-decode4k-ab-01/profile/summary.json",
+          "bytes": 2982860,
+          "sha256": "67af5ed7521014a16052fed4ad5743f4265e5c50c4c4f850111ced371ef2ab5a"
+        }
+      ],
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "774ee979ebe6d2ef527cdc3bfb34b077a039fc96710b036f447c8e0d54b69416",
+        "full_source_object_sha256": "59e72865271339e2caf186d93cf4fc922453adbd1c730e5b1b36fb66c8f35fd6"
+      },
+      "binary_sha256": {
+        "context": "30ff0fba03d9c2371c82c23215165cf850d3a434f03115ea34847d76b90ee28f",
+        "decode": "b181a6f9b020ae6f8a60f6ad33402a80d91df943e2be8cae2175c7fab5ed3b9f"
+      },
+      "model_asset_manifest_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+      "case": "decode-kv4k-o1k",
+      "environment": {
+        "APXINF_QWEN35_CUDA_GRAPHS": "1",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_NVTX": "0",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "1",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+      },
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/graph1-materialize-frozen-01/bin/qwen35_mtp_bench",
+        "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "--mode",
+        "mtp",
+        "--qwen35-kv-cache",
+        "bf16",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--tuning-dir",
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--prompt-tokens",
+        "4096",
+        "--max-new",
+        "1024"
+      ],
+      "measured_iterations": 5,
+      "warmups": 2,
+      "output_tokens": 1024,
+      "decode_intervals": 1023,
+      "timing_method": "host-callback-first-last-v2",
+      "median_tps": 90.32864603728952,
+      "median_tpot_ms": 11.070685146627566,
+      "measured_tps": [
+        90.32864603728952,
+        90.3387572551578,
+        90.31817602767352,
+        90.24041618536978,
+        90.34344198030749
+      ],
+      "measured_tpot_ms": [
+        11.070685146627566,
+        11.069446053763441,
+        11.071968500488758,
+        11.081509175953078,
+        11.068872051808407
+      ],
+      "seven_output_digests": [
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392",
+        "694f5386c486b392"
+      ],
+      "native_accuracy_status": "repeat_consistent",
+      "native_performance_accepted": true,
+      "broader_model_quality_accepted": false,
+      "recipe_manifest_before_after_sha256": "e03a098500c697bdf9ea0e15709e702e92bbddb3a9742d1ce14b4a894a9166a6",
+      "exit_and_lock": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false
+      },
+      "clock_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ],
+      "clock_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "cur_freq": "1206000000"
+        }
+      ]
+    }
+  ],
+  "comparison": {
+    "baseline_tps": 88.54484135374035,
+    "candidate_tps": 90.32864603728952,
+    "tpot_reduction_percent": 1.974794001465241,
+    "same_ELF": true,
+    "new_flag_only": true
+  },
+  "clean_draft_Cargo_GPU_weather_full15_run": false,
+  "public_model_Rust_API_changed": false,
+  "precision_or_sampling_changed": false,
+  "dependency_analysis": {
+    "bytes": 29153,
+    "sha256": "1775a98952262dea64edc997269e46e30e6fc8837a7034e3635baa61e7f1ea0f",
+    "scope": "test-only raw-bank module; no production dependency"
+  }
+}

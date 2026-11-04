@@ -726,7 +726,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             let rope_position = scratch.position.clone();
             // The last proposal is consumed as an input but no fourth draft
             // logit is needed. This mirrors the tuned Qwen3.8 protocol.
-            forward_one(
+            materialize_final_proposal(
                 ctx,
                 weights,
                 shadow,
@@ -739,7 +739,6 @@ impl MtpBackend for Qwen35MtpRuntime {
                 &rope_position,
                 materialize_row,
                 pending.draft_steps,
-                false,
             )?;
         } else if committed_rows > pending.draft_steps {
             return Err(invalid(
@@ -1426,6 +1425,46 @@ fn prefill_kv_chunk(
     ops::quantize_fp8_per_tensor(ctx, &value_flat, &value_slot, MTP_KV_SCALE)
 }
 
+// GEMM keys include stream, fixed A/output addresses, weight addresses and
+// policy. All A/output views below belong to this private, non-resizable scratch;
+// changing device/stream/weights/policy must prepare a fresh materialization tape.
+#[derive(PartialEq, Eq)]
+struct MtpMaterializeBinding {
+    device: usize,
+    stream: usize,
+    deterministic: bool,
+    gemm_count: usize,
+    gemm_weights: [usize; 10],
+}
+
+impl MtpMaterializeBinding {
+    fn new(ctx: &CudaContext, weights: &Qwen35DeviceWeights) -> Result<Self> {
+        let mtp = &weights.mtp;
+        let attention = &mtp.layer.attention;
+        let moe = &mtp.layer.moe;
+        let operands = [&mtp.fc.weight, &attention.q_proj.weight,
+            &attention.k_proj.weight, &attention.v_proj.weight, &attention.o_proj.weight,
+            &moe.router.weight, &moe.shared_gate.weight, &moe.shared_up.weight,
+            &moe.shared_down.weight, &moe.shared_expert_gate.weight];
+        // Reference MoE is one stateless raw launch. Edge MoE adds five
+        // GEMMs with stable views into the same MtpScratch allocations.
+        let gemm_count = if matches!(&moe.routed_experts, DeviceDenseRoutedExperts::Edge(_)) { 10 } else { 5 };
+        let mut gemm_weights = [0; 10];
+        for (slot, tensor) in gemm_weights[..gemm_count].iter_mut().zip(&operands) {
+            *slot = tensor.storage().as_gpu().map(|storage| storage.ptr())
+                .ok_or_else(|| invalid("MTP materialization weight has no CUDA storage"))?;
+        }
+        Ok(Self { device: ctx.device_id(), stream: ctx.stream().handle() as usize,
+            deterministic: std::env::var_os("APXINF_GEMM_DETERMINISTIC").is_some(), gemm_count, gemm_weights })
+    }
+}
+
+struct MtpMaterializeSession {
+    binding: MtpMaterializeBinding,
+    session: ExecutionSession,
+    prepared: bool,
+}
+
 struct MtpScratch {
     cache_capacity: usize,
     token: Tensor,
@@ -1466,6 +1505,7 @@ struct MtpScratch {
     edge_workspace: Option<CudaBuffer>,
     draft_sessions: Vec<ExecutionSession>,
     draft_sessions_prepared: [bool; QWEN35_MTP_DRAFT_STEPS],
+    materialize_session: Option<MtpMaterializeSession>,
 }
 
 impl MtpScratch {
@@ -1557,8 +1597,59 @@ impl MtpScratch {
                 .map(|_| ExecutionSession::with_capacity(MTP_DRAFT_WORKSPACE, ctx.device_id()))
                 .collect::<Result<Vec<_>>>()?,
             draft_sessions_prepared: [false; QWEN35_MTP_DRAFT_STEPS],
+            materialize_session: None,
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_final_proposal(
+    ctx: &CudaContext,
+    weights: &Qwen35DeviceWeights,
+    state: &mut Qwen35MtpState,
+    scratch: &mut MtpScratch,
+    geometry: AttentionGeometry,
+    eps: f32,
+    rope_theta: f32,
+    base_hidden: &Tensor,
+    token: &Tensor,
+    position: &Tensor,
+    cache_row: usize,
+    draft_step: usize,
+) -> Result<()> {
+    let enabled = std::env::var("APXINF_QWEN35_MTP_MATERIALIZE_SESSION").as_deref() == Ok("1");
+    let session = if enabled {
+        let binding = MtpMaterializeBinding::new(ctx, weights)?;
+        if scratch.materialize_session.as_ref().is_none_or(|cached| cached.binding != binding) {
+            scratch.materialize_session = Some(MtpMaterializeSession {
+                binding,
+                session: ExecutionSession::with_capacity(MTP_DRAFT_WORKSPACE, ctx.device_id())?,
+                prepared: false,
+            });
+        }
+        let cached = scratch.materialize_session.as_ref().expect("initialized materialization session");
+        Some((cached.session.clone(), cached.prepared))
+    } else {
+        None
+    };
+    // prepare executes this real row once; never prepare and then execute the
+    // same materialization twice. Unlike draft, this tape has no LM-head GEMM.
+    let mut forward = || forward_one(ctx, weights, state, scratch, geometry, eps,
+        rope_theta, base_hidden, token, position, cache_row, draft_step, false);
+    let result = match session.as_ref() {
+        Some((execution, true)) => execution.run(forward),
+        Some((execution, false)) => execution.prepare(forward),
+        None => forward(),
+    };
+    if enabled {
+        scratch.materialize_session.as_mut().expect("initialized materialization session").prepared = result.is_ok();
+        // Do not retry a partially executed row. Drain before returning an
+        // error, leave it unprepared and let the existing transaction abort.
+        if result.is_err() { ctx.synchronize().map_err(Error::Cuda)?; }
+    }
+    // prepare_commit retains its unconditional successful ctx synchronization,
+    // position validation and publish boundary after this function returns.
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
