@@ -743,6 +743,7 @@ __global__ void gdn_prepare_prefill_preserved_warp_kernel(
 template<int HeadsPerBlock>
 __global__ void fused_conv_prepare_kernel(
     const __nv_bfloat16* input, const __nv_bfloat16* weights,
+    const float* initial_window,
     __half* query, __half* key, __half* value, const float* decay,
     float* alpha, int tokens, int key_heads, int value_heads, float epsilon) {
   const int token = blockIdx.x;
@@ -761,7 +762,9 @@ __global__ void fused_conv_prepare_kernel(
 #pragma unroll
       for (int tap = 0; tap < 4; ++tap) {
         const int source_token = token - 3 + tap;
-        const float sample = source_token < 0 ? 0.0f : __bfloat162float(input[(long long)source_token * channels + channel]);
+        const float sample = source_token < 0
+            ? initial_window[(long long)channel * 4 + source_token + 4]
+            : __bfloat162float(input[(long long)source_token * channels + channel]);
         accumulator += sample * __bfloat162float(weights[channel * 4 + tap]);
       }
       values[part] = __bfloat162float(__float2bfloat16(accumulator / (1.0f + __expf(-accumulator))));
@@ -904,8 +907,8 @@ int gdn_conv_prepare(const void* input, const void* weight,
   const int head_groups = (2 * k_heads + v_heads + 79) / 80;
   fused_conv_prepare_kernel<80><<<dim3(tokens, head_groups), 256, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input),
-      static_cast<const __nv_bfloat16*>(weight), static_cast<__half*>(q_out),
-      static_cast<__half*>(k_out), static_cast<__half*>(v_out),
+      static_cast<const __nv_bfloat16*>(weight), static_cast<const float*>(window),
+      static_cast<__half*>(q_out), static_cast<__half*>(k_out), static_cast<__half*>(v_out),
       static_cast<const float*>(decay), static_cast<float*>(alpha),
       tokens, k_heads, v_heads, epsilon);
   const auto result = cudaGetLastError();
