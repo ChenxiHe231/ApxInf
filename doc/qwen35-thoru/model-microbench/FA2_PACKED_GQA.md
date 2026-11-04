@@ -115,9 +115,54 @@ host-wall分数；API/拷贝时间与GPU工作可重叠，不能相加作为wall
 4K/Q4对照S5→13，包含重调优因素；48K/Q4两臂同S7，core约2.028857→
 0.383430ms，仍须计入新pack/unpack和combine。四份真实非空report的SHA/size、
 Nsight版本、stats导出命令/退出码、原CSV/日志/ELF/source/clock/lock/reap已绑定。
-profiler身份仍是launcher，未伪称直接application/proc证明。本提交未纳入NCU数据，
-不填写DRAM带宽、Tensor/warp利用率或把缺失值写0；表中0只表示原路径无pack/
-unpack组成。
+profiler身份仍是launcher，未伪称直接application/proc证明。NCU单core数据另列
+如下；缺失的DRAM等计数不填写0。上表的0只表示原路径无pack/unpack组成。
+
+## NCU补充：48K/Q4/S7单core
+
+两臂同ELF`b5235729…`、同输入FNV与S7，fixed1206MHz；NCU使用
+`--launch-skip 101 --launch-count 1 --cache-control all --replay-mode kernel`。
+每臂只选择一个首formal core进行kernel replay，不是5次独立core重复，也不包含
+pack/combine/unpack。原CSV的旧duration单位是**ms**，新单位是**us**：
+**2.032640ms→383.232us（0.383232ms）**，单core时间降低
+**81.14609571788412%**。此前quiet host-wall和完整Nsight算子统计仍分别保留，
+不能用这个单core百分比替代整算子或模型收益。
+
+|实际NCU指标|control|packed|
+|---|---:|---:|
+|grid|1×7×16=112 CTA|1×7×2=14 CTA|
+|threads/CTA|128|128|
+|register/thread（allocated）|252（256）|253（256）|
+|dynamic shared memory/CTA|98,304B|98,304B|
+|allocated shared memory/CTA|99,328B|99,328B|
+|register/shared occupancy-limit CTA|2 /2|2 /2|
+|waves/SM|4|0.5|
+|SM throughput % peak sustained elapsed|73.517083%|48.876613%|
+|Tensor active cycles % peak sustained elapsed|73.517083%|48.876613%|
+|active warps % peak sustained active|16.616978%|8.324987%|
+|L2 sector hit rate %|74.957675%|0.223932%|
+|L2 throughput % peak sustained elapsed|33.727348%|44.763812%|
+|L2 fill-sysmem sectors % peak elapsed|16.871941%|44.763812%|
+|DRAM read/write bytes|MISSING|MISSING|
+|DRAM throughput / physical bandwidth utilization|MISSING|MISSING|
+|absolute L2 demand-sector / request-byte count|MISSING|MISSING|
+
+源码将每KV group的8个query heads映射到packed query行，实际head-grid维度
+16→2、CTA总量112→14，与减少重复head-grid处理的解释一致。它不证明物理
+DRAM流量降低8倍：缺少DRAM及绝对L2 demand计数，不能从CTA比例或L2百分比
+反推该结论。旧路径更多head CTAs可能形成L2命中，packed较低的hit率本身不足以
+判断缓存效率退化；这只是基于source/计时/相对counter的解释，未测绝对流量。
+
+Tensor/warp/SM百分比下降也不能简单称为“优化了算力利用率”或性能变差。
+更少CTA/waves在更短时间内完成相同输入输出合同；这些active/throughput比例
+不是有用FLOPs/peak或roofline效率。这里没有计算物理带宽利用率、roofline或
+全模型利用率，更没有推出模型30%收益。
+
+两份实际CSV的units row/data、原report/log逐SHA与size、root执行、source与
+recipe冻结、锁继承/child reap及clock恢复均绑定在JSON；另附独立离线audit。
+前置NCU01在root以a+打开`/tmp/apxinf-gpu.lock`时被protected_regular拒绝，
+尚未启动GPU；02改为只读打开同一共享锁后完成实际两次采集。01属于启动前错误，
+不是GPU失败。其历史来自root的现场记录，01原receipt未下载到本地，未补造SHA。
 
 ## 复现和未验收范围
 
@@ -140,4 +185,4 @@ retuned/restored必须如实声明；保存actual split/provider tuple和原字�
 编译/GPU运行；它仅带十个实现/测试文件及本doc/evidence。actualcheckpoint层、
 完整模型、全15、逐case30%、天气AIOS/E2E及原4K scalar/verification质量差异
 仍未验收；已有4K差异不能归因为这个新FA2。只做下一步实际模型gate/quiet A/B后
-才可给模型收益结论。后续NCU或checkpoint实验若完成，应另绑定真实收据补证。
+才可给模型收益结论。后续更多NCU或checkpoint/model实验若完成，应另绑定真实收据补证。

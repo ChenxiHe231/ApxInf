@@ -6605,8 +6605,9 @@
     "all15_or_30percent_accepted": false,
     "cleanisolated_source_GPU_retested": false,
     "existing_4k_scalar_verify_difference_attributed_to_new_FA2": false,
-    "NCU_utilization_or_DRAM_measurements_included": false,
-    "ordinary_prior_build_recipes_automatically_compatible": false
+    "NCU_utilization_or_DRAM_measurements_included": true,
+    "ordinary_prior_build_recipes_automatically_compatible": false,
+    "DRAM_absolute_or_roofline_evidence_included": false
   },
   "recipe_migration": "Native attention globalbuildid changes: explicitly prepare/retune ordinary and packed namespaces under new ELF; no inherited old-build tune receipt",
   "quality_limits": [
@@ -6660,5 +6661,529 @@
       "sha256": "f91526e942d05a234c2ea3ff2f48112f2316c926f1bd3fb441115ca15cdc6b12",
       "bytes": 346
     }
-  ]
+  ],
+  "NCU_48k_q4_matched_S7": {
+    "scope": "NCU one48K/Q4 core per arm, matchedS7/cacheall/kernelreplay; pack/combine/unpack excluded, wholeoperator quiet/Nsys separate",
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-packed-operator-ncu-02/receipt.json",
+      "sha256": "db995799ac377141faffdea69449402e1021d5d6467944060c3e69cacb70ba7d",
+      "bytes": 25997
+    },
+    "artifact": {
+      "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/fa2_packed_gqa_bench-9b9d093f9257d17b",
+      "sha256": "b523572928b10991b7f52d7fb1bbdd47f063e450f23173d8fa16c25b6581599b",
+      "size_bytes": 33878360
+    },
+    "source": {
+      "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+      "patch_sha256": "560584ea5a45471cb1248cb3ba44e9c4f2406194ad6e2d82944b5c15b82ab1b1",
+      "untracked_sha256": {
+        "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+        "crates/apxinf-cuda-new/native/kernels/fa2/fa2_packed_gqa.cu": "a912c38d427f1d8032a16feccc338e77a9e975b80ca5c72ec184b55b2f85d22f",
+        "crates/apxinf-cuda-new/native/kernels/fa2/flash_attn/packed_gqa_fwd.h": "c3dccf7123b75a2a75977eb2d4ebad271738e73b15931e883303aa1406f0c05e",
+        "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+        "crates/apxinf-cuda-new/tests/fa2_packed_gqa.rs": "c4600c2cea4b00becbc32d0aeabe3beb2937db0569944dbc7906d78467bfee17",
+        "crates/apxinf-cuda-new/tests/fa2_packed_gqa_bench.rs": "478df2984ad7b1774c4e1dae01408514efdaed8272802205dee92fc3f6a833c6",
+        "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+        "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+        "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+        "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+        "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+        "crates/apxinf-cuda-new/tests/support/fa2_packed_gqa_uniform_reference.rs": "a05d69831dd5f3fae800dd1ca77827408e0d00a6e43a0998efd2163fb517dcba",
+        "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+        "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+        "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+        "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+        "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+        "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+        "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+        "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "c2b69f56a2d8706379c874f6cf0df25389dd34d2631d2373a97250ac3484d5be",
+        "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+        "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+      }
+    },
+    "source_unchanged": true,
+    "recipes_unchanged": true,
+    "recipe_inventory_canonical_sha256": "2102cb8f5c552fd0b0d5b40694a05bd2cc08eaba1d09397581e32ebfec5ec69c",
+    "root_uid": 0,
+    "clock_before": {
+      "min_freq": "54000000",
+      "max_freq": "1206000000",
+      "governor": "simple_ondemand",
+      "cur_freq": "54000000"
+    },
+    "clock_fixed": {
+      "min_freq": "1206000000",
+      "max_freq": "1206000000",
+      "governor": "simple_ondemand",
+      "cur_freq": "1206000000"
+    },
+    "clock_restored": {
+      "min_freq": "54000000",
+      "max_freq": "1206000000",
+      "governor": "simple_ondemand",
+      "cur_freq": "54000000"
+    },
+    "clock_restore_valid": true,
+    "cleanup_proven": true,
+    "records": [
+      {
+        "flag": 0,
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/fa2-packed-operator-ncu-02/48k-q4-flag0.csv",
+          "sha256": "7de6706d4b522bb27c992c996770dda1518c5dffb145abd6011549fd81103e90",
+          "bytes": 34071
+        },
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/fa2-packed-operator-ncu-02/48k-q4-flag0.ncu-rep",
+          "sha256": "aa1e935e068c041c6378d7a3254467d110932b1eef5d35bbd2d26fbcebd011ca",
+          "bytes": 7780444
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/fa2-packed-operator-ncu-02/48k-q4-flag0.log",
+          "sha256": "f6b7d9f2dde3a22f74dec9d6326e2ed9a5b6bf6678cec937cb2d59edbb13e4f4",
+          "bytes": 3919
+        },
+        "argv": [
+          "/opt/nvidia/nsight-compute/2025.1.1/ncu",
+          "--target-processes",
+          "all",
+          "--kernel-name-base",
+          "function",
+          "--kernel-name",
+          "regex:.*flash_fwd_splitkv_kernel.*",
+          "--launch-skip",
+          "101",
+          "--launch-count",
+          "1",
+          "--replay-mode",
+          "kernel",
+          "--clock-control",
+          "none",
+          "--cache-control",
+          "all",
+          "--section",
+          "LaunchStats",
+          "--section",
+          "Occupancy",
+          "--section",
+          "SpeedOfLight",
+          "--section",
+          "MemoryWorkloadAnalysis",
+          "--section",
+          "WarpStateStats",
+          "--export",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/fa2-packed-operator-ncu-02/48k-q4-flag0",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/fa2_packed_gqa_bench-9b9d093f9257d17b",
+          "--ignored",
+          "--exact",
+          "fa2_packed_gqa_operator_measure",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "APXINF_FA2_PACKED_GQA": "0",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_FA2_BENCH_RECIPE_ROOT": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-fa2-packed-operator-retuned-01",
+          "APXINF_FA2_BENCH_RECIPE_ORIGIN": "retuned",
+          "APXINF_ATTENTION_REPORT": "1",
+          "APXINF_NVTX": "0",
+          "APXINF_FA2_BENCH_ITERATIONS": "50",
+          "APXINF_FA2_BENCH_DIAGNOSTIC": "1",
+          "APXINF_FA2_BENCH_PREFIX": "49152",
+          "APXINF_FA2_BENCH_QUERIES": "4",
+          "APXINF_FA2_BENCH_EXPECT_PROVIDER": "2",
+          "APXINF_FA2_BENCH_EXPECT_IMPLEMENTATION": "3",
+          "APXINF_FA2_BENCH_EXPECT_CONFIGURATION": "7"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "cleanup": {
+          "pid": 223019,
+          "pgid": 223019,
+          "direct_child_inherits_lock": true,
+          "proven": true,
+          "descendants_reaped": [],
+          "returncode": 0,
+          "members_after": [],
+          "direct_child_reaped": true
+        },
+        "config": {
+          "schema": "apxinf.fa2.operator.config.v1",
+          "packed": false,
+          "prefix": 49152,
+          "queries": 4,
+          "valid_keys": 49156,
+          "iterations": 50,
+          "warmups": 2,
+          "repeats": 5,
+          "provider": 2,
+          "implementation": 3,
+          "version": 1,
+          "configuration": 7,
+          "split_count": 7,
+          "same_s_forced": false,
+          "matched_s_comparison": "pending-not-forced",
+          "timing_method": "host-wall-batch-dispatch-plus-stream-sync",
+          "device_event_timing_available": false,
+          "recipe_origin_declared": "retuned",
+          "recipe_key_fnv": "12e167fd04fd7f33",
+          "recipe_bytes_fnv": "e200ce5741f9964a",
+          "input_fnv": "83b12f9946556047",
+          "admission_max_abs": 2.4020671844482422e-05,
+          "cpu_reference_seconds_excluded": 3.707841258,
+          "preparation_seconds_excluded": 0.017028491,
+          "preparation_and_admission_operator_calls": 1,
+          "profiling_diagnostic": true,
+          "operator_measurement_eligible": false,
+          "scope": "operator",
+          "whole_model_eligible": false
+        },
+        "kernel": "void flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<256, 64, 64, 4, 0, 0, bfloat16_t, Flash_kernel_traits<256, 64, 64, 4, bfloat16_t>>, 1, 0, 0, 0, 1, 0, 1, 0>(Flash_fwd_params)",
+        "sampled_cores": 1,
+        "cache_control": "all",
+        "replay_mode": "kernel",
+        "core_duration_ms": 2.03264,
+        "metrics": {
+          "gpu__time_duration.sum": {
+            "value": "2.032640",
+            "unit": "ms"
+          },
+          "launch__grid_size": {
+            "value": "112",
+            "unit": ""
+          },
+          "launch__grid_dim_x": {
+            "value": "1",
+            "unit": ""
+          },
+          "launch__grid_dim_y": {
+            "value": "7",
+            "unit": ""
+          },
+          "launch__grid_dim_z": {
+            "value": "16",
+            "unit": ""
+          },
+          "launch__block_size": {
+            "value": "128",
+            "unit": ""
+          },
+          "launch__registers_per_thread": {
+            "value": "252",
+            "unit": "register/thread"
+          },
+          "launch__registers_per_thread_allocated": {
+            "value": "256.000000",
+            "unit": "register/thread"
+          },
+          "launch__shared_mem_per_block_dynamic": {
+            "value": "98.304000",
+            "unit": "Kbyte/block"
+          },
+          "launch__shared_mem_per_block_allocated": {
+            "value": "99.328000",
+            "unit": "Kbyte/block"
+          },
+          "launch__occupancy_limit_registers": {
+            "value": "2.000000",
+            "unit": "block"
+          },
+          "launch__occupancy_limit_shared_mem": {
+            "value": "2.000000",
+            "unit": "block"
+          },
+          "launch__waves_per_multiprocessor": {
+            "value": "4",
+            "unit": ""
+          },
+          "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+            "value": "73.517083",
+            "unit": "%"
+          },
+          "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+            "value": "73.517083",
+            "unit": "%"
+          },
+          "sm__warps_active.avg.pct_of_peak_sustained_active": {
+            "value": "16.616978",
+            "unit": "%"
+          },
+          "lts__t_sector_hit_rate.pct": {
+            "value": "74.957675",
+            "unit": "%"
+          },
+          "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+            "value": "33.727348",
+            "unit": "%"
+          },
+          "lts__d_sectors_fill_sysmem.avg.pct_of_peak_sustained_elapsed": {
+            "value": "16.871941",
+            "unit": "%"
+          },
+          "dram__bytes_read.sum": "MISSING",
+          "dram__bytes_write.sum": "MISSING",
+          "dram__throughput.avg.pct_of_peak_sustained_elapsed": "MISSING",
+          "lts__t_sectors.sum": "MISSING"
+        }
+      },
+      {
+        "flag": 1,
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/fa2-packed-operator-ncu-02/48k-q4-flag1.csv",
+          "sha256": "a212181553241ca593113a6893bdac084abb55e8a7d15b2a0fc85cacf8dd9792",
+          "bytes": 34029
+        },
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/fa2-packed-operator-ncu-02/48k-q4-flag1.ncu-rep",
+          "sha256": "bf1c959c023e1f9490adcb72adf4c8e834e0697e2895154428a0ac762a087d8d",
+          "bytes": 723939
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/fa2-packed-operator-ncu-02/48k-q4-flag1.log",
+          "sha256": "2cb672d490b88ce4d6a566e4e52d90e48e480deeb18e8a5d0e2e86732740c289",
+          "bytes": 3933
+        },
+        "argv": [
+          "/opt/nvidia/nsight-compute/2025.1.1/ncu",
+          "--target-processes",
+          "all",
+          "--kernel-name-base",
+          "function",
+          "--kernel-name",
+          "regex:.*flash_fwd_splitkv_packed_gqa_kernel.*",
+          "--launch-skip",
+          "101",
+          "--launch-count",
+          "1",
+          "--replay-mode",
+          "kernel",
+          "--clock-control",
+          "none",
+          "--cache-control",
+          "all",
+          "--section",
+          "LaunchStats",
+          "--section",
+          "Occupancy",
+          "--section",
+          "SpeedOfLight",
+          "--section",
+          "MemoryWorkloadAnalysis",
+          "--section",
+          "WarpStateStats",
+          "--export",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/fa2-packed-operator-ncu-02/48k-q4-flag1",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/fa2_packed_gqa_bench-9b9d093f9257d17b",
+          "--ignored",
+          "--exact",
+          "fa2_packed_gqa_operator_measure",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "APXINF_FA2_PACKED_GQA": "1",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_FA2_BENCH_RECIPE_ROOT": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-fa2-packed-operator-retuned-01",
+          "APXINF_FA2_BENCH_RECIPE_ORIGIN": "retuned",
+          "APXINF_ATTENTION_REPORT": "1",
+          "APXINF_NVTX": "0",
+          "APXINF_FA2_BENCH_ITERATIONS": "50",
+          "APXINF_FA2_BENCH_DIAGNOSTIC": "1",
+          "APXINF_FA2_BENCH_PREFIX": "49152",
+          "APXINF_FA2_BENCH_QUERIES": "4",
+          "APXINF_FA2_BENCH_EXPECT_PROVIDER": "2",
+          "APXINF_FA2_BENCH_EXPECT_IMPLEMENTATION": "4",
+          "APXINF_FA2_BENCH_EXPECT_CONFIGURATION": "7"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "cleanup": {
+          "pid": 223144,
+          "pgid": 223144,
+          "direct_child_inherits_lock": true,
+          "proven": true,
+          "descendants_reaped": [],
+          "returncode": 0,
+          "members_after": [],
+          "direct_child_reaped": true
+        },
+        "config": {
+          "schema": "apxinf.fa2.operator.config.v1",
+          "packed": true,
+          "prefix": 49152,
+          "queries": 4,
+          "valid_keys": 49156,
+          "iterations": 50,
+          "warmups": 2,
+          "repeats": 5,
+          "provider": 2,
+          "implementation": 4,
+          "version": 1,
+          "configuration": 7,
+          "split_count": 7,
+          "same_s_forced": false,
+          "matched_s_comparison": "pending-not-forced",
+          "timing_method": "host-wall-batch-dispatch-plus-stream-sync",
+          "device_event_timing_available": false,
+          "recipe_origin_declared": "retuned",
+          "recipe_key_fnv": "5f556b3ce125598b",
+          "recipe_bytes_fnv": "fda3a25dfcf3a629",
+          "input_fnv": "83b12f9946556047",
+          "admission_max_abs": 2.4020671844482422e-05,
+          "cpu_reference_seconds_excluded": 4.061452175,
+          "preparation_seconds_excluded": 0.005925565,
+          "preparation_and_admission_operator_calls": 1,
+          "profiling_diagnostic": true,
+          "operator_measurement_eligible": false,
+          "scope": "operator",
+          "whole_model_eligible": false
+        },
+        "kernel": "void flash_fwd_splitkv_packed_gqa_kernel<Flash_fwd_kernel_traits<256, 64, 64, 4, 0, 0, bfloat16_t, Flash_kernel_traits<256, 64, 64, 4, bfloat16_t>>>(Flash_fwd_params)",
+        "sampled_cores": 1,
+        "cache_control": "all",
+        "replay_mode": "kernel",
+        "core_duration_ms": 0.383232,
+        "metrics": {
+          "gpu__time_duration.sum": {
+            "value": "383.232000",
+            "unit": "us"
+          },
+          "launch__grid_size": {
+            "value": "14",
+            "unit": ""
+          },
+          "launch__grid_dim_x": {
+            "value": "1",
+            "unit": ""
+          },
+          "launch__grid_dim_y": {
+            "value": "7",
+            "unit": ""
+          },
+          "launch__grid_dim_z": {
+            "value": "2",
+            "unit": ""
+          },
+          "launch__block_size": {
+            "value": "128",
+            "unit": ""
+          },
+          "launch__registers_per_thread": {
+            "value": "253",
+            "unit": "register/thread"
+          },
+          "launch__registers_per_thread_allocated": {
+            "value": "256.000000",
+            "unit": "register/thread"
+          },
+          "launch__shared_mem_per_block_dynamic": {
+            "value": "98.304000",
+            "unit": "Kbyte/block"
+          },
+          "launch__shared_mem_per_block_allocated": {
+            "value": "99.328000",
+            "unit": "Kbyte/block"
+          },
+          "launch__occupancy_limit_registers": {
+            "value": "2.000000",
+            "unit": "block"
+          },
+          "launch__occupancy_limit_shared_mem": {
+            "value": "2.000000",
+            "unit": "block"
+          },
+          "launch__waves_per_multiprocessor": {
+            "value": "0.50",
+            "unit": ""
+          },
+          "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+            "value": "48.876613",
+            "unit": "%"
+          },
+          "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+            "value": "48.876613",
+            "unit": "%"
+          },
+          "sm__warps_active.avg.pct_of_peak_sustained_active": {
+            "value": "8.324987",
+            "unit": "%"
+          },
+          "lts__t_sector_hit_rate.pct": {
+            "value": "0.223932",
+            "unit": "%"
+          },
+          "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+            "value": "44.763812",
+            "unit": "%"
+          },
+          "lts__d_sectors_fill_sysmem.avg.pct_of_peak_sustained_elapsed": {
+            "value": "44.763812",
+            "unit": "%"
+          },
+          "dram__bytes_read.sum": "MISSING",
+          "dram__bytes_write.sum": "MISSING",
+          "dram__throughput.avg.pct_of_peak_sustained_elapsed": "MISSING",
+          "lts__t_sectors.sum": "MISSING"
+        }
+      }
+    ],
+    "core_time_reduction_percent": 81.14609571788412,
+    "missing_metrics": [
+      "DRAM read/write bytes",
+      "DRAM throughput / physical bandwidth utilization",
+      "absolute L2 demand sectors / request bytes"
+    ],
+    "independent_audit": {
+      "analysis.json": {
+        "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/fa2-packed-operator-independent-audit-01/analysis.json",
+        "sha256": "78d4ada2e1aa16a92f0dfbbbff5ef610ba3edb35eead62bdf1e9f120dd92c09e",
+        "bytes": 19698
+      },
+      "REVIEW.md": {
+        "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/fa2-packed-operator-independent-audit-01/REVIEW.md",
+        "sha256": "3d4fd6be665c73ff7f1dacbe1e4606d0171a455479222cae7b2fd3761ed57876",
+        "bytes": 5189
+      },
+      "manifest.json": {
+        "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/fa2-packed-operator-independent-audit-01/manifest.json",
+        "sha256": "3ba30e98ef98922b2ef36337b851e5b6ed582b440a175bb997172420a2cc7533",
+        "bytes": 792
+      },
+      "audit.py": {
+        "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/fa2-packed-operator-independent-audit-01/audit.py",
+        "sha256": "24340382464ea7a7b8ee1954fb9ec04c56f6c702e428bd9c7b6940dc6af8217e",
+        "bytes": 12336
+      }
+    },
+    "interpretation": {
+      "head_grid_ctas_16_to_2": true,
+      "source_supports_grouped_heads_to_packed_rows": true,
+      "physical_traffic_reduction_factor_proven": false,
+      "useful_compute_utilization_improvement_proven": false,
+      "roofline_efficiency_computed": false,
+      "model_or_all15_30percent_accepted": false
+    },
+    "prelaunch_attempt01_history": {
+      "source": "root observed orchestration history; no attempt01 receipt downloaded locally",
+      "failure": "root a+ open of /tmp/apxinf-gpu.lock rejected by protected_regular before GPU launch",
+      "GPU_started": false,
+      "is_GPU_failure": false,
+      "attempt02": "read-only lock open, same sharedlock, actual2core captures completed"
+    },
+    "limits": [
+      "One selected core/arm with kernelreplay/cacheall; not five independent repeated core measurements",
+      "pack/combine/unpack excluded; prior fourNsight wholeoperator kernel accounting and quiet hostwall remain separate",
+      "lower average tensor/warp/SM percentages do not prove worse or better usefulFLOPs utilization",
+      "relativeL2hit/throughput ratios cannot establish8x physicalDRAM traffic or bandwidth utilization"
+    ]
+  }
 }
