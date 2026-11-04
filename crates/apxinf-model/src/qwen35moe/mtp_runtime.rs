@@ -920,11 +920,20 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
             .as_ref()
             .ok_or_else(|| invalid("Qwen3.5 context capture requires MTP prefill state"))?
             .clone();
+        // Verifier outputs are views of persistent scratch. A context
+        // checkpoint must retain an independent hidden row across later
+        // rounds, just as its target and draft cache banks do.
+        let frozen_hidden = zeros(
+            ctx,
+            target_hidden.shape().dims().to_vec(),
+            target_hidden.dtype(),
+        )?;
+        transfers::copy_cuda_to_cuda(ctx, &target_hidden, &frozen_hidden)?;
         self.target.capture_snapshot(ctx, &mut snapshot.target)?;
         self.mtp
             .copy_state(ctx, &self.committed_mtp, &mut snapshot.mtp)?;
         ctx.synchronize().map_err(Error::Cuda)?;
-        snapshot.target_hidden = Some(target_hidden);
+        snapshot.target_hidden = Some(frozen_hidden);
         snapshot.position = position;
         Ok(())
     }
@@ -2509,5 +2518,411 @@ mod tests {
         let mut logprobs = greedy;
         logprobs.return_logprob = Some(true);
         assert!(MtpGreedyPolicy::from_generation_options(&logprobs).is_err());
+    }
+}
+
+#[cfg(test)]
+pub(super) mod gpu_raw_protocol {
+    use super::*;
+    use std::path::PathBuf;
+    use crate::qwen35moe::{Qwen35MoeActivation, Qwen35KvCacheDType, Qwen35ExecutionOptions, Qwen35Fp8AttentionBackend};
+    use crate::qwen35moe::device_weights::load_qwen35_device_weights_from_path_with_options;
+    use crate::qwen35moe::mtp_schedule::ShadowCommitRange;
+
+    fn parse_protocol_graphs(value: Option<&std::ffi::OsStr>) -> std::result::Result<bool, &'static str> {
+        match value {
+            None => Ok(false),
+            Some(value) => match value.to_str() {
+                Some("0") => Ok(false),
+                Some("1") => Ok(true),
+                _ => Err("APXINF_QWEN35_PROTOCOL_GRAPHS must be unset, 0 or 1"),
+            },
+        }
+    }
+
+    pub(in crate::qwen35moe) struct Fixture {
+        pub(in crate::qwen35moe) ctx: CudaContext,
+        pub(in crate::qwen35moe) config: Qwen35MoeConfig,
+        pub(in crate::qwen35moe) decoder: Qwen35Decoder,
+        pub(in crate::qwen35moe) weights: Qwen35DeviceWeights,
+        pub(in crate::qwen35moe) prompt: Vec<u32>,
+        pub(in crate::qwen35moe) capacity: usize,
+        graphs: bool,
+    }
+
+    impl Fixture {
+        fn load() -> std::result::Result<Self, Box<dyn std::error::Error>> {
+            Self::load_with_autotune(false)
+        }
+        // Only the separately named ignored recipe-preparation entry calls true.
+        // Strict GPU gates always enter through load(), regardless of environment.
+        fn load_with_autotune(allow_online_tune: bool) -> std::result::Result<Self, Box<dyn std::error::Error>> {
+            let protocol_graphs_env = std::env::var_os("APXINF_QWEN35_PROTOCOL_GRAPHS");
+            let graphs = parse_protocol_graphs(protocol_graphs_env.as_deref())?;
+            std::env::set_var("APXINF_REQUIRE_RECIPES", if allow_online_tune { "0" } else { "1" });
+            std::env::set_var("APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE", "1");
+            std::env::set_var("APXINF_QWEN35_CUDA_GRAPHS", if graphs { "1" } else { "0" });
+            std::env::set_var("APXINF_QWEN35_VERIFY_GRAPHS", "0");
+            let checkpoint = PathBuf::from(std::env::var_os("APXINF_QWEN35_CHECKPOINT").expect("checkpoint env"));
+            let tuning = PathBuf::from(std::env::var_os("APXINF_QWEN35_PARITY_TUNING_DIR").expect("pre-tuned recipe env"));
+            assert!(checkpoint.is_absolute() && tuning.is_absolute());
+            if allow_online_tune { std::fs::create_dir_all(&tuning)?; }
+            else {
+                assert!(std::fs::read_dir(&tuning)?.filter_map(std::result::Result::ok)
+                    .any(|x| x.path().extension().is_some_and(|x| x == "recipe")));
+            }
+            let ctx = CudaContext::new_with_options(0, allow_online_tune, Some(&tuning))?;
+            let config = Qwen35MoeConfig::from_json_file(&checkpoint.join("config.json"))?;
+            let policy = Qwen35ExecutionOptions { moe_activation: Qwen35MoeActivation::Nvfp4, kv_cache: Qwen35KvCacheDType::Bf16 };
+            let weights = load_qwen35_device_weights_from_path_with_options(&ctx, &config, &checkpoint, policy)?;
+            let decoder = Qwen35Decoder::new(&config)?;
+            // Short fixed scope. Existing1024-token and long-context gates are separate.
+            let prompt = vec![151644,8948,198,9707,16357,220,19687,25,198,151645,198,151644,77091,198,35064,16933];
+            Ok(Self { ctx, config, decoder, weights, prompt, capacity:64, graphs })
+        }
+        pub(in crate::qwen35moe) fn target(&self) -> Result<Qwen35Session<Qwen35Fp8AttentionBackend>> {
+            let backend = Qwen35Fp8AttentionBackend::with_kv_cache(&self.config, Qwen35KvCacheDType::Bf16, None)?;
+            Qwen35Session::new(&self.ctx, &self.decoder, &self.weights, backend, self.capacity)
+        }
+    }
+
+    pub(in crate::qwen35moe) fn raw(tensor: &Tensor) -> Result<Vec<u8>> {
+        let cpu = transfers::to_cpu(tensor)?;
+        if cpu.dtype() == DType::F32 { assert!(cpu.as_f32()?.iter().all(|x| x.is_finite())); }
+        if cpu.dtype() == DType::BF16 { assert!(cpu.as_bf16()?.iter().all(|x| x.to_f32().is_finite())); }
+        let bytes=cpu.storage().as_cpu().unwrap();
+        if cpu.dtype()==DType::F8E4M3 { assert!(bytes.iter().all(|x|(*x & 0x7f)!=0x7f),"nonfinite E4M3 observation"); }
+        Ok(bytes.to_vec())
+    }
+    pub(in crate::qwen35moe) fn digest_images(images: &[(Vec<u8>,Vec<u8>)]) -> String {
+        let hash=images.iter().flat_map(|x|x.0.iter().chain(&x.1))
+            .fold(0xcbf29ce484222325u64,|h,b|(h^u64::from(*b)).wrapping_mul(0x100000001b3));
+        format!("{hash:016x}")
+    }
+    pub(in crate::qwen35moe) fn exact(label: &str, actual: &[u8], expected: &[u8]) {
+        assert_eq!(actual.len(),expected.len(),"{label}: length");
+        if let Some(i)=actual.iter().zip(expected).position(|(a,b)|a!=b) {
+            panic!("{label}: first byte mismatch {i}: {} != {}",actual[i],expected[i]);
+        }
+    }
+    pub(in crate::qwen35moe) fn pointer(t: &Tensor) -> usize { t.storage().as_gpu().unwrap().ptr() }
+    pub(in crate::qwen35moe) fn fill_rows(ctx: &CudaContext, t: &Tensor, start: usize, end: usize, rows: usize, byte: u8) -> Result<()> {
+        let b=CudaBuffer::from_tensor(t).map_err(Error::Cuda)?;
+        assert_eq!(b.len()%rows,0);assert!(start<=end && end<=rows);
+        b.view(start*(b.len()/rows),(end-start)*(b.len()/rows)).map_err(Error::Cuda)?
+            .memset_async(byte,ctx.stream()).map_err(Error::Cuda)
+    }
+    // CPU copy ledger, independent of CUDA cache view/copy implementations.
+    pub(in crate::qwen35moe) fn prefix_image(destination: &[u8], source: &[u8], row_bytes: usize, count: usize) -> Vec<u8> {
+        let end=row_bytes.checked_mul(count).unwrap();assert!(end<=destination.len() && end<=source.len());
+        let mut expected=destination.to_vec();expected[..end].copy_from_slice(&source[..end]);expected
+    }
+    #[test]
+    fn cpu_draft_copy_ledger_counts_physical_p_minus_one_rows() {
+        let source:Vec<u8>=(0..40u8).collect();let destination=vec![0x5au8;64];
+        let expected=prefix_image(&destination,&source,2,15);
+        assert_eq!(&expected[..30],&source[..30]);assert_eq!(&expected[30..],&destination[30..]);
+        assert_eq!(prefix_image(&destination,&source,2,0),destination);
+        assert_ne!(expected,prefix_image(&destination,&source,2,16),"logicalP16 must not copy physical16rows");
+    }
+    fn image(state: &Qwen35MtpState) -> Result<(Vec<u8>,Vec<u8>)> { Ok((raw(&state.key)?,raw(&state.value)?)) }
+    fn same(label: &str, state: &Qwen35MtpState, bytes: &(Vec<u8>,Vec<u8>)) -> Result<()> {
+        exact(&format!("{label} K"),&raw(&state.key)?,&bytes.0);exact(&format!("{label} V"),&raw(&state.value)?,&bytes.1);Ok(())
+    }
+    fn ids(state: &Qwen35MtpState) -> (usize,usize) { (pointer(&state.key),pointer(&state.value)) }
+    fn check_copy(f: &Fixture, runtime: &mut Qwen35MtpRuntime, source: &Qwen35MtpState, destination: &mut Qwen35MtpState) -> Result<()> {
+        let before=image(destination)?;let source_before=image(source)?;
+        let count=source.position.map(|p|p.cache_rows).unwrap_or(0);
+        let row_bytes=source_before.0.len()/source.capacity;
+        let expected=(prefix_image(&before.0,&source_before.0,row_bytes,count),prefix_image(&before.1,&source_before.1,row_bytes,count));
+        runtime.copy_state(&f.ctx,source,destination)?;f.ctx.synchronize().map_err(Error::Cuda)?;
+        same("copy destination independent CPU prefix ledger",destination,&expected)?;
+        same("copy source readonly",source,&source_before)?;
+        assert_eq!(destination.position,source.position);assert_eq!(destination.generation,source.generation+1);
+        assert!(runtime.pending_draft.is_none());Ok(())
+    }
+
+    fn draft_gate(f: &Fixture) -> Result<()> {
+        let mut target=f.target()?;
+        let prepared_target=target.prepare_target_prefill(&f.ctx,&f.decoder,&f.weights,&f.prompt)?;
+        let hidden_rows=prepared_target.output().hidden_states.clone();
+        let last_hidden=prepared_target.output().last_hidden_state()?;
+        let pending=prepared_target.output().greedy_token_ids(&f.ctx)?[0];
+        target.publish_target_prefill(prepared_target)?;
+        let mut runtime=Qwen35MtpRuntime::new(&f.config)?;
+        let mut committed=runtime.allocate_state(&f.ctx,f.capacity)?;
+        let mut shadow=runtime.allocate_state(&f.ctx,f.capacity)?;
+        let mut snapshot=runtime.allocate_state(&f.ctx,f.capacity+128)?;
+        assert_eq!(committed.capacity,128);assert_eq!(shadow.capacity,128);assert_eq!(snapshot.capacity,256);
+        assert_ne!(ids(&committed),ids(&shadow));assert_ne!(ids(&committed),ids(&snapshot));assert_ne!(ids(&shadow),ids(&snapshot));
+        for state in [&committed,&shadow,&snapshot] {
+            assert_eq!(state.key.shape().dims(),[state.capacity/128,128,runtime.geometry.kv_heads,runtime.geometry.head_dim]);
+            assert_eq!(state.key.dtype(),DType::F8E4M3);assert_eq!(state.value.shape(),state.key.shape());
+        }
+        runtime.reset_state(&f.ctx,&mut committed)?;runtime.reset_state(&f.ctx,&mut shadow)?;
+        f.ctx.synchronize().map_err(Error::Cuda)?;
+        let empty=image(&committed)?;assert!(empty.0.iter().chain(&empty.1).all(|x|*x==0));
+        fill_rows(&f.ctx,&snapshot.key,0,snapshot.capacity,snapshot.capacity,0x4a)?;
+        fill_rows(&f.ctx,&snapshot.value,0,snapshot.capacity,snapshot.capacity,0x4a)?;
+        check_copy(f,&mut runtime,&committed,&mut snapshot)?; // None means no bytes copied.
+        let committed_before=image(&committed)?;let committed_meta=(committed.position,committed.generation);
+        let hidden_before=raw(&hidden_rows)?;
+        let prepared=runtime.prepare_prefill(&f.ctx,&f.weights,&mut shadow,&f.prompt,&hidden_rows)?;
+        same("prefill must not mutate committed",&committed,&committed_before)?;
+        assert_eq!((committed.position,committed.generation),committed_meta);
+        exact("teacher forcing hidden input readonly",&raw(&hidden_rows)?,&hidden_before);
+        assert_eq!(prepared.position,MtpPositionContract::after_prompt(f.prompt.len())?);
+        assert_eq!(shadow.position,Some(prepared.position));assert_eq!(shadow.generation,prepared.generation);
+        let rows=f.prompt.len()-1;let row_bytes=raw(&shadow.key)?.len()/shadow.capacity;
+        // prepare_prefill declares a full reset, so its unused tail must be zero.
+        for tensor in [&shadow.key,&shadow.value] { assert!(raw(tensor)?[rows*row_bytes..].iter().all(|x|*x==0)); }
+        let staged=image(&shadow)?;let staged_ids=ids(&shadow);let old_ids=ids(&committed);
+        runtime.publish_prefill(&mut committed,&mut shadow,prepared);
+        assert_eq!(ids(&committed),staged_ids);assert_eq!(ids(&shadow),old_ids);same("prefill publication exact swap",&committed,&staged)?;
+        check_copy(f,&mut runtime,&committed,&mut snapshot)?;
+        let frozen=image(&snapshot)?;let frozen_meta=(snapshot.position,snapshot.generation);
+        for depth in 1..=3usize {
+            for keep in 1..=depth+1 {
+                check_copy(f,&mut runtime,&snapshot,&mut committed)?;
+                assert_eq!(committed.position,Some(MtpPositionContract::after_prompt(f.prompt.len())?));
+                for tensor in [&committed.key,&committed.value] { fill_rows(&f.ctx,tensor,rows,committed.capacity,committed.capacity,0x3a)?; }
+                for tensor in [&shadow.key,&shadow.value] { fill_rows(&f.ctx,tensor,0,shadow.capacity,shadow.capacity,0x5a)?; }
+                let old=image(&committed)?;let old_meta=(committed.position,committed.generation);let old_ids=ids(&committed);
+                let _draft=runtime.draft(&f.ctx,&f.weights,&committed,&mut shadow,pending,f.prompt.len(),&last_hidden,depth)?;
+                f.ctx.synchronize().map_err(Error::Cuda)?;
+                same("draft committed full physical bank readonly",&committed,&old)?;assert_eq!((committed.position,committed.generation),old_meta);
+                let staged_metadata=runtime.pending_draft.expect("real draft transaction must be pending");
+                assert_eq!(staged_metadata.draft_steps,depth);assert_eq!(staged_metadata.shadow_generation,shadow.generation);
+                assert_eq!(staged_metadata.start,MtpPositionContract::after_prompt(f.prompt.len())?);
+                let after_draft=image(&shadow)?;
+                exact("draft old K prefix",&after_draft.0[..rows*row_bytes],&old.0[..rows*row_bytes]);
+                exact("draft old V prefix",&after_draft.1[..rows*row_bytes],&old.1[..rows*row_bytes]);
+                assert!(after_draft.0[(rows+depth)*row_bytes..].iter().chain(&after_draft.1[(rows+depth)*row_bytes..]).all(|x|*x==0x5a));
+                let full=keep==depth+1;
+                let contract=MtpCommit { cache_range:ShadowCommitRange { start:f.prompt.len(),committed_end:f.prompt.len()+keep,
+                    verified_end:f.prompt.len()+if full {depth+1}else{depth} },materialize_final_proposal:full };
+                let prepared=runtime.prepare_commit(&f.ctx,&f.weights,&mut shadow,contract)?;
+                let after_prepare=image(&shadow)?;
+                // Full commit may materialize exactly one final physical row;
+                // partial commit only changes metadata, never clears its tail.
+                for (name,a,b) in [("K",&after_prepare.0,&after_draft.0),("V",&after_prepare.1,&after_draft.1)] {
+                    if full {
+                        exact(&format!("full materialization {name} old prefix"),&a[..(rows+depth)*row_bytes],&b[..(rows+depth)*row_bytes]);
+                        exact(&format!("full materialization {name} future canary"),&a[(rows+depth+1)*row_bytes..],&b[(rows+depth+1)*row_bytes..]);
+                    } else { exact(&format!("partial commit {name} all bytes unchanged"),a,b); }
+                }
+                same("prepare commit committed bank readonly",&committed,&old)?;assert_eq!((committed.position,committed.generation),old_meta);
+                let expected_position=MtpPositionContract {logical_position:f.prompt.len()+keep,cache_rows:rows+keep};
+                assert_eq!(shadow.position,Some(expected_position));assert_eq!(prepared.position,expected_position);
+                let staged_ids=ids(&shadow);let generation=shadow.generation;
+                assert_eq!(prepared.generation,generation);
+                runtime.publish_commit(&mut committed,&mut shadow,prepared);
+                assert!(runtime.pending_draft.is_none());
+                assert_eq!(ids(&committed),staged_ids);assert_eq!(ids(&shadow),old_ids);
+                same("commit publish exact physical swap",&committed,&after_prepare)?;same("old physical bank unchanged",&shadow,&old)?;
+                assert_eq!(committed.position,Some(expected_position));assert_eq!(committed.generation,generation);
+                same("MTP snapshot deepfreeze",&snapshot,&frozen)?;assert_eq!((snapshot.position,snapshot.generation),frozen_meta);
+                check_copy(f,&mut runtime,&snapshot,&mut committed)?; // Short restore must preserve unreachable tails.
+                println!("{}",serde_json::json!({"schema":"apxinf.qwen35.draft_raw_bank.v1","depth":depth,"keep":keep,
+                    "logical_position":expected_position.logical_position,"physical_cache_rows":expected_position.cache_rows,
+                    "full_materialization":full,"copy_protocol_exact":true,
+                    "published_source_digest":digest_images(std::slice::from_ref(&after_prepare)),
+                    "snapshot_digest":digest_images(std::slice::from_ref(&frozen)),
+                    "independent_gdn_math_oracle":false,"performance_accepted":false}));
+            }
+        }
+        // Append genuine target hidden rows after the restored short prefix.
+        let suffix=[1234u32,5678];
+        let target_append=target.prepare_target_append_prefill(&f.ctx,&f.decoder,&f.weights,&suffix)?;
+        for tensor in [&shadow.key,&shadow.value] { fill_rows(&f.ctx,tensor,0,shadow.capacity,shadow.capacity,0x5a)?; }
+        let before=image(&shadow)?;let old=image(&committed)?;
+        let prepared=runtime.prepare_append_prefill(&f.ctx,&f.weights,&committed,&mut shadow,&suffix,&last_hidden,&target_append.output().hidden_states)?;
+        let after=image(&shadow)?;
+        for (a,b) in [(&after.0,&before.0),(&after.1,&before.1)] { exact("append future tail unchanged",&a[(rows+suffix.len())*row_bytes..],&b[(rows+suffix.len())*row_bytes..]); }
+        exact("append copied old K prefix",&after.0[..rows*row_bytes],&old.0[..rows*row_bytes]);
+        exact("append copied old V prefix",&after.1[..rows*row_bytes],&old.1[..rows*row_bytes]);
+        same("append committed readonly",&committed,&old)?;
+        runtime.publish_prefill(&mut committed,&mut shadow,prepared);
+        assert_eq!(committed.position,Some(MtpPositionContract {logical_position:f.prompt.len()+suffix.len(),cache_rows:rows+suffix.len()}));
+        same("append publication bytes",&committed,&after)?;same("snapshot still deepfrozen",&snapshot,&frozen)?;
+        check_copy(f,&mut runtime,&snapshot,&mut committed)?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "real checkpoint raw target/draft GPU bank gate; single weights load; exclusive lock and pre-tuned strict recipes"]
+    fn real_checkpoint_target_and_draft_raw_bank_protocol() -> std::result::Result<(),Box<dyn std::error::Error>> {
+        let f=Fixture::load()?;
+        println!("{}",serde_json::json!({"schema":"apxinf.qwen35.raw_bank_config.v1","prompt_tokens":16,
+            "capacity":64,"block_tokens":128,"target_kv":"bf16","draft_kv":"fp8","draft_scale":1.0,
+            "depths":[1,2,3],"target_commit_cases":9,"draft_commit_cases":9,"weights_loads":1,
+            "strict_recipe_required":true,"autotune":false,"ordered_reduce":true,"graphs":f.graphs,"graph_gdn":std::env::var("APXINF_QWEN35_GRAPH_GDN").ok(),
+            "copy_protocol_only":true,"independent_gdn_math_oracle":false,"performance_accepted":false}));
+        super::super::session::gpu_raw_protocol::target_gate(&f)?;
+        draft_gate(&f)?;
+        Ok(())
+    }
+    // Recipe preparation is an explicit different ignored test and process.
+    // It executes actual target/MTP operations; it is not a protocol/quality gate.
+    fn prep_command(program: &str, args: &[&str]) -> std::result::Result<Vec<u8>,Box<dyn std::error::Error>> {
+        let output=std::process::Command::new(program).args(args).output()?;
+        if !output.status.success() { return Err(format!("{program} failed: {}",String::from_utf8_lossy(&output.stderr)).into()); }
+        Ok(output.stdout)
+    }
+    fn prep_sha(bytes: &[u8]) -> std::result::Result<String,Box<dyn std::error::Error>> {
+        use std::io::Write;
+        let mut child=std::process::Command::new("sha256sum").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn()?;
+        child.stdin.take().expect("sha256 stdin").write_all(bytes)?;
+        let output=child.wait_with_output()?;
+        if !output.status.success() { return Err("sha256sum failed".into()); }
+        let text=String::from_utf8(output.stdout)?;
+        let hash=text.split_whitespace().next().ok_or("empty sha256sum")?;
+        if hash.len()!=64 || !hash.bytes().all(|x|x.is_ascii_hexdigit()) { return Err("invalid sha256sum".into()); }
+        Ok(hash.to_owned())
+    }
+    fn prep_file_sha(path: &std::path::Path) -> std::result::Result<String,Box<dyn std::error::Error>> {
+        let output=std::process::Command::new("sha256sum").arg("--").arg(path).output()?;
+        if !output.status.success() { return Err(format!("sha256sum failed for {}",path.display()).into()); }
+        let text=String::from_utf8(output.stdout)?;
+        let hash=text.split_whitespace().next().ok_or("empty file sha256sum")?;
+        if hash.len()!=64 || !hash.bytes().all(|x|x.is_ascii_hexdigit()) { return Err("invalid file sha256sum".into()); }
+        Ok(hash.to_owned())
+    }
+    fn prep_files(root: &std::path::Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        if root.exists() {
+            for entry in std::fs::read_dir(root)? {
+                let path=entry?.path();
+                if path.is_dir() { prep_files(&path,files)?; }
+                else if path.is_file() { files.push(path); }
+            }
+        }
+        Ok(())
+    }
+    fn prep_inventory(root: &std::path::Path) -> std::result::Result<serde_json::Value,Box<dyn std::error::Error>> {
+        let mut paths=Vec::new();prep_files(root,&mut paths)?;paths.sort();
+        let mut files=Vec::new();let mut recipe_count=0usize;
+        for path in paths {
+            if path.extension().is_some_and(|x|x=="recipe") { recipe_count+=1; }
+            files.push(serde_json::json!({"path":path.strip_prefix(root)?,"bytes":path.metadata()?.len(),"sha256":prep_file_sha(&path)?}));
+        }
+        Ok(serde_json::json!({"root":root,"recipe_count":recipe_count,"files":files,"files_json_sha256":prep_sha(&serde_json::to_vec(&files)?)?}))
+    }
+
+    #[test]
+    #[ignore = "RECIPE PREPARATION ONLY: real weights once, online tune enabled, writes explicit tuning dir; not quality or performance acceptance"]
+    fn prepare_real_checkpoint_protocol_recipes() -> std::result::Result<(),Box<dyn std::error::Error>> {
+        let arguments:Vec<String>=std::env::args().collect();
+        let entry="qwen35moe::mtp_runtime::gpu_raw_protocol::prepare_real_checkpoint_protocol_recipes";
+        assert!(arguments.iter().any(|x|x=="--ignored") && arguments.iter().any(|x|x=="--exact")
+            && arguments.iter().filter(|x|x.as_str()==entry).count()==1
+            && arguments.iter().any(|x|x=="--test-threads=1"),
+            "recipe preparation requires --ignored --exact <full prepare name> --test-threads=1; never run all ignored tests");
+        let checkpoint=PathBuf::from(std::env::var_os("APXINF_QWEN35_CHECKPOINT").expect("checkpoint env"));
+        let tuning=PathBuf::from(std::env::var_os("APXINF_QWEN35_PARITY_TUNING_DIR").expect("tuning env"));
+        assert!(checkpoint.is_absolute() && tuning.is_absolute());
+        let mut model_files=Vec::new();
+        let mut paths:Vec<_>=std::fs::read_dir(&checkpoint)?.map(|x|x.map(|y|y.path())).collect::<std::io::Result<_>>()?;paths.sort();
+        for path in paths {
+            if path.is_file() && (path.extension().is_some_and(|x|x=="safetensors") || path.file_name().is_some_and(|x|x=="config.json" || x=="hf_quant_config.json")) {
+                model_files.push(serde_json::json!({"path":path,"bytes":path.metadata()?.len(),"sha256":prep_file_sha(&path)?}));
+            }
+        }
+        assert!(!model_files.is_empty(),"actual model files required");
+        let head=String::from_utf8(prep_command("git",&["rev-parse","HEAD"])?)?;
+        let status=String::from_utf8(prep_command("git",&["status","--porcelain","--untracked-files=all"])?)?;
+        let patch=prep_command("git",&["diff","HEAD","--binary"])?;
+        let mut untracked=Vec::new();
+        for name in prep_command("git",&["ls-files","--others","--exclude-standard","-z"])?.split(|x|*x==0).filter(|x|!x.is_empty()) {
+            let path=PathBuf::from(std::str::from_utf8(name)?);
+            if path.is_file() { untracked.push(serde_json::json!({"path":path,"sha256":prep_file_sha(&path)?})); }
+        }
+        let protocol_graphs_env = std::env::var_os("APXINF_QWEN35_PROTOCOL_GRAPHS");
+        let graphs = parse_protocol_graphs(protocol_graphs_env.as_deref())?;
+        let before=prep_inventory(&tuning)?;
+        println!("{}",serde_json::json!({"schema":"apxinf.qwen35.protocol_recipe_prepare_identity.v2",
+            "phase":"prepare_only","source_head":head.trim(),"source_status":status,"source_patch_sha256":prep_sha(&patch)?,"source_untracked_sha256":untracked,
+            "executable":std::env::current_exe()?,"executable_sha256":prep_file_sha(&std::env::current_exe()?)?,"model_files":model_files,
+            "recipes_before":before,"autotune_constructor_argument":true,"strict_recipe_required":false,"apxinf_require_recipes":"0",
+            "target_kv":"bf16","draft_kv":"fp8","draft_scale":1.0,"moe":"nvfp4","ordered_reduce":true,"graphs":graphs,"graph_gdn":std::env::var("APXINF_QWEN35_GRAPH_GDN").ok(),
+            "weights_loads":1,"quality_accepted":false,"performance_accepted":false}));
+        let f=Fixture::load_with_autotune(true)?;
+        assert_eq!(f.graphs, graphs);
+        assert_eq!(std::env::var("APXINF_REQUIRE_RECIPES").unwrap(),"0");
+        // Raw gate logical capacity64; the public protocol test defaults to
+        // prompt16+64=80. Both map to the same128-row physical KV block, but
+        // exercise both constructors rather than assuming recipe equivalence.
+        for logical_capacity in [64usize,80] {
+        let backend=Qwen35Fp8AttentionBackend::with_kv_cache(&f.config,Qwen35KvCacheDType::Bf16,None)?;
+        let mut target=Qwen35Session::new(&f.ctx,&f.decoder,&f.weights,backend,logical_capacity)?;
+        let mut runtime=Qwen35MtpRuntime::new(&f.config)?;
+        let mut committed=runtime.allocate_state(&f.ctx,logical_capacity)?;
+        let mut shadow=runtime.allocate_state(&f.ctx,logical_capacity)?;
+        let verify_ids=[42i32,1729,19,777];
+        for p in 16..=23usize {
+            // Original16-token prefix is unchanged; additional rows are an
+            // explicitly recorded repetition of that same protocol pattern.
+            let prompt:Vec<u32>=f.prompt.iter().copied().cycle().take(p).collect();
+            for width in 2..=4usize {
+                let input=transfers::to_cuda_on_stream(&f.ctx,Tensor::from_i32(vec![width],&verify_ids[..width])?)?;
+                for keep in 1..=width {
+                    target.reset(&f.ctx)?;
+                    target.prefill(&f.ctx,&f.decoder,&f.weights,&prompt)?;
+                    let verified=target.verify_target_chunk_device(&f.ctx,&f.decoder,&f.weights,&input)?;
+                    let staged=target.prepare_target_commit(&f.ctx,&f.decoder,&f.weights,verified,keep)?;
+                    target.publish_target_commit(staged)?;
+                }
+            }
+            // Scalar one-row kernels/attention at each required short position;
+            // four steps also cover the later public protocol continuation tail.
+            target.reset(&f.ctx)?;target.prefill(&f.ctx,&f.decoder,&f.weights,&prompt)?;
+            for token in [991u32,998,654,991] { target.decode(&f.ctx,&f.decoder,&f.weights,token)?; }
+            for suffix in [&[1234u32,5678][..],&[3456u32,7890][..],&[2345u32,6789][..],&[1234u32][..]] {
+                target.reset(&f.ctx)?;
+                let base=target.prepare_target_prefill(&f.ctx,&f.decoder,&f.weights,&prompt)?;
+                let hidden=base.output().hidden_states.clone();
+                let last=base.output().last_hidden_state()?;
+                let pending=base.output().greedy_token_ids(&f.ctx)?[0];
+                target.publish_target_prefill(base)?;
+                if suffix==&[1234u32,5678][..] {
+                for depth in 1..=3usize {
+                    for keep in 1..=depth+1 {
+                        runtime.reset_state(&f.ctx,&mut committed)?;runtime.reset_state(&f.ctx,&mut shadow)?;
+                        let prepared=runtime.prepare_prefill(&f.ctx,&f.weights,&mut shadow,&prompt,&hidden)?;
+                        runtime.publish_prefill(&mut committed,&mut shadow,prepared);
+                        runtime.draft(&f.ctx,&f.weights,&committed,&mut shadow,pending,p,&last,depth)?;
+                        let full=keep==depth+1;
+                        let contract=MtpCommit {cache_range:ShadowCommitRange {start:p,committed_end:p+keep,verified_end:p+if full {depth+1}else{depth}},materialize_final_proposal:full};
+                        let prepared=runtime.prepare_commit(&f.ctx,&f.weights,&mut shadow,contract)?;
+                        runtime.publish_commit(&mut committed,&mut shadow,prepared);
+                    }
+                }
+                }
+                // Restore the original target-aligned draft prefix before
+                // actual one/two-row target+shifted draft teacher forcing.
+                runtime.reset_state(&f.ctx,&mut committed)?;runtime.reset_state(&f.ctx,&mut shadow)?;
+                let prepared=runtime.prepare_prefill(&f.ctx,&f.weights,&mut shadow,&prompt,&hidden)?;
+                runtime.publish_prefill(&mut committed,&mut shadow,prepared);
+                let appended=target.prepare_target_append_prefill(&f.ctx,&f.decoder,&f.weights,suffix)?;
+                let prepared=runtime.prepare_append_prefill(&f.ctx,&f.weights,&committed,&mut shadow,suffix,&last,&appended.output().hidden_states)?;
+                runtime.publish_prefill(&mut committed,&mut shadow,prepared);
+                target.publish_target_prefill(appended)?;
+            }
+            f.ctx.synchronize().map_err(Error::Cuda)?;
+            println!("{}",serde_json::json!({"schema":"apxinf.qwen35.protocol_recipe_prepare_shape.v2",
+                "prompt_tokens":p,"prompt_token_ids":prompt,"target_capacity":logical_capacity,"physical_block_tokens":128,
+                "target_verify_rows":[2,3,4],"target_commit_keeps":"1..=verified_rows","scalar_steps":4,
+                "append_tokens":[[1234,5678],[3456,7890],[2345,6789],[1234]],"draft_prefill_rows":p-1,
+                "draft_depths":[1,2,3],"draft_commit_keeps":"1..=depth+1","actual_gpu_operations_completed":true,
+                "quality_accepted":false,"performance_accepted":false}));
+        }
+        }
+        f.ctx.synchronize().map_err(Error::Cuda)?;
+        let after=prep_inventory(&tuning)?;
+        assert!(after["recipe_count"].as_u64().unwrap_or(0)>0,"real persistent recipes required");
+        println!("{}",serde_json::json!({"schema":"apxinf.qwen35.protocol_recipe_prepare_complete.v2",
+            "recipes_after":after,"phase":"prepare_only","shape_iterations_completed":16,
+            "native_numeric_validation":"unchanged; operator errors propagate; no override installed",
+            "quality_accepted":false,"performance_accepted":false,"strict_followup_requires_fresh_process":true}));
+        Ok(())
     }
 }

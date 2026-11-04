@@ -1,0 +1,1215 @@
+{
+  "schema": "apxinf.qwen35.snapshot-hidden-ownership.evidence.v1",
+  "scope": "short real-checkpoint snapshot/copy/commit protocol correctness only",
+  "clean_commit_rebuilt_or_rerun": false,
+  "performance_accepted": false,
+  "all_P2_accepted": false,
+  "long_context_quality_accepted": false,
+  "weather_e2e_run": false,
+  "source_isolation": {
+    "base": "5a15634b825f9ffa73a05614f6d8174ef7d543c1",
+    "files": [
+      {
+        "path": "crates/apxinf-model/src/qwen35moe/mtp_runtime.rs",
+        "preimage_sha256": "7f4f80fccff501705d37716b8ace226a89527b89a5f8b5cacddc9390202aaccc",
+        "postimage_sha256": "319b03f72b3d1dac956d37923f6e3b5c540416e1659ab81cd9ea34a61984f48c",
+        "matches_current_main": true
+      },
+      {
+        "path": "crates/apxinf-model/src/qwen35moe/session.rs",
+        "preimage_sha256": "81c6ae2373345abfdada119aac4d41e281233db6a90cb5b42d55de14471d29a4",
+        "postimage_sha256": "57ed30edec5384a7ed955e60c0aede47dae3f5f5dfbee32522f4a11c16bf6af7",
+        "matches_current_main": true
+      },
+      {
+        "path": "crates/apxinf-model/src/qwen35moe/forward.rs",
+        "preimage_sha256": "9be4ee0477e30adaa1cba3c603774f69f668a85aefeeb8d2878d96c65170a4d0",
+        "postimage_sha256": "e611b3afe970acba4708bea3b9ac9fd51ac2efa3437bd85692aac161a8f4d2be",
+        "matches_current_main": true
+      },
+      {
+        "path": "crates/apxinf-model/tests/qwen35_real_state_protocol.rs",
+        "preimage_sha256": null,
+        "postimage_sha256": "c2b69f56a2d8706379c874f6cf0df25389dd34d2631d2373a97250ac3484d5be",
+        "matches_current_main": true
+      }
+    ],
+    "release_delta": "capture deep-copy only; all remaining changes cfg(test) or ignored integration test",
+    "unaccepted_candidates_added": false
+  },
+  "production_patch": {
+    "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/mtp-hidden-snapshot/production-hidden-capture-only.patch",
+    "sha256": "3b762b1c3c97bdec1812a5b8f759775286db19d9526b5633b5ba6a72d2b0eff8",
+    "bytes": 1205
+  },
+  "production_stage_receipt": {
+    "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-fix-stage-01/receipt.json",
+    "sha256": "1262ca00ae04264c8f2281ce8dee58e5da3b3719f161df3212611f1107eed033",
+    "bytes": 359
+  },
+  "build_receipt": {
+    "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-fix-model-gates-01/receipt.json",
+    "sha256": "30cb28e50d53a4ea40d345b9aa15a005802e48cbf7544063aaa374f5c2f1d971",
+    "bytes": 19238
+  },
+  "baseline": {
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-baseline-01/receipt.json",
+      "sha256": "77ea59b67fba7d4a5b05e9ed371670ccbec06158390dcf792d532581d46f735c",
+      "bytes": 1105866
+    },
+    "original_receipt_alias_confirmed": false,
+    "later_source_and_log_cause_audit": {
+      "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-baseline-01/baseline-cause-audit-root.json",
+      "sha256": "064799cc53eb80aff2ee6247c5f9dabd6cd33076191c1740f09ff7112e33bc78",
+      "bytes": 1106136
+    },
+    "log": {
+      "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-baseline-01/protocol.log",
+      "sha256": "75b35dcd51b75c2152590d651d6a62b65c9734848155f3124938edf0fdd2bad6",
+      "bytes": 802039
+    },
+    "binary_sha256": "6d810f4b61524bea9ed860d3d3b2ce2eeed21247c4390eeec1e69efb9bafd372",
+    "build_patch_sha256": "cde5d31be17eaa4b9aa7a728d831e8ded3fc0f51ab9c4edfde034f6a92410bd1",
+    "alias_root_cause_confirmed": true,
+    "expected_failure": "snapshot target_hidden must survive later verifier reuse: exact mismatch first_byte=0 actual=30 expected=180",
+    "exit_receipt": {
+      "returncode": 101,
+      "timed_out": false,
+      "child_reaped": true,
+      "lock_held_until_reaped": true,
+      "backend_task_may_be_live": false,
+      "target_binary_sha256": "6d810f4b61524bea9ed860d3d3b2ce2eeed21247c4390eeec1e69efb9bafd372"
+    }
+  },
+  "runs": [
+    {
+      "mode": "Graph0",
+      "entry": "real_mtp_short_snapshot_different_continuation_protocol",
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-fixed-gpu-01/public-mtp.json",
+        "sha256": "7ef8cc35d5944f343200a62e802d3af0006d554b418654b56728b0a4d9457b76",
+        "bytes": 1105436
+      },
+      "log": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-fixed-gpu-01/public-mtp.log",
+        "sha256": "cf3a52fd364bc7155ba7140a542115bfb67204236cb48bd8658bfd0f6dee1075",
+        "bytes": 872414
+      },
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/qwen35_real_state_protocol-817756a93260ef3f",
+        "sha256": "e5d0f8c1c0941b1aa022e527bdbe457607f0485883e97d3967759cd3b35b5fc0",
+        "size_bytes": 34668920
+      },
+      "source": {
+        "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "source_dirty": true,
+        "source_patch_sha256": "4a5d8cc24343b4515440eefdf0a18c6d3b5089837c053f9d177ead730e2bb6da",
+        "source_untracked_sha256": {
+          "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+          "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+          "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+          "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+          "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+          "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+          "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+          "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+          "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+          "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+          "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+          "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+          "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "10ca34214a87173c09aadad98b6b17ab5083a391af0e587db75b7c85778c06bd",
+          "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+          "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+        }
+      },
+      "environment": {
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_PARITY_TUNING_DIR": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "APXINF_QWEN35_PROTOCOL_PROMPT_TOKENS": "16",
+        "APXINF_CUDA_DEVICE": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CUDA_GRAPHS": "0",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+        "APXINF_NVFP4_A16_WMMA": "0",
+        "APXINF_NVTX": "0"
+      },
+      "actual_fixture_config": {
+        "autotune": false,
+        "capacity": 80,
+        "checkpoint": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "depths": [
+          1,
+          2,
+          3
+        ],
+        "draft_kv": "fp8",
+        "draft_scale": 1.0,
+        "graphs": false,
+        "moe": "nvfp4",
+        "ordered_reduce": true,
+        "performance_accepted": false,
+        "prompt_tokens": 16,
+        "repeats": 20,
+        "schema": "apxinf.qwen35.gpu_protocol.config.v1",
+        "state_observation": "public logical counts and GPU output/hidden observations; private raw KV/GDN banks not exposed",
+        "strict_recipe_required": true,
+        "target_kv": "bf16",
+        "tuning_dir": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16"
+      },
+      "transport": {
+        "transport_returncode": 0,
+        "wall_ms": 510865.263708,
+        "transport_timeout": false
+      },
+      "exit_receipt": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false,
+        "target_binary_sha256": "e5d0f8c1c0941b1aa022e527bdbe457607f0485883e97d3967759cd3b35b5fc0"
+      },
+      "gpu_lock": {
+        "path": "/tmp/apxinf-gpu.lock",
+        "acquired": true,
+        "wait_ms": 0.011064003047067672,
+        "prior_holder": null,
+        "owner_pid": 180866,
+        "target_binary_sha256": "e5d0f8c1c0941b1aa022e527bdbe457607f0485883e97d3967759cd3b35b5fc0"
+      },
+      "recipes_unchanged": true,
+      "recipe_inventory_canonical_sha256": "b34569a5880481144ae1b568d43c033c04cbb4f6294e4ed14d05be017f04b982",
+      "hardware_gpu_clocks_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "hardware_gpu_clocks_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "counts": {
+        "apxinf.qwen35.mtp_snapshot_protocol.v1": 180
+      },
+      "observations_canonical_sha256": "0f0314293b26ee88afa81d1756b5c0f1c121b6747f42673ab24bed9d3d4e3ca6",
+      "depth_keep_counts": [
+        {
+          "depth": 1,
+          "keep": null,
+          "records": 60
+        },
+        {
+          "depth": 2,
+          "keep": null,
+          "records": 60
+        },
+        {
+          "depth": 3,
+          "keep": null,
+          "records": 60
+        }
+      ],
+      "observations_sample": [
+        {
+          "accepted_proposals": 1,
+          "depth": 1,
+          "draft_cache_rows": 20,
+          "draft_logical_position": 21,
+          "performance_accepted": false,
+          "private_raw_bank_equality_checked": false,
+          "repeat": 0,
+          "restored_hidden_digest": "6bf4baa5784ae5f6",
+          "saved_hidden_digest": "6bf4baa5784ae5f6",
+          "schema": "apxinf.qwen35.mtp_snapshot_protocol.v1",
+          "snapshot_position": 17,
+          "suffix": [
+            1234,
+            5678
+          ],
+          "target_position": 21,
+          "tokens": [
+            198,
+            5525,
+            198
+          ]
+        }
+      ],
+      "prior_gpu_test_reused_without_rerun": false
+    },
+    {
+      "mode": "Graph0",
+      "entry": "real_target_verify_rollback_short_snapshot_protocol",
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-fixed-gpu-01/public-target.json",
+        "sha256": "f12625933f40f2b3f159cf438cca0bb89a09185e170e7f10116a69b47b85b8f8",
+        "bytes": 1105432
+      },
+      "log": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-fixed-gpu-01/public-target.log",
+        "sha256": "35dd60f57ad22b08e87d79165258be35a0d780ba5d5fdcd89445b40183a5a6d1",
+        "bytes": 859531
+      },
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/qwen35_real_state_protocol-817756a93260ef3f",
+        "sha256": "e5d0f8c1c0941b1aa022e527bdbe457607f0485883e97d3967759cd3b35b5fc0",
+        "size_bytes": 34668920
+      },
+      "source": {
+        "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "source_dirty": true,
+        "source_patch_sha256": "4a5d8cc24343b4515440eefdf0a18c6d3b5089837c053f9d177ead730e2bb6da",
+        "source_untracked_sha256": {
+          "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+          "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+          "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+          "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+          "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+          "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+          "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+          "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+          "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+          "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+          "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+          "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+          "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "10ca34214a87173c09aadad98b6b17ab5083a391af0e587db75b7c85778c06bd",
+          "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+          "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+        }
+      },
+      "environment": {
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_PARITY_TUNING_DIR": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "APXINF_QWEN35_PROTOCOL_PROMPT_TOKENS": "16",
+        "APXINF_CUDA_DEVICE": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CUDA_GRAPHS": "0",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+        "APXINF_NVFP4_A16_WMMA": "0",
+        "APXINF_NVTX": "0"
+      },
+      "actual_fixture_config": {
+        "autotune": false,
+        "capacity": 80,
+        "checkpoint": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "depths": [
+          1,
+          2,
+          3
+        ],
+        "draft_kv": "fp8",
+        "draft_scale": 1.0,
+        "graphs": false,
+        "moe": "nvfp4",
+        "ordered_reduce": true,
+        "performance_accepted": false,
+        "prompt_tokens": 16,
+        "repeats": 20,
+        "schema": "apxinf.qwen35.gpu_protocol.config.v1",
+        "state_observation": "public logical counts and GPU output/hidden observations; private raw KV/GDN banks not exposed",
+        "strict_recipe_required": true,
+        "target_kv": "bf16",
+        "tuning_dir": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16"
+      },
+      "transport": {
+        "transport_returncode": 0,
+        "wall_ms": 1394217.458834,
+        "transport_timeout": false
+      },
+      "exit_receipt": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false,
+        "target_binary_sha256": "e5d0f8c1c0941b1aa022e527bdbe457607f0485883e97d3967759cd3b35b5fc0"
+      },
+      "gpu_lock": {
+        "path": "/tmp/apxinf-gpu.lock",
+        "acquired": true,
+        "wait_ms": 0.012119999155402184,
+        "prior_holder": null,
+        "owner_pid": 182609,
+        "target_binary_sha256": "e5d0f8c1c0941b1aa022e527bdbe457607f0485883e97d3967759cd3b35b5fc0"
+      },
+      "recipes_unchanged": true,
+      "recipe_inventory_canonical_sha256": "b34569a5880481144ae1b568d43c033c04cbb4f6294e4ed14d05be017f04b982",
+      "hardware_gpu_clocks_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "hardware_gpu_clocks_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "counts": {
+        "apxinf.qwen35.target_protocol.v1": 180
+      },
+      "observations_canonical_sha256": "73fae399f9950fd2b8ce65713984517391399e43b0aa31833227704f7cda0e59",
+      "depth_keep_counts": [
+        {
+          "depth": 1,
+          "keep": null,
+          "records": 40
+        },
+        {
+          "depth": 2,
+          "keep": null,
+          "records": 60
+        },
+        {
+          "depth": 3,
+          "keep": null,
+          "records": 80
+        }
+      ],
+      "observations_sample": [
+        {
+          "committed_rows": 1,
+          "depth": 1,
+          "different_suffix": [
+            1234,
+            5678
+          ],
+          "discarded_rows": 1,
+          "performance_accepted": false,
+          "private_raw_bank_equality_checked": false,
+          "repeat": 0,
+          "restored_position": 16,
+          "restored_suffix_hidden_digest": "1ae042a96773149d",
+          "schema": "apxinf.qwen35.target_protocol.v1",
+          "tokens": [
+            198,
+            198,
+            198
+          ],
+          "verified_rows": 2
+        }
+      ],
+      "prior_gpu_test_reused_without_rerun": false
+    },
+    {
+      "mode": "Graph0",
+      "entry": "qwen35moe::mtp_runtime::gpu_raw_protocol::real_checkpoint_target_and_draft_raw_bank_protocol",
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-fixed-gpu-01/raw-target-and-draft.json",
+        "sha256": "1d6965616ee7c87e827900f82f4bd6aa23aadefb1feb54f3536ad12a9d29628c",
+        "bytes": 1105481
+      },
+      "log": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-fixed-gpu-01/raw-target-and-draft.log",
+        "sha256": "aa0929bdd7f7753d4e2e92dc45beff02920e91eaf0fb7c70800a7a7a1ae33bee",
+        "bytes": 808625
+      },
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/apxinf_model-a14b58be4d24da2f",
+        "sha256": "2c9146e6e6a3ae8eaa12844b1f4bb2136e4b115f3dd78df54b0138959de2742e",
+        "size_bytes": 37083552
+      },
+      "source": {
+        "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "source_dirty": true,
+        "source_patch_sha256": "4a5d8cc24343b4515440eefdf0a18c6d3b5089837c053f9d177ead730e2bb6da",
+        "source_untracked_sha256": {
+          "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+          "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+          "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+          "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+          "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+          "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+          "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+          "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+          "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+          "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+          "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+          "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+          "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "10ca34214a87173c09aadad98b6b17ab5083a391af0e587db75b7c85778c06bd",
+          "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+          "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+        }
+      },
+      "environment": {
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_PARITY_TUNING_DIR": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "APXINF_QWEN35_PROTOCOL_PROMPT_TOKENS": "16",
+        "APXINF_CUDA_DEVICE": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CUDA_GRAPHS": "0",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+        "APXINF_NVFP4_A16_WMMA": "0",
+        "APXINF_NVTX": "0"
+      },
+      "actual_fixture_config": {
+        "autotune": false,
+        "block_tokens": 128,
+        "capacity": 64,
+        "copy_protocol_only": true,
+        "depths": [
+          1,
+          2,
+          3
+        ],
+        "draft_commit_cases": 9,
+        "draft_kv": "fp8",
+        "draft_scale": 1.0,
+        "graphs": false,
+        "independent_gdn_math_oracle": false,
+        "ordered_reduce": true,
+        "performance_accepted": false,
+        "prompt_tokens": 16,
+        "schema": "apxinf.qwen35.raw_bank_config.v1",
+        "strict_recipe_required": true,
+        "target_commit_cases": 9,
+        "target_kv": "bf16",
+        "weights_loads": 1
+      },
+      "transport": {
+        "transport_returncode": 0,
+        "wall_ms": 81518.36087499987,
+        "transport_timeout": false
+      },
+      "exit_receipt": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false,
+        "target_binary_sha256": "2c9146e6e6a3ae8eaa12844b1f4bb2136e4b115f3dd78df54b0138959de2742e"
+      },
+      "gpu_lock": {
+        "path": "/tmp/apxinf-gpu.lock",
+        "acquired": true,
+        "wait_ms": 0.011397998605389148,
+        "prior_holder": null,
+        "owner_pid": 187170,
+        "target_binary_sha256": "2c9146e6e6a3ae8eaa12844b1f4bb2136e4b115f3dd78df54b0138959de2742e"
+      },
+      "recipes_unchanged": true,
+      "recipe_inventory_canonical_sha256": "b34569a5880481144ae1b568d43c033c04cbb4f6294e4ed14d05be017f04b982",
+      "hardware_gpu_clocks_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "hardware_gpu_clocks_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "counts": {
+        "apxinf.qwen35.target_raw_bank.v1": 9,
+        "apxinf.qwen35.draft_raw_bank.v1": 9
+      },
+      "observations_canonical_sha256": "e2764a93bd7b82cb38fc26b095f64329e71d2a056465f22529d6996ac77235d5",
+      "depth_keep_counts": [
+        {
+          "depth": 1,
+          "keep": 1,
+          "records": 2
+        },
+        {
+          "depth": 1,
+          "keep": 2,
+          "records": 2
+        },
+        {
+          "depth": 2,
+          "keep": 1,
+          "records": 2
+        },
+        {
+          "depth": 2,
+          "keep": 2,
+          "records": 2
+        },
+        {
+          "depth": 2,
+          "keep": 3,
+          "records": 2
+        },
+        {
+          "depth": 3,
+          "keep": 1,
+          "records": 2
+        },
+        {
+          "depth": 3,
+          "keep": 2,
+          "records": 2
+        },
+        {
+          "depth": 3,
+          "keep": 3,
+          "records": 2
+        },
+        {
+          "depth": 3,
+          "keep": 4,
+          "records": 2
+        }
+      ],
+      "observations_sample": [
+        {
+          "committed_position": 17,
+          "depth": 1,
+          "gdn_reference": "same-round GPU checkpoint bytes independently sliced on CPU",
+          "independent_gdn_math_oracle": false,
+          "keep": 1,
+          "logical_tail_zero_required": false,
+          "new_suffix_position": 18,
+          "performance_accepted": false,
+          "physical_write_ledger_exact": true,
+          "published_kv_source_digest": "c2d0d9539c6dbcb3",
+          "restored_position": 16,
+          "schema": "apxinf.qwen35.target_raw_bank.v1",
+          "selected_gdn_digest": "8904fb5769db2dd6",
+          "snapshot_kv_digest": "da12954c3bacdae1",
+          "verified_rows": 2
+        }
+      ],
+      "prior_gpu_test_reused_without_rerun": false
+    },
+    {
+      "mode": "Graph1/full",
+      "entry": "real_mtp_short_snapshot_different_continuation_protocol",
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-graph1-gpu-02/public-mtp.json",
+        "sha256": "6cffbca1a15eba1508e062b226cd70bd4b8590495fe319cf86704460d8c5a52b",
+        "bytes": 1107665
+      },
+      "log": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-graph1-gpu-02/public-mtp.log",
+        "sha256": "231b76b98ebc0a4c23245909fb17c2711853af762ac2ba682852ae19c1d91296",
+        "bytes": 872431
+      },
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/qwen35_real_state_protocol-817756a93260ef3f",
+        "sha256": "768b32db36822ddf3b4a770822934fce545a01b163291df02bff99a747d2f749",
+        "size_bytes": 34669408
+      },
+      "source": {
+        "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "source_dirty": true,
+        "source_patch_sha256": "18602f42264f4721c318b46d7b58aea76d7fd093a723d450b011c34c1a990f4d",
+        "source_untracked_sha256": {
+          "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+          "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+          "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+          "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+          "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+          "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+          "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+          "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+          "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+          "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+          "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+          "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+          "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "c2b69f56a2d8706379c874f6cf0df25389dd34d2631d2373a97250ac3484d5be",
+          "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+          "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+        }
+      },
+      "environment": {
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_PARITY_TUNING_DIR": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "APXINF_QWEN35_PROTOCOL_PROMPT_TOKENS": "16",
+        "APXINF_CUDA_DEVICE": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CUDA_GRAPHS": "1",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+        "APXINF_NVFP4_A16_WMMA": "0",
+        "APXINF_NVTX": "0",
+        "APXINF_QWEN35_PROTOCOL_GRAPHS": "1",
+        "APXINF_QWEN35_GRAPH_GDN": "full"
+      },
+      "actual_fixture_config": {
+        "autotune": false,
+        "capacity": 80,
+        "checkpoint": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "depths": [
+          1,
+          2,
+          3
+        ],
+        "draft_kv": "fp8",
+        "draft_scale": 1.0,
+        "graph_gdn": "full",
+        "graphs": true,
+        "moe": "nvfp4",
+        "ordered_reduce": true,
+        "performance_accepted": false,
+        "prompt_tokens": 16,
+        "repeats": 20,
+        "schema": "apxinf.qwen35.gpu_protocol.config.v1",
+        "state_observation": "public logical counts and GPU output/hidden observations; private raw KV/GDN banks not exposed",
+        "strict_recipe_required": true,
+        "target_kv": "bf16",
+        "tuning_dir": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16"
+      },
+      "transport": {
+        "transport_returncode": 0,
+        "wall_ms": 151952.275958,
+        "transport_timeout": false
+      },
+      "exit_receipt": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false,
+        "target_binary_sha256": "768b32db36822ddf3b4a770822934fce545a01b163291df02bff99a747d2f749"
+      },
+      "gpu_lock": {
+        "path": "/tmp/apxinf-gpu.lock",
+        "acquired": true,
+        "wait_ms": 0.010704003216233104,
+        "prior_holder": null,
+        "owner_pid": 190456,
+        "target_binary_sha256": "768b32db36822ddf3b4a770822934fce545a01b163291df02bff99a747d2f749"
+      },
+      "recipes_unchanged": true,
+      "recipe_inventory_canonical_sha256": "b34569a5880481144ae1b568d43c033c04cbb4f6294e4ed14d05be017f04b982",
+      "hardware_gpu_clocks_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "hardware_gpu_clocks_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "counts": {
+        "apxinf.qwen35.mtp_snapshot_protocol.v1": 180
+      },
+      "observations_canonical_sha256": "0f0314293b26ee88afa81d1756b5c0f1c121b6747f42673ab24bed9d3d4e3ca6",
+      "depth_keep_counts": [
+        {
+          "depth": 1,
+          "keep": null,
+          "records": 60
+        },
+        {
+          "depth": 2,
+          "keep": null,
+          "records": 60
+        },
+        {
+          "depth": 3,
+          "keep": null,
+          "records": 60
+        }
+      ],
+      "observations_sample": [
+        {
+          "accepted_proposals": 1,
+          "depth": 1,
+          "draft_cache_rows": 20,
+          "draft_logical_position": 21,
+          "performance_accepted": false,
+          "private_raw_bank_equality_checked": false,
+          "repeat": 0,
+          "restored_hidden_digest": "6bf4baa5784ae5f6",
+          "saved_hidden_digest": "6bf4baa5784ae5f6",
+          "schema": "apxinf.qwen35.mtp_snapshot_protocol.v1",
+          "snapshot_position": 17,
+          "suffix": [
+            1234,
+            5678
+          ],
+          "target_position": 21,
+          "tokens": [
+            198,
+            5525,
+            198
+          ]
+        }
+      ],
+      "prior_gpu_test_reused_without_rerun": true
+    },
+    {
+      "mode": "Graph1/full",
+      "entry": "real_target_verify_rollback_short_snapshot_protocol",
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-graph1-gpu-02/public-target.json",
+        "sha256": "792b8454fea8b411b17c48753603ca4f691961ed563c902c44c4dfe8a6773da2",
+        "bytes": 1106280
+      },
+      "log": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-graph1-gpu-02/public-target.log",
+        "sha256": "fb4af5f7960c5c4ac2a6022b7f451fd4445096976b94e95f97397fd1297c8524",
+        "bytes": 859548
+      },
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/qwen35_real_state_protocol-817756a93260ef3f",
+        "sha256": "768b32db36822ddf3b4a770822934fce545a01b163291df02bff99a747d2f749",
+        "size_bytes": 34669408
+      },
+      "source": {
+        "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "source_dirty": true,
+        "source_patch_sha256": "18602f42264f4721c318b46d7b58aea76d7fd093a723d450b011c34c1a990f4d",
+        "source_untracked_sha256": {
+          "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+          "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+          "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+          "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+          "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+          "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+          "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+          "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+          "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+          "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+          "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+          "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+          "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "c2b69f56a2d8706379c874f6cf0df25389dd34d2631d2373a97250ac3484d5be",
+          "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+          "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+        }
+      },
+      "environment": {
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_PARITY_TUNING_DIR": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "APXINF_QWEN35_PROTOCOL_PROMPT_TOKENS": "16",
+        "APXINF_CUDA_DEVICE": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CUDA_GRAPHS": "1",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+        "APXINF_NVFP4_A16_WMMA": "0",
+        "APXINF_NVTX": "0",
+        "APXINF_QWEN35_PROTOCOL_GRAPHS": "1",
+        "APXINF_QWEN35_GRAPH_GDN": "full"
+      },
+      "actual_fixture_config": {
+        "autotune": false,
+        "capacity": 80,
+        "checkpoint": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "depths": [
+          1,
+          2,
+          3
+        ],
+        "draft_kv": "fp8",
+        "draft_scale": 1.0,
+        "graph_gdn": "full",
+        "graphs": true,
+        "moe": "nvfp4",
+        "ordered_reduce": true,
+        "performance_accepted": false,
+        "prompt_tokens": 16,
+        "repeats": 20,
+        "schema": "apxinf.qwen35.gpu_protocol.config.v1",
+        "state_observation": "public logical counts and GPU output/hidden observations; private raw KV/GDN banks not exposed",
+        "strict_recipe_required": true,
+        "target_kv": "bf16",
+        "tuning_dir": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16"
+      },
+      "transport": {
+        "transport_returncode": 0,
+        "wall_ms": 357069.9715,
+        "transport_timeout": false
+      },
+      "exit_receipt": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false,
+        "target_binary_sha256": "768b32db36822ddf3b4a770822934fce545a01b163291df02bff99a747d2f749"
+      },
+      "gpu_lock": {
+        "path": "/tmp/apxinf-gpu.lock",
+        "acquired": true,
+        "wait_ms": 0.013445001968648285,
+        "prior_holder": null,
+        "owner_pid": 193085,
+        "target_binary_sha256": "768b32db36822ddf3b4a770822934fce545a01b163291df02bff99a747d2f749"
+      },
+      "recipes_unchanged": true,
+      "recipe_inventory_canonical_sha256": "b34569a5880481144ae1b568d43c033c04cbb4f6294e4ed14d05be017f04b982",
+      "hardware_gpu_clocks_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "hardware_gpu_clocks_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "counts": {
+        "apxinf.qwen35.target_protocol.v1": 180
+      },
+      "observations_canonical_sha256": "73fae399f9950fd2b8ce65713984517391399e43b0aa31833227704f7cda0e59",
+      "depth_keep_counts": [
+        {
+          "depth": 1,
+          "keep": null,
+          "records": 40
+        },
+        {
+          "depth": 2,
+          "keep": null,
+          "records": 60
+        },
+        {
+          "depth": 3,
+          "keep": null,
+          "records": 80
+        }
+      ],
+      "observations_sample": [
+        {
+          "committed_rows": 1,
+          "depth": 1,
+          "different_suffix": [
+            1234,
+            5678
+          ],
+          "discarded_rows": 1,
+          "performance_accepted": false,
+          "private_raw_bank_equality_checked": false,
+          "repeat": 0,
+          "restored_position": 16,
+          "restored_suffix_hidden_digest": "1ae042a96773149d",
+          "schema": "apxinf.qwen35.target_protocol.v1",
+          "tokens": [
+            198,
+            198,
+            198
+          ],
+          "verified_rows": 2
+        }
+      ],
+      "prior_gpu_test_reused_without_rerun": false
+    },
+    {
+      "mode": "Graph1/full",
+      "entry": "qwen35moe::mtp_runtime::gpu_raw_protocol::real_checkpoint_target_and_draft_raw_bank_protocol",
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-graph1-gpu-02/raw-target-and-draft.json",
+        "sha256": "fe04aa4131db431f9989779ed7ba6386b88d5862d2b3ea45b6b790836710ffa0",
+        "bytes": 1106161
+      },
+      "log": {
+        "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-graph1-gpu-02/raw-target-and-draft.log",
+        "sha256": "d7b7b308d862d43cffd7bc1e9e4714f65f6ed5170c5f5c4cd85bfc5b16259311",
+        "bytes": 808644
+      },
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/apxinf_model-a14b58be4d24da2f",
+        "sha256": "d5c3c3f884560fd8a80d6d1c29d0199026f922cbbe6cc12548aef24d645abc49",
+        "size_bytes": 37085304
+      },
+      "source": {
+        "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "source_dirty": true,
+        "source_patch_sha256": "18602f42264f4721c318b46d7b58aea76d7fd093a723d450b011c34c1a990f4d",
+        "source_untracked_sha256": {
+          "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+          "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+          "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+          "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+          "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+          "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+          "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+          "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+          "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+          "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+          "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+          "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+          "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+          "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "c2b69f56a2d8706379c874f6cf0df25389dd34d2631d2373a97250ac3484d5be",
+          "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+          "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+        }
+      },
+      "environment": {
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_PARITY_TUNING_DIR": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+        "APXINF_QWEN35_PROTOCOL_PROMPT_TOKENS": "16",
+        "APXINF_CUDA_DEVICE": "0",
+        "APXINF_REQUIRE_RECIPES": "1",
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CUDA_GRAPHS": "1",
+        "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+        "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+        "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+        "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+        "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+        "APXINF_NVFP4_A16_WMMA": "0",
+        "APXINF_NVTX": "0",
+        "APXINF_QWEN35_PROTOCOL_GRAPHS": "1",
+        "APXINF_QWEN35_GRAPH_GDN": "full"
+      },
+      "actual_fixture_config": {
+        "autotune": false,
+        "block_tokens": 128,
+        "capacity": 64,
+        "copy_protocol_only": true,
+        "depths": [
+          1,
+          2,
+          3
+        ],
+        "draft_commit_cases": 9,
+        "draft_kv": "fp8",
+        "draft_scale": 1.0,
+        "graph_gdn": "full",
+        "graphs": true,
+        "independent_gdn_math_oracle": false,
+        "ordered_reduce": true,
+        "performance_accepted": false,
+        "prompt_tokens": 16,
+        "schema": "apxinf.qwen35.raw_bank_config.v1",
+        "strict_recipe_required": true,
+        "target_commit_cases": 9,
+        "target_kv": "bf16",
+        "weights_loads": 1
+      },
+      "transport": {
+        "transport_returncode": 0,
+        "wall_ms": 69976.01754099998,
+        "transport_timeout": false
+      },
+      "exit_receipt": {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false,
+        "target_binary_sha256": "d5c3c3f884560fd8a80d6d1c29d0199026f922cbbe6cc12548aef24d645abc49"
+      },
+      "gpu_lock": {
+        "path": "/tmp/apxinf-gpu.lock",
+        "acquired": true,
+        "wait_ms": 0.011324002116452903,
+        "prior_holder": null,
+        "owner_pid": 194331,
+        "target_binary_sha256": "d5c3c3f884560fd8a80d6d1c29d0199026f922cbbe6cc12548aef24d645abc49"
+      },
+      "recipes_unchanged": true,
+      "recipe_inventory_canonical_sha256": "b34569a5880481144ae1b568d43c033c04cbb4f6294e4ed14d05be017f04b982",
+      "hardware_gpu_clocks_before": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "hardware_gpu_clocks_after": [
+        {
+          "path": "/sys/class/devfreq/gpu-0",
+          "governor": "simple_ondemand",
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "cur_freq": "54000000"
+        }
+      ],
+      "counts": {
+        "apxinf.qwen35.target_raw_bank.v1": 9,
+        "apxinf.qwen35.draft_raw_bank.v1": 9
+      },
+      "observations_canonical_sha256": "e2764a93bd7b82cb38fc26b095f64329e71d2a056465f22529d6996ac77235d5",
+      "depth_keep_counts": [
+        {
+          "depth": 1,
+          "keep": 1,
+          "records": 2
+        },
+        {
+          "depth": 1,
+          "keep": 2,
+          "records": 2
+        },
+        {
+          "depth": 2,
+          "keep": 1,
+          "records": 2
+        },
+        {
+          "depth": 2,
+          "keep": 2,
+          "records": 2
+        },
+        {
+          "depth": 2,
+          "keep": 3,
+          "records": 2
+        },
+        {
+          "depth": 3,
+          "keep": 1,
+          "records": 2
+        },
+        {
+          "depth": 3,
+          "keep": 2,
+          "records": 2
+        },
+        {
+          "depth": 3,
+          "keep": 3,
+          "records": 2
+        },
+        {
+          "depth": 3,
+          "keep": 4,
+          "records": 2
+        }
+      ],
+      "observations_sample": [
+        {
+          "committed_position": 17,
+          "depth": 1,
+          "gdn_reference": "same-round GPU checkpoint bytes independently sliced on CPU",
+          "independent_gdn_math_oracle": false,
+          "keep": 1,
+          "logical_tail_zero_required": false,
+          "new_suffix_position": 18,
+          "performance_accepted": false,
+          "physical_write_ledger_exact": true,
+          "published_kv_source_digest": "c2d0d9539c6dbcb3",
+          "restored_position": 16,
+          "schema": "apxinf.qwen35.target_raw_bank.v1",
+          "selected_gdn_digest": "8904fb5769db2dd6",
+          "snapshot_kv_digest": "da12954c3bacdae1",
+          "verified_rows": 2
+        }
+      ],
+      "prior_gpu_test_reused_without_rerun": false
+    }
+  ],
+  "public_protocol_function_identity": [
+    {
+      "name": "real_target_verify_rollback_short_snapshot_protocol",
+      "sha256": "1193296816c2c9abb22c4bd41578cfadf3f01972b0f3f4b968002e7736b95fd1",
+      "graph0_graph1_gpu_function_body_identical": true
+    },
+    {
+      "name": "real_mtp_short_snapshot_different_continuation_protocol",
+      "sha256": "bea8a2e974d3d3b7fcdf6dd76dab04531ab7797e85336956e8bde1a1db6f9992",
+      "graph0_graph1_gpu_function_body_identical": true
+    }
+  ],
+  "graph0_public_file_preimage": {
+    "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/mtp-protocol-graphs-01/preimage/crates/apxinf-model/tests/qwen35_real_state_protocol.rs",
+    "sha256": "10ca34214a87173c09aadad98b6b17ab5083a391af0e587db75b7c85778c06bd",
+    "bytes": 21121
+  },
+  "independent_audits": [
+    {
+      "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/mtp-hidden-snapshot-actual-audit-01/audit-complete-v2.json",
+      "sha256": "2775fc82c372ec577cfa7a735dc23e62d4c6275ad8897d50529a001566ff3c88",
+      "bytes": 8860
+    },
+    {
+      "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/mtp-hidden-snapshot-graph1-actual-audit-01/audit-complete.json",
+      "sha256": "80031fe87c48cbb76233c48003f7bc6650c40377ad11855e2028272c1a7552ac",
+      "bytes": 7698
+    }
+  ],
+  "graph1_history": {
+    "original_false_negative": {
+      "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-graph1-gpu-01/public-mtp.json",
+      "sha256": "62e328410cd9046b024adc4085ee757361d46ea8f856f66d073c3becf2959848",
+      "bytes": 1105550
+    },
+    "parser_correction": {
+      "path": "devlocal/model-microbench/recovery-build/mtp-hidden-snapshot-graph1-gpu-01/public-mtp-parser-correction.json",
+      "sha256": "fd235df7ab1f5c040c2abee73f92d849342ec9ff3500e2acee973ca70854770e",
+      "bytes": 1235
+    },
+    "first_02_entry_is_same_actual_01_log_not_second_gpu_run": true,
+    "subsequent_two_entries_fresh_gpu_processes": true
+  },
+  "limitations": [
+    "Actual GPU evidence came from dirty8278871 overlays with separately pinned source/ELFs; isolated5a156-based commit was not compiled/GPU-rerun",
+    "Short P16/depth1..3 and exact storage/copy/rollback protocol; not independent attention/GDN/MTP long-math proof",
+    "EOS behavior, FP8 calibrated attention, long1024 generated-token parity and all15 performance acceptance remain separate",
+    "Root observed same-process4K --modeboth scalar15841 vsMTP3691 at index1 with new optimizations disabled; unresolved independent long-context issue",
+    "No throughput improvement, AIOS weather/E2E or per-case30% claim",
+    "Recipe preparation is separately ignored/exact opt-in; strict GPU gates never online-tune"
+  ]
+}

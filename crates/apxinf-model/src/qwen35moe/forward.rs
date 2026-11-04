@@ -1963,3 +1963,18 @@ mod tests {
         assert_ne!(actual[1], 0.0);
     }
 }
+
+// Unit-test-only observation seams. No release getter/API is generated.
+#[cfg(test)]
+impl GdnState {
+    pub(in crate::qwen35moe) fn gpu_test_tensors(&self) -> (&Tensor, &Tensor) {
+        (&self.conv, &self.recurrent)
+    }
+}
+
+#[cfg(test)]
+impl GdnStateCheckpoints {
+    pub(in crate::qwen35moe) fn gpu_test_tensors(&self) -> (&Tensor, &Tensor) {
+        (&self.conv, &self.recurrent)
+    }
+}
