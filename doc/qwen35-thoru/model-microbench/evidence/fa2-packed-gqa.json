@@ -7185,5 +7185,201 @@
       "lower average tensor/warp/SM percentages do not prove worse or better usefulFLOPs utilization",
       "relativeL2hit/throughput ratios cannot establish8x physicalDRAM traffic or bandwidth utilization"
     ]
+  },
+  "model_benchmark_metadata": {
+    "scope": "Benchmark/collector metadata and separate provider-audit pairing only; no input/timing/math/precision/case policy change; no model performance or accuracy accepted",
+    "base_commit": "3a007f34a6219513e1c8517b228ac2a5a81ec413",
+    "patch_sha256": "1b1996e8cfe4d4aaf5cf83fd45277796a37034c93bc742340f36ce7d97cfade9",
+    "maintained_paths": [
+      {
+        "path": "crates/apxinf-model/examples/qwen35_context_bench.rs",
+        "preimage_sha256": "abdc86e7b3b9c5c5b12569c3cc08286fe94787ffd4ea56d5ff82836074e01146",
+        "postimage_sha256": "3c3b850afc16ab29a3f4bee22c0a5549714c3616565fca7f4e4dbf234ad1bf84",
+        "preimage_bytes": 18613,
+        "postimage_bytes": 18718
+      },
+      {
+        "path": "crates/apxinf-model/examples/qwen35_mtp_bench.rs",
+        "preimage_sha256": "e0603656fbf97948f5096d9d552e267a168a55fd2bff661e82814a53420284d9",
+        "postimage_sha256": "6cb4399bbbb094d439f9ee64f453be03847afa9b304d9205ccfa4848fc2904ff",
+        "preimage_bytes": 30690,
+        "postimage_bytes": 30795
+      },
+      {
+        "path": "crates/apxinf-model/examples/support/qwen35_benchmark.rs",
+        "preimage_sha256": "03d804e049c72b88b5c45052cf65a73fd452d4a060ce97f6ec8eb166f6b18434",
+        "postimage_sha256": "1fc5dfa1ed99ee1362dc09b64aff297d26181e5d77f0c28eec99525692f5d7bd",
+        "preimage_bytes": 4979,
+        "postimage_bytes": 6386
+      },
+      {
+        "path": "scripts/bench_qwen35_model_matrix.py",
+        "preimage_sha256": "30a4c11d9de740b6588d571df2c43fe2e22f005bddd4b8230f219d1011ba114e",
+        "postimage_sha256": "d553c66dd54819f1c0d02e1a7313d1f4b7a359dfe8eb16d9467798ac568f23af",
+        "preimage_bytes": 76134,
+        "postimage_bytes": 82725
+      },
+      {
+        "path": "scripts/test_bench_qwen35_model_matrix.py",
+        "preimage_sha256": "dcb8ba7aa56d3c502127314ac5d2f89450efd5714a8d85b32b7a3aa1c84fa5f9",
+        "postimage_sha256": "1393b605baf58f81d924977e5bd9dedf6929495b31409ea6f63c8f7ec38e27c9",
+        "preimage_bytes": 78870,
+        "postimage_bytes": 85205
+      }
+    ],
+    "flag": {
+      "name": "APXINF_FA2_PACKED_GQA",
+      "accepted": [
+        "unset",
+        "0",
+        "1"
+      ],
+      "unset_pinned_to": "0",
+      "benchmark_config_field": "fa2_packed_gqa integer0/1",
+      "worker_field": "effective_attention_environment",
+      "invalid_rejected_before_CUDA": true,
+      "old_missing_metadata": "compatible only with requested0; labeled legacy_missing_default_off; never inferred1"
+    },
+    "separate_actual_provider_audit": {
+      "formal_REPORT_enabled": false,
+      "audit_REPORT_enabled": true,
+      "native_provider": "flash-attention-2-packed-gqa-q1to4-v1",
+      "configuration_meaning": "S only for the explicitly recognized split-KV providers",
+      "pairing_helper": "scripts/bench_qwen35_model_matrix.py::bind_packed_gqa_audit",
+      "binding": [
+        "same case/checkpoint",
+        "same exact actual ELF SHA",
+        "identical explicit flag1 kernel env excluding REPORT switches",
+        "same recipe manifest SHA",
+        "explicit benchmark+worker metadata",
+        "actual packed provider and positive config/S"
+      ],
+      "not_model_quality": true,
+      "reports_count_is_not_kernel_launch_count": true
+    },
+    "CPU_actual": {
+      "python_tests_passed": 59,
+      "host_scope": "local Mac Python CPU fixture/lifecycle contracts, not GPU",
+      "log": {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-packed-gqa-benchmark-metadata-01/metadata-full-cpu-tests.log",
+        "sha256": "af1ef82537e9951c25ad6dc3c5a59595d03a7b1fe2e426c02d8b57fad9e795c8",
+        "bytes": 1017
+      },
+      "rust_tests_passed": 7,
+      "rust_scope": "pure shared benchmark helper CPU contracts only; no CUDA/model timing",
+      "rust_compiler": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+      "rust_source_sha256": "1fc5dfa1ed99ee1362dc09b64aff297d26181e5d77f0c28eec99525692f5d7bd",
+      "rust_ELF_sha256": "fa6f818a533fc24a4b34bf046eb1ba63b941941ba7db54398311d16d39b1472d",
+      "rust_receipt": {
+        "path": "devlocal/model-microbench/recovery-build/fa2-model-metadata-linux-cpu-01/receipt.json",
+        "sha256": "e6bbf9710dbd8168c96107bfccf1073a1d6ff2e8a6edb7f4b4a45e0c73d97f8d",
+        "bytes": 1288
+      }
+    },
+    "source_application": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-model-metadata-stage-01/receipt.json",
+      "sha256": "586c93cf2e6a4d6665d00514e5195fe19264af818e3124b0543619e4b585417a",
+      "bytes": 2261
+    },
+    "model_benchmark_build_actual": {
+      "guard_receipt": {
+        "path": "devlocal/model-microbench/recovery-build/fa2-model-benchmarks-build-01/receipt.json",
+        "sha256": "28645181a59f546b710e1c5a326682e503efe0887ab6ef8c01b5f4320fb5f287",
+        "bytes": 21321
+      },
+      "status": "success",
+      "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+      "source_dirty_overlay_patch_sha256": "21b01ef7374dedd0e85aff36f82f491810897f7560007c181216349564499bb3",
+      "source_unchanged": true,
+      "cleanup_proven_and_reaped": true,
+      "artifacts": {
+        "qwen35_context_bench": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/examples/qwen35_context_bench",
+          "sha256": "d2f874a81774fd8f1de6120a2e09d5716fc88efb34aa7ddf1fd1e2eccf91822d",
+          "size_bytes": 34948200
+        },
+        "qwen35_mtp_bench": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/examples/qwen35_mtp_bench",
+          "sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4",
+          "size_bytes": 35418512
+        }
+      },
+      "frozen_copy_receipt": {
+        "path": "devlocal/model-microbench/recovery-build/fa2-model-freeze-and-recipes-01/receipt.json",
+        "sha256": "3ed7d31ac9a988f74e7b2d178faec2c154cbdfdf17f158380759fe8836955adf",
+        "bytes": 11942
+      },
+      "frozen_copies_match_built_ELFs": true,
+      "scope": "Compiled dirty8278871 overlay, not a clean3a+metadata build/GPU certification"
+    },
+    "private_fixed_clock_runner02": {
+      "source_sha256": "a0fbcd6accdeddda6a91c59e1a953c507d850d2462315f73b35eaa12fc537187",
+      "scope": "ignored private source, not included in maintained commit",
+      "new_maintained_collector_plus_old_three_lease_blocks_verbatim": true,
+      "CPU_fake_tests_passed": 4,
+      "CPU_fake_log": {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fixed-clock-runner-02/cpu-contract.log",
+        "sha256": "89b7cb2979983c48a969078c03a86a9250a9ad761231fbb57678ece7312ed060",
+        "bytes": 470
+      },
+      "real_sudo_sysfs_SSH_GPU_executed_by_fake_tests": false,
+      "new_live_lease_retested": false,
+      "old_runner01_receipts_unchanged": true
+    },
+    "acceptance": {
+      "model_AB_completed": false,
+      "model_performance_accepted": false,
+      "model_accuracy_accepted": false,
+      "all15_or_30percent_accepted": false,
+      "clean_commit_GPU_retested": false
+    }
+  },
+  "model_4k_paired_gate_and_diagnostic_only": {
+    "scope": "actual paired gate failure retained; reconstructed-reference-S diagnostic never formal calibration/performance/quality acceptance",
+    "normal_paired_receipt": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-model-decode4k-ab-01/receipt.json",
+      "bytes": 16184,
+      "sha256": "670057c5a97f887775d07efe8c38793591dbb30aae11acb141423134f8eb9420"
+    },
+    "parent_digest": "a79ed7c8bf839729",
+    "parent_rounds": 351,
+    "candidate_excluded_tune_digest": "42c19b84f34f0dde",
+    "candidate_excluded_tune_rounds": 340,
+    "candidate_formal_dispatched": false,
+    "diagnostic_functional_comparison": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-model-legacy-s-diagnostic-01/functional-comparison.json",
+      "bytes": 726,
+      "sha256": "8f1ad671be39e42783622a2fb18d73332701a8e80847edab6b62aa0158e7777f"
+    },
+    "diagnostic_recipe_provenance": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-model-legacy-s-diagnostic-01/recipe-provenance.json",
+      "bytes": 139257,
+      "sha256": "6a34c904436e8969d237100a72744ad12957001b93a000b0f83d948dc01dcb0f"
+    },
+    "diagnostic_synthesized_tuples": 352,
+    "diagnostic_recipe_origin": "selected calibrated parent S5/6/7; NOT candidate auto-tuned winner or valid formal calibration evidence",
+    "ordinary_confound_audit": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-model-legacy-s-diagnostic-01/ordinary-recipe-confound-audit.json",
+      "bytes": 162,
+      "sha256": "ee57d91a23ca9f36cdaf077e9e4da25afe783f28f57ca8727293a4cb67a9c36c"
+    },
+    "diagnostic_audit_summary": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-model-legacy-s-diagnostic-01/audit-02/summary.json",
+      "bytes": 1124234,
+      "sha256": "3cb57e24d0aabf0e4f5a85c344a8132c91a7f9de0ab7dc3337d201a74736e36f"
+    },
+    "diagnostic_audit_case": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-model-legacy-s-diagnostic-01/audit-02/decode-kv4k-o1k.json",
+      "bytes": 861891,
+      "sha256": "19127e898528ce99fbef0f0e41a46a61738f589967c8355739ae2419c6112c67"
+    },
+    "diagnostic_audit_log": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-model-legacy-s-diagnostic-01/audit-02/decode-kv4k-o1k.log",
+      "bytes": 3273506,
+      "sha256": "6385f25ea0e1ab6f8746ba1382bd543b6f49f0b5c63f8139b6d9ad96b04fb7f8"
+    },
+    "all3_diagnostic_1024_digest_and_all_counters_match_parent": true,
+    "performance_accepted": false,
+    "model_quality_accepted": false
   }
 }

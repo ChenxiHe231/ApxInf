@@ -164,6 +164,51 @@ recipe冻结、锁继承/child reap及clock恢复均绑定在JSON；另附独立
 尚未启动GPU；02改为只读打开同一共享锁后完成实际两次采集。01属于启动前错误，
 不是GPU失败。其历史来自root的现场记录，01原receipt未下载到本地，未补造SHA。
 
+## 模型基准元数据与已完成验证
+
+共享benchmark helper在构造CUDA/model之前，把`APXINF_FA2_PACKED_GQA`严格
+解析并pin为0/1，两个model benchmark均在config中记录整数`fa2_packed_gqa`。
+collector也显式pin并清除worker继承值，记录`effective_attention_environment`，
+与native config交叉核对。invalid值提前失败；旧4K/8K artifact缺少这些field时
+只兼容requested0，并标`legacy_missing_default_off`，不能推断为1或伪称历史显式pin。
+这不改变input、计时边界、autotune选择、case或精度阈值。
+
+request flag不是实际provider证明。正式timing不打开REPORT；另用同ELF、相同
+flag/kernel环境、同recipe manifest hash的独立`--run-mode audit`读取实际provider、
+config/S和geometry，再用`bind_packed_gqa_audit(formal_case,audit_case)`配对。
+flag1要求显式benchmark/worker field及实际`flash-attention-2-packed-gqa-q1to4-v1`
+审计，不能只据开关声称新核被使用。REPORT条数也不是CUDA kernel launch数。
+这份配对仅认证执行配置，不认证模型质量或cross-version token一致性。
+
+实际CPU合同已完成Python59/59及Orin Rust1.98共享helper7/7；Thor小池guard已
+编译两个model benchmark，context ELF=`d2f874a81774fd8f1de6120a2e09d5716fc88efb34aa7ddf1fd1e2eccf91822d`、
+MTP ELF=`ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4`，
+持锁冻结副本SHA一致。上述编译来自dirty8278871 overlay，并非本clean提交GPU重测。
+对应source、CPU log、Rust receipt、guard receipt及ELF在evidence的
+`model_benchmark_metadata`逐SHA绑定。模型正式A/B尚未完成，没有新增模型性能成绩。
+
+private fixed-clock runner02包含新collector加旧runner01三段逐byte不变的1206MHz
+锁内lease；本轮4/4测试仅运行fakePath/fakeSubprocess CPU合同，没有真实sudo、
+sysfs写入、SSH或GPU调用，不能称新livelease已验收。旧runner01和已发表收据身份不变。
+
+## 4K模型配对门禁与同S诊断
+
+正常自动调优的模型配对未通过：control的1024-token digest为`a79ed7c8bf839729`、
+MTP351rounds；candidate仅完成excluded tune，digest为`42c19b84f34f0dde`、
+340rounds。controller据此停止，没有执行candidate正式计时，也没有报告模型加速。
+这些轨迹还不同于先前4K/8K历史样本，不能拿新的control和历史最优成绩直接归因。
+
+另做了明确的**diagnostic only**实验：保留原recipe，在新目录中按Parent每个
+精确几何的实际S5/6/7选择candidate tuple，共352条。它们是构造的参考配置，
+**不是candidate正常autotune winner，也不是正式校准/性能成绩**。三个strict
+生成（2warm+1audit）均完整匹配Parent的1024-token digest与所有MTP counters，
+实际packed provider/S由独立REPORT核实；collector仍标performance=false、
+accuracy=unresolved。共享55份普通recipe逐byte相同，原recipe未改。
+
+这项case-specific诊断支持把split分区差异作为此次生成变化的解释，尚不构成
+全局模型质量验收。下一步需真实、独立的reference-S约束校准与fresh严格配对；
+不能把手选tuple升级成正式autotune收据。原failed门禁及diagnostic来源逐SHA见JSON。
+
 ## 复现和未验收范围
 
 native policy默认off。通过已有Thor小池build guard分别构建两个固定target：
@@ -181,8 +226,8 @@ cargo test --release -p apxinf-cuda-new --no-default-features   --test fa2_packe
 retuned/restored必须如实声明；保存actual split/provider tuple和原字节hash。不要
 运行all-ignored，也不要在正式进程在线tune或静默替换recipe。
 
-证据来自有明确source/ELF的dirty8278871 overlay。这个隔离clean提交尚未重新
-编译/GPU运行；它仅带十个实现/测试文件及本doc/evidence。actualcheckpoint层、
+证据来自有明确source/ELF的dirty8278871 overlay。实现/NCU及metadata隔离clean提交尚未重新
+编译/GPU运行；本节收录上述dirty-overlay编译验证；模型配对状态单独记录。actualcheckpoint层、
 完整模型、全15、逐case30%、天气AIOS/E2E及原4K scalar/verification质量差异
 仍未验收；已有4K差异不能归因为这个新FA2。只做下一步实际模型gate/quiet A/B后
 才可给模型收益结论。后续更多NCU或checkpoint/model实验若完成，应另绑定真实收据补证。

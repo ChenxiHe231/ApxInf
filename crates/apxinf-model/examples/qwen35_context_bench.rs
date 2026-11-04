@@ -291,6 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let profiling = args.iter().any(|arg| arg == "--profile-measured");
     // Set before constructing any runtime: formal preparation must not silently
     // fall back when the tuning pass omitted a needed shape.
+    let fa2_packed_gqa = benchmark::pin_fa2_packed_gqa()?;
     std::env::set_var("APXINF_REQUIRE_RECIPES", if autotune { "0" } else { "1" });
     let allow_repeat_divergence = args.iter().any(|arg| arg == "--allow-repeat-divergence");
     let tuning_path = benchmark::optional_path(&args, "--tuning-dir")?;
@@ -360,6 +361,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         json!({
             "schema": "apxinf.qwen35.context_benchmark.config.v1",
+            "fa2_packed_gqa": fa2_packed_gqa,
             "checkpoint": checkpoint,
             "device": device,
             "autotune": autotune,

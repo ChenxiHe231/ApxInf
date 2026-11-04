@@ -31,6 +31,7 @@ SOURCE_MARKER = "APXINF_MATRIX_PROCESS "
 EXIT_MARKER = "APXINF_MATRIX_EXIT "
 LOCK_MARKER = "APXINF_MATRIX_LOCK "
 GPU_LOCK_PATH = "/tmp/apxinf-gpu.lock"
+FA2_PACKED_GQA_ENV = "APXINF_FA2_PACKED_GQA"
 MTP_FIXED_ENV = "APXINF_QWEN35_MTP_FIXED_DEPTH"
 MTP_SCALAR_TPOT_ENV = "APXINF_QWEN35_SCALAR_TPOT_MS"
 COLLECTOR_SOURCE = Path(__file__).read_bytes()
@@ -104,6 +105,27 @@ def validate_selection_policy(args, cases):
         raise ValueError("scalar disables MTP; do not label it with a fixed draft depth")
 
 
+def fa2_packed_gqa_flag(value):
+    # None means the historical/native default OFF, never an inferred ON.
+    if value is None:
+        return "0"
+    if type(value) is not str or value not in ("0", "1"):
+        raise ValueError("APXINF_FA2_PACKED_GQA must be unset, 0 or 1")
+    return value
+
+
+def validate_packed_gqa_metadata(config, args):
+    expected = int(environment(args, 1.0)[FA2_PACKED_GQA_ENV])
+    if "fa2_packed_gqa" not in config:
+        if expected != 0:
+            raise ValueError("packed GQA ON requires explicit benchmark metadata")
+        return dict(effective=0, reporting="legacy_missing_default_off")
+    actual = config["fa2_packed_gqa"]
+    if type(actual) is not int or actual not in (0, 1) or actual != expected:
+        raise ValueError("benchmark packed GQA metadata/environment mismatch")
+    return dict(effective=actual, reporting="explicit_pinned_0_or_1")
+
+
 def environment(args, scalar_tpot_ms=None):
     env = {}
     for item in args.env:
@@ -117,6 +139,7 @@ def environment(args, scalar_tpot_ms=None):
         if key in (MTP_FIXED_ENV, MTP_SCALAR_TPOT_ENV):
             raise ValueError("MTP controller environment is controlled by --mtp-strategy/--mtp-depth/--scalar-calibration")
         env[key] = value
+    env[FA2_PACKED_GQA_ENV] = fa2_packed_gqa_flag(env.get(FA2_PACKED_GQA_ENV))
     # Presence alone enables native reporting; do not set these to '0'.
     env.pop("APXINF_GEMM_REPORT", None)
     env.pop("APXINF_ATTENTION_REPORT", None)
@@ -214,7 +237,7 @@ print(json.dumps(result))
 LAUNCH_CODE = r'''
 import fcntl,hashlib,json,os,pathlib,signal,subprocess,sys,time
 p=json.loads(sys.argv[1]);env=dict(os.environ)
-for key in ('APXINF_GEMM_REPORT','APXINF_ATTENTION_REPORT','APXINF_REQUIRE_RECIPES','APXINF_QWEN35_MTP_FIXED_DEPTH','APXINF_QWEN35_SCALAR_TPOT_MS'):env.pop(key,None)
+for key in ('APXINF_GEMM_REPORT','APXINF_ATTENTION_REPORT','APXINF_REQUIRE_RECIPES','APXINF_QWEN35_MTP_FIXED_DEPTH','APXINF_QWEN35_SCALAR_TPOT_MS','APXINF_FA2_PACKED_GQA'):env.pop(key,None)
 env.update(p['environment'])
 def digest(path):
     h=hashlib.sha256()
@@ -308,7 +331,8 @@ try:
         raise SystemExit(128+signum)
     signal.signal(signal.SIGTERM,interrupted);signal.signal(signal.SIGINT,interrupted)
     identity={'pid':proc.pid,'kind':'profiler_launcher' if p['profile'] else 'benchmark','direct_child_inherits_gpu_lock':not p['profile'],
-              'effective_mtp_environment':{key:env.get(key) for key in ('APXINF_QWEN35_MTP_FIXED_DEPTH','APXINF_QWEN35_SCALAR_TPOT_MS')}}
+              'effective_mtp_environment':{key:env.get(key) for key in ('APXINF_QWEN35_MTP_FIXED_DEPTH','APXINF_QWEN35_SCALAR_TPOT_MS')},
+              'effective_attention_environment':{'APXINF_FA2_PACKED_GQA':env.get('APXINF_FA2_PACKED_GQA')}}
     if profile_output is not None:identity['profile_output']=profile_output
     try:
         path='/proc/%d/exe'%proc.pid
@@ -542,6 +566,7 @@ def parse_output(raw):
 
 def audit_recipe_sources(raw, required):
     dispatches = []
+    attention_dispatches = {}
     for line in raw.splitlines():
         if line.startswith(("[apxinf-gemm]", "[apxinf-attn]")):
             match = re.search(r"\bsource=(\S+)", line)
@@ -550,12 +575,65 @@ def audit_recipe_sources(raw, required):
             if match[1] not in ("recipe", "memory-recipe"):
                 raise ValueError("non-recipe execution: " + match[1])
             dispatches.append(dict(kind="gemm" if line.startswith("[apxinf-gemm]") else "attention", source=match[1]))
+            if line.startswith("[apxinf-attn]"):
+                head, separator, tail = line.partition(" | ")
+                provider = tail.split()[0] if separator and tail.split() else None
+                fields = dict(re.findall(r"\b([A-Za-z][A-Za-z0-9_]*)=([^\s|]+)", line))
+                configuration = fields.get("config")
+                configuration = int(configuration) if configuration is not None and configuration.isdecimal() else None
+                split_provider = provider in ("flash-attention-2-packed-gqa-q1to4-v1", "flash-attention-2-split-kv")
+                if split_provider and (configuration is None or configuration < 1):
+                    raise ValueError("split-KV attention report lacks a valid positive S configuration")
+                row = dict(provider=provider, configuration=configuration,
+                           split_kv_s=configuration if split_provider else None,
+                           source=match[1], geometry={key:fields[key] for key in ("sem","b","q","k","cap","qh","kvh","d","dyn","qs","det") if key in fields})
+                key = json.dumps(row,sort_keys=True)
+                if key not in attention_dispatches:
+                    attention_dispatches[key] = dict(**row, reports=0)
+                attention_dispatches[key]["reports"] += 1
     if required and {row["kind"] for row in dispatches} != {"gemm", "attention"}:
         raise ValueError("recipe audit did not observe both GEMM and attention")
     if re.search(r"recipe miss|recipe is missing|fallback-after-tune", raw, re.I):
         raise ValueError("benchmark reported missing recipe/fallback")
     return dict(dispatches=len(dispatches), recipe=sum(row["source"] == "recipe" for row in dispatches),
-                memory_recipe=sum(row["source"] == "memory-recipe" for row in dispatches))
+                memory_recipe=sum(row["source"] == "memory-recipe" for row in dispatches),
+                attention_dispatches=list(attention_dispatches.values()))
+
+
+def bind_packed_gqa_audit(formal, audit):
+    """Read-only pairing of separate maintained-collector case receipts.
+
+    This does not promote accuracy or replace the receipt/asset hash audit.
+    """
+    if formal.get("run_mode") != "formal" or audit.get("run_mode") != "audit" or formal.get("valid") is not True or audit.get("valid") is not True:
+        raise ValueError("binding requires valid separate formal and audit case receipts")
+    if any(not isinstance(row.get("argv"), list) or len(row["argv"]) < 2 for row in (formal,audit)):
+        raise ValueError("attention audit requires recorded benchmark/checkpoint argv")
+    if any(key in formal.get("environment", {}) for key in ("APXINF_GEMM_REPORT", "APXINF_ATTENTION_REPORT")) or audit.get("environment", {}).get("APXINF_ATTENTION_REPORT") != "1":
+        raise ValueError("attention provider audit must be separate from report-free formal timing")
+    if formal.get("case") != audit.get("case") or formal["argv"][1] != audit["argv"][1]:
+        raise ValueError("attention audit case/checkpoint mismatch")
+    def kernel_env(row):
+        return {key:value for key,value in row.get("environment", {}).items() if key not in ("APXINF_GEMM_REPORT", "APXINF_ATTENTION_REPORT")}
+    if kernel_env(formal) != kernel_env(audit) or formal.get("environment", {}).get(FA2_PACKED_GQA_ENV) != "1":
+        raise ValueError("attention audit requires identical explicit ON kernel environment")
+    for row in (formal, audit):
+        if row.get("attention_environment_reporting") != "explicit_pinned_0_or_1" or row.get("observed", {}).get("fa2_packed_gqa") != dict(effective=1,reporting="explicit_pinned_0_or_1"):
+            raise ValueError("attention audit requires explicit native/worker metadata")
+    elf = formal.get("process", {}).get("sha256")
+    recipe = formal.get("recipes_after", {}).get("manifest_sha256")
+    if not isinstance(elf, str) or not re.fullmatch(r"[0-9a-f]{64}", elf) or elf != audit.get("process", {}).get("sha256"):
+        raise ValueError("attention audit ELF mismatch")
+    if not isinstance(recipe, str) or not re.fullmatch(r"[0-9a-f]{64}", recipe) or recipe != audit.get("recipes_after", {}).get("manifest_sha256"):
+        raise ValueError("attention audit recipe manifest mismatch")
+    dispatches = audit.get("recipe_audit", {}).get("attention_dispatches", [])
+    packed = [row for row in dispatches if row.get("provider") == "flash-attention-2-packed-gqa-q1to4-v1"]
+    if not packed or any(type(row.get("split_kv_s")) is not int or row["split_kv_s"] < 1 for row in packed):
+        raise ValueError("independent audit did not observe actual packed-GQA provider/config/S")
+    return dict(verified=True,scope="same_case_ELF_flag_recipe_separate_dispatch_audit_not_model_accuracy",
+                case=formal["case"],binary_sha256=elf,recipe_manifest_sha256=recipe,fa2_packed_gqa=1,
+                formal_log_sha256=formal.get("log_sha256"),audit_log_sha256=audit.get("log_sha256"),
+                packed_attention_dispatches=packed)
 
 
 def finite_number(value, name, positive=True):
@@ -676,6 +754,7 @@ def validate_records(records, case, args):
     if len(configs) != 1 or len(summaries) != 1:
         raise ValueError("missing/duplicate config or summary")
     config, summary = configs[0], summaries[0]
+    packed_gqa = validate_packed_gqa_metadata(config, args)
     tune = args.run_mode == "tune"
     profile = args.run_mode == "profile"
     allow_divergence = getattr(args, "allow_repeat_divergence", False)
@@ -823,7 +902,8 @@ def validate_records(records, case, args):
                 measured_callback_timing=callback_measurements if decode else None,
                 decode_tpot_distribution=dict(sample_scope="per_iteration_mean_callback_interval_ms_not_per_token_latency",median=statistics.median(tpots),p90=sorted(tpots)[math.ceil(.9*len(tpots))-1],min=min(tpots),max=max(tpots)) if decode else None,
                 repeat_divergences=divergence_events, comparison_policy=comparison_policy(args), diagnostic_only=allow_divergence,
-                mtp_policy=policy, observed_max_proposed_depth=max(observed_depths, default=0) if decode else None)
+                mtp_policy=policy, fa2_packed_gqa=packed_gqa,
+                observed_max_proposed_depth=max(observed_depths, default=0) if decode else None)
 
 
 def validate_run(raw, case, args, recipe_before, recipe_after, expected_binary_sha, transport, expected_environment=None, expected_recipe_subset=None):
@@ -849,6 +929,17 @@ def validate_run(raw, case, args, recipe_before, recipe_after, expected_binary_s
             raise ValueError("unexpected process role")
         if expected_environment is not None and process.get("effective_mtp_environment") != {key:expected_environment.get(key) for key in (MTP_FIXED_ENV, MTP_SCALAR_TPOT_ENV)}:
             raise ValueError("worker effective MTP controller environment mismatch")
+        target_env = expected_environment if expected_environment is not None else environment(args, 1.0)
+        expected_fa2 = fa2_packed_gqa_flag(target_env.get(FA2_PACKED_GQA_ENV))
+        actual_attention_env = process.get("effective_attention_environment")
+        if actual_attention_env is None:
+            if expected_fa2 != "0":
+                raise ValueError("packed GQA ON requires explicit worker environment evidence")
+            details["attention_environment_reporting"] = "legacy_missing_default_off"
+        elif actual_attention_env != {FA2_PACKED_GQA_ENV:expected_fa2}:
+            raise ValueError("worker effective attention environment mismatch")
+        else:
+            details["attention_environment_reporting"] = "explicit_pinned_0_or_1"
         if args.run_mode != "profile" and process.get("sha256") != expected_binary_sha:
             raise ValueError("actual /proc executable differs from verified binary")
         if args.run_mode != "tune":
@@ -911,7 +1002,9 @@ def load_scalar_calibration(args, cases):
     def kernel_env(values):
         if not isinstance(values, dict):
             raise ValueError("scalar calibration lacks a recorded kernel environment")
-        return {key:value for key,value in values.items() if key not in controlled}
+        normalized = {key:value for key,value in values.items() if key not in controlled}
+        normalized[FA2_PACKED_GQA_ENV] = fa2_packed_gqa_flag(normalized.get(FA2_PACKED_GQA_ENV))
+        return normalized
     env_by_case = {entry["case"]:entry["environment"] for entry in metadata.get("case_execution", [])}
     receipt = dict(summary_path=str(summary_path), summary_sha256=hashlib.sha256(summary_bytes).hexdigest(),
                    metadata_path=str(metadata_path), metadata_sha256=hashlib.sha256(metadata_bytes).hexdigest(), identity=identity,

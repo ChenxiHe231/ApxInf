@@ -3,6 +3,24 @@
 use std::cmp::Ordering;
 use std::path::PathBuf;
 
+pub const FA2_PACKED_GQA_ENV: &str = "APXINF_FA2_PACKED_GQA";
+/// Native accepts precisely unset/0/1. Pin before constructing CUDA runtime.
+pub fn parse_fa2_packed_gqa(value: Option<&std::ffi::OsStr>) -> Result<u8, &'static str> {
+    match value {
+        None => Ok(0),
+        Some(value) => match value.to_str() {
+            Some("0") => Ok(0),
+            Some("1") => Ok(1),
+            _ => Err("APXINF_FA2_PACKED_GQA must be unset, 0 or 1"),
+        },
+    }
+}
+pub fn pin_fa2_packed_gqa() -> Result<u8, &'static str> {
+    let flag = parse_fa2_packed_gqa(std::env::var_os(FA2_PACKED_GQA_ENV).as_deref())?;
+    std::env::set_var(FA2_PACKED_GQA_ENV, flag.to_string());
+    Ok(flag)
+}
+
 pub const INPUT_SEED: u64 = 0x35A3_BF04_4096_0001;
 pub const VOCAB_SIZE: usize = 248_320;
 
@@ -96,6 +114,23 @@ pub fn validate_tuning_path(path: &Option<PathBuf>, autotune: bool) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn packed_gqa_flag_is_exact_and_defaults_off() {
+        use std::ffi::OsStr;
+        assert_eq!(parse_fa2_packed_gqa(None), Ok(0));
+        assert_eq!(parse_fa2_packed_gqa(Some(OsStr::new("0"))), Ok(0));
+        assert_eq!(parse_fa2_packed_gqa(Some(OsStr::new("1"))), Ok(1));
+        for bad in ["", "01", "true", "false", "-1", "2", " 1", "1 ", "0\n"] {
+            assert!(parse_fa2_packed_gqa(Some(OsStr::new(bad))).is_err());
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn packed_gqa_flag_rejects_non_utf8() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = std::ffi::OsString::from_vec(vec![0xff]);
+        assert!(parse_fa2_packed_gqa(Some(&invalid)).is_err());
+    }
     #[test]
     fn median_and_percentiles() {
         assert_eq!(quantile(&[4., 1., 3., 2.], 0.5), 2.5);

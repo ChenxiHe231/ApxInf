@@ -564,6 +564,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if profiling && (autotune || repeats != 1 || matches!(benchmark_mode, BenchmarkMode::Both)) {
         return Err("--profile-measured requires one non-autotune repeat and one --mode".into());
     }
+    let fa2_packed_gqa = benchmark::pin_fa2_packed_gqa()?;
     std::env::set_var("APXINF_REQUIRE_RECIPES", if autotune { "0" } else { "1" });
     benchmark::validate_tuning_path(&tuning_path, autotune)?;
     if tuning_path.as_ref().is_some_and(|path| !path.is_absolute()) {
@@ -609,6 +610,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "{}",
         json!({
             "schema": "apxinf.qwen35.benchmark.config.v2",
+            "fa2_packed_gqa": fa2_packed_gqa,
             "checkpoint": checkpoint,
             "device": device,
             "prompt_tokens": prompt_tokens,

@@ -982,4 +982,84 @@ class MatrixContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'untracked'):bench.verify_identity(bad,snapshot)
 
 
+class PackedGqaMetadataContracts(unittest.TestCase):
+    def test_environment_pins_off_or_exact_on_and_rejects_invalid(self):
+        self.assertEqual(bench.environment(args())[bench.FA2_PACKED_GQA_ENV], '0')
+        for value in ('0','1'):
+            self.assertEqual(bench.environment(args(env=[bench.FA2_PACKED_GQA_ENV+'='+value]))[bench.FA2_PACKED_GQA_ENV],value)
+        for value in ('','01','true','false','-1','2',' 1','1 ','0\n'):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'APXINF_FA2_PACKED_GQA'):
+                bench.environment(args(env=[bench.FA2_PACKED_GQA_ENV+'='+value]))
+        self.assertNotIn('APXINF_ATTENTION_REPORT',bench.environment(args(env=[bench.FA2_PACKED_GQA_ENV+'=1'])))
+
+    def test_legacy_metadata_is_only_default_off_for_prefill_and_decode(self):
+        for case in (bench.canonical_cases()[0],bench.canonical_cases()[9]):
+            records=fixture(case)
+            self.assertEqual(bench.validate_records(records,case,args())['fa2_packed_gqa'],dict(effective=0,reporting='legacy_missing_default_off'))
+            with self.assertRaisesRegex(ValueError,'ON requires explicit'):
+                bench.validate_records(records,case,args(env=[bench.FA2_PACKED_GQA_ENV+'=1']))
+
+    def test_explicit_native_metadata_must_match_integer_flag(self):
+        case=bench.canonical_cases()[9]
+        for flag in (0,1):
+            opts=args(env=[bench.FA2_PACKED_GQA_ENV+'='+str(flag)])
+            records=fixture(case,opts);records[0]['fa2_packed_gqa']=flag
+            self.assertEqual(bench.validate_records(records,case,opts)['fa2_packed_gqa'],dict(effective=flag,reporting='explicit_pinned_0_or_1'))
+            for bad in (None,True,False,'0','1',-1,2,1-flag):
+                records[0]['fa2_packed_gqa']=bad
+                with self.subTest(flag=flag,bad=bad),self.assertRaisesRegex(ValueError,'metadata/environment mismatch'):
+                    bench.validate_records(records,case,opts)
+
+    def test_worker_on_requires_matching_explicit_effective_flag(self):
+        case=bench.canonical_cases()[9];opts=args(env=[bench.FA2_PACKED_GQA_ENV+'=1']);env=bench.environment(opts)
+        records=fixture(case,opts);records[0]['fa2_packed_gqa']=1;recipe=recipe_inventory_fixture()
+        raw=raw_output(records,effective_env=env)
+        def validate(raw):
+            return bench.validate_run(raw,case,opts,recipe,recipe,'a'*64,dict(transport_returncode=0),env)
+        self.assertIn('explicit worker environment',validate(raw)['failures'][0])
+        lines=raw.splitlines();index=next(i for i,x in enumerate(lines) if x.startswith(bench.SOURCE_MARKER))
+        process=json.loads(lines[index][len(bench.SOURCE_MARKER):]);process['effective_attention_environment']={bench.FA2_PACKED_GQA_ENV:'1'}
+        lines[index]=bench.SOURCE_MARKER+json.dumps(process)
+        self.assertTrue(validate('\n'.join(lines))['valid'])
+        process['effective_attention_environment'][bench.FA2_PACKED_GQA_ENV]='0';lines[index]=bench.SOURCE_MARKER+json.dumps(process)
+        self.assertIn('effective attention environment mismatch',validate('\n'.join(lines))['failures'][0])
+
+    def test_separate_recipe_audit_keeps_actual_provider_config_split_and_geometry(self):
+        line='[apxinf-attn] sem=4 b=1 q=4 k=40960 cap=40960 qh=16 kvh=2 d=256 dyn=0 qs=40956 det=0 | flash-attention-2-packed-gqa-q1to4-v1 config=16 workspace=1234 source=memory-recipe\n'
+        report='[apxinf-gemm] m=4 | CUBLAS source=recipe\n'+line+line
+        got=bench.audit_recipe_sources(report,True)
+        self.assertEqual(got['dispatches'],3);self.assertEqual(len(got['attention_dispatches']),1)
+        row=got['attention_dispatches'][0]
+        self.assertEqual((row['provider'],row['configuration'],row['split_kv_s'],row['reports']),('flash-attention-2-packed-gqa-q1to4-v1',16,16,2))
+        self.assertEqual(row['geometry']['q'],'4');self.assertEqual(row['geometry']['k'],'40960')
+        for wrong in ('config=0','config=-1','config=bad'):
+            with self.assertRaisesRegex(ValueError,'positive S'):
+                bench.audit_recipe_sources(report.replace('config=16',wrong),True)
+        legacy=bench.audit_recipe_sources('[apxinf-attn] q=1 | FA2 source=recipe\n',False)['attention_dispatches'][0]
+        self.assertIsNone(legacy['split_kv_s'])
+
+    def test_binding_requires_same_elf_flag_case_recipes_and_actual_provider(self):
+        provider=dict(provider='flash-attention-2-packed-gqa-q1to4-v1',configuration=8,split_kv_s=8,reports=10,geometry=dict(q='4',k='40960'))
+        common=dict(valid=True,case='decode-kv4k-o1k',argv=['/bin/decode','/model'],environment={bench.FA2_PACKED_GQA_ENV:'1'},
+            attention_environment_reporting='explicit_pinned_0_or_1',observed=dict(fa2_packed_gqa=dict(effective=1,reporting='explicit_pinned_0_or_1')),
+            process=dict(sha256='a'*64),recipes_after=dict(manifest_sha256='b'*64),log_sha256='c'*64)
+        formal=dict(copy.deepcopy(common),run_mode='formal');audit=dict(copy.deepcopy(common),run_mode='audit',recipe_audit=dict(attention_dispatches=[provider]))
+        audit['environment']['APXINF_ATTENTION_REPORT']='1'
+        self.assertTrue(bench.bind_packed_gqa_audit(formal,audit)['verified'])
+        for wrong in ('elf','recipe','case','flag','native','worker','provider','S','checkpoint','argv','missing_report'):
+            bad=copy.deepcopy(audit)
+            if wrong=='elf':bad['process']['sha256']='d'*64
+            elif wrong=='recipe':bad['recipes_after']['manifest_sha256']='d'*64
+            elif wrong=='case':bad['case']='other'
+            elif wrong=='flag':bad['environment'][bench.FA2_PACKED_GQA_ENV]='0'
+            elif wrong=='native':bad['observed']['fa2_packed_gqa']['reporting']='legacy_missing_default_off'
+            elif wrong=='worker':bad['attention_environment_reporting']='legacy_missing_default_off'
+            elif wrong=='provider':bad['recipe_audit']['attention_dispatches']=[]
+            elif wrong=='S':bad['recipe_audit']['attention_dispatches'][0]['split_kv_s']=None
+            elif wrong=='argv':bad['argv']=[]
+            elif wrong=='missing_report':bad['environment'].pop('APXINF_ATTENTION_REPORT')
+            else:bad['argv'][1]='/different-model'
+            with self.subTest(wrong=wrong),self.assertRaises(ValueError):bench.bind_packed_gqa_audit(formal,bad)
+
+
 if __name__=='__main__':unittest.main()
