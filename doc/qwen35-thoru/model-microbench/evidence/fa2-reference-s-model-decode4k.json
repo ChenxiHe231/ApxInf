@@ -1,0 +1,1478 @@
+{
+  "schema": "apxinf.fa2-reference-s-model-decode4k.evidence.v1",
+  "status": "REVIEW_READY_NOT_COMMITTED_CANDIDATE_ONLY_PROFILE",
+  "scope": "one fixed4K+1024 greedyMTP3 pairedtrajectory; not fullP2/modelmathematics or15x30percent acceptance",
+  "raw_refs_note": "All refs are relative to original worktree root and identify ignored original artifacts NOT included in git",
+  "calibration": {
+    "outer": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-calibration-gpu-01/receipt.json",
+      "sha256": "7ab429ee45487f261d8528227bab0531579cb2aea296a9d9dad1550b36850688",
+      "bytes": 146330,
+      "in_git": false
+    },
+    "launch": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-calibration-gpu-01/launch.json",
+      "sha256": "0f01eeba6657d0eb604a537d54931f17abeb28d607f01679d44d73bb0b7b8c6e",
+      "bytes": 1241,
+      "in_git": false
+    },
+    "launch_code": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-calibration-gpu-01/locked-launch-code.py",
+      "sha256": "85241dc50d51345f0cff0a823c82bc01bfca8c0d423f23220ec648476ed44701",
+      "bytes": 11377,
+      "in_git": false
+    },
+    "log": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-calibration-gpu-01/calibration.log",
+      "sha256": "a13ea8e9c1fa9bc14e4fa41b2b1b0fc2de1694cefedb2a8ec8889fb7e447c65a",
+      "bytes": 526196,
+      "in_git": false
+    },
+    "provenance": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-calibration-gpu-01/provenance.json",
+      "sha256": "5a6d03d70a194e17a73a782754dc2c2adf3be2fb9ea28f3ac50b6ae845b2bc77",
+      "bytes": 484696,
+      "in_git": false
+    },
+    "complete_receipt": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-calibration-gpu-01/calibrated-assets/calibration-receipt.json",
+      "sha256": "e46bb5358e9fc467824e4aea182d32f2cfdc755b7a296080ac12d02c2cdce09e",
+      "bytes": 947458,
+      "in_git": false
+    },
+    "identity_before": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-calibration-gpu-01/identity-before.json",
+      "sha256": "77d1cb867ddc745bd777d4aa5f0aa55ffb0fb6cbbde568ff0e335822b7fb6f38",
+      "bytes": 74778,
+      "in_git": false
+    },
+    "identity_after": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-calibration-gpu-01/identity-after.json",
+      "sha256": "77d1cb867ddc745bd777d4aa5f0aa55ffb0fb6cbbde568ff0e335822b7fb6f38",
+      "bytes": 74778,
+      "in_git": false
+    },
+    "driver_sha256": "444eaf7730eaa3c339b942f28e1247218fb9225dd1ec606f512bc4eb5c92e069",
+    "model_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4",
+    "native_archive_sha256": "15f2939944afb6a5408a3f437859be0234bf99d8ca935ca23627495a879f5db3",
+    "namespace": "attention-kb1-1be98f5387acae8edc0852a681e9a973",
+    "recipe_count": 352,
+    "actual_synthetic_specs": 402,
+    "reference_S_distribution": {
+      "5": 119,
+      "6": 87,
+      "7": 146
+    },
+    "worst_max_abs": 0.00037197595306048825,
+    "method": "reference-s-constrained-singleton",
+    "unrestricted_fastest_claim": false,
+    "original_parent_candidate_unchanged": true,
+    "verify_events": [
+      {
+        "stage": "before",
+        "returncode": 0,
+        "stdout": "{\"status\": \"PASS all source/archive/driver/model/component SHA256 unchanged\", \"files\": 833}\n",
+        "stderr": ""
+      },
+      {
+        "stage": "after",
+        "returncode": 0,
+        "stdout": "{\"status\": \"PASS all source/archive/driver/model/component SHA256 unchanged\", \"files\": 833}\n",
+        "stderr": ""
+      }
+    ],
+    "clock_restored": {
+      "restored": {
+        "min_freq": "54000000",
+        "max_freq": "1206000000",
+        "governor": "simple_ondemand",
+        "cur_freq": "54000000"
+      },
+      "ok": true,
+      "lock_held": true,
+      "child_reaped": true
+    },
+    "actual_export_manifest_canonical_sha256": "9012ff94d906c33ab5d3302df44d99074cfa0fbcfc3561cf77aeed807f3e779d",
+    "independent_validator": {
+      "validate.py": {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-calibration-validator-01/validate.py",
+        "sha256": "911194b0d08ec14eb9e687c1ec6325cccb2c08e297143c61065e5368ad7eb404",
+        "bytes": 13133,
+        "in_git": false
+      },
+      "manifest.json": {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-calibration-validator-01/manifest.json",
+        "sha256": "dfc2cfc7a42181708befdd95f6cce791f4c3c03405b6aa60cc580d3f0618a824",
+        "bytes": 1755,
+        "in_git": false
+      },
+      "actual-audit.json": {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-calibration-validator-01/actual-audit.json",
+        "sha256": "672754e3d0d5040086cdb33ec49bd599135bd19cf890fc648062287cda241013",
+        "bytes": 43720,
+        "in_git": false
+      },
+      "execution-receipt.json": {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-calibration-validator-01/execution-receipt.json",
+        "sha256": "5aa9bedd653c7e767510d0a3ef7ab7bcfa2c3b5fd883aa95a8e97d6046ff5d5f",
+        "bytes": 102702,
+        "in_git": false
+      },
+      "test_validator.py": {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-calibration-validator-01/test_validator.py",
+        "sha256": "59b2adf125b33bb9ec375400394f5e1dc6ecd824ca232fb25fe0a634a4347179",
+        "bytes": 5279,
+        "in_git": false
+      }
+    },
+    "coverage": "declared4K+1024/draft3; synthetic normalpreparedBF16 K<=5123 plusQ1bucket endpoints/64tile neighbors, not actualcheckpointQKV acrossalllayers/8K..48K"
+  },
+  "paired_model": {
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/receipt.json",
+      "sha256": "03c228acffe4d89eb06327223faf64fec19d0a0229e9ecafdf61cb85b2ae2521",
+      "bytes": 10255,
+      "in_git": false
+    },
+    "arms": [
+      {
+        "arm": "parent",
+        "run_mode": "formal",
+        "rows": [
+          {
+            "iteration": 0,
+            "warmup": true,
+            "tps": 82.40437371161607,
+            "tpot_ms": 12.135278201368525,
+            "first_callback_elapsed_ns": 968441120,
+            "last_callback_elapsed_ns": 13382830720,
+            "generate_return_elapsed_ns": 13382990164,
+            "post_last_callback_ms": 0.15944399999999997,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 1,
+            "warmup": true,
+            "tps": 82.56779648428017,
+            "tpot_ms": 12.111259384164224,
+            "first_callback_elapsed_ns": 931760592,
+            "last_callback_elapsed_ns": 13321578942,
+            "generate_return_elapsed_ns": 13321741025,
+            "post_last_callback_ms": 0.162083,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 2,
+            "warmup": false,
+            "tps": 82.62439977605742,
+            "tpot_ms": 12.102962353861193,
+            "first_callback_elapsed_ns": 937654500,
+            "last_callback_elapsed_ns": 13318984988,
+            "generate_return_elapsed_ns": 13319147720,
+            "post_last_callback_ms": 0.16273200000000002,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 3,
+            "warmup": false,
+            "tps": 82.60385734354114,
+            "tpot_ms": 12.105972192570869,
+            "first_callback_elapsed_ns": 931819750,
+            "last_callback_elapsed_ns": 13316229303,
+            "generate_return_elapsed_ns": 13316390173,
+            "post_last_callback_ms": 0.16086999999999999,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 4,
+            "warmup": false,
+            "tps": 82.63668060322033,
+            "tpot_ms": 12.101163704789835,
+            "first_callback_elapsed_ns": 936306722,
+            "last_callback_elapsed_ns": 13315797192,
+            "generate_return_elapsed_ns": 13315955488,
+            "post_last_callback_ms": 0.158296,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 5,
+            "warmup": false,
+            "tps": 82.66605372209362,
+            "tpot_ms": 12.096863887585533,
+            "first_callback_elapsed_ns": 930443101,
+            "last_callback_elapsed_ns": 13305534858,
+            "generate_return_elapsed_ns": 13305694182,
+            "post_last_callback_ms": 0.159324,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 6,
+            "warmup": false,
+            "tps": 82.56900512830425,
+            "tpot_ms": 12.111082099706746,
+            "first_callback_elapsed_ns": 933387416,
+            "last_callback_elapsed_ns": 13323024404,
+            "generate_return_elapsed_ns": 13323186099,
+            "post_last_callback_ms": 0.161695,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          }
+        ],
+        "median_tps": 82.62439977605742,
+        "median_tpot_ms": 12.102962353861193,
+        "audit_is_formal_score": true,
+        "source": {
+          "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+          "source_dirty": true,
+          "source_status": " M crates/apxinf-cuda-new/build.rs\n M crates/apxinf-cuda-new/native/adapters/attention/candidates.cpp\n M crates/apxinf-cuda-new/native/adapters/attention/internal.h\n M crates/apxinf-cuda-new/native/adapters/attention/providers/fa2.cpp\n M crates/apxinf-cuda-new/native/adapters/attention/tuning_key.cpp\n M crates/apxinf-cuda-new/native/adapters/elementwise/execution.cpp\n M crates/apxinf-cuda-new/native/adapters/qwen35_attention.cu\n M crates/apxinf-cuda-new/native/include/apxinf_cuda/qwen35_attention.h\n M crates/apxinf-cuda-new/native/kernels/custom/gdn_ops.cu\n M crates/apxinf-cuda-new/native/kernels/custom/mlp_ops.h\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv.cu\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv_stub.cpp\n M crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/runner.cu\n M crates/apxinf-cuda-new/src/ffi/abi/qwen35_attention.rs\n M crates/apxinf-cuda-new/src/ffi/raw/cuda_runtime.rs\n M crates/apxinf-cuda-new/src/ops/mlp.rs\n M crates/apxinf-cuda-new/src/ops/mod.rs\n M crates/apxinf-cuda-new/src/ops/qwen35_mixers.rs\n M crates/apxinf-cuda-new/src/transfers.rs\n M crates/apxinf-model/examples/qwen35_context_bench.rs\n M crates/apxinf-model/examples/qwen35_mtp_bench.rs\n M crates/apxinf-model/examples/support/qwen35_benchmark.rs\n M crates/apxinf-model/src/qwen35moe/attention_backend.rs\n M crates/apxinf-model/src/qwen35moe/decoder.rs\n M crates/apxinf-model/src/qwen35moe/device_weights.rs\n M crates/apxinf-model/src/qwen35moe/forward.rs\n M crates/apxinf-model/src/qwen35moe/mtp_runtime.rs\n M crates/apxinf-model/src/qwen35moe/session.rs\n M crates/apxinf-model/tests/qwen35_real_moe_bench.rs\n M doc/qwen35-thoru/MODEL_MICROBENCH_PRECISION.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_TASKS.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_USAGE.md\n M scripts/bench_qwen35_model_matrix.py\n M scripts/test_bench_qwen35_model_matrix.py\n?? crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh\n?? crates/apxinf-cuda-new/native/kernels/fa2/fa2_packed_gqa.cu\n?? crates/apxinf-cuda-new/native/kernels/fa2/flash_attn/packed_gqa_fwd.h\n?? crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs\n?? crates/apxinf-cuda-new/tests/fa2_packed_gqa.rs\n?? crates/apxinf-cuda-new/tests/fa2_packed_gqa_bench.rs\n?? crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs\n?? crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs\n?? crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs\n?? crates/apxinf-cuda-new/tests/support/fa2_packed_gqa_uniform_reference.rs\n?? crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs\n?? crates/apxinf-model/examples/support/qwen35_callback_timing.rs\n?? crates/apxinf-model/examples/support/qwen35_decode_profile.rs\n?? crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs\n?? crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs\n?? crates/apxinf-model/tests/qwen35_real_state_protocol.rs\n?? crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs\n?? doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json\n",
+          "source_patch_sha256": "21b01ef7374dedd0e85aff36f82f491810897f7560007c181216349564499bb3",
+          "source_untracked_sha256": {
+            "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+            "crates/apxinf-cuda-new/native/kernels/fa2/fa2_packed_gqa.cu": "a912c38d427f1d8032a16feccc338e77a9e975b80ca5c72ec184b55b2f85d22f",
+            "crates/apxinf-cuda-new/native/kernels/fa2/flash_attn/packed_gqa_fwd.h": "c3dccf7123b75a2a75977eb2d4ebad271738e73b15931e883303aa1406f0c05e",
+            "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+            "crates/apxinf-cuda-new/tests/fa2_packed_gqa.rs": "c4600c2cea4b00becbc32d0aeabe3beb2937db0569944dbc7906d78467bfee17",
+            "crates/apxinf-cuda-new/tests/fa2_packed_gqa_bench.rs": "478df2984ad7b1774c4e1dae01408514efdaed8272802205dee92fc3f6a833c6",
+            "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+            "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+            "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+            "crates/apxinf-cuda-new/tests/support/fa2_packed_gqa_uniform_reference.rs": "a05d69831dd5f3fae800dd1ca77827408e0d00a6e43a0998efd2163fb517dcba",
+            "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+            "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+            "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+            "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+            "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+            "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+            "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+            "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "c2b69f56a2d8706379c874f6cf0df25389dd34d2631d2373a97250ac3484d5be",
+            "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+            "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+          }
+        },
+        "binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4",
+        "model_assets_canonical_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_NVTX": "0",
+          "APXINF_FA2_PACKED_GQA": "0",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "input_identity": {
+          "seed_hex": "35a3bf0440960001",
+          "tokens": 4096,
+          "fnv1a64": "da7ee97285eaa2a3",
+          "sha256": "25222540f75fb86a5642ca28152acfdbda3013b95a44d776ffc01e1ea3739ff8"
+        },
+        "recipe_inventory_count": 405,
+        "recipe_manifest_sha256": "5f2f11b413e8032e9cff17a0c47cb3bd7ee2c476f1a0ba1c6642fd523989345a",
+        "recipes_immutable": true,
+        "process": {
+          "pid": 229785,
+          "kind": "benchmark",
+          "direct_child_inherits_gpu_lock": true,
+          "effective_mtp_environment": {
+            "APXINF_QWEN35_MTP_FIXED_DEPTH": "3",
+            "APXINF_QWEN35_SCALAR_TPOT_MS": null
+          },
+          "effective_attention_environment": {
+            "APXINF_FA2_PACKED_GQA": "0"
+          },
+          "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/fa2-model-frozen-01/bin/qwen35_mtp_bench",
+          "sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "exit": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "target_binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "lock": {
+          "path": "/tmp/apxinf-gpu.lock",
+          "acquired": true,
+          "wait_ms": 78.95600900519639,
+          "prior_holder": null,
+          "owner_pid": 229782,
+          "target_binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "clock_fixed": {
+          "before": {
+            "min_freq": "54000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "54000000"
+          },
+          "fixed": {
+            "min_freq": "1206000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "1206000000"
+          },
+          "lock_held": true,
+          "policy": "matched1206MHzGPU; frequency changes are not operator gains"
+        },
+        "clock_restored": {
+          "restored": {
+            "min_freq": "54000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "54000000"
+          },
+          "ok": true,
+          "lock_held": true,
+          "child_reaped": true
+        },
+        "packed_dispatches_reported": 0,
+        "dispatch_audit_canonical_sha256": "91bbdef266596b28a8b00a45b8703d66b9a12d359e5f2ad11e8a0cf08623bf57",
+        "raw_refs": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-model-decode4k-ab-01/control/metadata.json",
+            "sha256": "a179398660168149b3bb091514d23dd99e9ac7f3d6ce9fe3dafe585b7620bfcf",
+            "bytes": 101893,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-model-decode4k-ab-01/control/summary.json",
+            "sha256": "91e07499e54f9c3bab6543cd94479a7a2d96d33e2227c3e0f4e1058195b02581",
+            "bytes": 420711,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-model-decode4k-ab-01/control/decode-kv4k-o1k.json",
+            "sha256": "e2780406a04a872f5a8c39aead5b252a79eaa9dc671bf612c621f5656a7f4682",
+            "bytes": 304307,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-model-decode4k-ab-01/control/decode-kv4k-o1k.log",
+            "sha256": "9ccef89e70c8dacd97c0abbe9890f9a71d085b17666716f6a0a29795d3ddee2c",
+            "bytes": 122051,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-model-decode4k-ab-01/control/collector.py",
+            "sha256": "a0fbcd6accdeddda6a91c59e1a953c507d850d2462315f73b35eaa12fc537187",
+            "bytes": 84523,
+            "in_git": false
+          }
+        ]
+      },
+      {
+        "arm": "candidate",
+        "run_mode": "formal",
+        "rows": [
+          {
+            "iteration": 0,
+            "warmup": true,
+            "tps": 86.68286278818915,
+            "tpot_ms": 11.536305652981428,
+            "first_callback_elapsed_ns": 969455981,
+            "last_callback_elapsed_ns": 12771096664,
+            "generate_return_elapsed_ns": 12771260414,
+            "post_last_callback_ms": 0.16375,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 1,
+            "warmup": true,
+            "tps": 86.522386001674,
+            "tpot_ms": 11.557702534701855,
+            "first_callback_elapsed_ns": 938091509,
+            "last_callback_elapsed_ns": 12761621202,
+            "generate_return_elapsed_ns": 12761780276,
+            "post_last_callback_ms": 0.159074,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 2,
+            "warmup": false,
+            "tps": 86.55649381591503,
+            "tpot_ms": 11.553148191593353,
+            "first_callback_elapsed_ns": 934109694,
+            "last_callback_elapsed_ns": 12752980294,
+            "generate_return_elapsed_ns": 12753140683,
+            "post_last_callback_ms": 0.160389,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 3,
+            "warmup": false,
+            "tps": 86.80337685337473,
+            "tpot_ms": 11.520289143695013,
+            "first_callback_elapsed_ns": 936654518,
+            "last_callback_elapsed_ns": 12721910312,
+            "generate_return_elapsed_ns": 12722114831,
+            "post_last_callback_ms": 0.204519,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 4,
+            "warmup": false,
+            "tps": 86.49140508275441,
+            "tpot_ms": 11.561842463343108,
+            "first_callback_elapsed_ns": 939499093,
+            "last_callback_elapsed_ns": 12767263933,
+            "generate_return_elapsed_ns": 12767420526,
+            "post_last_callback_ms": 0.156593,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 5,
+            "warmup": false,
+            "tps": 86.70662481491411,
+            "tpot_ms": 11.53314411827957,
+            "first_callback_elapsed_ns": 939874278,
+            "last_callback_elapsed_ns": 12738280711,
+            "generate_return_elapsed_ns": 12738455989,
+            "post_last_callback_ms": 0.17527800000000002,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 6,
+            "warmup": false,
+            "tps": 86.67142788488339,
+            "tpot_ms": 11.537827683284458,
+            "first_callback_elapsed_ns": 936570426,
+            "last_callback_elapsed_ns": 12739768146,
+            "generate_return_elapsed_ns": 12739930553,
+            "post_last_callback_ms": 0.162407,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          }
+        ],
+        "median_tps": 86.67142788488339,
+        "median_tpot_ms": 11.537827683284458,
+        "audit_is_formal_score": true,
+        "source": {
+          "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+          "source_dirty": true,
+          "source_status": " M crates/apxinf-cuda-new/build.rs\n M crates/apxinf-cuda-new/native/adapters/attention/candidates.cpp\n M crates/apxinf-cuda-new/native/adapters/attention/internal.h\n M crates/apxinf-cuda-new/native/adapters/attention/providers/fa2.cpp\n M crates/apxinf-cuda-new/native/adapters/attention/tuning_key.cpp\n M crates/apxinf-cuda-new/native/adapters/elementwise/execution.cpp\n M crates/apxinf-cuda-new/native/adapters/qwen35_attention.cu\n M crates/apxinf-cuda-new/native/include/apxinf_cuda/qwen35_attention.h\n M crates/apxinf-cuda-new/native/kernels/custom/gdn_ops.cu\n M crates/apxinf-cuda-new/native/kernels/custom/mlp_ops.h\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv.cu\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv_stub.cpp\n M crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/runner.cu\n M crates/apxinf-cuda-new/src/ffi/abi/qwen35_attention.rs\n M crates/apxinf-cuda-new/src/ffi/raw/cuda_runtime.rs\n M crates/apxinf-cuda-new/src/ops/mlp.rs\n M crates/apxinf-cuda-new/src/ops/mod.rs\n M crates/apxinf-cuda-new/src/ops/qwen35_mixers.rs\n M crates/apxinf-cuda-new/src/transfers.rs\n M crates/apxinf-model/examples/qwen35_context_bench.rs\n M crates/apxinf-model/examples/qwen35_mtp_bench.rs\n M crates/apxinf-model/examples/support/qwen35_benchmark.rs\n M crates/apxinf-model/src/qwen35moe/attention_backend.rs\n M crates/apxinf-model/src/qwen35moe/decoder.rs\n M crates/apxinf-model/src/qwen35moe/device_weights.rs\n M crates/apxinf-model/src/qwen35moe/forward.rs\n M crates/apxinf-model/src/qwen35moe/mtp_runtime.rs\n M crates/apxinf-model/src/qwen35moe/session.rs\n M crates/apxinf-model/tests/qwen35_real_moe_bench.rs\n M doc/qwen35-thoru/MODEL_MICROBENCH_PRECISION.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_TASKS.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_USAGE.md\n M scripts/bench_qwen35_model_matrix.py\n M scripts/test_bench_qwen35_model_matrix.py\n?? crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh\n?? crates/apxinf-cuda-new/native/kernels/fa2/fa2_packed_gqa.cu\n?? crates/apxinf-cuda-new/native/kernels/fa2/flash_attn/packed_gqa_fwd.h\n?? crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs\n?? crates/apxinf-cuda-new/tests/fa2_packed_gqa.rs\n?? crates/apxinf-cuda-new/tests/fa2_packed_gqa_bench.rs\n?? crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs\n?? crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs\n?? crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs\n?? crates/apxinf-cuda-new/tests/support/fa2_packed_gqa_uniform_reference.rs\n?? crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs\n?? crates/apxinf-model/examples/support/qwen35_callback_timing.rs\n?? crates/apxinf-model/examples/support/qwen35_decode_profile.rs\n?? crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs\n?? crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs\n?? crates/apxinf-model/tests/qwen35_real_state_protocol.rs\n?? crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs\n?? doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json\n",
+          "source_patch_sha256": "21b01ef7374dedd0e85aff36f82f491810897f7560007c181216349564499bb3",
+          "source_untracked_sha256": {
+            "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+            "crates/apxinf-cuda-new/native/kernels/fa2/fa2_packed_gqa.cu": "a912c38d427f1d8032a16feccc338e77a9e975b80ca5c72ec184b55b2f85d22f",
+            "crates/apxinf-cuda-new/native/kernels/fa2/flash_attn/packed_gqa_fwd.h": "c3dccf7123b75a2a75977eb2d4ebad271738e73b15931e883303aa1406f0c05e",
+            "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+            "crates/apxinf-cuda-new/tests/fa2_packed_gqa.rs": "c4600c2cea4b00becbc32d0aeabe3beb2937db0569944dbc7906d78467bfee17",
+            "crates/apxinf-cuda-new/tests/fa2_packed_gqa_bench.rs": "478df2984ad7b1774c4e1dae01408514efdaed8272802205dee92fc3f6a833c6",
+            "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+            "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+            "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+            "crates/apxinf-cuda-new/tests/support/fa2_packed_gqa_uniform_reference.rs": "a05d69831dd5f3fae800dd1ca77827408e0d00a6e43a0998efd2163fb517dcba",
+            "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+            "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+            "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+            "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+            "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+            "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+            "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+            "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "c2b69f56a2d8706379c874f6cf0df25389dd34d2631d2373a97250ac3484d5be",
+            "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+            "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+          }
+        },
+        "binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4",
+        "model_assets_canonical_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_NVTX": "0",
+          "APXINF_FA2_PACKED_GQA": "1",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "input_identity": {
+          "seed_hex": "35a3bf0440960001",
+          "tokens": 4096,
+          "fnv1a64": "da7ee97285eaa2a3",
+          "sha256": "25222540f75fb86a5642ca28152acfdbda3013b95a44d776ffc01e1ea3739ff8"
+        },
+        "recipe_inventory_count": 757,
+        "recipe_manifest_sha256": "054a515dee5e9948849530cddbf4e02db3cffa7ad7268e8859790ffd200b8d92",
+        "recipes_immutable": true,
+        "process": {
+          "pid": 245504,
+          "kind": "benchmark",
+          "direct_child_inherits_gpu_lock": true,
+          "effective_mtp_environment": {
+            "APXINF_QWEN35_MTP_FIXED_DEPTH": "3",
+            "APXINF_QWEN35_SCALAR_TPOT_MS": null
+          },
+          "effective_attention_environment": {
+            "APXINF_FA2_PACKED_GQA": "1"
+          },
+          "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/fa2-model-frozen-01/bin/qwen35_mtp_bench",
+          "sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "exit": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "target_binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "lock": {
+          "path": "/tmp/apxinf-gpu.lock",
+          "acquired": true,
+          "wait_ms": 78.92354599607643,
+          "prior_holder": null,
+          "owner_pid": 245501,
+          "target_binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "clock_fixed": {
+          "before": {
+            "min_freq": "54000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "54000000"
+          },
+          "fixed": {
+            "min_freq": "1206000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "1206000000"
+          },
+          "lock_held": true,
+          "policy": "matched1206MHzGPU; frequency changes are not operator gains"
+        },
+        "clock_restored": {
+          "restored": {
+            "min_freq": "54000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "54000000"
+          },
+          "ok": true,
+          "lock_held": true,
+          "child_reaped": true
+        },
+        "packed_dispatches_reported": 0,
+        "dispatch_audit_canonical_sha256": "91bbdef266596b28a8b00a45b8703d66b9a12d359e5f2ad11e8a0cf08623bf57",
+        "raw_refs": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/formal/metadata.json",
+            "sha256": "832958f9a3b7fd29537538a90d87dfd27c60923d95b0db2e82cf79753dc5549a",
+            "bytes": 289089,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/formal/summary.json",
+            "sha256": "f67fd5c88b9e29726a44843b76bcc6bbf0102ce14b71f5f17b2430c2e2ae01f6",
+            "bytes": 753226,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/formal/decode-kv4k-o1k.json",
+            "sha256": "344b6164d0d3e3b9aab064f447fb7d767a5b18bd6a94e8a56f0d19bbbc5fe341",
+            "bytes": 546378,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/formal/decode-kv4k-o1k.log",
+            "sha256": "472a30ef831c27281be82ad52e38a0c6e7971c70363bf8dc31fdf6a9635720da",
+            "bytes": 212790,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/formal/collector.py",
+            "sha256": "a0fbcd6accdeddda6a91c59e1a953c507d850d2462315f73b35eaa12fc537187",
+            "bytes": 84523,
+            "in_git": false
+          }
+        ]
+      },
+      {
+        "arm": "candidate-audit",
+        "run_mode": "audit",
+        "rows": [
+          {
+            "iteration": 0,
+            "warmup": true,
+            "tps": 85.11257190767668,
+            "tpot_ms": 11.749145603128055,
+            "first_callback_elapsed_ns": 983837611,
+            "last_callback_elapsed_ns": 13003213563,
+            "generate_return_elapsed_ns": 13003380766,
+            "post_last_callback_ms": 0.167203,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 1,
+            "warmup": true,
+            "tps": 86.08108513012827,
+            "tpot_ms": 11.616953927663735,
+            "first_callback_elapsed_ns": 947648648,
+            "last_callback_elapsed_ns": 12831792516,
+            "generate_return_elapsed_ns": 12831957284,
+            "post_last_callback_ms": 0.164768,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          },
+          {
+            "iteration": 2,
+            "warmup": false,
+            "tps": 85.8457784659771,
+            "tpot_ms": 11.648796456500488,
+            "first_callback_elapsed_ns": 946039676,
+            "last_callback_elapsed_ns": 12862758451,
+            "generate_return_elapsed_ns": 12862926146,
+            "post_last_callback_ms": 0.167695,
+            "digest": "a79ed7c8bf839729",
+            "MTP_canonical_sha256": "ae6383358283344e61f7eac3ed69f321a63aedede951119c42b0235c08811818"
+          }
+        ],
+        "median_tps": 85.8457784659771,
+        "median_tpot_ms": 11.648796456500488,
+        "audit_is_formal_score": false,
+        "source": {
+          "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+          "source_dirty": true,
+          "source_status": " M crates/apxinf-cuda-new/build.rs\n M crates/apxinf-cuda-new/native/adapters/attention/candidates.cpp\n M crates/apxinf-cuda-new/native/adapters/attention/internal.h\n M crates/apxinf-cuda-new/native/adapters/attention/providers/fa2.cpp\n M crates/apxinf-cuda-new/native/adapters/attention/tuning_key.cpp\n M crates/apxinf-cuda-new/native/adapters/elementwise/execution.cpp\n M crates/apxinf-cuda-new/native/adapters/qwen35_attention.cu\n M crates/apxinf-cuda-new/native/include/apxinf_cuda/qwen35_attention.h\n M crates/apxinf-cuda-new/native/kernels/custom/gdn_ops.cu\n M crates/apxinf-cuda-new/native/kernels/custom/mlp_ops.h\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv.cu\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv_stub.cpp\n M crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/runner.cu\n M crates/apxinf-cuda-new/src/ffi/abi/qwen35_attention.rs\n M crates/apxinf-cuda-new/src/ffi/raw/cuda_runtime.rs\n M crates/apxinf-cuda-new/src/ops/mlp.rs\n M crates/apxinf-cuda-new/src/ops/mod.rs\n M crates/apxinf-cuda-new/src/ops/qwen35_mixers.rs\n M crates/apxinf-cuda-new/src/transfers.rs\n M crates/apxinf-model/examples/qwen35_context_bench.rs\n M crates/apxinf-model/examples/qwen35_mtp_bench.rs\n M crates/apxinf-model/examples/support/qwen35_benchmark.rs\n M crates/apxinf-model/src/qwen35moe/attention_backend.rs\n M crates/apxinf-model/src/qwen35moe/decoder.rs\n M crates/apxinf-model/src/qwen35moe/device_weights.rs\n M crates/apxinf-model/src/qwen35moe/forward.rs\n M crates/apxinf-model/src/qwen35moe/mtp_runtime.rs\n M crates/apxinf-model/src/qwen35moe/session.rs\n M crates/apxinf-model/tests/qwen35_real_moe_bench.rs\n M doc/qwen35-thoru/MODEL_MICROBENCH_PRECISION.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_TASKS.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_USAGE.md\n M scripts/bench_qwen35_model_matrix.py\n M scripts/test_bench_qwen35_model_matrix.py\n?? crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh\n?? crates/apxinf-cuda-new/native/kernels/fa2/fa2_packed_gqa.cu\n?? crates/apxinf-cuda-new/native/kernels/fa2/flash_attn/packed_gqa_fwd.h\n?? crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs\n?? crates/apxinf-cuda-new/tests/fa2_packed_gqa.rs\n?? crates/apxinf-cuda-new/tests/fa2_packed_gqa_bench.rs\n?? crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs\n?? crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs\n?? crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs\n?? crates/apxinf-cuda-new/tests/support/fa2_packed_gqa_uniform_reference.rs\n?? crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs\n?? crates/apxinf-model/examples/support/qwen35_callback_timing.rs\n?? crates/apxinf-model/examples/support/qwen35_decode_profile.rs\n?? crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs\n?? crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs\n?? crates/apxinf-model/tests/qwen35_real_state_protocol.rs\n?? crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs\n?? doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json\n",
+          "source_patch_sha256": "21b01ef7374dedd0e85aff36f82f491810897f7560007c181216349564499bb3",
+          "source_untracked_sha256": {
+            "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+            "crates/apxinf-cuda-new/native/kernels/fa2/fa2_packed_gqa.cu": "a912c38d427f1d8032a16feccc338e77a9e975b80ca5c72ec184b55b2f85d22f",
+            "crates/apxinf-cuda-new/native/kernels/fa2/flash_attn/packed_gqa_fwd.h": "c3dccf7123b75a2a75977eb2d4ebad271738e73b15931e883303aa1406f0c05e",
+            "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+            "crates/apxinf-cuda-new/tests/fa2_packed_gqa.rs": "c4600c2cea4b00becbc32d0aeabe3beb2937db0569944dbc7906d78467bfee17",
+            "crates/apxinf-cuda-new/tests/fa2_packed_gqa_bench.rs": "478df2984ad7b1774c4e1dae01408514efdaed8272802205dee92fc3f6a833c6",
+            "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+            "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+            "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+            "crates/apxinf-cuda-new/tests/support/fa2_packed_gqa_uniform_reference.rs": "a05d69831dd5f3fae800dd1ca77827408e0d00a6e43a0998efd2163fb517dcba",
+            "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+            "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+            "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+            "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+            "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+            "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+            "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+            "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "c2b69f56a2d8706379c874f6cf0df25389dd34d2631d2373a97250ac3484d5be",
+            "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+            "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+          }
+        },
+        "binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4",
+        "model_assets_canonical_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_NVTX": "0",
+          "APXINF_FA2_PACKED_GQA": "1",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_GEMM_REPORT": "1",
+          "APXINF_ATTENTION_REPORT": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "input_identity": {
+          "seed_hex": "35a3bf0440960001",
+          "tokens": 4096,
+          "fnv1a64": "da7ee97285eaa2a3",
+          "sha256": "25222540f75fb86a5642ca28152acfdbda3013b95a44d776ffc01e1ea3739ff8"
+        },
+        "recipe_inventory_count": 757,
+        "recipe_manifest_sha256": "054a515dee5e9948849530cddbf4e02db3cffa7ad7268e8859790ffd200b8d92",
+        "recipes_immutable": true,
+        "process": {
+          "pid": 244950,
+          "kind": "benchmark",
+          "direct_child_inherits_gpu_lock": true,
+          "effective_mtp_environment": {
+            "APXINF_QWEN35_MTP_FIXED_DEPTH": "3",
+            "APXINF_QWEN35_SCALAR_TPOT_MS": null
+          },
+          "effective_attention_environment": {
+            "APXINF_FA2_PACKED_GQA": "1"
+          },
+          "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/fa2-model-frozen-01/bin/qwen35_mtp_bench",
+          "sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "exit": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "target_binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "lock": {
+          "path": "/tmp/apxinf-gpu.lock",
+          "acquired": true,
+          "wait_ms": 86.61340799881145,
+          "prior_holder": null,
+          "owner_pid": 244947,
+          "target_binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "clock_fixed": {
+          "before": {
+            "min_freq": "54000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "54000000"
+          },
+          "fixed": {
+            "min_freq": "1206000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "1206000000"
+          },
+          "lock_held": true,
+          "policy": "matched1206MHzGPU; frequency changes are not operator gains"
+        },
+        "clock_restored": {
+          "restored": {
+            "min_freq": "54000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "54000000"
+          },
+          "ok": true,
+          "lock_held": true,
+          "child_reaped": true
+        },
+        "packed_dispatches_reported": 10530,
+        "dispatch_audit_canonical_sha256": "0e8322ddcd10e5ec67bd803788d820b0cc8d0b04aa77cb694b3c6287c30c443c",
+        "raw_refs": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/audit/metadata.json",
+            "sha256": "90a11174ad9e6550e78c7558b9d3608a84b498cb7b06f138e1be7f2b4aec01f0",
+            "bytes": 289230,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/audit/summary.json",
+            "sha256": "b55cba23de7f351bc7628356179ee48379debd778208b268d6ffa5b9ca6dc260",
+            "bytes": 1124223,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/audit/decode-kv4k-o1k.json",
+            "sha256": "d6634924373475f6f8495919719a3d51f039870c7ca9928b816babce560a25ed",
+            "bytes": 861880,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/audit/decode-kv4k-o1k.log",
+            "sha256": "c039b7f27bdd3e778438d2135e5208e82f0a99824f3b5227d879a8c301d8f8e2",
+            "bytes": 3273529,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-decode4k-01/audit/collector.py",
+            "sha256": "a0fbcd6accdeddda6a91c59e1a953c507d850d2462315f73b35eaa12fc537187",
+            "bytes": 84523,
+            "in_git": false
+          }
+        ]
+      }
+    ],
+    "common_MTP_counters": {
+      "accepted_prefix_by_depth": [
+        303,
+        208,
+        163
+      ],
+      "bonus_tokens": 163,
+      "committed_accepted_tokens": 673,
+      "correction_tokens": 187,
+      "draft_steps": 3,
+      "emitted_tokens": 1023,
+      "full_accept_rounds": 163,
+      "implementation": "qwen3.6_moe_adaptive_mtp",
+      "matched_by_depth": [
+        303,
+        237,
+        242
+      ],
+      "partial_accept_rounds": 140,
+      "proposed_by_depth": [
+        351,
+        351,
+        351
+      ],
+      "proposed_tokens": 1053,
+      "rounds": 351,
+      "target_committed_rows": 1023,
+      "target_rolled_back_rows": 381,
+      "target_verified_rows": 1404,
+      "verified_accepted_tokens": 674,
+      "zero_accept_rounds": 48
+    },
+    "all17_output_digests_and_full_MTP_stats_equal": true,
+    "measured_token_vectors_publicly_serialized": false,
+    "only_formal_environment_difference": {
+      "APXINF_FA2_PACKED_GQA": [
+        "0",
+        "1"
+      ]
+    },
+    "tpot_reduction_percent": 4.669391294904257,
+    "parent_formal_is_reused_original_sameELF_2warm5": true,
+    "candidate_audit_2warm1_is_not_formal_score": true,
+    "merge_refs": [
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-formal-merge-01/merge.py",
+        "sha256": "3c4e51826b28dc2a2b32fda679cbfee6ef44ef49d0bb132288393b399584bfc3",
+        "bytes": 2216,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-formal-merge-01/stdout",
+        "sha256": "3d9a5bcee2e02a44886291da2999de082af92f0925d8c80dc04d73241fae256e",
+        "bytes": 241,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-formal-merge-01/transport.json",
+        "sha256": "a02d222e1be4a3d356cac5372aa177b9048c9baaa90b42f86d8cfae4569f1286",
+        "bytes": 21,
+        "in_git": false
+      }
+    ],
+    "merge_members": "405unchangednormalparent +352newcalibrated=757immutable",
+    "timing_method": "hostcallback-first-last-v2;1023intervals;prep/calibration/tune excluded"
+  },
+  "failed_autoS": {
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-model-decode4k-ab-01/receipt.json",
+      "sha256": "670057c5a97f887775d07efe8c38793591dbb30aae11acb141423134f8eb9420",
+      "bytes": 16184,
+      "in_git": false
+    },
+    "error": "AssertionError('candidate tune trajectory differs; no candidate formal dispatched')",
+    "parent_digest": "a79ed7c8bf839729",
+    "failed_candidate_digest": "42c19b84f34f0dde",
+    "same_MTP_counters": false,
+    "candidate_formal_dispatched": false,
+    "not_reclassified_as_pass": true
+  },
+  "tools": {
+    "calibrate.cpp": {
+      "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/fa2-reference-s-calibration-plan-01/v2/calibrate.cpp",
+      "sha256": "374aeb3013e41f891359601c40886f76d198fe8339858a14d646037afb32f64f",
+      "bytes": 20414,
+      "in_git": false
+    },
+    "contract.hpp": {
+      "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/fa2-reference-s-calibration-plan-01/v2/contract.hpp",
+      "sha256": "4eabf4995708d0ae39732d0c59e3d61d1654a7f8df983d1966c117f8a440a33b",
+      "bytes": 6223,
+      "in_git": false
+    },
+    "prepare.py": {
+      "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/fa2-reference-s-calibration-plan-01/v2/prepare.py",
+      "sha256": "a6caf687fec61eccb691af20fdaa7952034f51026f65330f5b9512772965fe75",
+      "bytes": 7085,
+      "in_git": false
+    },
+    "manifest.json": {
+      "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/fa2-reference-s-calibration-plan-01/v2/manifest.json",
+      "sha256": "af506b332a46f77026808dcb2ce86b4b483341ce0e5a08e23a07c79d9526cbf7",
+      "bytes": 1431,
+      "in_git": false
+    }
+  },
+  "build_refs": [
+    {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-build-03/receipt.json",
+      "sha256": "d3d8153a087942f954b1c0359ba3deb2fa6d23d78266dbb454b309b30d79a335",
+      "bytes": 47195,
+      "in_git": false
+    }
+  ],
+  "tool_runner_refs": [
+    {
+      "path": "devlocal/model-microbench/recovery-build/fixed-clock-runner-02/fixed_clock_matrix.py",
+      "sha256": "a0fbcd6accdeddda6a91c59e1a953c507d850d2462315f73b35eaa12fc537187",
+      "bytes": 84523,
+      "in_git": false
+    },
+    {
+      "path": "scripts/bench_qwen35_model_matrix.py",
+      "sha256": "d553c66dd54819f1c0d02e1a7313d1f4b7a359dfe8eb16d9467798ac568f23af",
+      "bytes": 82725,
+      "in_git": false
+    }
+  ],
+  "profile": {
+    "status": "CANDIDATE_ONLY_NVTX1; paired parent profile MISSING after two failed attempts; no further retry planned in this evidence",
+    "formal_score_from_profile": false,
+    "paired_profile_delta": null,
+    "raw_refs": [
+      {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-paired-nsys-analysis-01/CANDIDATE02.md",
+        "sha256": "aa547de0a1db39013cd005b26fbcde9756733c3b3984e993b1cff2d7ed7c23b4",
+        "bytes": 6862,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-paired-nsys-analysis-01/candidate02-detailed.json",
+        "sha256": "8d5ada982a90a60e55689d19005bd36356a2201ec55e4063818eff5f287bc2e9",
+        "bytes": 441438,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-paired-nsys-analysis-01/candidate02-manifest.json",
+        "sha256": "b9c97ad0276e55e50676930565ceabb79c82b90d00c7aef970ea3112c524b74f",
+        "bytes": 1232,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-paired-nsys-analysis-01/analyze.py",
+        "sha256": "e6a474b4abbb4d9e5857e5309fb6b26ea196c0db17f1dc3d847b4bd25bccaee4",
+        "bytes": 7352,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/bf16-kv-lifecycle/devlocal/fa2-reference-s-paired-nsys-analysis-01/supplement.py",
+        "sha256": "f9d1bd5c7aa3569fde92b731ca6dd37145f90bbfdf399cce12100b7242085670",
+        "bytes": 3854,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-profile4k-02/profile/decode-kv4k-o1k.json",
+        "sha256": "4b8bdb9bede522cc0ab2f016cb22a22a87cb3f95cb2a83e2e04151bc09857efb",
+        "bytes": 893671,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-profile4k-02/profile/decode-kv4k-o1k.log",
+        "sha256": "564727c0adc8cafa6190ba0fa7dce70fa4ddc91ad52a566e15e23534359b2a10",
+        "bytes": 3279093,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-profile4k-02/profile/decode-kv4k-o1k.stats.csv",
+        "sha256": "271d05144d78131ec2b09ea6b08b0c04514cd3617c4d1467b21385caf4c89d5b",
+        "bytes": 25657,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-profile4k-02/receipt.json",
+        "sha256": "5fa11847dcae108c1de1b287948f895cd33ada9fb16de3716f8bcdac88ab1806",
+        "bytes": 3202,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-profile4k-02/sqlite-download.json",
+        "sha256": "6fdbd9b1113e42500cfda5c4b4db0091ea9accc50c7155bf77768047c91ed122",
+        "bytes": 579,
+        "in_git": false
+      }
+    ],
+    "sqlite_sha256": "19609f2911658cc34e5840ffc18ae6e558e4788ccb7f0f2a03b89f906cffb785",
+    "sqlite_bytes": 70238208,
+    "benchmark_elf_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4",
+    "recipes_manifest_sha256": "054a515dee5e9948849530cddbf4e02db3cffa7ad7268e8859790ffd200b8d92",
+    "output_digest_all_three": "a79ed7c8bf839729",
+    "rounds": 351,
+    "attribution_method": "unique actual launch API correlation then same-thread callback-phase NVTX; 515512 matched/0 missing",
+    "phases": {
+      "prefill": {
+        "host_NVTX_seconds": 0.969551796,
+        "kernel_count": 1346,
+        "kernel_cumulative_seconds": 0.860813568,
+        "kernel_interval_union_seconds": 0.860813568,
+        "kernel_execution_outside_host_phase_count": 0
+      },
+      "decode": {
+        "host_NVTX_seconds": 12.500456137,
+        "kernel_count": 514166,
+        "kernel_cumulative_seconds": 10.492079642,
+        "kernel_interval_union_seconds": 10.49020441,
+        "kernel_execution_outside_host_phase_count": 0
+      },
+      "finalize": {
+        "host_NVTX_seconds": 0.000175713,
+        "kernel_count": 0,
+        "kernel_cumulative_seconds": 0.0,
+        "kernel_interval_union_seconds": 0.0,
+        "kernel_execution_outside_host_phase_count": 0
+      }
+    },
+    "whole_generate_host_seconds": 13.470188655,
+    "decode_kernel_denominator_seconds": 10.492079642,
+    "decode_kernel_groups": [
+      {
+        "label": "LM-head M1 GEMV plus M4 WMMA",
+        "kernel_cumulative_seconds": 2.4511855679999996,
+        "percent_decode_kernel": 23.362247062897385,
+        "kernels": [
+          {
+            "name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_gemv_bf16<(int)1, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)",
+            "count": 1053,
+            "sum_seconds": 1.55541856,
+            "percent_of_cumulative": 14.824692654577545,
+            "mean_us": 1477.1306362773028
+          },
+          {
+            "name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_wmma_bf16<(int)4, (int)128, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int, int)",
+            "count": 351,
+            "sum_seconds": 0.895767008,
+            "percent_of_cumulative": 8.537554408319846,
+            "mean_us": 2552.0427578347576
+          }
+        ]
+      },
+      {
+        "label": "target MoE FC1 act fusion plus FC2 finalize",
+        "kernel_cumulative_seconds": 2.526812608,
+        "percent_decode_kernel": 24.083048301359817,
+        "kernels": [
+          {
+            "name": "kernel_cutlass_kernel_blockscaled_contiguous_gather_grouped_gemm_act_fusionBlockScaledContiguousGatherGroupedGemmKernel_object_at__TiledMMA_ThrLayoutVMNK11110000_PermutationMNK____MMAAtom_0",
+            "count": 14040,
+            "sum_seconds": 1.754147136,
+            "percent_of_cumulative": 16.71877450279842,
+            "mean_us": 124.9392547008547
+          },
+          {
+            "name": "kernel_cutlass_kernel_blockscaled_contiguous_grouped_gemm_finalize_fusionSm100BlockScaledContiguousGroupedGemmFinalizeFusionKernel_object_at__TiledMMA_ThrLayoutVMNK11110000_PermutationMNK_0",
+            "count": 14040,
+            "sum_seconds": 0.772665472,
+            "percent_of_cumulative": 7.364273798561393,
+            "mean_us": 55.033153276353275
+          }
+        ]
+      },
+      {
+        "label": "three principal FP8 GEMMs; finer projection attribution MISSING",
+        "kernel_cumulative_seconds": 1.914124352,
+        "percent_decode_kernel": 18.2435171797374,
+        "kernels": [
+          {
+            "name": "nvjet_qqtst_128x8_128x12_2x1_v_bz_NNT",
+            "count": 14040,
+            "sum_seconds": 0.978070432,
+            "percent_of_cumulative": 9.321988255643475,
+            "mean_us": 69.66313618233617
+          },
+          {
+            "name": "nvjet_qqtst_256x8_128x6_4x1_v_bz_NNT",
+            "count": 14040,
+            "sum_seconds": 0.544124992,
+            "percent_of_cumulative": 5.186054724764546,
+            "mean_us": 38.75534131054131
+          },
+          {
+            "name": "nvjet_qqtst_512x8_128x3_4x1_v_bz_NNT",
+            "count": 10530,
+            "sum_seconds": 0.391928928,
+            "percent_of_cumulative": 3.7354741993293765,
+            "mean_us": 37.22022108262108
+          }
+        ]
+      },
+      {
+        "label": "packed FA2 core plus combine pack unpack",
+        "kernel_cumulative_seconds": 0.19591193599999998,
+        "percent_decode_kernel": 1.8672364553520986,
+        "kernels": [
+          {
+            "name": "void apxinf_cuda_new_fa2::flash_fwd_splitkv_packed_gqa_kernel<Flash_fwd_kernel_traits<(int)256, (int)64, (int)64, (int)4, (bool)0, (bool)0, cutlass::bfloat16_t, Flash_kernel_traits<(int)256, (int)64, (int)64, (int)4, cutlass::bfloat16_t>>>(apxinf_cuda_new_fa2::Flash_fwd_params)",
+            "count": 3510,
+            "sum_seconds": 0.164602048,
+            "percent_of_cumulative": 1.5688219458523245,
+            "mean_us": 46.895170370370366
+          },
+          {
+            "name": "void apxinf_cuda_new_fa2::flash_fwd_splitkv_combine_kernel<Flash_fwd_kernel_traits<(int)256, (int)64, (int)64, (int)4, (bool)0, (bool)0, cutlass::bfloat16_t, Flash_kernel_traits<(int)256, (int)64, (int)64, (int)4, cutlass::bfloat16_t>>, (int)4, (int)3, (bool)1>(apxinf_cuda_new_fa2::Flash_fwd_params)",
+            "count": 3510,
+            "sum_seconds": 0.018578208,
+            "percent_of_cumulative": 0.1770688808501898,
+            "mean_us": 5.292936752136752
+          },
+          {
+            "name": "apxinf_fa2_packed_detail::unpack_o_lse(const unsigned short *, const float *, unsigned short *, float *, int)",
+            "count": 3510,
+            "sum_seconds": 0.006715808,
+            "percent_of_cumulative": 0.06400835896361756,
+            "mean_us": 1.9133356125356125
+          },
+          {
+            "name": "apxinf_fa2_packed_detail::pack_q(const unsigned short *, unsigned short *, int)",
+            "count": 3510,
+            "sum_seconds": 0.006015872,
+            "percent_of_cumulative": 0.05733726968596718,
+            "mean_us": 1.7139236467236467
+          }
+        ]
+      }
+    ],
+    "GPU_activity_intervals": {
+      "kernel_union_seconds": 11.351017978,
+      "kernel_copy_memset_union_seconds": 11.780391674,
+      "memcpy_by_kind": [
+        {
+          "copy_kind": 1,
+          "label": "Host-to-Device",
+          "count": 1249,
+          "bytes": 82228,
+          "cumulative_seconds": 0.000439328
+        },
+        {
+          "copy_kind": 2,
+          "label": "Device-to-Host",
+          "count": 352,
+          "bytes": 11236,
+          "cumulative_seconds": 0.00044816
+        },
+        {
+          "copy_kind": 8,
+          "label": "Device-to-Device",
+          "count": 53211,
+          "bytes": 37936106968,
+          "cumulative_seconds": 0.369306848
+        }
+      ],
+      "memset_count": 53013,
+      "memset_cumulative_seconds": 0.059191936
+    },
+    "verify_malloc_free": [
+      {
+        "api": "cudaMalloc_v3020",
+        "scope": "verify",
+        "count": 10530,
+        "inclusive_seconds": 0.061901163,
+        "overlap_GPU_kernel_seconds": 0.052642681,
+        "overlap_GPU_any_activity_seconds": 0.053328308,
+        "note": "overlap supports GPU-wait interpretation; not a subtractable CPU saving"
+      },
+      {
+        "api": "cudaFree_v3020",
+        "scope": "verify",
+        "count": 10530,
+        "inclusive_seconds": 0.041437933,
+        "overlap_GPU_kernel_seconds": 0.0,
+        "overlap_GPU_any_activity_seconds": 0.0,
+        "note": "overlap supports GPU-wait interpretation; not a subtractable CPU saving"
+      }
+    ],
+    "verify_malloc_free_sum_seconds": 0.103339096,
+    "attention_allocator_exact_callchain": "MISSING: matching351*10*3/source is inference, not dedicated allocator callchain",
+    "draft_free": {
+      "api": "cudaFree_v3020",
+      "scope": "draft",
+      "count": 351,
+      "inclusive_seconds": 2.365477641,
+      "overlap_GPU_kernel_seconds": 2.259724128,
+      "overlap_GPU_any_activity_seconds": 2.265497568,
+      "note": "overlap supports GPU-wait interpretation; not a subtractable CPU saving"
+    },
+    "API_elapsed_not_savings_budget": true,
+    "percentages_are_GPU_kernel_composition_not_wall_or_peak_utilization": true,
+    "hardware_counters_DRAM_SM_tensor_occupancy_roofline": "MISSING in this Nsight trace",
+    "NVTX0_candidate01": {
+      "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-model-profile4k-01/receipt.json",
+      "sha256": "0f3781e8744de57b75c534f663dedbc553ccc64ffb55c86f3f52607eae034fe3",
+      "bytes": 3196,
+      "in_git": false
+    },
+    "NVTX0_is_wholegenerate_not_decode_only": true,
+    "failed_parent_attempts": [
+      {
+        "attempt": "fa2-reference-s-parent-profile4k-01",
+        "status": "FAILED_NOT_PROFILE_COMPARATOR",
+        "failures": [
+          "benchmark/transport exited unsuccessfully"
+        ],
+        "surfaced_error": "Error: Other(\"Qwen3.5 layer 39 attention: CUDA error: CUDA error 719: unspecified launch failure\")",
+        "exit": {
+          "returncode": 1,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "target_binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "recipes_immutable": true,
+        "raw_refs": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-parent-profile4k-01/receipt.json",
+            "sha256": "37118cd47e038339c94b4d449101f82586636a024bcc238cd92c73fc8a660e44",
+            "bytes": 3207,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-parent-profile4k-01/profile/decode-kv4k-o1k.json",
+            "sha256": "da58ce9d91ff2ddb55b717a54f4d12df4477d638ff30e47f4d7aab880c0a98b9",
+            "bytes": 320500,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-parent-profile4k-01/profile/decode-kv4k-o1k.log",
+            "sha256": "004bacf94b976bde193267a7441bbbd4acb5c87b9afabe23bc75ea257bd3920d",
+            "bytes": 2759884,
+            "in_git": false
+          }
+        ]
+      },
+      {
+        "attempt": "fa2-reference-s-parent-profile4k-02",
+        "status": "FAILED_NOT_PROFILE_COMPARATOR",
+        "failures": [
+          "benchmark/transport exited unsuccessfully"
+        ],
+        "surfaced_error": "Error: Other(\"Qwen3.5 layer 39 attention: CUDA error: ApxInf native status 5: strict recipe mode: Attention recipe missing or not restorable: Q=4 K=4548 key=attention-recipe-v5|ns|attention-kb1-1be98f5387acae8edc0852a681e9a973|toolkit=12080|cc=101|sms=14|cuda=1208|driver=1208|op|4|1|2|2|1|1|4|4548|4548|16|2|256|0|4544|0|0|1|16|16|16|16|0|268435456|1|0 cache_dir=/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-fa2-model-4k-01/control\")",
+        "exit": {
+          "returncode": 1,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "target_binary_sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+        },
+        "recipes_immutable": true,
+        "raw_refs": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-parent-profile4k-02/receipt.json",
+            "sha256": "2446d3042f039979dcac02956efd092f60b16500fb31b7dddcdb756d89e07db9",
+            "bytes": 3207,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-parent-profile4k-02/profile/decode-kv4k-o1k.json",
+            "sha256": "62ce7a6074b44ec462ffd8cc13f4c1ff0c8e0145678fc2527d1e248f1fa5a3a6",
+            "bytes": 320489,
+            "in_git": false
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-parent-profile4k-02/profile/decode-kv4k-o1k.log",
+            "sha256": "77959ce26e18626c21953def698c60ed7f68fb626bb015e8984a0707db5787c3",
+            "bytes": 2635481,
+            "in_git": false
+          }
+        ]
+      }
+    ]
+  },
+  "limits": {
+    "singleton_not_global_fastestS": true,
+    "all_P2_passed": false,
+    "long_scalar_MTP_parity_solved": false,
+    "all15_percase30percent": false,
+    "cleanisolatedsource_GPU_retested": false,
+    "weather_E2E": false,
+    "historical_88_5_90_4_TPS_directly_comparable": false
+  },
+  "historical_caveat": "CurrentR351/a79 and newELF/recipes differ from historicalR324/694f; never compare82.6/86.7 directly with88.5/90.4 to infer netgain orregression",
+  "recovery": {
+    "status": "MCU_RESET_COMPLETED_ROOT_CAUSE_UNRESOLVED",
+    "no_performance_comparison_across_reboot": true,
+    "soft_reboot": "issued but completion not proven; transport expected disconnect is not completed reboot proof",
+    "MCU_command": "soc reset",
+    "boot_before": "16d7f6d0-aa4f-4f2b-8e6d-394444e34460",
+    "boot_after": "339f93f3-04cb-4101-884e-9a54092bfb5e",
+    "CmaFree_before_KiB": 7896,
+    "CmaFree_after_KiB": 515072,
+    "CMA_causally_explains_PBDMA": false,
+    "no_OOM_evidence_in_collected_failure_logs": true,
+    "native_model_archive_unchanged_pins": [
+      {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/crates/apxinf-cuda-new/native/adapters/attention/providers/fa2.cpp",
+        "bytes": 22472,
+        "sha256": "2e6c5a5cd373cc4ef80c2f0628f59f9115a12de0cca38c0704f318b5572f5499"
+      },
+      {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/fa2-model-frozen-01/bin/qwen35_mtp_bench",
+        "bytes": 35418512,
+        "sha256": "ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4"
+      },
+      {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/build/apxinf-cuda-new-b7190ba26173bea0/out/libapxinf_gemm_native.a",
+        "bytes": 35881096,
+        "sha256": "15f2939944afb6a5408a3f437859be0234bf99d8ca935ca23627495a879f5db3"
+      }
+    ],
+    "source_patch_sha256": "21b01ef7374dedd0e85aff36f82f491810897f7560007c181216349564499bb3",
+    "observed_ssh_config": [
+      "user nvidia",
+      "hostname 10.30.15.13",
+      "port 22"
+    ],
+    "network_configuration_changed_by_this_recovery": false,
+    "clock_restore": {
+      "before": {
+        "min_freq": "54000000",
+        "max_freq": "1530000000",
+        "cur_freq": "1530000000",
+        "governor": "performance"
+      },
+      "after": {
+        "min_freq": "54000000",
+        "max_freq": "1206000000",
+        "cur_freq": "1206000000",
+        "governor": "simple_ondemand"
+      },
+      "reason": "restore exactpreboot1206cap/54min/simple_ondemand matching testedcontrol; defaultboot1530performance not used for scores",
+      "lock_held": true
+    },
+    "post_identity_clock": {
+      "min_freq": "54000000",
+      "max_freq": "1206000000",
+      "cur_freq": "54000000",
+      "governor": "simple_ondemand"
+    },
+    "HugePages_Total_after": 2048,
+    "recipe_present": {
+      "name": "ed74f3f5e316aa11.recipe",
+      "bytes": 205,
+      "sha256": "33dd9b76e30f3d0aba90faa1ecf69f2cde807f936daacf15a3b73a87c576c706",
+      "content": "attention-recipe-v5|ns|attention-kb1-1be98f5387acae8edc0852a681e9a973|toolkit=12080|cc=101|sms=14|cuda=1208|driver=1208|op|4|1|2|2|1|1|4|4548|4548|16|2|256|0|4544|0|0|1|16|16|16|16|0|268435456|1|0\n2 3 1 6\n"
+    },
+    "recipe_interpretation": "real S6 recipe present; generic missing-or-not-restorable error does not prove missing file. restore catches provider Failure, may mask underlying runtime error; not proof of exact PBDMA cause",
+    "post_reboot_memcheck01": "prelaunch refused: no GPU test; incorrect boot1530/performance lease",
+    "post_reboot_memcheck02": "PASS; legacyFA2 flag0/Q4/K4100 F64/guards/350enqueues memcheck only; no fullmodel or model-quality proof",
+    "raw_refs": [
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-reboot-recovery-01/before.json",
+        "sha256": "87dee07e0907e92c7e04e27fd2e7f5c3ad7a08344678538ab4c1e71dd63340c9",
+        "bytes": 273425,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-reboot-recovery-01/post-reboot-identity.json",
+        "sha256": "afb2a158a560601e91f94e474b9c2f95136b94f8a6b7028ededd61218d2e4fba",
+        "bytes": 2642,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-reboot-recovery-01/remote-reboot.py",
+        "sha256": "f37c8aa9799f2a0b642af123821b4b2d6d9074f03531003507db195644a0d299",
+        "bytes": 1651,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-reboot-recovery-01/transport.json",
+        "sha256": "8a791113e32ed0b5d96bdf1466f0af34bebc08ee7b4791c2d6e250c972ce9034",
+        "bytes": 54,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-reboot-recovery-01/serial-soc-reset.json",
+        "sha256": "e0dd5a3372c7febdbab8e40ba68622c0e074b8b29cf8b6fcf5f7085df4f3547b",
+        "bytes": 106250,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-reboot-recovery-01/serial-network-inspect.json",
+        "sha256": "686351e0da889d94596eeeab17a769532355429119fe56261982db3f9caebe12",
+        "bytes": 1601,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-reboot-recovery-01/clock-restore-matched.json",
+        "sha256": "1dddf976b98f99ee9564b91714e93bccab85c23bcc763f306725aae24aa545e8",
+        "bytes": 387,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-launch-failure-01/summary.json",
+        "sha256": "420dbd73e10bf592d72d91cecc4aa693b2be599f68a9431b69a584f9b511e8f7",
+        "bytes": 1155,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-launch-failure-01/observation.json",
+        "sha256": "43f3529457d8a7fef7a0e4ba46412b6652a9187db3673be574304e4edd28c37e",
+        "bytes": 272262,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-reference-s-input-snapshot-01/recipes.json",
+        "sha256": "e4f50858c04d844b6ff7cded75870634d32dd8830f5f136e9f50ea74cbd149c1",
+        "bytes": 334839,
+        "in_git": false
+      },
+      {
+        "path": "crates/apxinf-cuda-new/native/adapters/attention/execution.cpp",
+        "sha256": "702fe0a5070e1e46444281b51bc89e854c99b4cefe0d90df76131df37456dfee",
+        "bytes": 26732,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-parent-profile-health-probe-01/receipt.json",
+        "sha256": "f4ff14b0ab3aca6779a2092d5e23d76583630f724ffe11a501664a43b6a803d0",
+        "bytes": 9081,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-legacy-memcheck-post-reboot-01/receipt.json",
+        "sha256": "c77567904199541a40c5afaa731a6d2f6fff308784b50592f11855976026cc19",
+        "bytes": 213,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-legacy-memcheck-post-reboot-01/memcheck.log",
+        "sha256": "60bd4424b45e353c5041c8d1aa3beef8d76316a56b2fa4791309a7ce72081d89",
+        "bytes": 618,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-legacy-memcheck-post-reboot-02/receipt.json",
+        "sha256": "8f6f3ba672df04d9dce287a8836f4681a24d76d5b215b7e41dedda9c07760be1",
+        "bytes": 13877,
+        "in_git": false
+      },
+      {
+        "path": "devlocal/model-microbench/recovery-build/fa2-legacy-memcheck-post-reboot-02/memcheck.log",
+        "sha256": "2945f01c371e370a05866043292dcaa4cbc5eba98408f93c56c65f2f40da7c3c",
+        "bytes": 13048,
+        "in_git": false
+      }
+    ]
+  }
+}

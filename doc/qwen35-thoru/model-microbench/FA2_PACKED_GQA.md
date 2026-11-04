@@ -3,8 +3,9 @@
 本项为 BF16 target attention 增加独立 FA2 implementation4/version1。它把同一
 KV head下的8个query heads打包为query行，使小Q1..4以2个packed heads、8T行
 执行split-KV，再还原原O/LSE布局。原default provider、vendor FA2头文件和外部
-Rust/C ABI不变。该项已通过独立raw算子门禁及synthetic operator A/B，尚未通过
-actual checkpoint/model集成、全15case或逐case30%验收。
+Rust/C ABI不变。该项已通过独立raw算子门禁及synthetic operator A/B；另有下文
+参考S校准后的单个4K模型配对轨迹结果。独立checkpoint层/完整模型精度、全部P2、
+全15case与逐case30%仍未全部验收。
 
 ## 配置、数学与资源边界
 
@@ -209,6 +210,120 @@ accuracy=unresolved。共享55份普通recipe逐byte相同，原recipe未改。
 全局模型质量验收。下一步需真实、独立的reference-S约束校准与fresh严格配对；
 不能把手选tuple升级成正式autotune收据。原failed门禁及diagnostic来源逐SHA见JSON。
 
+## 参考S校准后的单个4K模型配对结果（草稿，paired profiler待补）
+
+[本轮模型/校准curated证据](evidence/fa2-reference-s-model-decode4k.json)与前面的
+synthetic operator结果分开。所有原始receipt/log/tool source引用均相对原工作树
+根目录，`in_git=false`：它们是ignored原始证据位置，未随本Git文档提交。Git里
+不含这些352recipe资产、模型二进制或大trace；不能把只开flag/手填recipe当作复现。
+
+先保留失败事实：packed路径自行auto-tune选择S13的原模型候选未通过轨迹门禁，
+parent digest为`a79ed7c8bf839729`，candidate为`42c19b84f34f0dde`且完整MTP计数
+不同；该轮没有派发candidate正式分数，仍为失败。后续reference-S方案通过不改判
+这条失败，也不把diagnostic手工构造的352tuple提升为正式recipe。
+
+新资产来自独立外置C++校准器，链接原native archive与原模型ELF，不改数学源码。
+它对每个原parent语义key只允许parent实际S，即`reference-s-constrained-singleton`；
+candidate_count=1，**不是搜索所有S后证明全局最快**。每个实际Spec经完整输出
+F64 max_abs<0.01、finite/readonly/padding/guards、20eager+20graph A/B/A，再用
+原native timing/capture和atomic recipe writer导出。352keys的S分布为5:119、
+6:87、7:146；实际测试402个synthetic Spec，最差max_abs为
+0.00037197595306048825。Q1含bucket端点/64tile邻居，覆盖本4K+1024/draft3的
+声明范围K<=5123，不是所有实际checkpoint层Q/K/V或8K..48K通用认证。
+
+独立CPU validator对实际导出的353文件（352recipe+receipt）只读验收通过；外层
+原source/archive/model/driver pins与原405/395recipe membership前后verify通过，
+原资产未变，进程回收和时钟恢复已绑定。正式candidate目录是405份未改parent
+recipe加352份新测量校准recipe，共757份，正式过程原字节manifest不变。
+
+两臂使用同一模型ELF
+`ab43b3808e7fbbc50f82195232fc17887b26806b226c270fedc354010a2d7fe4`，
+相同4096输入seed/digest、1024输出/1023callback间隔、fixed1206MHz、BF16target/
+draftFP8unit1、NVFP4、temperature0 greedy固定MTP depth3、Graph1/fullGDN。
+两边都开既有WMMA Tile128/MIN_ROWS4，其他新算子flag0；因此不是把WMMA或
+已有Graph1重新计为packed-GQA收益。正式env唯一差别是packed flag0→1；同时
+明确candidate使用前述新校准资产、parent沿用其原严格资产，未声称两个recipe目录
+相同。parent正式2warm5复用原同ELF已冻结记录，没有假称重新采集parent。
+
+|arm|正式中位tok/s|正式中位TPOT ms|
+|---|---:|---:|
+|parent|82.624399776057|12.102962353861|
+|candidate|86.671427884883|11.537827683284|
+
+TPOT降低**4.669391294904257%**。candidate先独立2warm1 audit，再fresh2warm5
+formal；audit时间不混入正式中位数。parent7轮+candidate audit3轮+formal7轮共17轮，
+每轮1024输出digest均`a79ed7c8bf839729`，完整MTP字段逐项相同：351rounds、
+1053proposals、1404verified rows、674verified accepted、673committed accepted、
+163fullaccept、140partial、48zeroaccept、1023committed rows、381rollback rows。
+REPORT audit实际识别10530次packed派发，来源仅recipe/memory-recipe，无静默
+在线调优/fallback。JSON记录所有17轮callback原ns、TPS/TPOT、逐轮统计SHA及
+原始收据。跨进程公开证据是完整输出digest/完整计数一致，不伪称已发布全部token
+向量的逐字节trace；这也不代替长上下文scalar/MTP/P2的全部精度门禁。
+
+|arm|iteration|用途|tok/s|
+|---|---:|---|---:|
+|parent|0|warmup|82.404373712|
+|parent|1|warmup|82.567796484|
+|parent|2|formal|82.624399776|
+|parent|3|formal|82.603857344|
+|parent|4|formal|82.636680603|
+|parent|5|formal|82.666053722|
+|parent|6|formal|82.569005128|
+|candidate|0|warmup|86.682862788|
+|candidate|1|warmup|86.522386002|
+|candidate|2|formal|86.556493816|
+|candidate|3|formal|86.803376853|
+|candidate|4|formal|86.491405083|
+|candidate|5|formal|86.706624815|
+|candidate|6|formal|86.671427885|
+
+这轮R351/a79轨迹、新ELF与recipe配置不同于历史88.5/90.4tok/s的R324/694f轨迹，
+不能横向相减推断净提升或退化。也不能将本轮4.669%与旧2.097% WMMA结果直接
+相加成总体收益。实际auto-S13失败仍失败；独立实际层、EOS、long scalar/MTP等
+P2问题未全过，15×30%尚未达成，更无天气AIOS/E2E结论。隔离Git提交未clean重建/
+GPU重跑，当前数字来自有明确source/ELF/pins的原dirty overlay。
+
+### 当前模型 profiler：仅候选侧归因
+
+candidate02 实际 NVTX1 capture 成功，2warm+1captured 均为 a79/351round；
+757 recipes 不变、同 ELF ab43。首次 NVTX0 candidate01 仍保留为 whole-generate
+诊断。父版本 NVTX1 parent01/02 均失败，不能提供 paired profiler 差值；失败不
+升级为成功，也不采用不完整 trace 作为对照。上述 **4.669391%** 正式收益仍仅来自
+同 boot 的 quiet 2warm5 A/B，不能拿以下仪器化时间替换它。
+
+SQLite 中全部515512个 kernel 通过唯一实际 launch correlation 与同线程 callback
+NVTX 归属；没有将全 capture 冒充 Decode。
+
+|候选侧范围|host NVTX(s)|归属 kernel 累计(s)|
+|---|---:|---:|
+|Prefill 至首 callback|0.969552|0.860814|
+|首至末 callback Decode|12.500456|10.492080|
+|末 callback 至 return|0.000176|0|
+
+整次 generate host 为13.470189s。下面百分比只以 **Decode kernel 累计10.492080s**
+为分母，表示 GPU 工作组成；不是墙时占比、SM/Tensor 利用率或 roofline 效率。
+
+|Decode 工作|kernel 累计(s)|占 Decode kernel|
+|---|---:|---:|
+|LM-head：draft M1 GEMV + target M4 WMMA|2.451186|23.36%|
+|target MoE：FC1 act fusion + FC2 finalize|2.526813|24.08%|
+|三种主要 FP8 GEMM，具体投影细分未有证据|1.914124|18.24%|
+|packed FA2：core + combine + pack + unpack|0.195912|1.87%|
+
+verify 范围10530次 malloc 和10530次 free 合计0.103339s；351×10×3与源码
+attention 分配数吻合，但没有专属 callchain，精确 attention 归因仍是缺项。不能
+把全 trace 的 free 都当 attention 优化预算。draft free 的2.365478s中2.265498s
+与 GPU activity 重叠，API等待不等于可直接删去的CPU损耗；API、kernel、host
+时间不能相加。当前没有 DRAM流量、SM/Tensor利用率或occupancy counter，
+因此只据此优先调查 LM-head/MoE，不能宣称已提高算力/带宽利用率。
+
+父profile两次失败出现CUDA719/PFIFO/PBDMA；根因仍UNRESOLVED。真实
+`ed74f3f5e316aa11.recipe` 的S6文件存在，通用“missing or not restorable”不能直接
+解释为缺recipe。故障恢复、时钟和原工件身份见
+[恢复记录](../MODEL_MICROBENCH_RECOVERY.md)。workspace pool 未应用，与本次
+故障无已知因果关系；没有跨重启 profiler 对比。完整原始refs/SHA、阶段时长、
+计数、重叠与失败记录保存在模型 evidence JSON，原大trace没有加入Git。
+
 ## 复现和未验收范围
 
 native policy默认off。通过已有Thor小池build guard分别构建两个固定target：
@@ -228,6 +343,6 @@ retuned/restored必须如实声明；保存actual split/provider tuple和原字�
 
 证据来自有明确source/ELF的dirty8278871 overlay。实现/NCU及metadata隔离clean提交尚未重新
 编译/GPU运行；本节收录上述dirty-overlay编译验证；模型配对状态单独记录。actualcheckpoint层、
-完整模型、全15、逐case30%、天气AIOS/E2E及原4K scalar/verification质量差异
-仍未验收；已有4K差异不能归因为这个新FA2。只做下一步实际模型gate/quiet A/B后
-才可给模型收益结论。后续更多NCU或checkpoint/model实验若完成，应另绑定真实收据补证。
+完整模型精度、全15、逐case30%、天气AIOS/E2E及原4K scalar/verification质量差异
+仍未全部验收；已有4K差异不能归因为这个新FA2。上文单个4K MTP配对性能结果
+只适用于已声明轨迹/资产，不能扩为全部模型与case。后续更多NCU或checkpoint/model实验若完成，应另绑定真实收据补证。
