@@ -2341,8 +2341,8 @@ mod tests {
         assert_eq!(state.physical_row_for_draft(0).unwrap(), 4_095);
         assert_eq!(state.rope_position_for_draft(0).unwrap(), 4_096);
         let last = QWEN35_MTP_DRAFT_STEPS - 1;
-        assert_eq!(state.physical_row_for_draft(last).unwrap(), 4_096);
-        assert_eq!(state.rope_position_for_draft(last).unwrap(), 4_097);
+        assert_eq!(state.physical_row_for_draft(last).unwrap(), 4_095 + last);
+        assert_eq!(state.rope_position_for_draft(last).unwrap(), 4_096 + last);
     }
 
     #[test]

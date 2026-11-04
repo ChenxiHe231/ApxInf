@@ -1,0 +1,43 @@
+{
+  "schema": "apxinf.qwen35.mtp-host-schedule-gate.v1",
+  "scope": "actual production std-only host schedule compiled as Rust test harness; no CUDA or model generation",
+  "implementation_parent": "fcbff980eec5af299cd3bb6d3e391e0dcd35964f",
+  "source_sha256": "5611a2e610b0c05f5ec1ec5ba3b80ecf6f9505731386674ea8acbb086753a6af",
+  "test_elf_sha256": "2b3caf3dccd4cece1ca43ba2b61bbaee0b9b1984e73a4693500d7d4b5315d4e3",
+  "rustc": "1.98.0 (88d9e12ae 2026-08-18)",
+  "host": "shanghai_orin Linux aarch64 CPU only",
+  "argv": [
+    "rustc",
+    "--edition=2021",
+    "--test",
+    "-O",
+    "mtp_schedule.rs",
+    "-o",
+    "mtp_schedule_test"
+  ],
+  "execution": [
+    "mtp_schedule_test",
+    "--nocapture"
+  ],
+  "tests_passed": 11,
+  "tests_failed": 0,
+  "single_round_cases": 140,
+  "budget1_no_round_cases": 28,
+  "committed_single_round_cases": 112,
+  "eos_reached_cases": 61,
+  "budget_masked_eos_cases": 15,
+  "complete_1024_output_cases": 9,
+  "complete_output_checked_rounds": 5543,
+  "log_sha256": "a3b8b3ff27a565f314068a369984f1aed07bfb0ec717b4030ca5ec59d7a0ee7a",
+  "production_algorithm_changed": false,
+  "runtime_test_assertion_fix": {
+    "changed": "last draft physical row =4095+last; RoPE=4096+last",
+    "reason": "previous literals retained depth2 values while maximum depth is3",
+    "full_cargo_unit_execution": "pending; not included in the11 std-only tests"
+  },
+  "remaining": [
+    "GPU KV/GDN commit/rollback and snapshot restore continuation",
+    "actual depth1/2/3 model scalar parity",
+    "EOS and failure injection in actual device transactions"
+  ]
+}

@@ -40,7 +40,7 @@
 | `cake_matches_chunk_scan_at_qwen35_head_ratio` | ignored，覆盖64/128/1024/2048/4096和非零初态，但比较包含BF16/F16路径且相对L2仅报告 | 可辅助诊断，不代替same-representation独立reference，也不能把仅cosine过线当本P2全部指标合格 |
 | `attention_bf16_qwen35_causal_cache_uses_fa2` | 仅全零Q/K/V，(Q,K)=(128,128)/(1,129)，只查provider名称 | 仅路由测试，**不是48K BF16数值证明** |
 | native attention candidate validator | 对其给定reference执行逐元素 finite 与 `abs_error ≤0.03+0.02×abs(ref)` | 既有library admission上限；它不是35B模型官方无损承诺，不代替逐row/冻结baseline更严格的case合同；新增BF16专用上限需在候选前明确冻结 |
-| `mtp_schedule.rs` tests | 精确0/partial/full、EOS/budget、失败/stale不可提交 | 无GPU数学证明；必须与GPU实际checkpoint/状态测试相接 |
+| `mtp_schedule.rs` tests | 11项CPU测试通过：depth1/2/3、全部接受前缀、预算1/2/3/4/1024、每个可发row的EOS共140组合；9种depth/接受前缀连续生成1024 token共5543轮；失败/stale/overflow前后状态精确不变 | 独立标量counter只认证host事务账目，见[CPU证据](model-microbench/evidence/mtp-host-schedule-gate.json)；无GPU数学证明，仍须接实际KV/GDN checkpoint/回滚续跑 |
 | `qwen35_real_checkpoint::neutral_mtp_matches_forced_scalar_greedy` | 文件顶层现为`cfg(feature="qwen35-cuda")`，ignored；默认prompt16、输出32；实际断言token IDs、rollback统计 | 仍须先`--list`确认存在并显式执行ignored测试；feature修正不代表已完成GPU验收。默认短prompt不认证48K/1K输出 |
 
 算子改写若宣称“仅调度/复制改变”，同输入的原始KV/state应逐位一致。不同CPU/GPU的FP32归约或trig发生合法舍入差异时，应先隔离该stage；不能对不同prequant输入的FP8 bytes机械要求相等，也不能因此放宽真正同输入量化或数据复制的要求。
