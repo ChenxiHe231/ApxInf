@@ -139,6 +139,7 @@ extern "C" {
     pub fn cudaStreamBeginCapture(stream: cudaStream_t, mode: cudaStreamCaptureMode)
         -> cudaError_t;
     pub fn cudaStreamEndCapture(stream: cudaStream_t, pGraph: *mut *mut c_void) -> cudaError_t;
+    pub fn cudaStreamIsCapturing(stream: cudaStream_t, capture_status: *mut i32) -> cudaError_t;
 
     pub fn cudaGetLastError() -> cudaError_t;
     pub fn cudaPeekAtLastError() -> cudaError_t;

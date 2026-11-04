@@ -664,8 +664,8 @@ fn pack_and_upload_edge_bf16_experts(
         fc2,
     )?;
     Ok(DeviceEdgeBf16Experts {
-        fc1_weight: transfers::to_cuda(&fc1, ctx.device_id())?,
-        fc2_weight: transfers::to_cuda(&fc2, ctx.device_id())?,
+        fc1_weight: transfers::to_cuda_on_stream(ctx, fc1)?,
+        fc2_weight: transfers::to_cuda_on_stream(ctx, fc2)?,
         experts,
         hidden,
         intermediate,
@@ -719,7 +719,7 @@ fn pack_and_upload_fused_edge_bf16_experts(
         fc1,
     )?;
     Ok(DeviceEdgeBf16Experts {
-        fc1_weight: transfers::to_cuda(&fc1, ctx.device_id())?,
+        fc1_weight: transfers::to_cuda_on_stream(ctx, fc1)?,
         fc2_weight: upload_unchanged(ctx, down_proj)?,
         experts,
         hidden,
@@ -772,7 +772,7 @@ fn upload_static_fp8(
     )?;
     Ok(DeviceStaticFp8Linear {
         weight: upload_unchanged(ctx, weights.weight)?,
-        transposed: transfers::to_cuda(&transposed_host, ctx.device_id())?,
+        transposed: transfers::to_cuda_on_stream(ctx, transposed_host)?,
         input_scale: weights.input_scale,
         alpha: weights.input_scale * weights.weight_scale,
         input_features: weights.input_features,
@@ -949,7 +949,7 @@ fn pack_and_upload_edge_nvfp4_experts(
 
     let upload_raw = |shape: Vec<usize>, dtype: DType, bytes: Vec<u8>| -> Result<Tensor> {
         let host = Tensor::from_raw(Shape::new(shape), dtype, Device::Cpu, bytes)?;
-        transfers::to_cuda(&host, ctx.device_id())
+        transfers::to_cuda_on_stream(ctx, host)
     };
     let fc1_scale_shape = vec![
         experts,
@@ -1082,7 +1082,7 @@ fn upload_dense_expert_projection(
         bytes,
     )?;
     Ok(DeviceDenseExpertProjection {
-        weight: transfers::to_cuda(&host, ctx.device_id())?,
+        weight: transfers::to_cuda_on_stream(ctx, host)?,
         experts,
         input_features,
         output_features,
@@ -1103,7 +1103,7 @@ fn transpose_and_upload_bf16(
         Device::Cpu,
         bytes,
     )?;
-    transfers::to_cuda(&host, ctx.device_id())
+    transfers::to_cuda_on_stream(ctx, host)
 }
 
 fn w4a16_lm_head_enabled() -> bool {
@@ -1173,8 +1173,8 @@ fn repack_and_upload_nvfp4_a16(
         block_scales,
     )?;
     Ok(DeviceNvfp4A16Linear {
-        qweight: transfers::to_cuda(&q_host, ctx.device_id())?,
-        block_scales: transfers::to_cuda(&scale_host, ctx.device_id())?,
+        qweight: transfers::to_cuda_on_stream(ctx, q_host)?,
+        block_scales: transfers::to_cuda_on_stream(ctx, scale_host)?,
         global_scale: upload_f32(ctx, &[weights.weight_scale_2])?,
         input_features: k,
         output_features: n,
@@ -1295,9 +1295,9 @@ fn quantize_and_upload_nvfp4_a16(
     )?;
     let global_host = Tensor::from_f32(vec![1], &[global_scale])?;
     Ok(DeviceNvfp4A16Linear {
-        qweight: transfers::to_cuda(&q_host, ctx.device_id())?,
-        block_scales: transfers::to_cuda(&scale_host, ctx.device_id())?,
-        global_scale: transfers::to_cuda(&global_host, ctx.device_id())?,
+        qweight: transfers::to_cuda_on_stream(ctx, q_host)?,
+        block_scales: transfers::to_cuda_on_stream(ctx, scale_host)?,
+        global_scale: transfers::to_cuda_on_stream(ctx, global_host)?,
         input_features: k,
         output_features: n,
     })
@@ -1419,19 +1419,19 @@ fn stack_and_upload(
         Device::Cpu,
         bytes,
     )?;
-    transfers::to_cuda(&host, ctx.device_id())
+    transfers::to_cuda_on_stream(ctx, host)
 }
 
 fn upload_f32(ctx: &CudaContext, values: &[f32]) -> Result<Tensor> {
     let host = Tensor::from_f32(vec![values.len()], values)?;
-    transfers::to_cuda(&host, ctx.device_id())
+    transfers::to_cuda_on_stream(ctx, host)
 }
 
 fn upload_unchanged(ctx: &CudaContext, tensor: Tensor) -> Result<Tensor> {
     if tensor.device() != Device::Cpu {
         return Err(invalid("Qwen3.5 device upload expects CPU source tensors"));
     }
-    transfers::to_cuda(&tensor, ctx.device_id())
+    transfers::to_cuda_on_stream(ctx, tensor)
 }
 
 fn validate_cpu_tensor(tensor: &Tensor, dtype: DType, shape: &[usize], label: &str) -> Result<()> {

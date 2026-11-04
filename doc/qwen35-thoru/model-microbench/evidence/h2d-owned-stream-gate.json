@@ -1,0 +1,128 @@
+{
+  "schema": "apxinf.qwen35.owned-h2d-correctness.v1",
+  "status": "controlled stream-order regression and helper boundary tests passed; isolated H2D-only model build/full accuracy not asserted",
+  "base_head": "8278871a6bedee3af92cc512842b3ae458440cbf",
+  "source": {
+    "frozen_experiment": "ordered-h2d-01",
+    "experiment_manifest_sha256": "2c30dc08aba3bb107a6ea122cdcd0048d4948cbbfc12149bc27ee89e38574826",
+    "complete13_patch_sha256": "68b865ccfad830af8c5b6c91a849eec7093d2bb4e4b5fd65a7362091a566c946",
+    "extracted_product_files": 9,
+    "extracted_integration_tests": 1,
+    "postimage_sha256": {
+      "crates/apxinf-cuda-new/src/ffi/raw/cuda_runtime.rs": "c568dfb00391984e28cd918c574635cf4841b9776c8b62b15aa79d40f80370e1",
+      "crates/apxinf-cuda-new/src/ops/qwen35_mixers.rs": "6403cfe5a70bc7c111dfc6f7664ca83d5ffd731c88db0535e0d37d10d2aa439a",
+      "crates/apxinf-cuda-new/src/transfers.rs": "16a451eb094ec52e8a3637217ece3b60d0a48e3906c6f00094b1d80504f90e1d",
+      "crates/apxinf-model/src/qwen35moe/attention_backend.rs": "b2840f8f5f4cdc0390608f2e548321e783ea67ee6d9a16035a5f81132bdc2c8b",
+      "crates/apxinf-model/src/qwen35moe/decoder.rs": "95998f4b6646dca3907c583c189486b3bd2263c62561eccdbe037c6ebf099fe5",
+      "crates/apxinf-model/src/qwen35moe/device_weights.rs": "ee8a684ff1330bd3a06359af5940ee5fa690e75746585c9126e3a20d49a5b919",
+      "crates/apxinf-model/src/qwen35moe/forward.rs": "9be4ee0477e30adaa1cba3c603774f69f668a85aefeeb8d2878d96c65170a4d0",
+      "crates/apxinf-model/src/qwen35moe/mtp_runtime.rs": "bdef0c35a624da689fcfa6678ec8389bec0fef6a34d35964d5c0e39eaa2aa937",
+      "crates/apxinf-model/src/qwen35moe/session.rs": "97f8b9fba3e4927dbd29a5432a5465b8cc6bb91f8b41323a4cbc44da69911100",
+      "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d"
+    },
+    "no_later_P2_EOF": true,
+    "no_MoE_ordered_or_P0_change": true
+  },
+  "legacy_controlled_probe": {
+    "artifact_id": "h2d-order-gate",
+    "receipt_sha256": "e61ba0b08596055033b7e3d3ff225f4bc26963a7269f585ec596f327d965d138",
+    "build_receipt_sha256": "4b6517fd54350e6bbd11a556ae5595cf283c3e13f788be1fc54889a9eb42afb4",
+    "compiled_source_sha256": "0bb086a1109f66473a073471a04989793c046d2e5ebcd2dc4240b881bc79acc1",
+    "executable_sha256": "9ec75bd3602aaa708f8fdbbb90c1952b5d3e407a98f2e8567a706b43201ed3e3",
+    "log_sha256": "332b7bf3188f325d1d571b4e25574ae5756a40d0ce7cad5e363b480b8c30dd27",
+    "process_exit_code": 0,
+    "diagnostic_only": true,
+    "quality_pass": false,
+    "unfenced": {
+      "value": 0,
+      "expected_after_ordering": 123,
+      "callback_done_at_upload_return": false,
+      "upload_us": 27,
+      "bounded_callback_ms": 50
+    },
+    "fenced_control": {
+      "value": 123,
+      "ordered": true
+    },
+    "old_reuse_without_pending_zero": {
+      "rounds": 60,
+      "observed_mismatched_rounds": 0,
+      "log_sha256": "fed34650abc4ce32d4d9bd396f20d62ca8ec29602ad3c9cc095402bf1694647f",
+      "not_a_general_stream_safety_proof": true
+    }
+  },
+  "owned_helper_regression": {
+    "artifact_id": "ordered-h2d-gates-01",
+    "receipt_sha256": "2cbb5b5363551d4a38ee9df48ea57ab5338f0af6ce92f9508e9414e109807aaa",
+    "GPU_executable_sha256": "6cd57eeb97684cebe72c13e4adfab099a012a4876d40531734659b610f37cdec",
+    "CPU_lib_executable_sha256": "1b35466685e8748e50e4e10bcf0b92fdfcd8c66c0100c088ef2c8a2effcb533d",
+    "integration_source_sha256": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+    "GPU_tests_passed": 3,
+    "CPU_validation_tests_passed": 1,
+    "explicit_GPU_tests": [
+      "qwen35_ctx_h2d_pending_zero_is_ordered",
+      "qwen35_ctx_h2d_temporary_source_is_complete_and_reusable",
+      "qwen35_ctx_h2d_rejects_capture_and_recovers"
+    ],
+    "GPU_log_sha256": "64d877353d280785610d96c7426e65019f5bd295a2a2720326ada16e48468e7d",
+    "CPU_log_sha256": "9547324f6d6f0c8f466184106260a6bd3b965ffa88604ecc08228488ef4f1b8d",
+    "list_log_sha256": "e17ef4931a59009c9a0cd93ee7670175a08a511d72348a25b941b3a879545fda",
+    "owned_children_reaped": true,
+    "common_lock_acquired_and_released": true,
+    "reuse_elements": [
+      1,
+      16,
+      4096
+    ],
+    "repeats_each": 20,
+    "all60_digest_comparisons_equal": true,
+    "capture_scope": "public Rust capture wrapper rejects allocating/fixed temporary host upload; destination unchanged; outside-capture upload recovers",
+    "raw_extern_capture_nonzero_status_branch_separately_executed": false,
+    "CPU_scope": "legal empty CUDA metadata; shape/dtype/context-device/CPU-source validation; no CUDA calls",
+    "full_test_build_receipt_available_locally": true,
+    "source_to_ELF_build_binding": {
+      "artifact_id": "owned-h2d-gate-01",
+      "receipt_sha256": "a4c18851ba80217c2fb2e692755290bdb9163bb7ba6f8b1e3e4a2f970c45d902",
+      "cargo_build_jsonl_sha256": "7680da16131f722f807ccdb4142e61e1a13ad85eac788ece66b0f0b18ab61835",
+      "compiled_source_manifest_sha256": "fe4c689efe93ffa5f9bcf89c3070b435883e6a4c36d776208f670cb74f0efe80",
+      "compiled_source_archive_sha256": "6883ac2d9004fe5cb4818646785f89a31fd97dd42c0f8c4e164902b093849284",
+      "artifacts_manifest_sha256": "e96f59395a24db5a730d27c06df7172c94e45bd0f06cdabc5e0fd49bca21c9d8",
+      "all13_archived_source_files_verified": true,
+      "all10_extracted_H2D_code_files_match_archived_bytes": true,
+      "build_source_before_equals_after": true,
+      "build_exit_code": 0,
+      "owned_build_cleanup_proven": true,
+      "actual_downloaded_ELFs_match_build_and_test_receipts": true
+    }
+  },
+  "supporting_combined_model_build": {
+    "artifact_id": "ordered-h2d-model-01",
+    "receipt_sha256": "17cc4eb2403f91b613223c2df5048284535e5f43e94fff78099c7d4aa1312c6a",
+    "source_patch_sha256": "68b865ccfad830af8c5b6c91a849eec7093d2bb4e4b5fd65a7362091a566c946",
+    "source_before_equals_after": true,
+    "build_exit_code": 0,
+    "owned_group_cleanup_proven": true,
+    "includes_independent_MoE_ordered_overlay": true,
+    "actual_example_ELF_sha256": {
+      "qwen35_mtp_bench": "dcfbc9e98093c29b35891cd2bf233111ad1a197adb929fd79806a356cc49ac68",
+      "qwen35_context_bench": "d436b97978963605a5b60cf0c80dc51ae3c49bfc56e1bed3c4936a942b487e09"
+    },
+    "scope": "actual two-example combined-source compile; not a separately rebuilt isolated H2D-only version"
+  },
+  "helper_contract": {
+    "upload_stream": "ctx.stream",
+    "owned_CPU_source_retained_until_completion": true,
+    "success_wait": "ctx.synchronize",
+    "on_uncertain_CUDA_error": "retain source and destination owners; error propagated",
+    "capture": "reject before allocation/submission; no silent copy skip or fallback",
+    "legacy_default_stream_API_unchanged": true
+  },
+  "not_certified": [
+    "isolated H2D-only Cargo/model build",
+    "raw CUDA capture nonzero-status branch",
+    "complete model graphs",
+    "model numerical accuracy and long-context quality",
+    "MTP/KV/GDN lifecycle correctness",
+    "performance gain or all15 target achievement"
+  ]
+}

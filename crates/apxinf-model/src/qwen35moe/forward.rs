@@ -58,7 +58,7 @@ impl TextBoundaryScratch {
         })
     }
 
-    pub fn write_token_ids(&self, token_ids: &[u32]) -> Result<()> {
+    pub fn write_token_ids(&self, ctx: &CudaContext, token_ids: &[u32]) -> Result<()> {
         if token_ids.len() != self.tokens {
             return Err(invalid(format!(
                 "Qwen3.5 token count mismatch: prepared {}, got {}",
@@ -74,7 +74,7 @@ impl TextBoundaryScratch {
             })
             .collect::<Result<Vec<_>>>()?;
         let host = Tensor::from_i32(vec![self.tokens], &token_ids)?;
-        transfers::copy_cpu_to_cuda(&host, &self.token_ids)
+        transfers::copy_cpu_to_cuda_on_stream(ctx, host, &self.token_ids)
     }
 
     /// Run checkpoint embedding lookup into resident hidden storage.

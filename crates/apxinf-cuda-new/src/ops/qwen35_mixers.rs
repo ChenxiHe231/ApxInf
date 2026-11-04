@@ -403,7 +403,7 @@ pub fn qwen35_gdn_prefill(
                         .map_err(|_| invalid("Qwen3.5 GDN prompt exceeds i32"))?,
                 ],
             )?;
-            transfers::copy_cpu_to_cuda(&seqlens, cake.cu_seqlens)?;
+            transfers::copy_cpu_to_cuda_on_stream(ctx, seqlens, cake.cu_seqlens)?;
             gdn_prefill(
                 ctx,
                 &q16,

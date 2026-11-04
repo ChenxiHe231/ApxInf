@@ -399,8 +399,8 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                 scratch: decoder.allocate_verify_scratch(ctx, rows)?,
                 committed_phases: None,
                 shadow_phases: None,
-                predictions: transfers::to_cuda(&prediction_zeros, ctx.device_id())?,
-                acceptance: transfers::to_cuda(&acceptance_zeros, ctx.device_id())?,
+                predictions: transfers::to_cuda_on_stream(ctx, prediction_zeros)?,
+                acceptance: transfers::to_cuda_on_stream(ctx, acceptance_zeros)?,
             });
         }
         let mut session = Self {

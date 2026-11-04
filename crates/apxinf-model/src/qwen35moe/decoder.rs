@@ -888,7 +888,7 @@ impl Qwen35Decoder {
                     })
                     .collect::<Vec<_>>();
                 let input = Tensor::from_bf16(vec![1, self.architecture.hidden_size], &values)?;
-                transfers::copy_cpu_to_cuda(&input, &scratch.hidden)?;
+                transfers::copy_cpu_to_cuda_on_stream(ctx, input.clone(), &scratch.hidden)?;
                 if !graph_gdn_full {
                     if let (MixerKind::Gdn(_), DeviceMixerWeights::Gdn(gdn)) =
                         (&layer.mixer, &resident.mixer)
@@ -941,7 +941,7 @@ impl Qwen35Decoder {
                 ctx.synchronize().map_err(Error::Cuda)?;
                 let expected = transfers::to_cpu(&scratch.hidden)?.as_bf16()?.to_vec();
 
-                transfers::copy_cpu_to_cuda(&input, &scratch.hidden)?;
+                transfers::copy_cpu_to_cuda_on_stream(ctx, input.clone(), &scratch.hidden)?;
                 graph_phases[layer_offset].replay()?;
                 ctx.synchronize().map_err(Error::Cuda)?;
                 if matches!(&layer.mixer, MixerKind::Gdn(_)) {
@@ -1044,7 +1044,7 @@ impl Qwen35Decoder {
         decode_phases: Option<&[Qwen35DecodePhase]>,
         verify_phases: Option<&[Qwen35VerifyPhase]>,
     ) -> Result<DecoderOutput> {
-        scratch.write_token_ids(token_ids)?;
+        scratch.write_token_ids(ctx, token_ids)?;
         self.run_after_token_ids(
             ctx,
             weights,
@@ -1538,7 +1538,7 @@ impl DecoderScratch {
         Ok(())
     }
 
-    fn write_token_ids(&self, token_ids: &[u32]) -> Result<()> {
+    fn write_token_ids(&self, ctx: &CudaContext, token_ids: &[u32]) -> Result<()> {
         let values = token_ids
             .iter()
             .map(|&token| {
@@ -1547,7 +1547,7 @@ impl DecoderScratch {
             })
             .collect::<Result<Vec<_>>>()?;
         let host = Tensor::from_i32(vec![self.tokens], &values)?;
-        transfers::copy_cpu_to_cuda(&host, &self.token_ids)
+        transfers::copy_cpu_to_cuda_on_stream(ctx, host, &self.token_ids)
     }
 
     fn write_token_ids_device(&self, ctx: &CudaContext, token_ids: &Tensor) -> Result<()> {

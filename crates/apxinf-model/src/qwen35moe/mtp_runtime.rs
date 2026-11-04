@@ -376,13 +376,13 @@ impl MtpBackend for Qwen35MtpRuntime {
                         .map_err(|_| invalid("Qwen3.5 MTP prompt position exceeds i32"))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let shifted_tokens = transfers::to_cuda(
-                &Tensor::from_i32(vec![position.cache_rows], &shifted_tokens)?,
-                ctx.device_id(),
+            let shifted_tokens = transfers::to_cuda_on_stream(
+                ctx,
+                Tensor::from_i32(vec![position.cache_rows], &shifted_tokens)?,
             )?;
-            let shifted_positions = transfers::to_cuda(
-                &Tensor::from_i32(vec![position.cache_rows], &shifted_positions)?,
-                ctx.device_id(),
+            let shifted_positions = transfers::to_cuda_on_stream(
+                ctx,
+                Tensor::from_i32(vec![position.cache_rows], &shifted_positions)?,
             )?;
             for start in (0..position.cache_rows).step_by(MTP_PREFILL_CHUNK) {
                 let rows = (position.cache_rows - start).min(MTP_PREFILL_CHUNK);
@@ -469,13 +469,13 @@ impl MtpBackend for Qwen35MtpRuntime {
                     .map_err(|_| invalid("Qwen3.5 MTP append position exceeds i32"))
             })
             .collect::<Result<Vec<_>>>()?;
-        let tokens = transfers::to_cuda(
-            &Tensor::from_i32(vec![chunk_tokens.len()], &token_values)?,
-            ctx.device_id(),
+        let tokens = transfers::to_cuda_on_stream(
+            ctx,
+            Tensor::from_i32(vec![chunk_tokens.len()], &token_values)?,
         )?;
-        let positions = transfers::to_cuda(
-            &Tensor::from_i32(vec![chunk_tokens.len()], &position_values)?,
-            ctx.device_id(),
+        let positions = transfers::to_cuda_on_stream(
+            ctx,
+            Tensor::from_i32(vec![chunk_tokens.len()], &position_values)?,
         )?;
 
         for start_row in (0..chunk_tokens.len()).step_by(MTP_PREFILL_CHUNK) {
@@ -582,7 +582,7 @@ impl MtpBackend for Qwen35MtpRuntime {
         let eps = self.rms_norm_eps;
         let theta = self.rope_theta;
         let scratch = self.ensure_scratch(ctx, committed.capacity)?;
-        write_i32(&scratch.token, pending)?;
+        write_i32(ctx, &scratch.token, pending)?;
         let pending_slot = element_view(&scratch.verification_inputs, 0)?;
         transfers::copy_cuda_to_cuda(ctx, &scratch.token, &pending_slot)?;
         let draft_positions = (0..draft_steps)
@@ -595,9 +595,9 @@ impl MtpBackend for Qwen35MtpRuntime {
             .into_iter()
             .flat_map(|position| [position; 3])
             .collect::<Vec<_>>();
-        let draft_positions = transfers::to_cuda(
-            &Tensor::from_i32(vec![draft_steps, 3], &draft_positions)?,
-            ctx.device_id(),
+        let draft_positions = transfers::to_cuda_on_stream(
+            ctx,
+            Tensor::from_i32(vec![draft_steps, 3], &draft_positions)?,
         )?;
         // GEMM normally synchronizes after every eager execution so temporary
         // native resources cannot be destroyed while still in flight. Draft
@@ -710,6 +710,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             let scratch = self.ensure_scratch(ctx, shadow.capacity)?;
             transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &scratch.token)?;
             write_text_position(
+                ctx,
                 &scratch.position,
                 u32::try_from(
                     pending
@@ -2173,18 +2174,18 @@ fn validate_tensor(
     Ok(())
 }
 
-fn write_i32(destination: &Tensor, value: u32) -> Result<()> {
+fn write_i32(ctx: &CudaContext, destination: &Tensor, value: u32) -> Result<()> {
     let value = i32::try_from(value)
         .map_err(|_| invalid(format!("Qwen3.5 MTP value {value} exceeds i32")))?;
     let host = Tensor::from_i32(vec![1], &[value])?;
-    transfers::copy_cpu_to_cuda(&host, destination)
+    transfers::copy_cpu_to_cuda_on_stream(ctx, host, destination)
 }
 
-fn write_text_position(destination: &Tensor, value: u32) -> Result<()> {
+fn write_text_position(ctx: &CudaContext, destination: &Tensor, value: u32) -> Result<()> {
     let value = i32::try_from(value)
         .map_err(|_| invalid(format!("Qwen3.5 MTP position {value} exceeds i32")))?;
     let host = Tensor::from_i32(vec![3, 1], &[value, value, value])?;
-    transfers::copy_cpu_to_cuda(&host, destination)
+    transfers::copy_cpu_to_cuda_on_stream(ctx, host, destination)
 }
 
 fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {

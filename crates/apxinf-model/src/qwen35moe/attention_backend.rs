@@ -387,7 +387,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             tokens,
         )?;
         let scratch = self.scratch(ctx, tokens, cache.capacity, request.phase)?;
-        scratch.ensure_text_positions(request.start_position)?;
+        scratch.ensure_text_positions(ctx, request.start_position)?;
         let profile_attention = tokens == ops::QWEN35_MTP_DRAFT_STEPS + 1
             && std::env::var_os("APXINF_QWEN35_ATTENTION_TIMING").is_some();
         if profile_attention {
@@ -1138,13 +1138,13 @@ impl AttentionScratch {
         })
     }
 
-    fn ensure_text_positions(&mut self, start_position: usize) -> Result<()> {
+    fn ensure_text_positions(&mut self, ctx: &CudaContext, start_position: usize) -> Result<()> {
         if self.positions_start == Some(start_position) {
             return Ok(());
         }
         let values = text_position_values(start_position, self.tokens)?;
         let host = Tensor::from_i32(vec![TEXT_POSITION_CHANNELS, self.tokens], &values)?;
-        transfers::copy_cpu_to_cuda(&host, &self.positions)?;
+        transfers::copy_cpu_to_cuda_on_stream(ctx, host, &self.positions)?;
         self.positions_start = Some(start_position);
         Ok(())
     }

@@ -48,6 +48,90 @@ pub fn copy_cpu_to_cuda(source: &Tensor, destination: &Tensor) -> Result<()> {
     copy_host_to_device(device_id, source, destination.ptr()).map_err(Error::Cuda)
 }
 
+/// Upload an owned CPU tensor on the context stream and wait for completion.
+///
+/// Ownership keeps temporary host bytes alive until DMA finishes. This is a
+/// conservative, synchronous host boundary, not a capture-safe async staging
+/// API. It rejects CUDA Graph capture before allocating or submitting work.
+/// Existing default-stream transfer functions keep their original behavior.
+pub fn to_cuda_on_stream(ctx: &crate::CudaContext, source: Tensor) -> Result<Tensor> {
+    if source.device() != Device::Cpu {
+        return Err(Error::Other("copy source must be a CPU tensor".into()));
+    }
+    ensure_upload_outside_capture(ctx)?;
+    let bytes = source.storage().as_cpu()
+        .ok_or_else(|| Error::Other("expected CPU storage".into()))?.len();
+    let buffer = CudaBuffer::alloc(bytes, ctx.device_id()).map_err(Error::Cuda)?;
+    let destination = buffer.into_tensor(source.shape().clone(), source.dtype());
+    copy_cpu_to_cuda_on_stream(ctx, source, &destination)?;
+    Ok(destination)
+}
+
+/// Copy owned CPU staging into fixed CUDA storage on the context stream.
+///
+/// Prior writes/reads, this H2D, and subsequent kernels share stream order.
+/// This function waits for that stream before dropping the CPU source or
+/// returning success. On a submission/completion error it conservatively
+/// retains both source and destination owners: an error cannot prove pending
+/// DMA has stopped. Capture is explicitly unsupported; callers must upload
+/// changing inputs outside capture, then capture only device-side consumers.
+pub fn copy_cpu_to_cuda_on_stream(
+    ctx: &crate::CudaContext,
+    source: Tensor,
+    destination: &Tensor,
+) -> Result<()> {
+    validate_cpu_upload(&source, destination, ctx.device_id())?;
+    ensure_upload_outside_capture(ctx)?;
+    let destination = CudaBuffer::from_tensor(destination).map_err(Error::Cuda)?;
+    let bytes = source.storage().as_cpu()
+        .ok_or_else(|| Error::Other("expected CPU storage".into()))?;
+    if bytes.len() != destination.len() {
+        return Err(Error::Other("fixed CUDA input storage length mismatch".into()));
+    }
+    let submitted = ctx.stream().with_current_device(|| unsafe {
+        ffi::check_cuda(ffi::cudaMemcpyAsync(
+            destination.ptr(), bytes.as_ptr().cast(), bytes.len(),
+            ffi::cudaMemcpyKind::cudaMemcpyHostToDevice, ctx.stream().handle(),
+        ))
+    });
+    if let Err(error) = submitted.and_then(|()| ctx.synchronize()) {
+        // A CUDA error can describe earlier asynchronous work. Do not infer
+        // from it that this copy did not queue or may no longer access memory.
+        std::mem::forget((source, destination));
+        return Err(Error::Cuda(error));
+    }
+    Ok(())
+}
+
+fn validate_cpu_upload(source: &Tensor, destination: &Tensor, device_id: usize) -> Result<()> {
+    if source.device() != Device::Cpu {
+        return Err(Error::Other("copy source must be a CPU tensor".into()));
+    }
+    if destination.device() != Device::Cuda(device_id) {
+        return Err(Error::Other("fixed CUDA copy destination does not match context device".into()));
+    }
+    if source.shape() != destination.shape() || source.dtype() != destination.dtype() {
+        return Err(Error::Other("fixed CUDA input shape/dtype mismatch".into()));
+    }
+    Ok(())
+}
+
+fn ensure_upload_outside_capture(ctx: &crate::CudaContext) -> Result<()> {
+    if crate::workspace::is_capturing() {
+        return Err(Error::Other("owned CPU upload is not supported during CUDA Graph capture; upload before capture".into()));
+    }
+    // Also recognize captures started through a caller's raw CUDA interface,
+    // outside the Rust capture-retention boundary. CUDA enum ABI is int32.
+    let mut capture_status = 0i32;
+    ctx.stream().with_current_device(|| unsafe {
+        ffi::check_cuda(ffi::cudaStreamIsCapturing(ctx.stream().handle(), &mut capture_status))
+    }).map_err(Error::Cuda)?;
+    if capture_status != 0 {
+        return Err(Error::Other("owned CPU upload is not supported during CUDA Graph capture; upload before capture".into()));
+    }
+    Ok(())
+}
+
 /// Copy a shape-identical CUDA tensor into stable-address CUDA storage on the
 /// context stream. Source and destination must be on the same device.
 pub fn copy_cuda_to_cuda(
@@ -267,4 +351,40 @@ pub(crate) fn copy_device_to_host(
         ))?;
     }
     Ok(destination)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_cpu_upload;
+    use apxinf_core::storage::GpuStorageHandle;
+    use apxinf_core::{DType, Device, Shape, Storage, Tensor};
+
+    // Empty CUDA metadata has no allocation to dereference or release. These
+    // validation tests call no CUDA APIs and require no GPU context.
+    fn empty_cuda(device: usize, shape: Vec<usize>, dtype: DType) -> Tensor {
+        Tensor::from_raw_parts(
+            Shape::new(shape), dtype, Device::Cuda(device),
+            Storage::Gpu {
+                device: Device::Cuda(device),
+                handle: GpuStorageHandle { ptr: 0, len: 0, _prevent_leak: None },
+            },
+        )
+    }
+
+    #[test]
+    fn ctx_upload_validates_cpu_shape_dtype_and_context_device_without_cuda() {
+        let source = Tensor::from_i32(vec![0], &[]).unwrap();
+        let destination = empty_cuda(0, vec![0], DType::I32);
+        validate_cpu_upload(&source, &destination, 0).unwrap();
+        assert!(validate_cpu_upload(&source, &destination, 1).unwrap_err()
+            .to_string().contains("context device"));
+        assert!(validate_cpu_upload(&source, &empty_cuda(0, vec![0, 1], DType::I32), 0)
+            .unwrap_err().to_string().contains("shape/dtype"));
+        assert!(validate_cpu_upload(&source, &empty_cuda(0, vec![0], DType::F32), 0)
+            .unwrap_err().to_string().contains("shape/dtype"));
+        assert!(validate_cpu_upload(&destination, &destination, 0).unwrap_err()
+            .to_string().contains("CPU tensor"));
+        assert!(validate_cpu_upload(&source, &source, 0).unwrap_err()
+            .to_string().contains("context device"));
+    }
 }
