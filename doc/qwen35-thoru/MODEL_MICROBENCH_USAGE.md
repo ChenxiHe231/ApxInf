@@ -21,7 +21,37 @@ python3 scripts/bench_qwen35_model_matrix.py "${matrix_args[@]}" --inspect \
   > devlocal/model-microbench/runs/identity.json
 ```
 
-构建命令为 `cargo build --release -p apxinf-model --features qwen35-cuda --example qwen35_context_bench --example qwen35_mtp_bench`。在Thor执行时先设置CUDA/Cargo的PATH，并使用公共GPU锁。源码、构建日志和实际ELF哈希必须对应；inspect自身不能证明一个旧二进制来自当前源码。
+先在 Thor 本机完成全部编译，再回到上述 matrix 流程。使用专用编译 launcher，
+不要交错 native 编译和大 HugeTLB 池下的推理，也不要在外层重复获取同一公共锁：
+
+```bash
+python3 scripts/build_qwen35_thor_benchmarks.py --plan \
+  --target-dir /opt/data/dev/apxinf-qwen35-thoru-perf/target
+python3 scripts/build_qwen35_thor_benchmarks.py --execute \
+  --target-dir /opt/data/dev/apxinf-qwen35-thoru-perf/target
+```
+
+默认仅 plan：不取锁、不 sudo、不改池、不编译、不写 receipt。`--execute` 只允许
+Thor Linux aarch64 普通用户；持有固定 `/tmp/apxinf-gpu.lock` 后，若
+`HugePages_Total - HugePages_Free + HugePages_Rsvd > 2048` 则拒绝缩池。
+仅用已缓存授权的 `sudo -n` 设置并读回2048页（绝不清零），核对 Total/Free/Rsvd
+与 `MemAvailable >= 24 GiB`，才以当前普通用户启动 release、`qwen35-cuda`、
+Cargo jobs2 / NVCC parallelism2，一次编译两个 benchmark。
+
+默认编译结束保留小池；仅最后一次成功编译可显式加 `--inference-pages N` 请求
+后续推理池。该请求只在 owned PGID 的 Cargo 和孙进程已全部结束/reap 后执行，
+增长量必须不超过编译后 `MemAvailable - 8 GiB`；root pool writer 还会在增长前后
+再次检查至少8GiB普通内存余量，避免扩池吞掉全部普通内存。
+读回失败在同一授权操作中回到2048；权限过期则失败并保留小池，不自动恢复大池。
+构建失败不触发扩池。不能证明终止时 guard 落盘失败 receipt 并保持进程持锁，
+不显式 unlock；先检查 receipt 中的 owned PGID，确认其结束后再处理该 guard。
+正常 TERM/INT 会延后至固定 pool 操作记录完毕。外部 SIGKILL 或 OOM 强杀 guard
+不在这项保证内：sudo pool helper 可能继续，而 sudo 不保证继承 Cargo 的锁 FD；
+此时必须人工核实 pool 与残留进程，不能把不完整 receipt 当作成功/清理证明。
+
+receipt 默认在 `devlocal/model-microbench/safe-build/<run>/`，记录源码、实际编译
+argv、前后内存/池、退出码、清理证明及 Cargo JSON 返回的实际 aarch64 ELF SHA256。
+源码、构建日志和实际ELF哈希必须对应；inspect自身不能证明旧二进制来自当前源码。
 
 先独立调优，再启动新的正式进程：
 

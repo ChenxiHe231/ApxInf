@@ -1,0 +1,23 @@
+{
+  "schema": "apxinf.qwen35.safe-build.cpu-validation.v1",
+  "validated_utc": "2026-11-04T04:58:03.178221+00:00",
+  "scope": "CPU contracts and real Linux child/descendant/lock cleanup only; no sudo, real pool write, CUDA or cargo compilation performed",
+  "linux_host_alias": "shanghai_orin",
+  "linux_tests_passed": 19,
+  "mac_tests_passed": 16,
+  "mac_linux_only_skipped": 3,
+  "linux_log_sha256": "95f73c2481388a0e8ab8f0270a5d53bd51c442d0949d5f3f6504104a3c88c231",
+  "source_sha256": {
+    "scripts/build_qwen35_thor_benchmarks.py": "efec4ed299270ab881aadd3d2e6b3b4d4a3363ed043b106e523039150f0d2eca",
+    "scripts/test_build_qwen35_thor_benchmarks.py": "9b46e8df7523a3e5b569b7427195f06ef8d44cb309ed86e0dad6767d18b8d799"
+  },
+  "build_pool_pages": 2048,
+  "minimum_regular_memory_gib": 24,
+  "post_build_optional_inference_reserve_gib": 8,
+  "shared_lock": "/tmp/apxinf-gpu.lock",
+  "runtime_validation_pending": [
+    "Thor platform and actual pool operations",
+    "successful real CUDA build receipt and ELF hashes"
+  ],
+  "limitation": "External SIGKILL/OOM of guard during sudo pool helper is not covered by Cargo lock inheritance; documented, no hard-kill guarantee"
+}
