@@ -39,8 +39,9 @@ def fixture(case, opts=None, values=None):
     repeats=opts.repeats if opts.run_mode=='formal' else 1;warmups=0 if tune else opts.warmups
     identity=bench.input_identity(n);prefix='apxinf.qwen35.benchmark.' if is_decode else 'apxinf.qwen35.context_benchmark.'
     output=1024 if is_decode else 1
+    version='v2' if is_decode else 'v1'
     flags=dict(mode=opts.mode,autotune=tune,performance_eligible=not tune and not profile,profiling=profile,strict_recipe_required=not tune)
-    config=dict(schema=prefix+'config.v1',**flags,output_tokens=output,warmups=warmups,repeats=repeats,
+    config=dict(schema=prefix+'config.'+version,**flags,output_tokens=output,warmups=warmups,repeats=repeats,
                 qwen35_kv_cache=opts.kv_cache,qwen35_moe_activation=opts.moe_activation,temperature=0,sampling_mode='greedy',
                 tuning_dir=opts.tuning_dir,input_digest_fnv1a64=identity['fnv1a64'],input_seed_hex=identity['seed_hex'],
                 mtp_depth=3,mtp_strategy='fixed',draft_kv_dtype='fp8',draft_kv_scale=1.0)
@@ -48,18 +49,32 @@ def fixture(case, opts=None, values=None):
     strategy=opts.mtp_strategy if opts.mode=='mtp' else 'disabled'
     depth=opts.mtp_depth if strategy=='fixed' else None
     config.update(mtp_enabled=opts.mode=='mtp',mtp_strategy=strategy,mtp_depth=depth,fixed_depth=depth)
-    if is_decode:config.update(prompt_tokens=n,context_reuse=False)
+    if is_decode:config.update(prompt_tokens=n,context_reuse=False,
+        timing_method=bench.DECODE_TIMING_METHOD,timing_clock='std::time::Instant',
+        timing_origin='benchmark-generate-entry',timing_clock_reads_per_generate=4,
+        ttft_scope='generate_entry_to_first_callback',decode_scope='first_to_last_callback_intervals',
+        post_last_callback_scope='last_callback_to_generate_return')
     else:config.update(prefix_tokens=case['initial_kv_tokens'],input_tokens=case['new_input_tokens'],total_context_tokens=n)
     iterations=[]
     values=values or list(range(100,100+repeats))
     for i in range(warmups+repeats):
         value=50 if i<warmups else values[i-warmups]
-        row=dict(schema=prefix+'iteration.v1',**flags,iteration=i,warmup=i<warmups,output_tokens=output,
+        row=dict(schema=prefix+'iteration.'+version,**flags,iteration=i,warmup=i<warmups,output_tokens=output,
                  decode_intervals=output-1,token_digest_fnv1a64='0123456789abcdef')
         if is_decode:
-            decode_ms=(output-1)*1000/value
-            row.update(prompt_tokens=n,computed_prompt_tokens=n,reused_prompt_tokens=0,generation_tokens_per_second=value,
-                       ttft_ms=200,decode_ms=decode_ms,total_latency_ms=200+decode_ms)
+            decode_ns=round((output-1)*1e9/value)
+            decode_ms=decode_ns/1e6
+            legacy_decode_ms=decode_ms+7
+            row.update(prompt_tokens=n,computed_prompt_tokens=n,reused_prompt_tokens=0,decode_tokens_per_second=value,
+                       ttft_ms=200,decode_interval_ms=decode_ms,post_last_callback_ms=5,total_latency_ms=205+decode_ms,
+                       timing_method=bench.DECODE_TIMING_METHOD,
+                       callback_timing=dict(clock='std::time::Instant',origin='benchmark-generate-entry',clock_reads=4,
+                           callback_count=1024,decode_intervals=1023,first_callback_elapsed_ns=200_000_000,
+                           last_callback_elapsed_ns=200_000_000+decode_ns,generate_return_elapsed_ns=205_000_000+decode_ns),
+                       legacy_engine_profile=dict(schema='apxinf.qwen35.legacy-engine-profile.v1',
+                           scope='first_model_token_ready_to_engine_finalize_callbacks_excluded',ttft_ms=190,
+                           total_latency_ms=190+legacy_decode_ms,decode_including_finalize_ms=legacy_decode_ms,
+                           generation_tokens_per_second=(output-1)*1000/legacy_decode_ms))
             used=opts.mtp_depth if opts.mtp_strategy=='fixed' else 3
             by_depth=[1 if d<used else 0 for d in range(3)]
             row['speculation']=dict(draft_steps=3,proposed_tokens=sum(by_depth),proposed_by_depth=by_depth,
@@ -68,9 +83,15 @@ def fixture(case, opts=None, values=None):
                         initial_kv_tokens=case['initial_kv_tokens'],computed_input_tokens=case['new_input_tokens'],
                         committed_context_tokens_after_prefill=n,prefill_ms=value,decode_ms=None,decode_tokens_per_second=None)
         iterations.append(row)
-    summary=dict(schema=prefix+'summary.v1',**flags,divergent_repeats=0,output_tokens=output,decode_intervals=output-1,warmups=warmups,repeats=repeats)
+    summary=dict(schema=prefix+'summary.'+version,**flags,divergent_repeats=0,output_tokens=output,decode_intervals=output-1,warmups=warmups,repeats=repeats)
     if is_decode:
-        summary.update(prompt_tokens=n,generation_tokens_per_second={'median':bench.statistics.median(values)})
+        summary.update(prompt_tokens=n,decode_tokens_per_second={'median':bench.statistics.median(values)},
+                       timing_method=bench.DECODE_TIMING_METHOD)
+        measured=[row for row in iterations if not row['warmup']]
+        for key in ('ttft_ms','decode_interval_ms','post_last_callback_ms','total_latency_ms'):
+            summary[key]={'median':bench.statistics.median(row[key] for row in measured)}
+        summary['legacy_engine_profile']=dict(scope='first_model_token_ready_to_engine_finalize_callbacks_excluded',
+            generation_tokens_per_second={'median':bench.statistics.median(row['legacy_engine_profile']['generation_tokens_per_second'] for row in measured)})
         summary['speculation']={key:([x*repeats for x in value] if isinstance(value,list) else value*repeats)
                                 for key,value in iterations[-1]['speculation'].items() if key!='draft_steps'} if opts.mode=='mtp' else None
     else:summary.update(prefix_tokens=case['initial_kv_tokens'],input_tokens=case['new_input_tokens'],total_context_tokens=n,prefill_ms={'median':bench.statistics.median(values)})
@@ -128,6 +149,65 @@ def scalar_calibration_fixture(root, cases, diagnostic=False, env=None):
                   observed_before=identity,expected=identity,environment=env)
     (root/'summary.json').write_text(json.dumps(summary));(root/'metadata.json').write_text(json.dumps(metadata))
     return root/'summary.json',identity
+
+
+class CallbackTimingV2Contracts(unittest.TestCase):
+    def test_callback_metric_excludes_tail_but_preserves_legacy_separately(self):
+        case=bench.canonical_cases()[9];opts=args();records=fixture(case,opts)
+        result=bench.validate_records(records,case,opts)
+        self.assertEqual(result['observed_median'],102)
+        self.assertEqual(result['decode_timing_method'],bench.DECODE_TIMING_METHOD)
+        self.assertEqual(len(result['measured_callback_timing']),5)
+        self.assertEqual(result['measured_callback_timing'][0]['tail_ms'],5)
+        self.assertNotEqual(result['measured_callback_timing'][0]['tps'],result['measured_callback_timing'][0]['legacy_tps'])
+        self.assertIn('not_per_token_latency',result['decode_tpot_distribution']['sample_scope'])
+
+    def test_warmups_have_the_same_strict_1024_callbacks_and_clock_contract(self):
+        for change in ('callbacks','intervals','clock_reads','origin','clock','monotonic','nanoseconds_type'):
+            case=bench.canonical_cases()[9];opts=args();records=fixture(case,opts)
+            timing=records[1]['callback_timing'] # warmup0, not a measured repeat
+            if change=='callbacks':timing['callback_count']=1023
+            elif change=='intervals':timing['decode_intervals']=1024
+            elif change=='clock_reads':timing['clock_reads']=1026
+            elif change=='origin':timing['origin']='model_profile_start'
+            elif change=='clock':timing['clock']='wall_clock'
+            elif change=='monotonic':timing['last_callback_elapsed_ns']=timing['first_callback_elapsed_ns']
+            else:timing['first_callback_elapsed_ns']=True
+            with self.subTest(change=change),self.assertRaises(ValueError):bench.validate_records(records,case,opts)
+
+    def test_tail_not_added_to_decode_denominator_or_subtracted_by_uniform_estimate(self):
+        case=bench.canonical_cases()[9];opts=args()
+        for change in ('tail_in_denominator','total_without_tail','uniform_subtraction','legacy_at_top','legacy_scope','summary_tail'):
+            records=fixture(case,opts);row=records[3]
+            if change=='tail_in_denominator':row['decode_interval_ms']+=row['post_last_callback_ms']
+            elif change=='total_without_tail':row['total_latency_ms']-=row['post_last_callback_ms']
+            elif change=='uniform_subtraction':row['decode_interval_ms']-=1023*.001
+            elif change=='legacy_at_top':row['generation_tokens_per_second']=row['legacy_engine_profile']['generation_tokens_per_second']
+            elif change=='legacy_scope':row['legacy_engine_profile']['scope']='same_as_callback'
+            else:records[-1]['post_last_callback_ms']['median']=0
+            with self.subTest(change=change),self.assertRaises(ValueError):bench.validate_records(records,case,opts)
+
+    def test_native_v1_or_mixed_decode_schemas_cannot_be_relabelled(self):
+        case=bench.canonical_cases()[9];opts=args()
+        for mode in ('all','mixed','future'):
+            records=fixture(case,opts)
+            if mode=='all':
+                for row in records:row['schema']=row['schema'].replace('.v2','.v1')
+            elif mode=='mixed':records.insert(1,dict(records[1],schema='apxinf.qwen35.benchmark.iteration.v1'))
+            else:records[1]['schema']='apxinf.qwen35.benchmark.iteration.v3'
+            with self.subTest(mode=mode),self.assertRaisesRegex(ValueError,'legacy Decode v1'):bench.validate_records(records,case,opts)
+
+    def test_finalization_may_be_zero_but_primary_interval_must_be_positive(self):
+        case=bench.canonical_cases()[9];opts=args();records=fixture(case,opts)
+        for row in records[1:-1]:
+            row['post_last_callback_ms']=0
+            row['total_latency_ms']-=5
+            row['callback_timing']['generate_return_elapsed_ns']=row['callback_timing']['last_callback_elapsed_ns']
+        records[-1]['post_last_callback_ms']['median']=0
+        records[-1]['total_latency_ms']['median']-=5
+        bench.validate_records(records,case,opts)
+        records[1]['decode_interval_ms']=0
+        with self.assertRaises(ValueError):bench.validate_records(records,case,opts)
 
 
 class MatrixContracts(unittest.TestCase):
@@ -596,7 +676,7 @@ class MatrixContracts(unittest.TestCase):
     def test_decode_counts_first_token_boundary_and_tps_consistency(self):
         case=bench.canonical_cases()[-1];opts=args();records=fixture(case,opts)
         result=bench.validate_records(records,case,opts)
-        self.assertEqual(result['decode_tpot_ms'],1000/102)
+        self.assertAlmostEqual(result['decode_tpot_ms'],1000/102,delta=1e-6/1023) # <= one nanosecond of total interval quantization
         for key,value in [('decode_intervals',1024),('output_tokens',1000),('reused_prompt_tokens',1),('computed_prompt_tokens',1),('decode_ms',2)]:
             bad=copy.deepcopy(records);bad[1][key]=value
             with self.assertRaises(ValueError):bench.validate_records(bad,case,opts)
@@ -715,6 +795,76 @@ class MatrixContracts(unittest.TestCase):
         bad=bench.validate_run(raw_output(records),case,opts,{'count':0,'manifest_sha256':'x'},before,'a'*64,outcome)
         self.assertFalse(bad['valid'])
         with self.assertRaisesRegex(ValueError,'receipt'):bench.parse_output('\n'.join(json.dumps(r) for r in records))
+
+    def test_profile_worker_creates_target_parent_before_child_and_exports_fresh_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);parent=root/"nested profile 'quoted'; $literal [x]";base=parent/'cold-i2k'
+            opts=args(workdir=directory,context_binary=sys.executable,decode_binary=sys.executable,
+                      tuning_dir=str(root/'recipes'),profile_dir=str(parent),nsys=self.fake_nsys(root))
+            child='import pathlib,sys; p=pathlib.Path(sys.argv[1].split("=",1)[1]); assert p.parent.is_dir(); pathlib.Path(str(p)+".nsys-rep").write_bytes(b"CPU fixture, not GPU capture")'
+            with patch.object(bench,'GPU_LOCK_PATH',str(root/'gpu.lock')):
+                outcome=bench.Transport(opts).execute([sys.executable,'-c',child,'--output='+str(base)],{},root/'launch.log',profile=True)
+            self.assertEqual(outcome['transport_returncode'],0)
+            records,process,exit_receipt,lock=bench.parse_output((root/'launch.log').read_text())
+            self.assertTrue(exit_receipt['child_reaped']);self.assertTrue(lock['acquired'])
+            self.assertEqual(process['profile_output']['base'],str(base));self.assertFalse(process['profile_output']['parent_preexisted'])
+            artifact=bench.Transport(opts).profile_artifacts(str(base),root/'case')
+            self.assertTrue(artifact['valid'],artifact['failures'])
+            self.assertEqual(artifact['report']['sha256'],bench.sha256_file(Path(str(base)+'.nsys-rep')))
+            self.assertEqual(artifact['stats']['argv'][-1],str(base)+'.nsys-rep')
+
+    def test_profile_worker_rejects_any_stale_prefix_before_child_without_overwrite(self):
+        for suffix,kind in [('.nsys-rep','file'),('.sqlite','file'),('.qdstrm','file'),('','directory'),('.nsys-rep','dangling_symlink')]:
+            with self.subTest(suffix=suffix,kind=kind),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);parent=root/'traces';parent.mkdir();base=parent/'cold-i2k';stale=Path(str(base)+suffix)
+                if kind=='file':stale.write_bytes(b'old evidence')
+                elif kind=='directory':stale.mkdir()
+                else:stale.symlink_to(root/'nonexistent')
+                flag=root/'child-started';opts=args(workdir=directory,context_binary=sys.executable,decode_binary=sys.executable,tuning_dir=str(root/'recipes'),profile_dir=str(parent))
+                child='from pathlib import Path; Path('+repr(str(flag))+').touch()'
+                with patch.object(bench,'GPU_LOCK_PATH',str(root/'gpu.lock')):
+                    result=bench.Transport(opts).execute([sys.executable,'-c',child,'--output='+str(base)],{},root/'blocked.log',profile=True)
+                self.assertEqual(result['transport_returncode'],73);self.assertFalse(flag.exists())
+                _,process,exit_receipt,_=bench.parse_output((root/'blocked.log').read_text())
+                self.assertEqual(process['kind'],'not_started');self.assertIn('prefix already exists',exit_receipt['profile_prelaunch_error'])
+                if kind=='file':self.assertEqual(stale.read_bytes(),b'old evidence')
+                if kind=='dangling_symlink':self.assertTrue(stale.is_symlink())
+
+    def test_profile_mkdir_failure_has_not_started_receipt_and_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);parent=root/'file-not-directory';parent.write_text('preserve');flag=root/'child-started'
+            opts=args(workdir=directory,context_binary=sys.executable,decode_binary=sys.executable,tuning_dir=str(root/'recipes'),profile_dir=str(parent))
+            with patch.object(bench,'GPU_LOCK_PATH',str(root/'gpu.lock')):
+                result=bench.Transport(opts).execute([sys.executable,'-c','from pathlib import Path; Path('+repr(str(flag))+').touch()','--output='+str(parent/'cold-i2k')],{},root/'failure.log',profile=True)
+            self.assertEqual(result['transport_returncode'],73);self.assertFalse(flag.exists());self.assertEqual(parent.read_text(),'preserve')
+            _,process,receipt,_=bench.parse_output((root/'failure.log').read_text());self.assertEqual(process['kind'],'not_started');self.assertTrue(receipt['child_reaped'])
+
+    def test_formal_and_tune_never_create_configured_profile_parent(self):
+        for mode in ('formal','tune'):
+            with self.subTest(mode=mode),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);parent=root/'profile-must-not-exist'
+                opts=args(run_mode=mode,workdir=directory,context_binary=sys.executable,decode_binary=sys.executable,tuning_dir=str(root/'recipes'),profile_dir=str(parent))
+                with patch.object(bench,'GPU_LOCK_PATH',str(root/'gpu.lock')):
+                    result=bench.Transport(opts).execute([sys.executable,'-c','pass'],{},root/'run.log')
+                self.assertEqual(result['transport_returncode'],0);self.assertFalse(parent.exists())
+
+    def test_profile_transport_rejects_missing_duplicate_relative_or_wrong_parent_output(self):
+        for outputs in [[],['--output=relative/cold-i2k'],['--output=/elsewhere/cold-i2k'],['--output=/trace/one','--output=/trace/two']]:
+            with self.subTest(outputs=outputs),tempfile.TemporaryDirectory() as directory:
+                with patch.object(bench.subprocess,'run') as run:
+                    with self.assertRaisesRegex(ValueError,'profile'):
+                        bench.Transport(args(profile_dir='/trace')).execute([sys.executable,*outputs],{},Path(directory)/'log',profile=True)
+                run.assert_not_called();self.assertFalse((Path(directory)/'log').exists())
+
+    def test_profile_ssh_payload_quotes_remote_path_and_does_not_mkdir_locally(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);parent=root/"remote 'quoted'; $(not-a-command) [x]";base=parent/'cold-i2k'
+            opts=args(ssh_host='thor-u',profile_dir=str(parent))
+            with patch.object(bench.subprocess,'run',return_value=SimpleNamespace(returncode=0)) as run:
+                bench.Transport(opts).execute(['nsys','profile','--output='+str(base),'/bin/context'],{},root/'transport.log',profile=True)
+            argv=run.call_args.args[0];self.assertEqual(argv[:2],['ssh','thor-u'])
+            remote=bench.shlex.split(argv[2]);self.assertEqual(remote[:3],['python3','-c',bench.LAUNCH_CODE])
+            payload=json.loads(remote[3]);self.assertEqual(payload['profile_output'],str(base));self.assertEqual(payload['argv'][2],'--output='+str(base));self.assertFalse(parent.exists())
 
     def test_real_launcher_timeout_reaps_only_its_child(self):
         # CPU subprocess only: prove the timeout path does not silently advance.

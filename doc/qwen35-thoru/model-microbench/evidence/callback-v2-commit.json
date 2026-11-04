@@ -1,0 +1,92 @@
+{
+  "schema": "apxinf.callback_v2.commit_evidence.v1",
+  "scope": "Measurement definition and tool reliability only; no speedup/clean commit GPU/model/weather/full15 claim",
+  "source_overlay_patch_sha256": "147717faa89e4ae760b9f90b3cc752516652942fb0a65c0cb58930ef1455b2fd",
+  "fresh_private_python_cpu": {
+    "scope": "Fresh Python CPU fake-process/shape/clock/lock/profiler-directory contracts on private exact-source files, not Cargo/native/GPU/model",
+    "argv": [
+      "/Library/Developer/CommandLineTools/usr/bin/python3",
+      "scripts/test_bench_qwen35_model_matrix.py"
+    ],
+    "returncode": 0,
+    "passed": 53,
+    "elapsed_seconds": 7.730691416999999,
+    "stdout_sha256": "9e5fae6df493610da1f7f161ddd399112c7e430934f9a1bc20235365f829b299",
+    "stderr_sha256": "addae5fc328dd3973977495ed74005fa3a49bafa010d9610268554a1e29f60a8",
+    "source_sha256": {
+      "crates/apxinf-model/examples/qwen35_mtp_bench.rs": "e0603656fbf97948f5096d9d552e267a168a55fd2bff661e82814a53420284d9",
+      "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+      "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+      "scripts/bench_qwen35_model_matrix.py": "30a4c11d9de740b6588d571df2c43fe2e22f005bddd4b8230f219d1011ba114e",
+      "scripts/test_bench_qwen35_model_matrix.py": "dcb8ba7aa56d3c502127314ac5d2f89450efd5714a8d85b32b7a3aa1c84fa5f9"
+    }
+  },
+  "original_independent_CPU_evidence": [
+    {
+      "path": "devlocal/model-microbench/recovery-build/decode-callback-timing-linux-cpu-01/receipt.json",
+      "sha256": "5e9f5737977f35767f25273adfbdc50610d303ebcb2b2d1087e2ce54bc0e457b",
+      "receipt": {
+        "schema": "apxinf.cpu.contract.execution.v1",
+        "scope": "pure std CPU callback clock contracts; not CUDA, generation, or model performance",
+        "source_sha256": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+        "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+        "stages": [
+          {
+            "argv": [
+              "/home/wwxq/.cargo/bin/rustc",
+              "--edition=2021",
+              "--test",
+              "-O",
+              "/home/wwxq/apxinf-pr117-runtime-2529a7e/devlocal/model-microbench-callback-timing/cpu-01/qwen35_callback_timing.rs",
+              "-o",
+              "/home/wwxq/apxinf-pr117-runtime-2529a7e/devlocal/model-microbench-callback-timing/cpu-01/callback-timing-tests"
+            ],
+            "returncode": 0,
+            "elapsed_seconds": 1.017888237023726,
+            "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "argv": [
+              "/home/wwxq/apxinf-pr117-runtime-2529a7e/devlocal/model-microbench-callback-timing/cpu-01/callback-timing-tests",
+              "--nocapture",
+              "--test-threads=1"
+            ],
+            "returncode": 0,
+            "elapsed_seconds": 0.002722814097069204,
+            "stdout_sha256": "719add0200f17a9673298542c59916a5c9168fb349749c9f533787410c3afc66",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "utc": "2026-11-04T10:42:34.649110+00:00",
+        "passed": true,
+        "executable_sha256": "4961da2313bd45057607d7ab0b89b0afa0f026e857357a471962d4d5321c7763"
+      }
+    },
+    {
+      "path": "devlocal/model-microbench/recovery-build/callback-profiler-v2-linux-cpu-01/receipt.json",
+      "sha256": "b4e310e774c7cc1fc78a3829b15a59a8f6d619ff782a7e8cdb35339cef87ee89",
+      "receipt": {
+        "scope": "CPU fake-subprocess/measurement/profile-directory contracts only; no GPU/model run",
+        "argv": [
+          "/usr/bin/python3",
+          "/home/wwxq/apxinf-pr117-runtime-2529a7e/devlocal/model-microbench-callback-timing/runner-cpu-01/test_bench_qwen35_model_matrix.py"
+        ],
+        "source_sha256": {
+          "bench_qwen35_model_matrix.py": "30a4c11d9de740b6588d571df2c43fe2e22f005bddd4b8230f219d1011ba114e",
+          "test_bench_qwen35_model_matrix.py": "dcb8ba7aa56d3c502127314ac5d2f89450efd5714a8d85b32b7a3aa1c84fa5f9"
+        },
+        "python": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]",
+        "elapsed_seconds": 6.576489647035487,
+        "returncode": 0,
+        "stdout_sha256": "9e5fae6df493610da1f7f161ddd399112c7e430934f9a1bc20235365f829b299",
+        "stderr_sha256": "bd91c97412e65f8120cb6d7b177ede4385d1497ed4829a9f0a7bbb2c9d32ed84",
+        "passed53": true
+      }
+    }
+  ],
+  "actual_Rust9_reexecution_in_private": false,
+  "model_public_Rust_API_changed": false,
+  "CLI_arguments_changed": false,
+  "JSON_schema_migration": "Decode config/iteration/summary.v2 and matrix.run.v2; legacy total-minus-engineTTFT explicitly separated and rejected as official interval score"
+}

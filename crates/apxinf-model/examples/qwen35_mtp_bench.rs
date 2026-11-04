@@ -21,6 +21,18 @@ use serde_json::{json, Value};
 mod benchmark;
 #[path = "support/qwen35_cuda_profile.rs"]
 mod cuda_profile;
+#[path = "support/qwen35_decode_profile.rs"]
+mod decode_profile;
+#[path = "support/qwen35_callback_timing.rs"]
+mod callback_clock;
+
+struct NvtxGenerationRanges;
+impl decode_profile::RangeSink for NvtxGenerationRanges {
+    type Guard = apxinf_model::profiling::trace::Range;
+    fn push(&mut self, label: &'static str) -> Self::Guard {
+        apxinf_model::profiling::trace::range(label)
+    }
+}
 use benchmark::{quantile, token_digest, INPUT_SEED};
 const PROMPT_TOKENS: usize = 4_096;
 const DEFAULT_OUTPUT_TOKENS: usize = 256;
@@ -214,15 +226,60 @@ fn run_mode(
     let mut measured_ttft_ms = Vec::with_capacity(repeats);
     let mut measured_prefill_tps = Vec::with_capacity(repeats);
     let mut measured_generation_tps = Vec::with_capacity(repeats);
+    let mut measured_decode_ms = Vec::with_capacity(repeats);
+    let mut measured_post_last_ms = Vec::with_capacity(repeats);
+    let mut measured_total_ms = Vec::with_capacity(repeats);
+    let mut measured_legacy_generation_tps = Vec::with_capacity(repeats);
     let mut aggregate = AggregateSpeculation::default();
     let mut canonical_tokens: Option<Vec<u32>> = None;
 
     for iteration in 0..warmups + repeats {
         let warmup = iteration < warmups;
         let profile_range = cuda_profile::CudaProfileRange::start(profiling && !warmup)?;
-        let output =
-            model.generate_streaming_with_options(LlmInput::text(prompt), &options, |_token| {})?;
+        let (output, callback_timing) = if profiling && !warmup {
+            // Callback endpoints are host availability boundaries. They do not
+            // introduce GPU synchronization or split an MTP round into tokens.
+            let mut phases = decode_profile::GenerationRanges::new(
+                NvtxGenerationRanges, max_new_tokens,
+            )?;
+            let mut timing = callback_clock::CallbackTimer::start(max_new_tokens)?;
+            let output = model.generate_streaming_with_options(
+                LlmInput::text(prompt), &options, |_token| {
+                    timing.on_token();
+                    phases.on_token();
+                },
+            )?;
+            let timing = timing.finish_after_generate(output.tokens.len())?;
+            phases.finish(output.tokens.len())?;
+            (output, timing)
+        } else {
+            // The same timing helper checks warmups and formal output budgets.
+            // Only first/final callbacks read the clock; intermediate callbacks
+            // count delivery without token timestamps, GPU work, or logging.
+            let mut timing = callback_clock::CallbackTimer::start(max_new_tokens)?;
+            let output = model.generate_streaming_with_options(
+                LlmInput::text(prompt), &options, |_token| timing.on_token(),
+            )?;
+            let timing = timing.finish_after_generate(output.tokens.len())?;
+            (output, timing)
+        };
         profile_range.finish()?;
+        if profiling && !warmup {
+            println!("{}", json!({
+                "schema": "apxinf.qwen35.benchmark.profile_scope.v2",
+                "mode": mode.name(), "iteration": iteration,
+                "performance_eligible": false,
+                "capture_scope": "full_generate_including_prompt_prefill",
+                "nvtx_requested": std::env::var("APXINF_NVTX").as_deref() == Ok("1"),
+                "generate_range": decode_profile::GENERATE,
+                "entry_to_first_callback_range": decode_profile::PREFILL,
+                "first_to_last_callback_range": (max_new_tokens > 1).then_some(decode_profile::DECODE),
+                "last_callback_to_return_range": decode_profile::FINALIZE,
+                "callback_tokens": output.tokens.len(),
+                "callback_intervals": output.tokens.len().saturating_sub(1),
+                "attribution_requires_actual_nvtx_events_and_cuda_correlation": true,
+            }));
+        }
         let token_ids = output.token_ids();
         if let Some(expected) = &canonical_tokens {
             if expected != &token_ids {
@@ -287,19 +344,20 @@ fn run_mode(
             canonical_tokens = Some(token_ids.clone());
         }
 
-        let ttft_ms = output
-            .profile
-            .ttft_ms()
-            .ok_or("generation profile did not record TTFT")?;
-        let generation_tps = output.profile.generation_tps();
-        if max_new_tokens > 1 && generation_tps.is_none() {
-            return Err("generation profile did not record generation TPS".into());
+        let legacy_ttft_ms = output.profile.ttft_ms()
+            .ok_or("legacy generation profile did not record TTFT")?;
+        let legacy_generation_tps = output.profile.generation_tps();
+        let legacy_total_ms = output.profile.total_latency_ms()
+            .ok_or("legacy generation profile did not record total latency")?;
+        let legacy_decode_ms = (max_new_tokens > 1).then_some(legacy_total_ms - legacy_ttft_ms);
+        let ttft_ms = callback_clock::ms(callback_timing.first_callback);
+        let total_latency_ms = callback_clock::ms(callback_timing.generate_return);
+        let decode_ms = callback_timing.decode_ms();
+        let post_last_callback_ms = callback_clock::ms(callback_timing.post_last_callback);
+        let generation_tps = callback_timing.decode_tps();
+        if max_new_tokens > 1 && (generation_tps.is_none() || legacy_generation_tps.is_none()) {
+            return Err("callback or legacy generation profile did not record Decode TPS".into());
         }
-        let total_latency_ms = output
-            .profile
-            .total_latency_ms()
-            .ok_or("generation profile did not record total latency")?;
-        let decode_ms = (max_new_tokens > 1).then_some(total_latency_ms - ttft_ms);
         if output.profile.reused_input_tokens() != 0
             || output.profile.input_tokens() != prompt.len()
         {
@@ -327,7 +385,7 @@ fn run_mode(
         println!(
             "{}",
             json!({
-                "schema": "apxinf.qwen35.benchmark.iteration.v1",
+                "schema": "apxinf.qwen35.benchmark.iteration.v2",
                 "mode": mode.name(),
                 "iteration": iteration,
                 "warmup": warmup,
@@ -340,12 +398,32 @@ fn run_mode(
                 "reused_prompt_tokens": output.profile.reused_input_tokens(),
                 "decode_intervals": token_ids.len().saturating_sub(1),
                 "total_latency_ms": total_latency_ms,
-                "decode_ms": decode_ms,
+                "timing_method": callback_clock::METHOD,
+                "decode_interval_ms": decode_ms,
+                "post_last_callback_ms": post_last_callback_ms,
+                "callback_timing": {
+                    "clock": callback_clock::CLOCK,
+                    "origin": callback_clock::ORIGIN,
+                    "clock_reads": callback_timing.clock_reads,
+                    "callback_count": callback_timing.callback_count,
+                    "decode_intervals": callback_timing.intervals,
+                    "first_callback_elapsed_ns": callback_timing.first_callback.as_nanos(),
+                    "last_callback_elapsed_ns": callback_timing.last_callback.as_nanos(),
+                    "generate_return_elapsed_ns": callback_timing.generate_return.as_nanos(),
+                },
+                "legacy_engine_profile": {
+                    "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+                    "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+                    "ttft_ms": legacy_ttft_ms,
+                    "total_latency_ms": legacy_total_ms,
+                    "decode_including_finalize_ms": legacy_decode_ms,
+                    "generation_tokens_per_second": legacy_generation_tps,
+                },
                 "prompt_tokens": prompt.len(),
                 "output_tokens": token_ids.len(),
                 "ttft_ms": ttft_ms,
                 "prefill_tokens_per_second": prefill_tps,
-                "generation_tokens_per_second": generation_tps,
+                "decode_tokens_per_second": generation_tps,
                 "repeat_diverged": repeat_diverged,
                 "token_digest_fnv1a64": format!("{:016x}", token_digest(&token_ids)),
                 "speculation": speculation,
@@ -355,6 +433,10 @@ fn run_mode(
         if !warmup {
             measured_ttft_ms.push(ttft_ms);
             measured_prefill_tps.push(prefill_tps);
+            measured_post_last_ms.push(post_last_callback_ms);
+            measured_total_ms.push(total_latency_ms);
+            if let Some(ms) = decode_ms { measured_decode_ms.push(ms); }
+            if let Some(tps) = legacy_generation_tps { measured_legacy_generation_tps.push(tps); }
             if let Some(tps) = generation_tps {
                 measured_generation_tps.push(tps);
             }
@@ -362,7 +444,7 @@ fn run_mode(
     }
 
     let mut summary = json!({
-        "schema": "apxinf.qwen35.benchmark.summary.v1",
+        "schema": "apxinf.qwen35.benchmark.summary.v2",
         "mode": mode.name(),
         "autotune": autotune,
         "profiling": profiling,
@@ -382,7 +464,27 @@ fn run_mode(
             "median": quantile(&measured_prefill_tps, 0.5),
             "p95": quantile(&measured_prefill_tps, 0.95),
         },
-        "generation_tokens_per_second": (!measured_generation_tps.is_empty()).then(|| json!({
+        "timing_method": callback_clock::METHOD,
+        "post_last_callback_ms": {
+            "median": quantile(&measured_post_last_ms, 0.5),
+            "p95": quantile(&measured_post_last_ms, 0.95),
+        },
+        "total_latency_ms": {
+            "median": quantile(&measured_total_ms, 0.5),
+            "p95": quantile(&measured_total_ms, 0.95),
+        },
+        "decode_interval_ms": (!measured_decode_ms.is_empty()).then(|| json!({
+            "median": quantile(&measured_decode_ms, 0.5),
+            "p95": quantile(&measured_decode_ms, 0.95),
+        })),
+        "legacy_engine_profile": {
+            "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+            "generation_tokens_per_second": (!measured_legacy_generation_tps.is_empty()).then(|| json!({
+                "median": quantile(&measured_legacy_generation_tps, 0.5),
+                "p95": quantile(&measured_legacy_generation_tps, 0.95),
+            })),
+        },
+        "decode_tokens_per_second": (!measured_generation_tps.is_empty()).then(|| json!({
             "median": quantile(&measured_generation_tps, 0.5),
             "p95": quantile(&measured_generation_tps, 0.95),
         })),
@@ -506,7 +608,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}",
         json!({
-            "schema": "apxinf.qwen35.benchmark.config.v1",
+            "schema": "apxinf.qwen35.benchmark.config.v2",
             "checkpoint": checkpoint,
             "device": device,
             "prompt_tokens": prompt_tokens,
@@ -523,6 +625,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "strict_recipe_required": !autotune,
             "recipe_audit_required": true,
             "context_reuse": false,
+            "timing_method": callback_clock::METHOD,
+            "timing_clock": callback_clock::CLOCK,
+            "timing_origin": callback_clock::ORIGIN,
+            "timing_clock_reads_per_generate": if max_new_tokens > 1 { 4 } else { 3 },
+            "ttft_scope": "generate_entry_to_first_callback",
+            "decode_scope": "first_to_last_callback_intervals",
+            "post_last_callback_scope": "last_callback_to_generate_return",
             "temperature": 0.0,
             "sampling_mode": "greedy",
             "kv_capacity": capacity,

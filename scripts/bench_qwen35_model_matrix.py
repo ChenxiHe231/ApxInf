@@ -20,7 +20,8 @@ import subprocess
 import sys
 import time
 
-SCHEMA = "apxinf.model-matrix.run.v1"
+SCHEMA = "apxinf.model-matrix.run.v2"
+DECODE_TIMING_METHOD = "host-callback-first-last-v2"
 SEED = 0x35A3BF0440960001
 VOCAB = 248320
 FNV_OFFSET = 0xCBF29CE484222325
@@ -280,6 +281,24 @@ try:
                 print('APXINF_MATRIX_LOCK_WAIT '+json.dumps({'path':p['lock_path'],'wait_ms':elapsed*1000,'holder':prior_holder}),flush=True);last_notice=elapsed
             time.sleep(min(0.1,max(0.001,p['lock_timeout']-elapsed)))
     print('APXINF_MATRIX_LOCK '+json.dumps({'path':p['lock_path'],'acquired':True,'wait_ms':(time.monotonic()-started)*1000,'prior_holder':prior_holder,'owner_pid':os.getpid(),'recipes_before':inventory(),'hardware_before':hardware(),'target_binary_sha256':digest(p['benchmark_binary'])}),flush=True)
+    profile_output=None
+    if p['profile']:
+        try:
+            report=pathlib.Path(p['profile_output'])
+            if not report.is_absolute() or not report.name:
+                raise ValueError('profile output base must be absolute')
+            parent_existed=report.parent.exists()
+            report.parent.mkdir(parents=True,exist_ok=True)
+            # Use literal names, not glob syntax: output paths may contain
+            # shell/glob metacharacters. Any same-prefix artifact is stale.
+            conflicts=sorted(x.name for x in report.parent.iterdir() if x.name.startswith(report.name))
+            if conflicts:
+                raise FileExistsError('profile output prefix already exists: '+', '.join(conflicts))
+            profile_output={'base':str(report),'parent':str(report.parent),'parent_preexisted':parent_existed,'same_prefix_artifacts':conflicts}
+        except (OSError,ValueError,TypeError) as error:
+            print('APXINF_MATRIX_PROCESS '+json.dumps({'kind':'not_started','pid':None,'profile_output':p.get('profile_output'),'error':str(error)}),flush=True)
+            print('APXINF_MATRIX_EXIT '+json.dumps({'returncode':73,'timed_out':False,'child_reaped':True,'lock_held_until_reaped':True,'profile_prelaunch_error':str(error)}),flush=True)
+            sys.exit(73)
     # The direct benchmark inherits this same open-file-description. It keeps
     # the lock after abrupt worker loss. A profiler may close inherited FDs in
     # descendants: only the live worker/launcher lifetime is guaranteed there.
@@ -290,6 +309,7 @@ try:
     signal.signal(signal.SIGTERM,interrupted);signal.signal(signal.SIGINT,interrupted)
     identity={'pid':proc.pid,'kind':'profiler_launcher' if p['profile'] else 'benchmark','direct_child_inherits_gpu_lock':not p['profile'],
               'effective_mtp_environment':{key:env.get(key) for key in ('APXINF_QWEN35_MTP_FIXED_DEPTH','APXINF_QWEN35_SCALAR_TPOT_MS')}}
+    if profile_output is not None:identity['profile_output']=profile_output
     try:
         path='/proc/%d/exe'%proc.pid
         identity['exe']=os.readlink(path);identity['sha256']=digest(path)
@@ -381,6 +401,16 @@ def validate_profile_artifacts(artifacts):
     return failures
 
 
+def _profile_output_for_command(argv, directory):
+    outputs = [item[len("--output="):] for item in argv if item.startswith("--output=")]
+    if len(outputs) != 1 or not directory:
+        raise ValueError("profile invocation requires one explicit --output= base and profile directory")
+    report = Path(outputs[0])
+    if not report.is_absolute() or not report.name or report.parent != Path(directory):
+        raise ValueError("profile output base must be directly inside the absolute profile directory")
+    return str(report)
+
+
 class Transport:
     def __init__(self, args):
         self.args = args
@@ -397,7 +427,8 @@ class Transport:
 
     def execute(self, argv, env, log, profile=False):
         target_binary = self.args.decode_binary if "--prompt-tokens" in argv else self.args.context_binary
-        payload = json.dumps(dict(argv=argv, environment=env, cwd=self.args.workdir, timeout=self.args.timeout_sec, profile=profile,
+        profile_output = _profile_output_for_command(argv, self.args.profile_dir) if profile else None
+        payload = json.dumps(dict(argv=argv, environment=env, cwd=self.args.workdir, timeout=self.args.timeout_sec, profile=profile, profile_output=profile_output,
                                   lock_path=GPU_LOCK_PATH, lock_timeout=self.args.lock_timeout_sec, tuning_dir=self.args.tuning_dir, benchmark_binary=target_binary))
         started = time.monotonic()
         with log.open("wb") as stream:
@@ -593,12 +624,55 @@ def validate_decode_speculation(stats, args, aggregate=False):
     return max((index+1 for index, count in enumerate(proposed) if count), default=0)
 
 
+def validate_callback_timing(row, output):
+    if row.get("timing_method") != DECODE_TIMING_METHOD:
+        raise ValueError("Decode requires explicit callback timing v2")
+    if "decode_ms" in row or "generation_tokens_per_second" in row:
+        raise ValueError("ambiguous legacy Decode metrics at v2 top level")
+    timing = row.get("callback_timing")
+    if not isinstance(timing, dict) or timing.get("clock") != "std::time::Instant" or timing.get("origin") != "benchmark-generate-entry":
+        raise ValueError("Decode callback clock/origin mismatch")
+    for field,value in {"clock_reads":4,"callback_count":output,"decode_intervals":output-1}.items():
+        if type(timing.get(field)) is not int or timing[field] != value:
+            raise ValueError("Decode callback timing count mismatch: "+field)
+    first,last,returned = [timing.get(key) for key in ("first_callback_elapsed_ns","last_callback_elapsed_ns","generate_return_elapsed_ns")]
+    if any(type(x) is not int for x in (first,last,returned)) or not (0 < first < last <= returned):
+        raise ValueError("Decode callback timestamps must be monotonic integer nanoseconds")
+    tps = finite_number(row.get("decode_tokens_per_second"), "callback Decode TPS")
+    ttft = finite_number(row.get("ttft_ms"), "callback TTFT")
+    interval = finite_number(row.get("decode_interval_ms"), "callback Decode interval")
+    tail = finite_number(row.get("post_last_callback_ms"), "post-last-callback tail", positive=False)
+    total = finite_number(row.get("total_latency_ms"), "callback total latency")
+    for actual,expected in ((ttft,first/1e6),(interval,(last-first)/1e6),(tail,(returned-last)/1e6),
+                            (total,returned/1e6),(tps,(output-1)*1e9/(last-first))):
+        if not math.isclose(actual,expected,rel_tol=1e-9,abs_tol=1e-6):
+            raise ValueError("callback Decode intervals, TPS and clock endpoints disagree")
+    if not math.isclose(total,ttft+interval+tail,rel_tol=1e-9,abs_tol=1e-6):
+        raise ValueError("callback total must include separate TTFT + intervals + tail")
+    legacy = row.get("legacy_engine_profile")
+    if not isinstance(legacy,dict) or legacy.get("schema") != "apxinf.qwen35.legacy-engine-profile.v1" or legacy.get("scope") != "first_model_token_ready_to_engine_finalize_callbacks_excluded":
+        raise ValueError("legacy engine profile requires an explicit separate scope")
+    legacy_ttft = finite_number(legacy.get("ttft_ms"), "legacy TTFT")
+    legacy_total = finite_number(legacy.get("total_latency_ms"), "legacy total")
+    legacy_decode = finite_number(legacy.get("decode_including_finalize_ms"), "legacy Decode including finalize")
+    legacy_tps = finite_number(legacy.get("generation_tokens_per_second"), "legacy Decode TPS")
+    if not math.isclose(legacy_decode,legacy_total-legacy_ttft,rel_tol=1e-9,abs_tol=1e-6) or not math.isclose(legacy_tps,(output-1)*1000/legacy_decode,rel_tol=1e-9,abs_tol=1e-6):
+        raise ValueError("legacy engine fields disagree with their original total-minus-TTFT scope")
+    return dict(tps=tps,ttft_ms=ttft,interval_ms=interval,tail_ms=tail,total_ms=total,
+                legacy_decode_ms=legacy_decode,legacy_tps=legacy_tps)
+
+
 def validate_records(records, case, args):
     decode = case["group"] == "decode"
     prefix = "apxinf.qwen35.benchmark." if decode else "apxinf.qwen35.context_benchmark."
-    configs = [r for r in records if r.get("schema") == prefix+"config.v1"]
-    iterations = [r for r in records if r.get("schema") == prefix+"iteration.v1"]
-    summaries = [r for r in records if r.get("schema") == prefix+"summary.v1"]
+    version = "v2" if decode else "v1"
+    if decode and any(str(r.get("schema", "")).startswith(prefix+kind+".")
+                      and r["schema"] != prefix+kind+".v2"
+                      for r in records for kind in ("config","iteration","summary")):
+        raise ValueError("legacy Decode v1 or unsupported schema cannot be relabeled as callback interval v2")
+    configs = [r for r in records if r.get("schema") == prefix+"config."+version]
+    iterations = [r for r in records if r.get("schema") == prefix+"iteration."+version]
+    summaries = [r for r in records if r.get("schema") == prefix+"summary."+version]
     if len(configs) != 1 or len(summaries) != 1:
         raise ValueError("missing/duplicate config or summary")
     config, summary = configs[0], summaries[0]
@@ -637,6 +711,15 @@ def validate_records(records, case, args):
     if config.get("input_digest_fnv1a64") != identity["fnv1a64"] or str(config.get("input_seed_hex", "")).lower().removeprefix("0x") != identity["seed_hex"]:
         raise ValueError("input token identity mismatch")
     if decode:
+        for key,value in {"timing_method":DECODE_TIMING_METHOD,"timing_clock":"std::time::Instant",
+                          "timing_origin":"benchmark-generate-entry","timing_clock_reads_per_generate":4,
+                          "ttft_scope":"generate_entry_to_first_callback",
+                          "decode_scope":"first_to_last_callback_intervals",
+                          "post_last_callback_scope":"last_callback_to_generate_return"}.items():
+            if config.get(key) != value:
+                raise ValueError("Decode timing configuration mismatch: "+key)
+        if summary.get("timing_method") != DECODE_TIMING_METHOD:
+            raise ValueError("Decode summary timing method mismatch")
         if config.get("prompt_tokens") != total_input or config.get("context_reuse") is not False:
             raise ValueError("decode prompt/reuse configuration mismatch")
     elif (config.get("prefix_tokens"), config.get("input_tokens"), config.get("total_context_tokens")) != (case["initial_kv_tokens"], case["new_input_tokens"], total_input):
@@ -657,6 +740,7 @@ def validate_records(records, case, args):
     tpots = []
     digests = []
     observed_depths = []
+    callback_measurements = []
     for index, row in enumerate(iterations):
         if row.get("iteration") != index or row.get("warmup") is not (index < warmups):
             raise ValueError("iteration ordering/warmup classification mismatch")
@@ -669,12 +753,10 @@ def validate_records(records, case, args):
         if decode:
             if row.get("prompt_tokens") != total_input or row.get("reused_prompt_tokens") != 0 or row.get("computed_prompt_tokens") != total_input:
                 raise ValueError("decode prompt was truncated or unexpectedly reused")
-            tps = finite_number(row.get("generation_tokens_per_second"), "decode TPS")
-            ttft = finite_number(row.get("ttft_ms"), "TTFT")
-            decode_ms = finite_number(row.get("decode_ms"), "Decode")
-            total_ms = finite_number(row.get("total_latency_ms"), "total latency")
-            if not math.isclose(tps, (output-1)*1000/decode_ms, rel_tol=1e-9, abs_tol=1e-6) or not math.isclose(total_ms, ttft+decode_ms, rel_tol=1e-9, abs_tol=1e-6):
-                raise ValueError("Decode intervals, TPS and measured times disagree")
+            timing = validate_callback_timing(row, output)
+            tps,decode_ms = timing["tps"],timing["interval_ms"]
+            if index >= warmups:
+                callback_measurements.append(timing)
             value = tps
             observed_depths.append(validate_decode_speculation(row.get("speculation"), args))
         else:
@@ -715,7 +797,21 @@ def validate_records(records, case, args):
             for key in ("proposed_by_depth", "matched_by_depth", "accepted_prefix_by_depth"):
                 if summary["speculation"][key] != [sum(row[key][depth] for row in measured_stats) for depth in range(3)]:
                     raise ValueError("summary MTP counters disagree with raw measured rounds")
-    metric_key = "generation_tokens_per_second" if decode else "prefill_ms"
+    if decode:
+        for key,observed_key in (("ttft_ms","ttft_ms"),("decode_interval_ms","interval_ms"),
+                                 ("post_last_callback_ms","tail_ms"),("total_latency_ms","total_ms")):
+            reported = finite_number((summary.get(key) or {}).get("median"),"callback summary "+key,positive=key!="post_last_callback_ms")
+            if not math.isclose(reported,statistics.median(m[observed_key] for m in callback_measurements),rel_tol=1e-9,abs_tol=1e-6):
+                raise ValueError("callback summary median differs from measured observations: "+key)
+        legacy_summary = summary.get("legacy_engine_profile",{})
+        if not isinstance(legacy_summary,dict):
+            raise ValueError("legacy summary must be a separate metric object")
+        if legacy_summary.get("scope") != "first_model_token_ready_to_engine_finalize_callbacks_excluded":
+            raise ValueError("legacy summary scope missing")
+        legacy_median = finite_number((legacy_summary.get("generation_tokens_per_second") or {}).get("median"),"legacy summary median TPS")
+        if not math.isclose(legacy_median,statistics.median(m["legacy_tps"] for m in callback_measurements),rel_tol=1e-9,abs_tol=1e-6):
+            raise ValueError("legacy summary median differs from raw legacy observations")
+    metric_key = "decode_tokens_per_second" if decode else "prefill_ms"
     reported_median = finite_number((summary.get(metric_key) or {}).get("median"), "summary median")
     if not math.isclose(reported_median, statistics.median(values), rel_tol=1e-9, abs_tol=1e-6):
         raise ValueError("summary median differs from formal raw observations")
@@ -723,7 +819,9 @@ def validate_records(records, case, args):
                 observed_median=statistics.median(values), observed_p90=sorted(values)[math.ceil(.9*len(values))-1], min=min(values),max=max(values),
                 decode_tpot_ms=statistics.median(tpots) if decode else None, output_digest=digests[0], output_digests=digests,
                 measured_primary_values=values, measured_decode_tpot_ms=tpots, total_iterations=len(iterations), warmup_iterations=warmups,
-                decode_tpot_distribution=dict(median=statistics.median(tpots),p90=sorted(tpots)[math.ceil(.9*len(tpots))-1],min=min(tpots),max=max(tpots)) if decode else None,
+                decode_timing_method=DECODE_TIMING_METHOD if decode else None,
+                measured_callback_timing=callback_measurements if decode else None,
+                decode_tpot_distribution=dict(sample_scope="per_iteration_mean_callback_interval_ms_not_per_token_latency",median=statistics.median(tpots),p90=sorted(tpots)[math.ceil(.9*len(tpots))-1],min=min(tpots),max=max(tpots)) if decode else None,
                 repeat_divergences=divergence_events, comparison_policy=comparison_policy(args), diagnostic_only=allow_divergence,
                 mtp_policy=policy, observed_max_proposed_depth=max(observed_depths, default=0) if decode else None)
 
@@ -734,7 +832,7 @@ def validate_run(raw, case, args, recipe_before, recipe_after, expected_binary_s
     exit_receipt = {}
     try:
         records, process, exit_receipt, lock = parse_output(raw)
-        details.update(native_iterations=[row for row in records if row.get("schema", "").endswith("iteration.v1")],
+        details.update(native_iterations=[row for row in records if row.get("schema") in ("apxinf.qwen35.context_benchmark.iteration.v1","apxinf.qwen35.benchmark.iteration.v2")],
                        repeat_divergences=[row for row in records if row.get("schema") == "apxinf.qwen35.benchmark.repeat_divergence.v1"])
         details.update(process=process, exit_receipt=exit_receipt, gpu_lock=lock, backend_task_may_be_live=bool(exit_receipt.get("backend_task_may_be_live")))
         if lock.get("path") != GPU_LOCK_PATH or lock.get("acquired") is not True:
@@ -831,7 +929,7 @@ def load_scalar_calibration(args, cases):
             raise ValueError("scalar calibration raw log hash mismatch")
         raw = raw_bytes.decode()
         records, _, _, _ = parse_output(raw)
-        configs = [item for item in records if item.get("schema") == "apxinf.qwen35.benchmark.config.v1"]
+        configs = [item for item in records if item.get("schema") == "apxinf.qwen35.benchmark.config.v2"]
         if len(configs) != 1 or configs[0].get("mode") != "scalar":
             raise ValueError("calibration case must be actual scalar Decode")
         config = configs[0]
@@ -946,7 +1044,7 @@ def main():
                   comparison_policy=comparison_policy(args),allow_repeat_divergence=args.allow_repeat_divergence,
                   accuracy_status="unresolved" if args.allow_repeat_divergence else "pending_repeat_consistency",
                   collector_sha256=COLLECTOR_SHA256,collector_python=sys.version,utc_started=dt.datetime.now(dt.timezone.utc).isoformat(),
-                  timing_scope="resident weights; cold KV or append timer; output1 prefill /1024 decode; first token excluded from1023 decode intervals")
+                  timing_scope="resident weights; context prefill v1/output1; Decode v2 uses one host callback clock: entry-to-first TTFT, first-to-last 1023 intervals, separate last-to-return tail; legacy engine total-minus-TTFT retained separately")
     (args.output/'metadata.json').write_text(json.dumps(metadata,ensure_ascii=False,indent=2)+'\n')
     results=[]
     for entry in plan:
