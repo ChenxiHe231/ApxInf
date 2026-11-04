@@ -1,0 +1,24 @@
+{
+  "schema": "apxinf.qwen35.decode-policy-runner.validation.v1",
+  "scope": "CPU measurement/metadata contract only; not a new MTP implementation or GPU performance result",
+  "validated_utc": "2026-11-04T04:48:45.006381+00:00",
+  "cpu_tests_passed": 42,
+  "log_sha256": "81572cf75f595273f4b8b3c0c45a1ebf9bfe597f01843d4ce8b84cef39fec34a",
+  "source_sha256": {
+    "scripts/bench_qwen35_model_matrix.py": "19a55b79e8d46094dd33cef143b3b156e813d0401c22deee0f25c2b805a283d8",
+    "scripts/test_bench_qwen35_model_matrix.py": "2620d10851dfd53d8b98524b8e9f31ab807ccd9a0dd0e441aebc2a937498a0f9"
+  },
+  "actual_native_default_regression": "Existing real cold2K records validate unchanged, measured median442.699667ms; this does not test new Decode policies",
+  "capabilities": [
+    "Decode-only scalar/fixed1/fixed2/fixed3/adaptive; Prefill remains fixed3",
+    "case-specific scalar TPOT from verified raw1023-interval formal-stage records",
+    "same source/ELF/model/precision and declared strict or diagnostic policy",
+    "unchanged scalar .recipe subset with new verifier keys allowed; target snapshot and lock-inside recheck",
+    "observer-only NVTX change allowed solely for profile/audit with explicit receipt"
+  ],
+  "limitations": [
+    "GPU fixed-depth and adaptive matrix still pending",
+    "diagnostic results remain accuracy unresolved/performance not accepted",
+    "profile instrumentation changes controller observations and cannot supply formal throughput"
+  ]
+}

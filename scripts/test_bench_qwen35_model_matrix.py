@@ -20,9 +20,16 @@ import bench_qwen35_model_matrix as bench
 def args(**changes):
     base=dict(run_mode='formal',warmups=2,repeats=5,mode='mtp',mtp_depth=3,kv_cache='bf16',moe_activation='nvfp4',
               env=[],context_binary='/bin/context',decode_binary='/bin/decode',checkpoint='/model',tuning_dir='/recipes',
-              workdir='/',ssh_host=None,timeout_sec=2,lock_timeout_sec=3,nsys='nsys',profile_dir='/trace',allow_repeat_divergence=False)
+              workdir='/',ssh_host=None,timeout_sec=2,lock_timeout_sec=3,nsys='nsys',profile_dir='/trace',allow_repeat_divergence=False,
+              mtp_strategy='fixed',scalar_calibration=None)
     base.update(changes)
     return SimpleNamespace(**base)
+
+
+def recipe_inventory_fixture(files=None):
+    rows=copy.deepcopy(files if files is not None else [dict(path='scalar.recipe',bytes=5,sha256='c'*64)])
+    digest=bench.hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    return dict(path='/recipes',files=rows,count=sum(row['path'].endswith('.recipe') for row in rows),manifest_sha256=digest)
 
 
 def fixture(case, opts=None, values=None):
@@ -38,6 +45,9 @@ def fixture(case, opts=None, values=None):
                 tuning_dir=opts.tuning_dir,input_digest_fnv1a64=identity['fnv1a64'],input_seed_hex=identity['seed_hex'],
                 mtp_depth=3,mtp_strategy='fixed',draft_kv_dtype='fp8',draft_kv_scale=1.0)
     config['allow_repeat_divergence']=opts.allow_repeat_divergence
+    strategy=opts.mtp_strategy if opts.mode=='mtp' else 'disabled'
+    depth=opts.mtp_depth if strategy=='fixed' else None
+    config.update(mtp_enabled=opts.mode=='mtp',mtp_strategy=strategy,mtp_depth=depth,fixed_depth=depth)
     if is_decode:config.update(prompt_tokens=n,context_reuse=False)
     else:config.update(prefix_tokens=case['initial_kv_tokens'],input_tokens=case['new_input_tokens'],total_context_tokens=n)
     iterations=[]
@@ -50,18 +60,25 @@ def fixture(case, opts=None, values=None):
             decode_ms=(output-1)*1000/value
             row.update(prompt_tokens=n,computed_prompt_tokens=n,reused_prompt_tokens=0,generation_tokens_per_second=value,
                        ttft_ms=200,decode_ms=decode_ms,total_latency_ms=200+decode_ms)
+            used=opts.mtp_depth if opts.mtp_strategy=='fixed' else 3
+            by_depth=[1 if d<used else 0 for d in range(3)]
+            row['speculation']=dict(draft_steps=3,proposed_tokens=sum(by_depth),proposed_by_depth=by_depth,
+                                    matched_by_depth=by_depth,accepted_prefix_by_depth=by_depth) if opts.mode=='mtp' else None
         else:row.update(prefix_tokens=case['initial_kv_tokens'],input_tokens=case['new_input_tokens'],total_context_tokens=n,
                         initial_kv_tokens=case['initial_kv_tokens'],computed_input_tokens=case['new_input_tokens'],
                         committed_context_tokens_after_prefill=n,prefill_ms=value,decode_ms=None,decode_tokens_per_second=None)
         iterations.append(row)
     summary=dict(schema=prefix+'summary.v1',**flags,divergent_repeats=0,output_tokens=output,decode_intervals=output-1,warmups=warmups,repeats=repeats)
-    if is_decode:summary.update(prompt_tokens=n,generation_tokens_per_second={'median':bench.statistics.median(values)})
+    if is_decode:
+        summary.update(prompt_tokens=n,generation_tokens_per_second={'median':bench.statistics.median(values)})
+        summary['speculation']={key:([x*repeats for x in value] if isinstance(value,list) else value*repeats)
+                                for key,value in iterations[-1]['speculation'].items() if key!='draft_steps'} if opts.mode=='mtp' else None
     else:summary.update(prefix_tokens=case['initial_kv_tokens'],input_tokens=case['new_input_tokens'],total_context_tokens=n,prefill_ms={'median':bench.statistics.median(values)})
     return [config,*iterations,summary]
 
 
-def divergent_fixture(case, opts, indices=(2, 4)):
-    records=fixture(case,opts)
+def divergent_fixture(case, opts, indices=(2, 4), values=None):
+    records=fixture(case,opts,values)
     iterations=records[1:-1];events=[]
     for index in indices:
         row=iterations[index];row['repeat_diverged']=True;row['token_digest_fnv1a64']='f'*16
@@ -76,15 +93,366 @@ def divergent_fixture(case, opts, indices=(2, 4)):
     return records[:-1]+events+[records[-1]]
 
 
-def raw_output(records,code=0,sha='a'*64,report=''):
+def raw_output(records,code=0,sha='a'*64,report='',effective_env=None,recipe_inventory=None):
     process={'pid':123,'kind':'benchmark','sha256':sha,'exe':'/bin/context'}
-    recipe={'count':1,'manifest_sha256':'x'}
+    config=records[0]
+    controls=effective_env if effective_env is not None else ({bench.MTP_FIXED_ENV:str(config['mtp_depth'])} if config.get('mtp_strategy')=='fixed' else {})
+    process['effective_mtp_environment']={key:controls.get(key) for key in (bench.MTP_FIXED_ENV,bench.MTP_SCALAR_TPOT_ENV)}
+    recipe=recipe_inventory_fixture() if recipe_inventory is None else recipe_inventory
     lock={'path':bench.GPU_LOCK_PATH,'acquired':True,'owner_pid':42,'wait_ms':0,'recipes_before':recipe,'target_binary_sha256':sha}
     receipt={'returncode':code,'timed_out':False,'child_reaped':True,'lock_held_until_reaped':True,'recipes_after':recipe,'target_binary_sha256':sha}
     return bench.LOCK_MARKER+json.dumps(lock)+'\n'+bench.SOURCE_MARKER+json.dumps(process)+'\n'+report+'\n'.join(json.dumps(row) for row in records)+'\n'+bench.EXIT_MARKER+json.dumps(receipt)+'\n'
 
 
+def scalar_calibration_fixture(root, cases, diagnostic=False, env=None):
+    """CPU artifact fixture with actual runner receipts, never a GPU score."""
+    root.mkdir(parents=True,exist_ok=True)
+    opts=args(mode='scalar',repeats=6,allow_repeat_divergence=diagnostic,env=env or [])
+    source=dict(source_commit='a'*40,source_dirty=False,source_patch_sha256='b'*64,source_untracked_sha256={})
+    identity=dict(source=source,binary_sha256=dict(context='a'*64,decode='a'*64),model_sha256={'model.safetensors':'f'*64})
+    recipes=recipe_inventory_fixture()
+    env=bench.environment(opts);rows=[]
+    for index,case in enumerate(cases):
+        values=[(index+1)*value for value in [10,20,40,80,160,320]]
+        records=divergent_fixture(case,opts,indices=(1,2,4),values=values) if diagnostic else fixture(case,opts,values)
+        raw=raw_output(records);log=root/(case['id']+'.log');log.write_text(raw)
+        transport=dict(transport_returncode=0,transport_timeout=False)
+        validation=bench.validate_run(raw,case,opts,recipes,recipes,'a'*64,transport)
+        assert validation['measurement_valid'] and validation['performance_accepted'] is (not diagnostic),validation['failures']
+        rows.append(dict(case=case['id'],group='decode',run_mode='formal',argv=bench.command_for_case(opts,case),
+                         log_sha256=bench.sha256_file(log),recipes_before=recipes,recipes_after=recipes,transport=transport,**validation))
+    summary=dict(schema=bench.SCHEMA,run_mode='formal',all_cases_valid=True,measurement_valid=True,performance_accepted=not diagnostic,
+                 source_unchanged=True,accuracy_status='unresolved' if diagnostic else 'repeat_consistent',comparison_policy=bench.comparison_policy(opts),allow_repeat_divergence=diagnostic,
+                 observed_after=identity,results=rows,requested_cases=[case['id'] for case in cases],completed_cases=len(cases))
+    metadata=dict(schema=bench.SCHEMA,run_mode='formal',comparison_policy=bench.comparison_policy(opts),allow_repeat_divergence=diagnostic,
+                  observed_before=identity,expected=identity,environment=env)
+    (root/'summary.json').write_text(json.dumps(summary));(root/'metadata.json').write_text(json.dumps(metadata))
+    return root/'summary.json',identity
+
+
 class MatrixContracts(unittest.TestCase):
+    def test_decode_policy_selection_rejects_prefill_relabeling_and_implicit_adaptive_cost(self):
+        decode=bench.canonical_cases()[9:];prefill=bench.canonical_cases()[0]
+        for depth in (1,2,3):
+            opts=args(mtp_depth=depth);bench.validate_selection_policy(opts,decode)
+            self.assertEqual(bench.environment(opts)[bench.MTP_FIXED_ENV],str(depth))
+            if depth!=3:
+                with self.assertRaisesRegex(ValueError,'Decode-only'):bench.validate_selection_policy(opts,[prefill,*decode])
+        adaptive=args(mtp_strategy='adaptive',scalar_calibration=Path('/fixture/scalar/summary.json'))
+        bench.validate_selection_policy(adaptive,decode)
+        env=bench.environment(adaptive,18.75)
+        self.assertNotIn(bench.MTP_FIXED_ENV,env);self.assertEqual(env[bench.MTP_SCALAR_TPOT_ENV],'18.75')
+        self.assertIsNone(bench.mtp_policy(adaptive,18.75)['fixed_depth'])
+        for changes in ({'scalar_calibration':None},{'mtp_depth':1},{'mode':'scalar'}):
+            bad=copy.copy(adaptive)
+            for key,value in changes.items():setattr(bad,key,value)
+            with self.assertRaises(ValueError):bench.validate_selection_policy(bad,decode)
+        diagnostic=copy.copy(adaptive);diagnostic.allow_repeat_divergence=True
+        bench.validate_selection_policy(diagnostic,decode)
+        with self.assertRaisesRegex(ValueError,'Decode-only'):bench.validate_selection_policy(adaptive,[prefill])
+        with self.assertRaisesRegex(ValueError,'calibrated scalar TPOT'):bench.environment(adaptive)
+        for key in (bench.MTP_FIXED_ENV,bench.MTP_SCALAR_TPOT_ENV):
+            with self.assertRaisesRegex(ValueError,'controlled'):bench.environment(args(env=[key+'=1']))
+        bench.validate_selection_policy(args(mode='scalar'),decode)
+        self.assertNotIn(bench.MTP_FIXED_ENV,bench.environment(args(mode='scalar')))
+
+    def test_native_decode_strategy_and_actual_depth_counters_are_verified(self):
+        case=bench.canonical_cases()[9]
+        for opts in [args(mtp_depth=depth) for depth in (1,2,3)]+[args(mtp_strategy='adaptive'),args(mode='scalar')]:
+            observed=bench.validate_records(fixture(case,opts),case,opts)
+            expected=0 if opts.mode=='scalar' else (3 if opts.mtp_strategy=='adaptive' else opts.mtp_depth)
+            self.assertEqual(observed['observed_max_proposed_depth'],expected)
+            self.assertEqual(observed['mtp_policy']['fixed_depth'],opts.mtp_depth if opts.mode=='mtp' and opts.mtp_strategy=='fixed' else None)
+        for mutation in ('draft4','depth4','beyond_fixed','scalar_stats','adaptive_fixed_label','aggregate'):
+            with self.subTest(mutation=mutation):
+                opts=args(mtp_depth=1)
+                if mutation=='scalar_stats':opts=args(mode='scalar')
+                if mutation=='adaptive_fixed_label':opts=args(mtp_strategy='adaptive')
+                records=fixture(case,opts)
+                if mutation=='draft4':records[1]['speculation']['draft_steps']=4
+                elif mutation=='depth4':records[1]['speculation']['proposed_by_depth']=[1,0,0,1]
+                elif mutation=='beyond_fixed':records[1]['speculation']['proposed_by_depth']=[1,1,0]
+                elif mutation=='scalar_stats':records[1]['speculation']={}
+                elif mutation=='adaptive_fixed_label':records[0]['fixed_depth']=3
+                elif mutation=='aggregate':records[-1]['speculation']['proposed_by_depth']=[6,0,0];records[-1]['speculation']['proposed_tokens']=6
+                with self.assertRaises(ValueError):bench.validate_records(records,case,opts)
+
+    def test_scalar_calibration_uses_per_case_median_of_measured_tpot_not_inverse_tps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cases=bench.canonical_cases()[9:11];path,identity=scalar_calibration_fixture(Path(directory),cases)
+            opts=args(mtp_strategy='adaptive',scalar_calibration=path)
+            receipt=bench.load_scalar_calibration(opts,cases)
+            self.assertEqual(receipt['summary_sha256'],bench.sha256_file(path))
+            self.assertEqual(receipt['identity'],identity)
+            for case,tpot in zip(cases,[18.75,9.375]):
+                row=receipt['cases'][case['id']]
+                self.assertEqual(row['scalar_tpot_ms'],tpot);self.assertEqual(row['decode_intervals'],1023)
+                self.assertEqual(len(row['measured_decode_tpot_ms']),6)
+            self.assertNotAlmostEqual(receipt['cases'][cases[0]['id']]['scalar_tpot_ms'],1000/60)
+
+    def test_scalar_calibration_rejects_unaccepted_diagnostic_wrong_precision_or_incomplete_raw(self):
+        variants=('diagnostic','not_accepted','unresolved','missing_case','changed_source','wrong_mode','raw_hash',
+                  'short_output','stored_tpot','wrong_kv','wrong_activation','kernel_env','too_few_repeats')
+        for variant in variants:
+            with self.subTest(variant=variant),tempfile.TemporaryDirectory() as directory:
+                case=bench.canonical_cases()[9];path,_=scalar_calibration_fixture(Path(directory),[case])
+                summary=json.loads(path.read_text());opts=args(mtp_strategy='adaptive',scalar_calibration=path)
+                selected=[case];log=Path(directory)/(case['id']+'.log')
+                if variant=='diagnostic':summary['allow_repeat_divergence']=True
+                elif variant=='not_accepted':summary['performance_accepted']=False
+                elif variant=='unresolved':summary['accuracy_status']='unresolved'
+                elif variant=='missing_case':selected=bench.canonical_cases()[9:11]
+                elif variant=='changed_source':summary['observed_after']['source']['source_commit']='f'*40
+                elif variant=='raw_hash':log.write_text(log.read_text()+'\n')
+                elif variant=='stored_tpot':summary['results'][0]['observed']['measured_decode_tpot_ms'][0]=999
+                elif variant=='wrong_kv':opts.kv_cache='fp8'
+                elif variant=='wrong_activation':opts.moe_activation='bf16'
+                elif variant=='kernel_env':opts.env=['APXINF_QWEN35_CUDA_GRAPHS=1']
+                else:
+                    records,_,_,_=bench.parse_output(log.read_text())
+                    if variant=='wrong_mode':records[0]['mode']='mtp'
+                    elif variant=='too_few_repeats':records[0]['repeats']=4
+                    elif variant=='short_output':records[1]['output_tokens']=1023
+                    log.write_text(raw_output(records));summary['results'][0]['log_sha256']=bench.sha256_file(log)
+                path.write_text(json.dumps(summary))
+                with self.assertRaises(ValueError):bench.load_scalar_calibration(opts,selected)
+
+    def test_adaptive_main_checks_source_elf_weight_identity_before_any_execution(self):
+        for changed in ('source','elf','weights'):
+            with self.subTest(changed=changed),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);case=bench.canonical_cases()[9]
+                path,identity=scalar_calibration_fixture(root/'scalar',[case]);actual=copy.deepcopy(identity)
+                actual['recipes']=recipe_inventory_fixture()
+                if changed=='source':actual['source']['source_patch_sha256']='0'*64
+                elif changed=='elf':actual['binary_sha256']['decode']='0'*64
+                else:actual['model_sha256']['model.safetensors']='0'*64
+                metadata=root/'target.json';metadata.write_text(json.dumps(actual))
+                command=['matrix','--mtp-strategy','adaptive','--scalar-calibration',str(path),'--case',case['id'],
+                         '--workdir','/','--context-binary','/bin/context','--decode-binary','/bin/decode','--checkpoint','/model',
+                         '--tuning-dir','/recipes','--metadata',str(metadata),'--output',str(root/'result')]
+                with patch.object(sys,'argv',command),patch.object(bench.Transport,'snapshot',return_value=actual),patch.object(bench.Transport,'execute') as execute:
+                    with self.assertRaisesRegex(ValueError,'identity mismatch'):bench.main()
+                    execute.assert_not_called()
+
+    def test_adaptive_main_records_each_case_cost_without_claiming_fixed_depth(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);cases=bench.canonical_cases()[9:11];path,identity=scalar_calibration_fixture(root/'scalar',cases)
+            actual=copy.deepcopy(identity);recipes=recipe_inventory_fixture();actual['recipes']=recipes
+            metadata=root/'target.json';metadata.write_text(json.dumps(actual));out=root/'adaptive';seen=[]
+            def execute(_transport,argv,env,log,profile=False):
+                case=next(case for case in cases if str(case['initial_kv_tokens'])==argv[argv.index('--prompt-tokens')+1])
+                seen.append(env.copy());self.assertNotIn(bench.MTP_FIXED_ENV,env)
+                log.write_text(raw_output(fixture(case,args(mtp_strategy='adaptive')),effective_env=env))
+                return dict(transport_returncode=0,transport_timeout=False)
+            command=['matrix','--mtp-strategy','adaptive','--scalar-calibration',str(path),'--cases',','.join(c['id'] for c in cases),
+                     '--workdir','/','--context-binary','/bin/context','--decode-binary','/bin/decode','--checkpoint','/model',
+                     '--tuning-dir','/recipes','--metadata',str(metadata),'--output',str(out)]
+            with patch.object(sys,'argv',command),patch.object(bench.Transport,'snapshot',lambda _s,kind='full':recipes if kind=='recipes' else actual),patch.object(bench.Transport,'execute',execute):
+                self.assertEqual(bench.main(),0)
+            self.assertEqual([float(env[bench.MTP_SCALAR_TPOT_ENV]) for env in seen],[18.75,9.375])
+            summary=json.loads((out/'summary.json').read_text());manifest=json.loads((out/'metadata.json').read_text())
+            self.assertTrue(summary['performance_accepted']);self.assertTrue(manifest['calibration_target_identity_verified'])
+            for row in summary['results']:
+                self.assertEqual(row['mtp_policy']['strategy'],'adaptive');self.assertIsNone(row['mtp_policy']['fixed_depth'])
+                self.assertEqual(row['scalar_calibration']['calibration_summary_sha256'],bench.sha256_file(path))
+                self.assertEqual(row['process']['effective_mtp_environment'],{key:row['environment'].get(key) for key in (bench.MTP_FIXED_ENV,bench.MTP_SCALAR_TPOT_ENV)})
+
+    def test_diagnostic_adaptive_requires_matching_policy_and_never_becomes_official_performance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);case=bench.canonical_cases()[9]
+            path,identity=scalar_calibration_fixture(root/'diagnostic-scalar',[case],diagnostic=True)
+            opts=args(mtp_strategy='adaptive',scalar_calibration=path,allow_repeat_divergence=True)
+            receipt=bench.load_scalar_calibration(opts,[case])
+            self.assertFalse(receipt['performance_accepted']);self.assertEqual(receipt['accuracy_status'],'unresolved')
+            calibrated=receipt['cases'][case['id']]
+            self.assertEqual(calibrated['scalar_tpot_ms'],18.75);self.assertEqual(len(calibrated['repeat_divergences']),3)
+            self.assertEqual(len(calibrated['output_digests']),8);self.assertFalse(calibrated['performance_accepted'])
+            with self.assertRaisesRegex(ValueError,'same explicit'):bench.load_scalar_calibration(args(mtp_strategy='adaptive',scalar_calibration=path),[case])
+            strict_path,_=scalar_calibration_fixture(root/'strict-scalar',[case])
+            with self.assertRaisesRegex(ValueError,'same explicit'):bench.load_scalar_calibration(args(mtp_strategy='adaptive',scalar_calibration=strict_path,allow_repeat_divergence=True),[case])
+            actual=copy.deepcopy(identity);recipes=recipe_inventory_fixture();actual['recipes']=recipes
+            metadata=root/'target.json';metadata.write_text(json.dumps(actual));out=root/'diagnostic-adaptive'
+            def execute(_transport,argv,env,log,profile=False):
+                self.assertIn('--allow-repeat-divergence',argv);self.assertEqual(env[bench.MTP_SCALAR_TPOT_ENV],'18.75')
+                log.write_text(raw_output(divergent_fixture(case,opts),effective_env=env))
+                return dict(transport_returncode=0,transport_timeout=False)
+            command=['matrix','--mtp-strategy','adaptive','--allow-repeat-divergence','--scalar-calibration',str(path),'--case',case['id'],
+                     '--workdir','/','--context-binary','/bin/context','--decode-binary','/bin/decode','--checkpoint','/model',
+                     '--tuning-dir','/recipes','--metadata',str(metadata),'--output',str(out)]
+            with patch.object(sys,'argv',command),patch.object(bench.Transport,'snapshot',lambda _s,kind='full':recipes if kind=='recipes' else actual),patch.object(bench.Transport,'execute',execute):
+                self.assertEqual(bench.main(),0)
+            summary=json.loads((out/'summary.json').read_text());row=summary['results'][0]
+            self.assertTrue(summary['measurement_valid']);self.assertFalse(summary['performance_accepted'])
+            self.assertEqual(summary['accuracy_status'],'unresolved');self.assertFalse(row['performance_accepted'])
+            self.assertEqual(row['comparison_policy'],'diagnostic-repeat-divergence-v1')
+            self.assertEqual(len(row['native_iterations']),7);self.assertEqual(len(row['repeat_divergences']),2)
+            self.assertFalse(row['scalar_calibration']['performance_accepted'])
+            table=(out/'summary.md').read_text()
+            self.assertIn('Diagnostic median',table);self.assertNotIn('| Formal N |',table);self.assertNotIn('| passed |',table)
+
+    def test_diagnostic_calibration_rejects_policy_upgrade_or_incomplete_divergence_evidence(self):
+        variants=('summary_official','row_official','mixed_policy','wrong_accuracy','stored_events','stored_digests',
+                  'raw_firstdiff','raw_digest','missing_event','short_output','recipe_changed','wrong_lock')
+        for variant in variants:
+            with self.subTest(variant=variant),tempfile.TemporaryDirectory() as directory:
+                case=bench.canonical_cases()[9];path,_=scalar_calibration_fixture(Path(directory),[case],diagnostic=True)
+                summary=json.loads(path.read_text());row=summary['results'][0]
+                opts=args(mtp_strategy='adaptive',scalar_calibration=path,allow_repeat_divergence=True)
+                log=Path(directory)/(case['id']+'.log')
+                if variant=='summary_official':summary['performance_accepted']=True
+                elif variant=='row_official':row['performance_accepted']=True
+                elif variant=='mixed_policy':row['comparison_policy']='strict-repeat-consistency-v1'
+                elif variant=='wrong_accuracy':summary['accuracy_status']='repeat_consistent'
+                elif variant=='stored_events':row['repeat_divergences']=[]
+                elif variant=='stored_digests':row['observed']['output_digests'][1]='0'*16
+                elif variant=='recipe_changed':row['recipes_after']['manifest_sha256']='changed'
+                elif variant=='wrong_lock':
+                    raw=log.read_text().replace('"path": "/tmp/apxinf-gpu.lock"','"path": "/tmp/wrong.lock"')
+                    log.write_text(raw);row['log_sha256']=bench.sha256_file(log)
+                else:
+                    records,_,_,_=bench.parse_output(log.read_text())
+                    events=[r for r in records if r.get('schema')=='apxinf.qwen35.benchmark.repeat_divergence.v1']
+                    if variant=='raw_firstdiff':events[0]['first_diff']=1024
+                    elif variant=='raw_digest':events[0]['actual_digest_fnv1a64']='0'*16
+                    elif variant=='missing_event':records.remove(events[0])
+                    elif variant=='short_output':records[1]['output_tokens']=1023
+                    log.write_text(raw_output(records));row['log_sha256']=bench.sha256_file(log)
+                path.write_text(json.dumps(summary))
+                with self.assertRaises(ValueError):bench.load_scalar_calibration(opts,[case])
+
+    def test_profile_and_audit_can_add_nvtx_to_uninstrumented_scalar_cost_with_receipts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case=bench.canonical_cases()[9];path,_=scalar_calibration_fixture(Path(directory),[case],env=['APXINF_NVTX=0'])
+            recipes=recipe_inventory_fixture()
+            for mode in ('profile','audit'):
+                opts=args(run_mode=mode,mtp_strategy='adaptive',scalar_calibration=path,env=['APXINF_NVTX=1'])
+                receipt=bench.load_scalar_calibration(opts,[case])['cases'][case['id']]
+                self.assertEqual(receipt['scalar_tpot_ms'],18.75)
+                observers=receipt['observer_environment_comparison']
+                self.assertEqual(observers['run_mode'],mode)
+                self.assertEqual(observers['original_target_env_arguments'],['APXINF_NVTX=1'])
+                self.assertEqual(observers['calibration_original_environment']['APXINF_NVTX'],'0')
+                self.assertEqual(observers['calibration_observer_environment']['APXINF_NVTX'],'0')
+                self.assertEqual(observers['current_observer_environment']['APXINF_NVTX'],'1')
+                self.assertIn('APXINF_NVTX',observers['ignored_observer_keys'])
+                self.assertEqual(observers['current_observer_environment']['APXINF_GEMM_REPORT'],'1')
+                env=bench.environment(opts,receipt['scalar_tpot_ms'])
+                report='[apxinf-gemm] source=recipe\n[apxinf-attn] source=recipe\n'
+                raw=raw_output(fixture(case,opts),effective_env=env,report=report)
+                if mode=='profile':raw=raw.replace('"kind": "benchmark"','"kind": "profiler_launcher"')
+                result=bench.validate_run(raw,case,opts,recipes,recipes,'a'*64,dict(transport_returncode=0,transport_timeout=False),env)
+                self.assertTrue(result['measurement_valid'],result['failures']);self.assertFalse(result['performance_accepted'])
+
+    def test_nvtx_exception_does_not_allow_formal_or_math_timing_precision_mismatches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case=bench.canonical_cases()[9];path,_=scalar_calibration_fixture(Path(directory),[case],env=['APXINF_NVTX=0'])
+            formal=args(mtp_strategy='adaptive',scalar_calibration=path,env=['APXINF_NVTX=1'])
+            with self.assertRaisesRegex(ValueError,'kernel environment differs'):bench.load_scalar_calibration(formal,[case])
+            for changes in ({'env':['APXINF_NVTX=1','APXINF_QWEN35_CUDA_GRAPHS=1']},
+                            {'env':['APXINF_NVTX=1','APXINF_QWEN35_ROUTER_GEMV=1']},
+                            {'env':['APXINF_NVTX=1','APXINF_QWEN35_VERIFY_LAYER_TIMING=1']},
+                            {'kv_cache':'fp8'},{'moe_activation':'bf16'}):
+                opts=args(run_mode='profile',mtp_strategy='adaptive',scalar_calibration=path,env=['APXINF_NVTX=1'])
+                for key,value in changes.items():setattr(opts,key,value)
+                with self.subTest(changes=changes),self.assertRaises(ValueError):bench.load_scalar_calibration(opts,[case])
+
+    def test_scalar_recipe_subset_allows_new_verifier_keys_but_rejects_late_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case=bench.canonical_cases()[9];path,_=scalar_calibration_fixture(Path(directory),[case])
+            opts=args(mtp_strategy='adaptive',scalar_calibration=path)
+            calibrated=bench.load_scalar_calibration(opts,[case])['cases'][case['id']]
+            required=calibrated['recipe_subset'];original=recipe_inventory_fixture()
+            self.assertEqual(required['files'],original['files'])
+            self.assertEqual(required['manifest_sha256'],original['manifest_sha256'])
+            verifier=dict(path='verify/rows4.recipe',bytes=8,sha256='d'*64)
+            expanded=recipe_inventory_fixture([*original['files'],verifier])
+            self.assertNotEqual(expanded['manifest_sha256'],required['manifest_sha256'])
+            check=bench.verify_recipe_subset(required,expanded)
+            self.assertTrue(check['verified']);self.assertEqual(check['added_recipe_keys'],['verify/rows4.recipe'])
+            env=bench.environment(opts,calibrated['scalar_tpot_ms']);transport=dict(transport_returncode=0,transport_timeout=False)
+            raw=raw_output(fixture(case,opts),effective_env=env,recipe_inventory=expanded)
+            result=bench.validate_run(raw,case,opts,expanded,expanded,'a'*64,transport,env,required)
+            self.assertTrue(result['performance_accepted'],result['failures'])
+            self.assertEqual(result['scalar_recipe_subset_locked_check']['matched_count'],1)
+            # This is a late rewrite after the initial snapshot, but stable
+            # throughout the candidate process: only the new subset gate
+            # distinguishes it from the previously accepted recipe inventory.
+            changed=recipe_inventory_fixture([dict(original['files'][0],sha256='e'*64),verifier])
+            late=raw_output(fixture(case,opts),effective_env=env,recipe_inventory=changed)
+            self.assertTrue(bench.validate_run(late,case,opts,changed,changed,'a'*64,transport,env)['valid'])
+            rejected=bench.validate_run(late,case,opts,changed,changed,'a'*64,transport,env,required)
+            self.assertFalse(rejected['valid']);self.assertTrue(any('recipe changed or missing' in f for f in rejected['failures']))
+            with self.assertRaisesRegex(ValueError,'changed or missing'):bench.verify_recipe_subset(required,recipe_inventory_fixture([verifier]))
+            # Adding a key during the formal process still fails the existing
+            # whole-directory before/after gate; additions are allowed only
+            # between scalar calibration and the candidate acquisition.
+            during=bench.validate_run(raw,case,opts,original,expanded,'a'*64,transport,env,required)
+            self.assertFalse(during['valid']);self.assertTrue(any('recipes changed' in f for f in during['failures']))
+
+    def test_adaptive_preflight_rejects_changed_or_deleted_scalar_recipe_before_execution(self):
+        for change in ('rewrite','delete'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);case=bench.canonical_cases()[9];path,identity=scalar_calibration_fixture(root/'scalar',[case])
+                original=recipe_inventory_fixture()['files'][0]
+                files=[dict(original,bytes=6)] if change=='rewrite' else [dict(path='new-verifier.recipe',bytes=8,sha256='d'*64)]
+                actual=copy.deepcopy(identity);actual['recipes']=recipe_inventory_fixture(files)
+                metadata=root/'target.json';metadata.write_text(json.dumps(actual))
+                command=['matrix','--mtp-strategy','adaptive','--scalar-calibration',str(path),'--case',case['id'],
+                         '--workdir','/','--context-binary','/bin/context','--decode-binary','/bin/decode','--checkpoint','/model',
+                         '--tuning-dir','/recipes','--metadata',str(metadata),'--output',str(root/'result')]
+                with patch.object(sys,'argv',command),patch.object(bench.Transport,'snapshot',return_value=actual),patch.object(bench.Transport,'execute') as execute:
+                    with self.assertRaisesRegex(ValueError,'recipe changed or missing'):bench.main()
+                    execute.assert_not_called()
+
+    def test_adaptive_plan_marks_recipe_subset_pending_without_contacting_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case=bench.canonical_cases()[9];path,_=scalar_calibration_fixture(Path(directory),[case])
+            command=['matrix','--plan','--mtp-strategy','adaptive','--scalar-calibration',str(path),'--case',case['id'],
+                     '--workdir','/','--context-binary','/bin/context','--decode-binary','/bin/decode','--checkpoint','/model','--tuning-dir','/recipes']
+            with patch.object(sys,'argv',command),patch.object(sys,'stdout',bench.io.StringIO()) as stdout,patch.object(bench,'Transport') as transport:
+                self.assertEqual(bench.main(),0);transport.assert_not_called();plan=json.loads(stdout.getvalue())
+            self.assertFalse(plan['calibration_target_recipes_verified'])
+            cost=plan['plan'][0]['scalar_calibration']
+            self.assertEqual(cost['recipe_subset_target_status'],'pending')
+            self.assertEqual(cost['recipe_subset']['count'],1)
+            self.assertRegex(cost['recipe_subset']['manifest_sha256'],'^[0-9a-f]{64}$')
+
+    def test_scalar_calibration_requires_hashed_locked_recipe_file_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            case=bench.canonical_cases()[9];path,_=scalar_calibration_fixture(Path(directory),[case])
+            summary=json.loads(path.read_text());log=Path(directory)/(case['id']+'.log')
+            records,_,_,_=bench.parse_output(log.read_text())
+            inventory=recipe_inventory_fixture();inventory.pop('files')
+            log.write_text(raw_output(records,recipe_inventory=inventory))
+            summary['results'][0]['log_sha256']=bench.sha256_file(log);path.write_text(json.dumps(summary))
+            with self.assertRaisesRegex(ValueError,'per-file byte/hash evidence'):
+                bench.load_scalar_calibration(args(mtp_strategy='adaptive',scalar_calibration=path),[case])
+
+    def test_worker_clears_inherited_mtp_controller_variables_before_explicit_merge(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);lock=root/'gpu.lock'
+            opts=args(workdir=directory,context_binary=sys.executable,decode_binary=sys.executable,tuning_dir=str(root/'recipes'))
+            child='import os,json;print(json.dumps({k:os.environ.get(k) for k in ["APXINF_QWEN35_MTP_FIXED_DEPTH","APXINF_QWEN35_SCALAR_TPOT_MS"]}))'
+            for index,env in enumerate(({}, {bench.MTP_FIXED_ENV:'2'}, {bench.MTP_SCALAR_TPOT_ENV:'18.75'})):
+                log=root/(str(index)+'.log')
+                with patch.dict(os.environ,{bench.MTP_FIXED_ENV:'1',bench.MTP_SCALAR_TPOT_ENV:'19.42'}),patch.object(bench,'GPU_LOCK_PATH',str(lock)):
+                    outcome=bench.Transport(opts).execute([sys.executable,'-c',child],env,log)
+                self.assertEqual(outcome['transport_returncode'],0)
+                raw=log.read_text();_,process,_,_=bench.parse_output(raw)
+                expected={key:env.get(key) for key in (bench.MTP_FIXED_ENV,bench.MTP_SCALAR_TPOT_ENV)}
+                self.assertEqual(process['effective_mtp_environment'],expected)
+                self.assertIn(json.dumps(expected),raw)
+
+    def test_adaptive_rejects_missing_or_wrong_effective_controller_receipt(self):
+        case=bench.canonical_cases()[9];opts=args(mtp_strategy='adaptive')
+        recipes=recipe_inventory_fixture();expected=bench.environment(opts,18.75)
+        for env in ({},{bench.MTP_FIXED_ENV:'3',bench.MTP_SCALAR_TPOT_ENV:'18.75'},{bench.MTP_SCALAR_TPOT_ENV:'19.42'}):
+            with self.subTest(env=env):
+                result=bench.validate_run(raw_output(fixture(case,opts),effective_env=env),case,opts,recipes,recipes,'a'*64,
+                                          dict(transport_returncode=0,transport_timeout=False),expected)
+                self.assertFalse(result['valid']);self.assertFalse(result['performance_accepted'])
+                self.assertTrue(any('environment mismatch' in failure for failure in result['failures']))
+
     def fake_nsys(self, root, *, stats_code=0, version_code=0, csv=True, mutate=False):
         script=root/'fake-nsys'
         script.write_text('#!'+sys.executable+'\n'+
@@ -151,7 +519,7 @@ class MatrixContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);out=root/'result';metadata=root/'expected.json'
             source=dict(source_commit='a'*40,source_dirty=False,source_patch_sha256='b'*64,source_untracked_sha256={})
-            recipes=dict(count=1,manifest_sha256='x')
+            recipes=recipe_inventory_fixture()
             actual=dict(source=source,binary_sha256=dict(context='a'*64,decode='a'*64),model_sha256={'model.safetensors':'f'*64},recipes=recipes)
             metadata.write_text(json.dumps(actual))
             case=bench.canonical_cases()[0]
@@ -260,7 +628,7 @@ class MatrixContracts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'escape'):bench.validate_records(records,case,opts)
 
     def test_explicit_divergence_policy_keeps_seven_raw_rounds_but_rejects_formal_score(self):
-        recipes=dict(count=1,manifest_sha256='x')
+        recipes=recipe_inventory_fixture()
         for case in (bench.canonical_cases()[0],bench.canonical_cases()[-1]):
             with self.subTest(case=case['id']):
                 opts=args(allow_repeat_divergence=True)
@@ -302,7 +670,7 @@ class MatrixContracts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);out=root/'result';metadata=root/'expected.json'
             source=dict(source_commit='a'*40,source_dirty=False,source_patch_sha256='b'*64,source_untracked_sha256={})
-            recipes=dict(count=1,manifest_sha256='x')
+            recipes=recipe_inventory_fixture()
             actual=dict(source=source,binary_sha256=dict(context='a'*64,decode='a'*64),model_sha256={'model.safetensors':'f'*64},recipes=recipes)
             metadata.write_text(json.dumps(actual));case=bench.canonical_cases()[-1]
             raw=raw_output(divergent_fixture(case,args(allow_repeat_divergence=True)))

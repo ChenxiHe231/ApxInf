@@ -56,3 +56,20 @@ profiler使用CUDA profiler API圈定测量，不包含权重加载、warmup或�
 若默认重复输出一致性检查失败，原始失败必须保留。只有明确的探索运行才添加 `--allow-repeat-divergence`：它保留全部轮次、token digest和首差异窗口，结果始终为 `accuracy_status=unresolved`、`performance_accepted=false`；表中只能称诊断中位数。不能用该选项绕过算子精度门禁或MTP正确性验收。
 
 每次只变一个候选，采用相同测量policy、输入、权重、精度及调优方案做父版本/候选对照；源码或ELF在运行中改变会使结果失效。GPU锁是协作锁，不能约束不遵守该锁的外部进程，因此还须核对机器实际占用。
+
+
+## Decode策略消融
+
+显式选择Decode子集，例如 `--cases decode-kv4k-o1k,decode-kv48k-o1k`。使用上述common参数、metadata与新的output目录，分别运行：
+
+- `--mode scalar`：禁用MTP，取得每case的TPOT成本。
+- `--mode mtp --mtp-strategy fixed --mtp-depth 1`，以及depth2、depth3。
+- `--mode mtp --mtp-strategy adaptive --scalar-calibration /ABS/scalar-run/summary.json`。
+
+Adaptive要求保留scalar的summary、metadata和逐case原始log；每组至少2轮预热、5轮测量，完整1024输出/1023间隔。工具重验原始时间与摘要哈希、源码/实际ELF/权重、精度及运行环境，再从各case逐轮TPOT取中位数，不使用运行时内置19.42ms默认成本。
+
+校准时使用的所有recipe必须仍存在且字节不变；可以增加新的verifier recipe。目标snapshot预检与每case取得GPU锁后的清单都会复验该子集。源码、二进制、已有recipe或精度方案改变后需要重新校准。
+
+Strict和显式diagnostic只能各自使用同policy的scalar校准，不能互相升级。diagnostic adaptive始终保留完整输出差异证据并标记准确性未解决、正式性能未验收。profile/audit可以在NVTX0的scalar成本上启用NVTX1，但记录两侧observer环境；formal仍严格匹配NVTX。额外GPU同步计时、kernel和精度环境差异不会被忽略。
+
+这是测量工具能力；42项CPU合同检查通过，GPU策略矩阵尚待执行，见[验证记录](model-microbench/evidence/decode-policy-runner.json)。profiler插桩会改变adaptive的观测成本，其吞吐不替代正式结果。

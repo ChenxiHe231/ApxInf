@@ -30,6 +30,8 @@ SOURCE_MARKER = "APXINF_MATRIX_PROCESS "
 EXIT_MARKER = "APXINF_MATRIX_EXIT "
 LOCK_MARKER = "APXINF_MATRIX_LOCK "
 GPU_LOCK_PATH = "/tmp/apxinf-gpu.lock"
+MTP_FIXED_ENV = "APXINF_QWEN35_MTP_FIXED_DEPTH"
+MTP_SCALAR_TPOT_ENV = "APXINF_QWEN35_SCALAR_TPOT_MS"
 COLLECTOR_SOURCE = Path(__file__).read_bytes()
 COLLECTOR_SHA256 = hashlib.sha256(COLLECTOR_SOURCE).hexdigest()
 
@@ -86,7 +88,22 @@ def selected_cases(rows, selection):
     return [row for row in rows if row["id"] in wanted]
 
 
-def environment(args):
+def validate_selection_policy(args, cases):
+    strategy = getattr(args, "mtp_strategy", "fixed")
+    if any(case["group"] != "decode" for case in cases) and (strategy != "fixed" or args.mtp_depth != 3):
+        raise ValueError("Prefill hook is fixed depth3; non-fixed3 policies require an explicit Decode-only subset")
+    if strategy == "adaptive":
+        if args.mode != "mtp" or args.mtp_depth != 3:
+            raise ValueError("adaptive requires --mode mtp and maximum depth3; --mtp-depth only selects fixed depth")
+        if not getattr(args, "scalar_calibration", None):
+            raise ValueError("adaptive requires explicit --scalar-calibration; the runtime's default scalar TPOT is forbidden")
+    elif getattr(args, "scalar_calibration", None):
+        raise ValueError("--scalar-calibration is used only with --mtp-strategy adaptive")
+    if args.mode == "scalar" and args.mtp_depth != 3:
+        raise ValueError("scalar disables MTP; do not label it with a fixed draft depth")
+
+
+def environment(args, scalar_tpot_ms=None):
     env = {}
     for item in args.env:
         if "=" not in item:
@@ -96,6 +113,8 @@ def environment(args):
             raise ValueError("only explicit APXINF_/CUDA_ environment controls are accepted")
         if key in env:
             raise ValueError("duplicate environment key")
+        if key in (MTP_FIXED_ENV, MTP_SCALAR_TPOT_ENV):
+            raise ValueError("MTP controller environment is controlled by --mtp-strategy/--mtp-depth/--scalar-calibration")
         env[key] = value
     # Presence alone enables native reporting; do not set these to '0'.
     env.pop("APXINF_GEMM_REPORT", None)
@@ -107,8 +126,18 @@ def environment(args):
         env["APXINF_GEMM_REPORT"] = "1"
         env["APXINF_ATTENTION_REPORT"] = "1"
     if args.mode == "mtp":
-        env["APXINF_QWEN35_MTP_FIXED_DEPTH"] = str(args.mtp_depth)
+        if getattr(args, "mtp_strategy", "fixed") == "fixed":
+            env[MTP_FIXED_ENV] = str(args.mtp_depth)
+        else:
+            env[MTP_SCALAR_TPOT_ENV] = format(finite_number(scalar_tpot_ms, "calibrated scalar TPOT"), ".17g")
     return env
+
+
+def mtp_policy(args, scalar_tpot_ms=None):
+    enabled = args.mode == "mtp"
+    strategy = getattr(args, "mtp_strategy", "fixed") if enabled else "disabled"
+    return dict(strategy=strategy, fixed_depth=args.mtp_depth if strategy == "fixed" else None,
+                maximum_draft_depth=3 if enabled else None, scalar_tpot_ms=scalar_tpot_ms if strategy == "adaptive" else None)
 
 
 def command_for_case(args, case):
@@ -184,7 +213,7 @@ print(json.dumps(result))
 LAUNCH_CODE = r'''
 import fcntl,hashlib,json,os,pathlib,signal,subprocess,sys,time
 p=json.loads(sys.argv[1]);env=dict(os.environ)
-for key in ('APXINF_GEMM_REPORT','APXINF_ATTENTION_REPORT','APXINF_REQUIRE_RECIPES'):env.pop(key,None)
+for key in ('APXINF_GEMM_REPORT','APXINF_ATTENTION_REPORT','APXINF_REQUIRE_RECIPES','APXINF_QWEN35_MTP_FIXED_DEPTH','APXINF_QWEN35_SCALAR_TPOT_MS'):env.pop(key,None)
 env.update(p['environment'])
 def digest(path):
     h=hashlib.sha256()
@@ -259,7 +288,8 @@ try:
         terminate_owned_child()
         raise SystemExit(128+signum)
     signal.signal(signal.SIGTERM,interrupted);signal.signal(signal.SIGINT,interrupted)
-    identity={'pid':proc.pid,'kind':'profiler_launcher' if p['profile'] else 'benchmark','direct_child_inherits_gpu_lock':not p['profile']}
+    identity={'pid':proc.pid,'kind':'profiler_launcher' if p['profile'] else 'benchmark','direct_child_inherits_gpu_lock':not p['profile'],
+              'effective_mtp_environment':{key:env.get(key) for key in ('APXINF_QWEN35_MTP_FIXED_DEPTH','APXINF_QWEN35_SCALAR_TPOT_MS')}}
     try:
         path='/proc/%d/exe'%proc.pid
         identity['exe']=os.readlink(path);identity['sha256']=digest(path)
@@ -406,6 +436,39 @@ def sha256_file(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def recipe_subset(inventory):
+    files = inventory.get("files")
+    if not isinstance(files, list):
+        raise ValueError("recipe inventory lacks per-file byte/hash evidence")
+    entries = {}
+    for row in files:
+        if not isinstance(row, dict):
+            raise ValueError("invalid recipe inventory entry")
+        path = row.get("path", "")
+        if not isinstance(path, str):
+            raise ValueError("invalid recipe inventory path")
+        if not path.endswith(".recipe"):
+            continue
+        if Path(path).is_absolute() or any(part in ("", ".", "..") for part in path.split('/')) or path in entries or type(row.get("bytes")) is not int or row["bytes"] < 0 or not re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", "")):
+            raise ValueError("invalid recipe inventory entry: " + path)
+        entries[path] = dict(path=path, bytes=row["bytes"], sha256=row["sha256"])
+    rows = [entries[key] for key in sorted(entries)]
+    if len(rows) != inventory.get("count"):
+        raise ValueError("recipe inventory count differs from per-file evidence")
+    return dict(files=rows, count=len(rows), manifest_sha256=hashlib.sha256(json.dumps(rows,sort_keys=True,separators=(',',':')).encode()).hexdigest())
+
+
+def verify_recipe_subset(required, current_inventory):
+    current = recipe_subset(current_inventory)
+    by_path = {row["path"]:row for row in current["files"]}
+    for row in required["files"]:
+        if by_path.get(row["path"]) != row:
+            raise ValueError("scalar calibration recipe changed or missing: " + row["path"])
+    return dict(verified=True, required_subset_manifest_sha256=required["manifest_sha256"],
+                matched_count=required["count"], current_recipe_count=current["count"],
+                added_recipe_keys=sorted(set(by_path)-{row["path"] for row in required["files"]}))
+
+
 def verify_identity(expected, actual):
     if not isinstance(expected, dict):
         raise ValueError("metadata must be an object")
@@ -507,6 +570,29 @@ def validate_divergence_evidence(records, iterations, summary, output, args, dec
     return events
 
 
+def validate_decode_speculation(stats, args, aggregate=False):
+    if args.mode == "scalar":
+        if stats is not None:
+            raise ValueError("scalar Decode unexpectedly reported MTP counters")
+        return 0
+    if not isinstance(stats, dict):
+        raise ValueError("MTP Decode lacks actual speculative counters")
+    if not aggregate and (type(stats.get("draft_steps")) is not int or not 1 <= stats["draft_steps"] <= 3):
+        raise ValueError("native MTP maximum draft steps exceeds supported depth3")
+    arrays = []
+    for name in ("proposed_by_depth", "matched_by_depth", "accepted_prefix_by_depth"):
+        values = stats.get(name)
+        if not isinstance(values, list) or len(values) != 3 or any(type(x) is not int or x < 0 for x in values):
+            raise ValueError("invalid native MTP depth counters: " + name)
+        if getattr(args, "mtp_strategy", "fixed") == "fixed" and any(values[args.mtp_depth:]):
+            raise ValueError("native MTP counters proposed/matched beyond requested fixed depth")
+        arrays.append(values)
+    proposed, matched, accepted = arrays
+    if sum(proposed) != stats.get("proposed_tokens") or any(not 0 <= a <= m <= p for p, m, a in zip(proposed, matched, accepted)):
+        raise ValueError("native MTP depth counters disagree with proposal totals")
+    return max((index+1 for index, count in enumerate(proposed) if count), default=0)
+
+
 def validate_records(records, case, args):
     decode = case["group"] == "decode"
     prefix = "apxinf.qwen35.benchmark." if decode else "apxinf.qwen35.context_benchmark."
@@ -555,8 +641,13 @@ def validate_records(records, case, args):
             raise ValueError("decode prompt/reuse configuration mismatch")
     elif (config.get("prefix_tokens"), config.get("input_tokens"), config.get("total_context_tokens")) != (case["initial_kv_tokens"], case["new_input_tokens"], total_input):
         raise ValueError("prefill geometry mismatch")
+    policy = mtp_policy(args)
+    if config.get("mtp_strategy") != policy["strategy"] or config.get("mtp_enabled") is not (args.mode == "mtp"):
+        raise ValueError("MTP strategy/enabled configuration mismatch")
+    if config.get("mtp_depth") != policy["fixed_depth"] or config.get("fixed_depth") != policy["fixed_depth"]:
+        raise ValueError("MTP strategy/depth mismatch")
     if args.mode == "mtp":
-        if config.get("mtp_depth") != args.mtp_depth or config.get("mtp_strategy") != "fixed":
+        if not decode and policy["fixed_depth"] != 3:
             raise ValueError("MTP strategy/depth mismatch")
         if config.get("draft_kv_dtype") != "fp8" or config.get("draft_kv_scale") != 1.0:
             raise ValueError("draft KV precision missing or changed")
@@ -565,6 +656,7 @@ def validate_records(records, case, args):
     values = []
     tpots = []
     digests = []
+    observed_depths = []
     for index, row in enumerate(iterations):
         if row.get("iteration") != index or row.get("warmup") is not (index < warmups):
             raise ValueError("iteration ordering/warmup classification mismatch")
@@ -584,6 +676,7 @@ def validate_records(records, case, args):
             if not math.isclose(tps, (output-1)*1000/decode_ms, rel_tol=1e-9, abs_tol=1e-6) or not math.isclose(total_ms, ttft+decode_ms, rel_tol=1e-9, abs_tol=1e-6):
                 raise ValueError("Decode intervals, TPS and measured times disagree")
             value = tps
+            observed_depths.append(validate_decode_speculation(row.get("speculation"), args))
         else:
             if (row.get("prefix_tokens"), row.get("input_tokens"), row.get("total_context_tokens")) != (case["initial_kv_tokens"], case["new_input_tokens"], total_input):
                 raise ValueError("prefill iteration geometry changed")
@@ -615,6 +708,13 @@ def validate_records(records, case, args):
     shape_fields = {"prompt_tokens":total_input} if decode else {"prefix_tokens":case["initial_kv_tokens"],"input_tokens":case["new_input_tokens"],"total_context_tokens":total_input}
     if any(summary.get(key) != value for key,value in shape_fields.items()):
         raise ValueError("summary geometry differs from iteration records")
+    if decode:
+        validate_decode_speculation(summary.get("speculation"), args, aggregate=True)
+        if args.mode == "mtp":
+            measured_stats = [row["speculation"] for row in iterations if not row["warmup"]]
+            for key in ("proposed_by_depth", "matched_by_depth", "accepted_prefix_by_depth"):
+                if summary["speculation"][key] != [sum(row[key][depth] for row in measured_stats) for depth in range(3)]:
+                    raise ValueError("summary MTP counters disagree with raw measured rounds")
     metric_key = "generation_tokens_per_second" if decode else "prefill_ms"
     reported_median = finite_number((summary.get(metric_key) or {}).get("median"), "summary median")
     if not math.isclose(reported_median, statistics.median(values), rel_tol=1e-9, abs_tol=1e-6):
@@ -624,10 +724,11 @@ def validate_records(records, case, args):
                 decode_tpot_ms=statistics.median(tpots) if decode else None, output_digest=digests[0], output_digests=digests,
                 measured_primary_values=values, measured_decode_tpot_ms=tpots, total_iterations=len(iterations), warmup_iterations=warmups,
                 decode_tpot_distribution=dict(median=statistics.median(tpots),p90=sorted(tpots)[math.ceil(.9*len(tpots))-1],min=min(tpots),max=max(tpots)) if decode else None,
-                repeat_divergences=divergence_events, comparison_policy=comparison_policy(args), diagnostic_only=allow_divergence)
+                repeat_divergences=divergence_events, comparison_policy=comparison_policy(args), diagnostic_only=allow_divergence,
+                mtp_policy=policy, observed_max_proposed_depth=max(observed_depths, default=0) if decode else None)
 
 
-def validate_run(raw, case, args, recipe_before, recipe_after, expected_binary_sha, transport):
+def validate_run(raw, case, args, recipe_before, recipe_after, expected_binary_sha, transport, expected_environment=None, expected_recipe_subset=None):
     failures = []
     details = {}
     exit_receipt = {}
@@ -638,6 +739,8 @@ def validate_run(raw, case, args, recipe_before, recipe_after, expected_binary_s
         details.update(process=process, exit_receipt=exit_receipt, gpu_lock=lock, backend_task_may_be_live=bool(exit_receipt.get("backend_task_may_be_live")))
         if lock.get("path") != GPU_LOCK_PATH or lock.get("acquired") is not True:
             raise ValueError("shared GPU lock was not acquired")
+        if expected_recipe_subset is not None:
+            details["scalar_recipe_subset_locked_check"] = verify_recipe_subset(expected_recipe_subset, lock.get("recipes_before", {}))
         if exit_receipt.get("lock_held_until_reaped") is not True or exit_receipt.get("child_reaped") is not True:
             raise ValueError("GPU lock lifetime/child cleanup is unproven")
         if lock.get("target_binary_sha256") != expected_binary_sha or exit_receipt.get("target_binary_sha256") != expected_binary_sha:
@@ -646,6 +749,8 @@ def validate_run(raw, case, args, recipe_before, recipe_after, expected_binary_s
             raise ValueError("benchmark/transport exited unsuccessfully")
         if process.get("kind") != ("profiler_launcher" if args.run_mode=="profile" else "benchmark"):
             raise ValueError("unexpected process role")
+        if expected_environment is not None and process.get("effective_mtp_environment") != {key:expected_environment.get(key) for key in (MTP_FIXED_ENV, MTP_SCALAR_TPOT_ENV)}:
+            raise ValueError("worker effective MTP controller environment mismatch")
         if args.run_mode != "profile" and process.get("sha256") != expected_binary_sha:
             raise ValueError("actual /proc executable differs from verified binary")
         if args.run_mode != "tune":
@@ -669,6 +774,104 @@ def validate_run(raw, case, args, recipe_before, recipe_after, expected_binary_s
                 comparison_policy=comparison_policy(args), failures=failures, **details)
 
 
+def load_scalar_calibration(args, cases):
+    """Validate scalar formal-stage evidence under the same explicit accuracy policy."""
+    summary_path = Path(args.scalar_calibration).resolve()
+    metadata_path = summary_path.parent/'metadata.json'
+    summary_bytes, metadata_bytes = summary_path.read_bytes(), metadata_path.read_bytes()
+    summary = json.loads(summary_bytes)
+    metadata = json.loads(metadata_bytes)
+    policy = comparison_policy(args)
+    diagnostic = getattr(args, "allow_repeat_divergence", False)
+    expected_accuracy = "unresolved" if diagnostic else "repeat_consistent"
+    for document in (summary, metadata):
+        if document.get("schema") != SCHEMA or document.get("run_mode") != "formal" or document.get("comparison_policy") != policy or document.get("allow_repeat_divergence", False) is not diagnostic:
+            raise ValueError("scalar calibration requires the same explicit strict/diagnostic formal-stage measurement policy")
+    if any(summary.get(key) is not True for key in ("all_cases_valid", "measurement_valid", "source_unchanged")) or summary.get("performance_accepted") is not (not diagnostic):
+        raise ValueError("scalar calibration acceptance status does not match the strict/diagnostic policy")
+    if summary.get("accuracy_status") != expected_accuracy:
+        raise ValueError("scalar calibration accuracy status does not match the strict/diagnostic policy")
+    identity = metadata.get("observed_before", {})
+    verify_identity(identity, identity)
+    verify_identity(metadata.get("expected", {}), identity)
+    final = summary.get("observed_after", {})
+    if final.get("source") != identity["source"] or final.get("binary_sha256") != identity["binary_sha256"]:
+        raise ValueError("scalar calibration source/ELF changed during acquisition")
+    if not isinstance(summary.get("results"), list):
+        raise ValueError("scalar calibration has no case results")
+    by_case = {row.get("case"):row for row in summary["results"]}
+    if len(by_case) != len(summary["results"]):
+        raise ValueError("duplicate scalar calibration case")
+    current_env = environment(args, 1.0)
+    controlled = {MTP_FIXED_ENV, MTP_SCALAR_TPOT_ENV, "APXINF_GEMM_REPORT", "APXINF_ATTENTION_REPORT", "APXINF_REQUIRE_RECIPES"}
+    observer_keys = {"APXINF_GEMM_REPORT", "APXINF_ATTENTION_REPORT"}
+    if args.run_mode in ("profile", "audit"):
+        # NVTX markers may be added for an observer invocation. Other timing
+        # switches can add synchronizations and remain part of kernel_env.
+        controlled.add("APXINF_NVTX")
+        observer_keys.add("APXINF_NVTX")
+    def kernel_env(values):
+        if not isinstance(values, dict):
+            raise ValueError("scalar calibration lacks a recorded kernel environment")
+        return {key:value for key,value in values.items() if key not in controlled}
+    env_by_case = {entry["case"]:entry["environment"] for entry in metadata.get("case_execution", [])}
+    receipt = dict(summary_path=str(summary_path), summary_sha256=hashlib.sha256(summary_bytes).hexdigest(),
+                   metadata_path=str(metadata_path), metadata_sha256=hashlib.sha256(metadata_bytes).hexdigest(), identity=identity,
+                   comparison_policy=policy,accuracy_status=expected_accuracy,performance_accepted=not diagnostic,cases={})
+    for case in cases:
+        row = by_case.get(case["id"])
+        if not row or row.get("group") != "decode" or row.get("run_mode") != "formal" or any(row.get(key) is not True for key in ("valid", "measurement_valid")) or row.get("performance_accepted") is not (not diagnostic) or row.get("comparison_policy") != policy or row.get("accuracy_status") != expected_accuracy:
+            raise ValueError("missing scalar calibration with the matching acceptance policy for " + case["id"])
+        calibration_env = env_by_case.get(case["id"], metadata.get("environment", {}))
+        if kernel_env(calibration_env) != kernel_env(current_env):
+            raise ValueError("scalar calibration kernel environment differs for " + case["id"])
+        log = summary_path.parent/(case["id"]+'.log')
+        raw_bytes = log.read_bytes()
+        if hashlib.sha256(raw_bytes).hexdigest() != row.get("log_sha256"):
+            raise ValueError("scalar calibration raw log hash mismatch")
+        raw = raw_bytes.decode()
+        records, _, _, _ = parse_output(raw)
+        configs = [item for item in records if item.get("schema") == "apxinf.qwen35.benchmark.config.v1"]
+        if len(configs) != 1 or configs[0].get("mode") != "scalar":
+            raise ValueError("calibration case must be actual scalar Decode")
+        config = configs[0]
+        if type(config.get("warmups")) is not int or config["warmups"] < 2 or type(config.get("repeats")) is not int or config["repeats"] < 5:
+            raise ValueError("scalar calibration requires at least warmups2/measured5")
+        scalar_args = argparse.Namespace(**vars(args))
+        scalar_args.mode, scalar_args.mtp_strategy, scalar_args.mtp_depth = "scalar", "fixed", 3
+        scalar_args.run_mode, scalar_args.allow_repeat_divergence = "formal", diagnostic
+        scalar_args.warmups, scalar_args.repeats = config["warmups"], config["repeats"]
+        validation = validate_run(raw, case, scalar_args, row["recipes_before"], row["recipes_after"],
+                                  identity["binary_sha256"]["decode"], row["transport"])
+        if not validation["measurement_valid"] or validation["performance_accepted"] is not (not diagnostic):
+            raise ValueError("scalar calibration raw validation failed: " + '; '.join(validation["failures"]))
+        observed = validation["observed"]
+        locked_recipes = validation["exit_receipt"].get("recipes_after", {})
+        required_recipes = recipe_subset(locked_recipes)
+        if not required_recipes["count"] or row.get("exit_receipt", {}).get("recipes_after") != locked_recipes:
+            raise ValueError("scalar calibration lacks matching locked post-run recipe evidence")
+        verify_recipe_subset(required_recipes, validation["gpu_lock"].get("recipes_before", {}))
+        values = row.get("observed", {}).get("measured_decode_tpot_ms")
+        if values != observed["measured_decode_tpot_ms"] or row.get("native_iterations") != validation["native_iterations"] or row.get("repeat_divergences") != validation["repeat_divergences"] or row.get("observed", {}).get("repeat_divergences") != observed["repeat_divergences"] or row.get("observed", {}).get("output_digests") != observed["output_digests"]:
+            raise ValueError("scalar calibration stored measurements disagree with raw 1023-interval Decode")
+        scalar_tpot = finite_number(statistics.median(values), "scalar calibration median TPOT")
+        receipt["cases"][case["id"]] = dict(scalar_tpot_ms=scalar_tpot, measured_decode_tpot_ms=values,
+                                              warmups=config["warmups"], measured_iterations=config["repeats"],
+                                              decode_intervals=1023, log_sha256=row["log_sha256"], comparison_policy=policy,
+                                              accuracy_status=expected_accuracy,performance_accepted=not diagnostic,
+                                              output_digests=observed["output_digests"],repeat_divergences=validation["repeat_divergences"],
+                                              recipe_subset=required_recipes,recipe_subset_target_status="pending",
+                                              observer_environment_comparison=dict(
+                                                  run_mode=args.run_mode,original_target_env_arguments=list(args.env),
+                                                  calibration_original_environment=calibration_env,
+                                                  calibration_observer_environment={key:calibration_env.get(key) for key in sorted(observer_keys)},
+                                                  current_observer_environment={key:current_env.get(key) for key in sorted(observer_keys)},
+                                                  ignored_observer_keys=sorted(observer_keys),
+                                                  note="Profile/audit instrumentation can change controller observations; its throughput is never accepted formal performance."),
+                                              calibration_summary_sha256=receipt["summary_sha256"],calibration_metadata_sha256=receipt["metadata_sha256"])
+    return receipt
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-mode",choices=("tune","formal","audit","profile"),default="formal")
@@ -684,6 +887,8 @@ def main():
     parser.add_argument("--mode",choices=("mtp","scalar"),default="mtp")
     parser.add_argument("--allow-repeat-divergence",action="store_true",help="Explicit diagnostic collection only; preserve divergence evidence and never accept formal performance")
     parser.add_argument("--mtp-depth",type=int,choices=(1,2,3),default=3)
+    parser.add_argument("--mtp-strategy",choices=("fixed","adaptive"),default="fixed")
+    parser.add_argument("--scalar-calibration",type=Path,help="Validated scalar formal-stage summary.json under the same strict/diagnostic policy, with sibling metadata.json and hashed raw case logs; required for adaptive")
     parser.add_argument("--kv-cache",choices=("bf16","fp8"),default="bf16")
     parser.add_argument("--moe-activation",choices=("nvfp4","bf16"),default="nvfp4")
     parser.add_argument("--warmups",type=int,default=2)
@@ -697,20 +902,31 @@ def main():
     minimum_warmups = 0 if args.run_mode == "tune" else 2
     if args.warmups < minimum_warmups or args.repeats < 1 or args.timeout_sec < 1 or args.lock_timeout_sec < 1:
         parser.error("warmups>=2 for non-tune, repeats>=1, timeout-sec>=1 required")
-    if args.mode == "mtp" and args.mtp_depth != 3:
-        parser.error("current context benchmark is fixed depth3; do not relabel it as another depth")
     try:
         cases = selected_cases(load_cases(args.matrix),args.cases)
-        env = environment(args)
-    except ValueError as error:
+        validate_selection_policy(args, cases)
+        calibration = load_scalar_calibration(args, cases) if args.mtp_strategy == "adaptive" else None
+        plan = []
+        for case in cases:
+            calibrated_case = calibration["cases"][case["id"]] if calibration else None
+            scalar_tpot = calibrated_case["scalar_tpot_ms"] if calibrated_case else None
+            plan.append(dict(case=case,argv=command_for_case(args,case),environment=environment(args,scalar_tpot),
+                             mtp_policy=mtp_policy(args,scalar_tpot),scalar_calibration=calibrated_case))
+    except (ValueError, OSError, KeyError, TypeError) as error:
         parser.error(str(error))
-    plan = [dict(case=case,argv=command_for_case(args,case),environment=env) for case in cases]
     if args.plan:
-        print(json.dumps(dict(schema=SCHEMA,run_mode=args.run_mode,comparison_policy=comparison_policy(args),plan=plan),ensure_ascii=False,indent=2));return 0
+        print(json.dumps(dict(schema=SCHEMA,run_mode=args.run_mode,comparison_policy=comparison_policy(args),plan=plan,
+                              scalar_calibration=calibration,calibration_target_identity_verified=False if calibration else None,
+                              calibration_target_recipes_verified=False if calibration else None),ensure_ascii=False,indent=2));return 0
     transport = Transport(args)
     actual = transport.snapshot()
     if args.inspect:
         print(json.dumps(actual,ensure_ascii=False,indent=2));return 0
+    if calibration:
+        verify_identity(calibration["identity"], actual)
+        for calibrated_case in calibration["cases"].values():
+            calibrated_case["target_snapshot_recipe_subset_check"] = verify_recipe_subset(calibrated_case["recipe_subset"], actual.get("recipes", {}))
+            calibrated_case["recipe_subset_target_status"] = "verified_snapshot; lock_check_required"
     if not args.metadata or not args.output:
         parser.error("execution requires --metadata and --output")
     expected=json.loads(args.metadata.read_text())
@@ -722,7 +938,11 @@ def main():
     args.output.mkdir(parents=True,exist_ok=False)
     (args.output/'collector.py').write_bytes(COLLECTOR_SOURCE)
     (args.output/'matrix.json').write_text(json.dumps(cases,ensure_ascii=False,indent=2)+'\n')
-    metadata=dict(schema=SCHEMA,run_mode=args.run_mode,expected=expected,observed_before=actual,environment=env,
+    metadata=dict(schema=SCHEMA,run_mode=args.run_mode,expected=expected,observed_before=actual,
+                  environment=plan[0]["environment"] if not calibration else None,
+                  case_execution=[dict(case=row["case"]["id"],environment=row["environment"],mtp_policy=row["mtp_policy"],scalar_calibration=row["scalar_calibration"]) for row in plan],
+                  scalar_calibration=calibration,calibration_target_identity_verified=True if calibration else None,
+                  calibration_target_recipes_verified=True if calibration else None,
                   comparison_policy=comparison_policy(args),allow_repeat_divergence=args.allow_repeat_divergence,
                   accuracy_status="unresolved" if args.allow_repeat_divergence else "pending_repeat_consistency",
                   collector_sha256=COLLECTOR_SHA256,collector_python=sys.version,utc_started=dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -738,10 +958,15 @@ def main():
             argv=[args.nsys,'profile','--trace=cuda,nvtx,osrt','--cuda-graph-trace=node','--sample=none','--cpuctxsw=none',
                   '--capture-range=cudaProfilerApi','--capture-range-end=stop','--force-overwrite=false','--output='+profile_report]+argv
         log=args.output/(case['id']+'.log')
-        outcome=transport.execute(argv,env,log,args.run_mode=='profile')
+        outcome=transport.execute(argv,entry['environment'],log,args.run_mode=='profile')
         after=transport.snapshot('recipes')
         binary_role='decode' if case['group']=='decode' else 'context'
-        validation=validate_run(log.read_text(errors='replace'),case,args,before,after,actual['binary_sha256'][binary_role],outcome)
+        validation=validate_run(log.read_text(errors='replace'),case,args,before,after,actual['binary_sha256'][binary_role],outcome,entry['environment'],
+                                entry['scalar_calibration']['recipe_subset'] if entry['scalar_calibration'] else None)
+        if entry['scalar_calibration']:
+            locked_subset_check=validation.get('scalar_recipe_subset_locked_check')
+            entry['scalar_calibration']['recipe_subset_target_status']='verified_snapshot_and_lock' if locked_subset_check else 'snapshot_verified; lock_failed_or_unproven'
+            entry['scalar_calibration']['locked_recipe_subset_check']=locked_subset_check
         profile_artifacts=None
         if profile_report:
             if validation.get('backend_task_may_be_live') or outcome.get('backend_task_may_be_live'):
@@ -756,6 +981,7 @@ def main():
                 validation['performance_accepted']=False
                 validation['failures'].extend(profile_artifacts['failures'])
         result=dict(case=case['id'],group=case['group'],argv=argv,run_mode=args.run_mode,recipes_before=before,recipes_after=after,
+                    environment=entry['environment'],mtp_policy=entry['mtp_policy'],scalar_calibration=entry['scalar_calibration'],
                     log_sha256=sha256_file(log),transport=outcome,profile_report=profile_report,profile_artifacts=profile_artifacts,**validation)
         results.append(result)
         (args.output/(case['id']+'.json')).write_text(json.dumps(result,ensure_ascii=False,indent=2)+'\n')
@@ -773,6 +999,9 @@ def main():
     accepted=complete and source_unchanged and all(row['valid'] for row in results)
     performance_accepted=accepted and args.run_mode=='formal' and all(row['performance_accepted'] for row in results)
     summary=dict(schema=SCHEMA,run_mode=args.run_mode,requested_cases=[x['id'] for x in cases],completed_cases=len(results),
+                 case_execution=metadata['case_execution'],scalar_calibration=calibration,
+                 calibration_target_identity_verified=True if calibration else None,
+                 calibration_target_recipes_verified=True if calibration else None,
                  all_cases_valid=accepted,measurement_valid=accepted,full_matrix_requested=len(cases)==15,full_matrix_valid=accepted and len(cases)==15,performance_accepted=performance_accepted,source_unchanged=source_unchanged,
                  comparison_policy=comparison_policy(args),allow_repeat_divergence=args.allow_repeat_divergence,
                  accuracy_status="unresolved" if args.allow_repeat_divergence else ("repeat_consistent" if accepted else "failed_or_incomplete"),
