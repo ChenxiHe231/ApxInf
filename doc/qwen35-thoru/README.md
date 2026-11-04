@@ -47,27 +47,23 @@ CUDA runtime draws from the reserved HugeTLB pool. Never compile CUDA code with
 the inference-sized pool still reserved: parallel `cicc` processes can exhaust
 the remaining ordinary memory and trigger the system OOM killer.
 
-Stop every ApxInf/Edge-LLM inference process, release HugeTLB, and limit both
-Cargo and the native CUDA worker pool to two jobs before compiling:
+Use the guarded build phase described in
+[MODEL_MICROBENCH_USAGE.md](MODEL_MICROBENCH_USAGE.md). It holds the shared GPU
+lock, refuses to shrink an in-use pool, retains **2048 HugeTLB pages (4 GiB)**,
+requires at least 24 GiB of ordinary available memory, and limits both Cargo
+and the native CUDA worker pool to two jobs. **Do not set the pool to zero**:
+on this DriveOS installation the CUDA context failed with zero pages and
+initialized with 2048 pages in a controlled check.
 
-```bash
-sudo sysctl -w vm.nr_hugepages=0
-grep -E 'MemAvailable|HugePages_Total|HugePages_Free|Hugetlb' /proc/meminfo
+Finish all native builds before allocating the inference pool. An optional
+`--inference-pages 20480` on the last successful guarded build requests 40 GiB,
+checks the actual allocation, and retains at least 8 GiB of ordinary available
+memory. A failed or partial request rolls back to the small build pool; it does
+not start inference. Recheck the GPU clock policy after every reboot.
 
-export APXINF_NVCC_PARALLELISM=2
-export CARGO_BUILD_JOBS=2
-```
-
-After the build finishes, restore the 40 GiB inference pool **before** loading
-the model, and do not run Cargo/NVCC at the same time as inference:
-
-```bash
-sudo sysctl -w vm.nr_hugepages=20480
-grep -E 'MemAvailable|HugePages_Total|HugePages_Free|Hugetlb' /proc/meminfo
-```
-
-`HugePages_Total` must report `20480`. If the kernel cannot reserve the full
-pool, stop memory-heavy processes and retry before starting inference.
+The [recovery record](MODEL_MICROBENCH_RECOVERY.md) distinguishes the observed
+OOM incident from earlier clock-related failures and documents recovery and
+prevention. Do not stop another user's processes to reclaim memory.
 
 Set the remaining build and checkpoint paths once per shell:
 

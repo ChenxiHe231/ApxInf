@@ -47,8 +47,33 @@ class Contracts(unittest.TestCase):
             with mock.patch.object(build.platform,'system',return_value=system), \
                  mock.patch.object(build.platform,'machine',return_value=machine), \
                  mock.patch.object(build.os,'geteuid',return_value=uid), \
-                 mock.patch.object(Path,'read_text',return_value=model),self.assertRaises(build.GuardError):
+                 mock.patch.object(Path,'read_bytes',side_effect=[model.encode()+b'\0',b'nvidia,tegra234\0']),self.assertRaises(build.GuardError):
                 build.validate_platform()
+
+    def test_platform_accepts_actual_board_soc_pair_and_explicit_thor_name(self):
+        for model,compatible in [('p3960-0010',['nvidia,p3960','nvidia,tegra264']),('NVIDIA Jetson AGX Thor',['nvidia,tegra264'])]:
+            with mock.patch.object(build.platform,'system',return_value='Linux'), \
+                 mock.patch.object(build.platform,'machine',return_value='aarch64'), \
+                 mock.patch.object(build.os,'geteuid',return_value=1000), \
+                 mock.patch.object(Path,'read_bytes',side_effect=[model.encode()+b'\0',b'\0'.join(x.encode() for x in compatible)+b'\0']):
+                receipt=build.validate_platform()
+            self.assertEqual(receipt['model'],model);self.assertEqual(receipt['compatible'],compatible)
+
+    def test_platform_rejects_single_board_wrong_soc_or_wrong_board_pair(self):
+        for model,compatible in [
+            ('p3960-0010',['nvidia,p3960']),
+            ('p3960-0010',['nvidia,tegra264']),
+            ('p3960-0010',['nvidia,p3960','nvidia,tegra234']),
+            ('p3960-0010',['nvidia,p3960','nvidia,tegra264-v0']),
+            ('p3960-0000',['nvidia,p3960','nvidia,tegra264']),
+            ('p3767-0000',['nvidia,p3960','nvidia,tegra264']),
+            ('Jetson Orin',['nvidia,tegra234']),
+        ]:
+            with mock.patch.object(build.platform,'system',return_value='Linux'), \
+                 mock.patch.object(build.platform,'machine',return_value='aarch64'), \
+                 mock.patch.object(build.os,'geteuid',return_value=1000), \
+                 mock.patch.object(Path,'read_bytes',side_effect=[model.encode()+b'\0',b'\0'.join(x.encode() for x in compatible)+b'\0']), \
+                 self.assertRaises(build.GuardError):build.validate_platform()
 
     def test_reserved_is_added_once_and_small_readback_is_strict(self):
         build.check_memory(memory(32768,1000,1000))

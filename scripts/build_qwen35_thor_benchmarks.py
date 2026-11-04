@@ -95,9 +95,13 @@ def validate_platform():
     if platform.system() != "Linux" or platform.machine() not in ("aarch64", "arm64"):
         raise GuardError("execute requires local Linux aarch64 Jetson Thor")
     if os.geteuid() == 0: raise GuardError("run launcher/cargo as the ordinary user, not root")
-    model = Path("/proc/device-tree/model").read_text().replace("\0", "")
-    if "thor" not in model.lower(): raise GuardError("local device model is not Thor")
-    return dict(system=platform.system(), machine=platform.machine(), model=model.strip(), uid=os.geteuid())
+    model = Path("/proc/device-tree/model").read_bytes().decode().rstrip("\0").strip()
+    compatible = [x.decode() for x in Path("/proc/device-tree/compatible").read_bytes().split(b"\0") if x]
+    named_thor = "thor" in model.lower()
+    observed_pair = model == "p3960-0010" and {"nvidia,p3960", "nvidia,tegra264"}.issubset(compatible)
+    if not (named_thor or observed_pair): raise GuardError("local device is not a recognized Thor model/board+SoC pair")
+    return dict(system=platform.system(), machine=platform.machine(), model=model, compatible=compatible,
+                identification="thor_model_string" if named_thor else "observed_p3960-0010_tegra264_pair", uid=os.geteuid())
 
 
 def memory_snapshot():

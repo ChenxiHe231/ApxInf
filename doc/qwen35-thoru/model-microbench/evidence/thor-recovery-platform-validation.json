@@ -1,0 +1,33 @@
+{
+  "scope": "Thor board detection CPU contracts and observed reboot recovery; no new performance score",
+  "device": {
+    "model": "p3960-0010",
+    "compatible": [
+      "nvidia,p3960",
+      "nvidia,tegra264"
+    ]
+  },
+  "cpu_tests": {
+    "mac_passed": 18,
+    "mac_linux_only_skipped": 3,
+    "thor_linux_passed": 21
+  },
+  "evidence": {
+    "platform-linux-cpu.log": {
+      "sha256": "3e45eb5da31f48eb36a281a2dbe3726fb03c37b9d15d3c1f5a84f91986d0f97c",
+      "bytes": 3607
+    },
+    "serial-mem-cont.log": {
+      "sha256": "0ed9e7cfe09e2483d083c123af58e14453fa81b124be3fd471d4eca31a2b3bd7",
+      "bytes": 415
+    },
+    "authorized-mcu-reboot.log": {
+      "sha256": "418459732c9bf79096a66d7d0960c2d1d001ed2e0ac68d04f19c66f4e5346f35",
+      "bytes": 97939
+    },
+    "post-mcu-ssh.log": {
+      "sha256": "9870af02387f72e1715936fc68315f3b325e40529eabba9dacd5c1a690482632",
+      "bytes": 153
+    }
+  }
+}

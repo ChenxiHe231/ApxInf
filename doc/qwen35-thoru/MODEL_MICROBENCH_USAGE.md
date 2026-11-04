@@ -21,6 +21,8 @@ python3 scripts/bench_qwen35_model_matrix.py "${matrix_args[@]}" --inspect \
   > devlocal/model-microbench/runs/identity.json
 ```
 
+故障与恢复原因、重启后核对流程见 [恢复记录](MODEL_MICROBENCH_RECOVERY.md)。
+
 先在 Thor 本机完成全部编译，再回到上述 matrix 流程。使用专用编译 launcher，
 不要交错 native 编译和大 HugeTLB 池下的推理，也不要在外层重复获取同一公共锁：
 
