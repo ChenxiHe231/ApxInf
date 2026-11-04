@@ -17,8 +17,13 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
 #include <mutex>
 #include <string>
+
+#include "ordered_route_reduce.cuh"
 
 using apxinf::framework::Failure;
 
@@ -43,6 +48,38 @@ constexpr int kMaxResidentThreadsPerSm = 2048;
 constexpr float kSfScaleEpsilon = 1.0e-20f;
 constexpr size_t kAlignment = 256;
 
+// Experimental, process-fixed arithmetic policy. Query and execute share this
+// exact snapshot, including a rejected value; changing getenv later cannot
+// invalidate an already-allocated workspace's representation.
+bool ordered_reduce_enabled() {
+  struct Policy { bool enabled; bool valid; };
+  static const Policy policy = [] {
+    const char* value = std::getenv("APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE");
+    if (value == nullptr || std::strcmp(value, "0") == 0) return Policy{false, true};
+    if (std::strcmp(value, "1") == 0) return Policy{true, true};
+    return Policy{false, false};
+  }();
+  if (!policy.valid) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE must be unset, 0 or 1");
+  }
+  return policy.enabled;
+}
+
+size_t checked_size_add(size_t a, size_t b) {
+  if (b > std::numeric_limits<size_t>::max() - a) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "Edge NVFP4 MoE workspace size addition overflow");
+  }
+  return a + b;
+}
+
+size_t checked_size_mul(size_t a, size_t b) {
+  if (a != 0 && b > std::numeric_limits<size_t>::max() / a) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "Edge NVFP4 MoE workspace size multiplication overflow");
+  }
+  return a * b;
+}
+
 struct WorkspaceLayout {
   size_t input_fp4{};
   size_t input_sf{};
@@ -52,6 +89,7 @@ struct WorkspaceLayout {
   size_t num_tiles{};
   size_t fc1_fp4{};
   size_t fc1_sf{};
+  size_t expanded_bf16{};  // Private [tokens, top_k, hidden], enabled policy only.
   size_t total{};
   int32_t permuted_m{};
   int32_t tile_entries{};
@@ -78,6 +116,7 @@ WorkspaceLayout workspace_layout(const apxinf_moe_edge_nvfp4_spec_t& spec) {
   size_t cursor = 0;
   auto place = [&](size_t& offset, size_t bytes) {
     offset = cursor;
+    (void)checked_size_add(checked_size_add(cursor, bytes), kAlignment - 1);
     cursor = align_up(cursor + bytes, kAlignment);
   };
   place(layout.input_fp4, static_cast<size_t>(routes) * spec.hidden / 2);
@@ -94,7 +133,11 @@ WorkspaceLayout workspace_layout(const apxinf_moe_edge_nvfp4_spec_t& spec) {
         static_cast<size_t>(layout.permuted_m) * spec.intermediate / 2);
   place(layout.fc1_sf,
         static_cast<size_t>(layout.permuted_m) * layout.padded_inter_sf);
-  layout.total = cursor + kAlignment;
+  if (ordered_reduce_enabled()) {
+    const size_t expanded_elements = checked_size_mul(static_cast<size_t>(routes), spec.hidden);
+    place(layout.expanded_bf16, checked_size_mul(expanded_elements, sizeof(uint16_t)));
+  }
+  layout.total = checked_size_add(cursor, kAlignment);
   return layout;
 }
 
@@ -380,6 +423,31 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
   auto* fc1_sf = at<void>(bindings.workspace, layout.fc1_sf);
   const int routes = static_cast<int>(spec.tokens * spec.top_k);
   const auto stream = reinterpret_cast<cudaStream_t>(bindings.stream);
+  const bool ordered_reduce = ordered_reduce_enabled();
+  void* fc2_output = bindings.output;
+  int64_t fc2_tokens = spec.tokens;
+  int64_t fc2_top_k = spec.top_k;
+  int64_t clear_elements = static_cast<int64_t>(spec.tokens) * spec.hidden;
+  size_t live_elements = 0;
+  unsigned ordered_blocks = 0;
+  if (ordered_reduce) {
+    live_elements = checked_size_mul(spec.tokens, spec.hidden);
+    const size_t expanded_elements = checked_size_mul(static_cast<size_t>(routes), spec.hidden);
+    if (expanded_elements > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "Edge NVFP4 MoE expanded clear count exceeds int64");
+    }
+    const size_t blocks = (live_elements - 1) /
+                         apxinf::experimental::ordered_route_reduce::kThreads + 1;
+    if (blocks > std::numeric_limits<unsigned>::max() ||
+        properties.maxGridSize[0] <= 0 || blocks > static_cast<size_t>(properties.maxGridSize[0])) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "Edge NVFP4 MoE ordered reduction grid is too large");
+    }
+    ordered_blocks = static_cast<unsigned>(blocks);
+    fc2_output = at<void>(bindings.workspace, layout.expanded_bf16);
+    clear_elements = static_cast<int64_t>(expanded_elements);
+    fc2_tokens = routes;
+    fc2_top_k = 1;
+  }
 
   if (spec.tokens <= 4) {
     const int quant_blocks = std::min<int>(routes, properties.multiProcessorCount * 4);
@@ -408,8 +476,8 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
   const int32_t pdl = 0;
   int result = cute_dsl_nvfp4_moe_sm110_fc1_swiglu_n128_wrapper(
       &fc1_module, input_fp4, const_cast<void*>(bindings.fc1_weight), input_sf,
-      const_cast<void*>(bindings.fc1_scales), fc1_fp4, fc1_sf, bindings.output,
-      static_cast<int64_t>(spec.tokens) * spec.hidden, 1,
+      const_cast<void*>(bindings.fc1_scales), fc1_fp4, fc1_sf, fc2_output,
+      clear_elements, 1,
       const_cast<float*>(bindings.fc1_alpha),
       const_cast<float*>(bindings.input_global_scale),
       const_cast<float*>(bindings.down_input_scale), tile_group, tile_limit,
@@ -423,17 +491,26 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
 
   result = cute_dsl_nvfp4_moe_sm110_fc2_n128_bf16_wrapper(
       &fc2_module, fc1_fp4, const_cast<void*>(bindings.fc2_weight), fc1_sf,
-      const_cast<void*>(bindings.fc2_scales), bindings.output,
+      const_cast<void*>(bindings.fc2_scales), fc2_output,
       const_cast<float*>(bindings.fc2_alpha),
       const_cast<float*>(bindings.down_input_scale), tile_group, tile_limit,
       permutation, num_tiles, const_cast<float*>(bindings.expert_weights), m,
-      spec.hidden, spec.intermediate, spec.experts, spec.tokens, spec.top_k,
+      spec.hidden, spec.intermediate, spec.experts, fc2_tokens, fc2_top_k,
       properties.multiProcessorCount, pdl, stream);
   if (result != 0) {
     throw Failure(APXINF_STATUS_PROVIDER_ERROR,
                   "Edge NVFP4 MoE FC2 returned " + std::to_string(result));
   }
   apxinf::framework::check_cuda(cudaGetLastError());
+  if (ordered_reduce) {
+    // FC2 already applied the original route weights. Sum the eight rounded
+    // BF16 route contributions once, in fixed FP32 slot order, then RNE BF16.
+    apxinf::experimental::ordered_route_reduce::ordered_route_reduce_kernel<<<
+        ordered_blocks, apxinf::experimental::ordered_route_reduce::kThreads, 0, stream>>>(
+        static_cast<const uint16_t*>(fc2_output), static_cast<uint16_t*>(bindings.output),
+        nullptr, live_elements, spec.hidden);
+    apxinf::framework::check_cuda(cudaGetLastError());
+  }
 }
 
 }  // namespace

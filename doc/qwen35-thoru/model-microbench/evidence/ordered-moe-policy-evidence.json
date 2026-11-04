@@ -1,0 +1,744 @@
+{
+  "schema": "apxinf.ordered-moe-policy.review-evidence.v1",
+  "base_revision": "8278871a6bedee3af92cc512842b3ae458440cbf",
+  "parent_assumption": "Owned context-stream H2D commit precedes this commit; it does not touch the three ordered-policy paths. This package excludes those ten prerequisite paths.",
+  "source_identity": [
+    {
+      "path": "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/runner.cu",
+      "before_sha256": "0e0f296c4dbe78285daaa525a8719ca2170123c97356800794e4244cbf6e8455",
+      "after_sha256": "146a476b4d98fe26d56b6fec1359d0db5ae3aeae6258cf4cdbeaade186fb1a0e",
+      "before_bytes": 18761,
+      "after_bytes": 22323
+    },
+    {
+      "path": "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh",
+      "before_sha256": null,
+      "after_sha256": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+      "before_bytes": null,
+      "after_bytes": 2377
+    },
+    {
+      "path": "crates/apxinf-model/tests/qwen35_real_moe_bench.rs",
+      "before_sha256": "a1c0ec09238a23b52cd51c03a26d59824695a7cd9a9bd1a53a6151844fbfb87f",
+      "after_sha256": "0caea57ee092aba5430797048806970673d93b9810948cfb974774522de6790f",
+      "before_bytes": 17090,
+      "after_bytes": 61108
+    }
+  ],
+  "original_13file_source_manifest": {
+    "path": "devlocal/model-microbench/recovery-build/ordered-h2d-capture-source-01.json",
+    "sha256": "fe4c689efe93ffa5f9bcf89c3070b435883e6a4c36d776208f670cb74f0efe80",
+    "ordered_paths_match_exactly": true
+  },
+  "arithmetic_policy": {
+    "opt_in_env": "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE=1",
+    "default": "unset or exact 0 retains original reduction; other strings invalid",
+    "snapshot": "function-local static once per process, shared by workspace query and execute",
+    "route_values": "FC2 already weighted BF16 route outputs, no second weighting",
+    "reduction": "+0, sequential slot0..7 explicit add.rn.f32 without FTZ, one cvt.rn.bf16.f32",
+    "bit_equivalent_to_old_bf16_reduce": false,
+    "always_more_accurate": false,
+    "workspace_delta_bytes": "tokens * 8 * hidden * 2; old eight region offsets and trailing 256-byte padding preserved for valid shapes"
+  },
+  "cpu_oracle": {
+    "raw_log": "devlocal/model-microbench/recovery-build/fc2-sum-oracle-cpu.log",
+    "parsed_result": "9 passed; 0 failed",
+    "fixture_count": 54,
+    "has_extreme_cancellation_and_intermediate_overflow_counterexamples": true,
+    "source_to_compiler_elf_receipt_available_in_this_package": false,
+    "limitation": "Raw actual run log and frozen source/fixtures are preserved; this item alone does not prove the compiler/ELF identity. It is not a model-quality gate."
+  },
+  "standalone_gpu": {
+    "regular_and_fast_math": true,
+    "summary": [
+      {
+        "log": "devlocal/model-microbench/recovery-build/route-reducer-build/run/regular-small.log",
+        "suite_line": "ordered-route-reduce suite PASS shape_cases=15 mask_cases=8 repeats=20 model_gate=false performance_eligible=false",
+        "case_records": 23,
+        "kernel_calls": 460
+      },
+      {
+        "log": "devlocal/model-microbench/recovery-build/route-reducer-build/run/regular-large.log",
+        "suite_line": "ordered-route-reduce suite PASS shape_cases=4 mask_cases=0 repeats=1 model_gate=false performance_eligible=false",
+        "case_records": 4,
+        "kernel_calls": 4
+      },
+      {
+        "log": "devlocal/model-microbench/recovery-build/route-reducer-build/run/fast-math-small.log",
+        "suite_line": "ordered-route-reduce suite PASS shape_cases=15 mask_cases=8 repeats=20 model_gate=false performance_eligible=false",
+        "case_records": 23,
+        "kernel_calls": 460
+      },
+      {
+        "log": "devlocal/model-microbench/recovery-build/route-reducer-build/run/fast-math-large.log",
+        "suite_line": "ordered-route-reduce suite PASS shape_cases=4 mask_cases=0 repeats=1 model_gate=false performance_eligible=false",
+        "case_records": 4,
+        "kernel_calls": 4
+      }
+    ],
+    "per_build_kernel_calls": 464,
+    "total_kernel_calls": 928,
+    "validated": "all frozen CPU literal FP32 stage bits and final BF16 bytes; input readonly, guards and tails",
+    "independent_model_quality": false
+  },
+  "real_checkpoint_gpu": {
+    "checkpoint": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+    "layers": [
+      0,
+      1
+    ],
+    "token_shapes": [
+      1,
+      4,
+      2048
+    ],
+    "integration_calls": 120,
+    "capture_calls": 240,
+    "capture_warmups_not_counted": 12,
+    "all_parsed_records_checked": true,
+    "reference": "all T*H outputs, CPU fixed-slot FP32 sum of actual weighted BF16 expanded route values then BF16 RNE",
+    "coverage_limit": "FC1/FC2 math, quantization, router selections, all 40 layers and full-model quality are not independently accepted by this reference. Fixed routing uses uniform 0.125 weights.",
+    "integration_test_source_sha256": "47622bedf85ab2a3550cc8ceaba086e17a3e69a6c2a1b1ddc6236a5301ea7409",
+    "integration_test_is_exact_prefix_of_final_test": true,
+    "final_test_source_sha256": "0caea57ee092aba5430797048806970673d93b9810948cfb974774522de6790f",
+    "capture_compiled_include_str_fnv_matches_all_three_postimages": true,
+    "integration_elf_sha256": "38945fc408c403ba99034466539afc1ff2ddb8350c6ecdf82b18af92c3ae0071",
+    "capture_elf_sha256": "475d6ca7505843b215f5297a4beab7d29c5e1779af2c0aa5167576da5f2e7247",
+    "summaries": [
+      {
+        "layer": 0,
+        "completed_full_safe_op_repeats": 20,
+        "full_output_reference_elements_per_repeat": 2048,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "schema": "apxinf.qwen35.ordered_reduce.integration.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 1
+      },
+      {
+        "layer": 0,
+        "completed_full_safe_op_repeats": 20,
+        "full_output_reference_elements_per_repeat": 8192,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "schema": "apxinf.qwen35.ordered_reduce.integration.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 4
+      },
+      {
+        "layer": 0,
+        "completed_full_safe_op_repeats": 20,
+        "full_output_reference_elements_per_repeat": 4194304,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "schema": "apxinf.qwen35.ordered_reduce.integration.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 2048
+      },
+      {
+        "layer": 0,
+        "completed_eager_calls": 20,
+        "completed_graph_replays": 20,
+        "full_output_reference_elements_per_repeat": 2048,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "same_allocation_graph_captures": 1,
+        "schema": "apxinf.qwen35.ordered_reduce.capture_eager.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 1,
+        "warmup_eager_calls": 2
+      },
+      {
+        "layer": 0,
+        "completed_eager_calls": 20,
+        "completed_graph_replays": 20,
+        "full_output_reference_elements_per_repeat": 8192,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "same_allocation_graph_captures": 1,
+        "schema": "apxinf.qwen35.ordered_reduce.capture_eager.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 4,
+        "warmup_eager_calls": 2
+      },
+      {
+        "layer": 0,
+        "completed_eager_calls": 20,
+        "completed_graph_replays": 20,
+        "full_output_reference_elements_per_repeat": 4194304,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "same_allocation_graph_captures": 1,
+        "schema": "apxinf.qwen35.ordered_reduce.capture_eager.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 2048,
+        "warmup_eager_calls": 2
+      },
+      {
+        "layer": 1,
+        "completed_full_safe_op_repeats": 20,
+        "full_output_reference_elements_per_repeat": 2048,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "schema": "apxinf.qwen35.ordered_reduce.integration.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 1
+      },
+      {
+        "layer": 1,
+        "completed_full_safe_op_repeats": 20,
+        "full_output_reference_elements_per_repeat": 8192,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "schema": "apxinf.qwen35.ordered_reduce.integration.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 4
+      },
+      {
+        "layer": 1,
+        "completed_full_safe_op_repeats": 20,
+        "full_output_reference_elements_per_repeat": 4194304,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "schema": "apxinf.qwen35.ordered_reduce.integration.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 2048
+      },
+      {
+        "layer": 1,
+        "completed_eager_calls": 20,
+        "completed_graph_replays": 20,
+        "full_output_reference_elements_per_repeat": 2048,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "same_allocation_graph_captures": 1,
+        "schema": "apxinf.qwen35.ordered_reduce.capture_eager.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 1,
+        "warmup_eager_calls": 2
+      },
+      {
+        "layer": 1,
+        "completed_eager_calls": 20,
+        "completed_graph_replays": 20,
+        "full_output_reference_elements_per_repeat": 8192,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "same_allocation_graph_captures": 1,
+        "schema": "apxinf.qwen35.ordered_reduce.capture_eager.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 4,
+        "warmup_eager_calls": 2
+      },
+      {
+        "layer": 1,
+        "completed_eager_calls": 20,
+        "completed_graph_replays": 20,
+        "full_output_reference_elements_per_repeat": 4194304,
+        "ordered_policy_reference_gate_completed": true,
+        "original_sum_bytewise_equivalence_claimed": false,
+        "performance_accepted": false,
+        "same_allocation_graph_captures": 1,
+        "schema": "apxinf.qwen35.ordered_reduce.capture_eager.summary.v1",
+        "scope": "new reduction policy only; FC1/FC2 math and full model accuracy not independently accepted",
+        "tokens": 2048,
+        "warmup_eager_calls": 2
+      }
+    ]
+  },
+  "characterization_only": {
+    "profile_source": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/ordered-cold2k-profile-analysis/summary.json",
+    "ordered_reduce_kernels": {
+      "instances": 40,
+      "gpu_ns": 13404384,
+      "percent_kernel_duration_sum": 3.0285069503463444,
+      "percent_profiled_prefill_wall": 2.579335942661119
+    },
+    "profile_original_failed_status_preserved": true,
+    "profile_elf_sha256": "b389ae345d91fb437052db61831d4266137843530a3c52d3ce8e37596ec828fc",
+    "cold2k_h2d_plus_ordered_formal_source": "devlocal/model-microbench/p1-ordered-h2d-01/04-formal-cold/run/cold-i2k.json",
+    "cold2k_median_ms": 486.59762,
+    "cold2k_context_elf_sha256": "d436b97978963605a5b60cf0c80dc51ae3c49bfc56e1bed3c4936a942b487e09",
+    "same_elf_between_profile_and_formal": false,
+    "performance_improvement_claimed": false,
+    "model_quality_accepted": false,
+    "notice": "13.404384ms is the reducer GPU kernel duration sum in one recovered diagnostic profile. 486.597620ms is separate H2D+ordered Cold2K characterization, not an isolated gain or model-quality acceptance."
+  },
+  "actual_run_records": [
+    {
+      "kind": "integration_or_policy",
+      "source": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/list.log",
+      "sha256": "43e03ee028a45dd74b6687fdab942ab7e12fa2303f02023f2967245d9b6d9e64",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/qwen35_real_moe_bench",
+        "--list"
+      ],
+      "env": {}
+    },
+    {
+      "kind": "integration_or_policy",
+      "source": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/literal.log",
+      "sha256": "9eb03771d7adc400e3e1491a17e87fed7b02bd2c0e113aca0bc05cde693c64a8",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/qwen35_real_moe_bench",
+        "--exact",
+        "edge_ordered_reduce_tests::ordered_reference_literal_rounding_contract",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {}
+    },
+    {
+      "kind": "integration_or_policy",
+      "source": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-None.log",
+      "sha256": "9653e26ed12f6f544fb9447a703abad570f74f3bd7b18ab0adfdf7f30e970dc3",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/qwen35_real_moe_bench",
+        "--exact",
+        "edge_ordered_reduce_tests::edge_ordered_reduce_workspace_policy_gate",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {}
+    },
+    {
+      "kind": "integration_or_policy",
+      "source": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-0.log",
+      "sha256": "bd15f4ea2455e7e43eb7dd03fe3596940029fca73db0efc077220c43b681418d",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/qwen35_real_moe_bench",
+        "--exact",
+        "edge_ordered_reduce_tests::edge_ordered_reduce_workspace_policy_gate",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "0"
+      }
+    },
+    {
+      "kind": "integration_or_policy",
+      "source": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-1.log",
+      "sha256": "8830dfdbc399165085f19fe953e997be40603ffba65b51bfc7dccfba5e6be81b",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/qwen35_real_moe_bench",
+        "--exact",
+        "edge_ordered_reduce_tests::edge_ordered_reduce_workspace_policy_gate",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1"
+      }
+    },
+    {
+      "kind": "integration_or_policy",
+      "source": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-2.log",
+      "sha256": "99c42e6915fc74e6ac025f0f0ae2f0a0df0c587c0604dc247822b2020a2c29ad",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/qwen35_real_moe_bench",
+        "--exact",
+        "edge_ordered_reduce_tests::edge_ordered_reduce_workspace_policy_gate",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "2"
+      }
+    },
+    {
+      "kind": "integration_or_policy",
+      "source": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/layer-0.log",
+      "sha256": "72ca78714a1a5c357bad4e3f127472c9605b6ac68ea96c0f8d240cbe5a2e87d2",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/qwen35_real_moe_bench",
+        "--exact",
+        "edge_ordered_reduce_tests::real_checkpoint_edge_ordered_reduce_integration_gate",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_MOE_PROBE_LAYER": "0",
+        "APXINF_QWEN35_MOE_PROBE_TOKENS": "1,4,2048"
+      }
+    },
+    {
+      "kind": "integration_or_policy",
+      "source": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/layer-1.log",
+      "sha256": "2714bfb4655462a4af3a4df4652ecd8beb898fa53569a40881aadb94bdbedf7e",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/qwen35_real_moe_bench",
+        "--exact",
+        "edge_ordered_reduce_tests::real_checkpoint_edge_ordered_reduce_integration_gate",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_MOE_PROBE_LAYER": "1",
+        "APXINF_QWEN35_MOE_PROBE_TOKENS": "1,4,2048"
+      }
+    },
+    {
+      "kind": "capture",
+      "source": "devlocal/model-microbench/recovery-build/ordered-h2d-gates-01/capture-layer-0.log",
+      "sha256": "e1b47f253106aa8946a9038732563149d69ef3dc9f41c8768782bc4d381bdb63",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-capture-gate-01/run/qwen35_real_moe_bench",
+        "--exact",
+        "edge_ordered_reduce_capture_tests::real_checkpoint_edge_ordered_reduce_capture_eager_gate",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_MOE_PROBE_LAYER": "0",
+        "APXINF_QWEN35_MOE_PROBE_TOKENS": "1,4,2048"
+      }
+    },
+    {
+      "kind": "capture",
+      "source": "devlocal/model-microbench/recovery-build/ordered-h2d-gates-01/capture-layer-1.log",
+      "sha256": "049e44118eccf6c4efcae463a457884c7fc7919c4e22bbf4f5da678a8c08dbd1",
+      "returncode": 0,
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/ordered-capture-gate-01/run/qwen35_real_moe_bench",
+        "--exact",
+        "edge_ordered_reduce_capture_tests::real_checkpoint_edge_ordered_reduce_capture_eager_gate",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "env": {
+        "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+        "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+        "APXINF_QWEN35_MOE_PROBE_LAYER": "1",
+        "APXINF_QWEN35_MOE_PROBE_TOKENS": "1,4,2048"
+      }
+    },
+    {
+      "kind": "standalone_reducer",
+      "source": "devlocal/model-microbench/recovery-build/route-reducer-build/run/regular-small.log",
+      "sha256": "95556a6f0c0b3843c27d0d7aa06a0ba06a2e6ced75b44427107688879d3958af",
+      "returncode": 0,
+      "binary_sha256": "ccc46f249db5b3c9821c94f55de8561ecb5185fdc035fd3937e09b22a8c428e2",
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/route-reducer-build/ordered-route-regular",
+        "--execute",
+        "--tier",
+        "small",
+        "--repeats",
+        "20"
+      ]
+    },
+    {
+      "kind": "standalone_reducer",
+      "source": "devlocal/model-microbench/recovery-build/route-reducer-build/run/regular-large.log",
+      "sha256": "dc1b4e4b68d83114e1631b460c171c1a544a29a32e57618c7863f85d727d97b3",
+      "returncode": 0,
+      "binary_sha256": "ccc46f249db5b3c9821c94f55de8561ecb5185fdc035fd3937e09b22a8c428e2",
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/route-reducer-build/ordered-route-regular",
+        "--execute",
+        "--tier",
+        "large",
+        "--repeats",
+        "1"
+      ]
+    },
+    {
+      "kind": "standalone_reducer",
+      "source": "devlocal/model-microbench/recovery-build/route-reducer-build/run/fast-math-small.log",
+      "sha256": "95556a6f0c0b3843c27d0d7aa06a0ba06a2e6ced75b44427107688879d3958af",
+      "returncode": 0,
+      "binary_sha256": "5a2f54b1ca8106b0540c4c9fe89c14b9c1af7a5824f66751eaf514980a738cf5",
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/route-reducer-build/ordered-route-fast-math",
+        "--execute",
+        "--tier",
+        "small",
+        "--repeats",
+        "20"
+      ]
+    },
+    {
+      "kind": "standalone_reducer",
+      "source": "devlocal/model-microbench/recovery-build/route-reducer-build/run/fast-math-large.log",
+      "sha256": "dc1b4e4b68d83114e1631b460c171c1a544a29a32e57618c7863f85d727d97b3",
+      "returncode": 0,
+      "binary_sha256": "5a2f54b1ca8106b0540c4c9fe89c14b9c1af7a5824f66751eaf514980a738cf5",
+      "argv": [
+        "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/route-reducer-build/ordered-route-fast-math",
+        "--execute",
+        "--tier",
+        "large",
+        "--repeats",
+        "1"
+      ]
+    }
+  ],
+  "original_files": [
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-h2d-capture-source-01.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-h2d-capture-source-01.json",
+      "sha256": "fe4c689efe93ffa5f9bcf89c3070b435883e6a4c36d776208f670cb74f0efe80",
+      "bytes": 1727
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-h2d-capture-source-01.tar",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-h2d-capture-source-01.tar",
+      "sha256": "6883ac2d9004fe5cb4818646785f89a31fd97dd42c0f8c4e164902b093849284",
+      "bytes": 563200
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-h2d-model-01/source.patch",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-h2d-model-01/source.patch",
+      "sha256": "68b865ccfad830af8c5b6c91a849eec7093d2bb4e4b5fd65a7362091a566c946",
+      "bytes": 75493
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/receipt.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/receipt.json",
+      "sha256": "6f640c86973867c85a79d1d13902ca464c0e02fdefba2cc13433dda04a7b4804",
+      "bytes": 9033
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/receipt.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/receipt.json",
+      "sha256": "e16448f24eb751d51e2a2ab1d4262da564300b66c9205c1284144faa88a332ad",
+      "bytes": 7229
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-h2d-gates-01/receipt.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-h2d-gates-01/receipt.json",
+      "sha256": "2cbb5b5363551d4a38ee9df48ea57ab5338f0af6ce92f9508e9414e109807aaa",
+      "bytes": 4879
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/route-reducer-build/receipt.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/route-reducer-build/receipt.json",
+      "sha256": "fde1093837b3a2c056989d6cfe0101a1a556bf23b2b923cab4fbb98552e47524",
+      "bytes": 3965
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/route-reducer-build/run/receipt.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/route-reducer-build/run/receipt.json",
+      "sha256": "154bc0ce6c68c8ee426f1c2f111ed80be2c161bcd61ab23232e5fb71319a0150",
+      "bytes": 2475
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/fc2-sum-oracle-cpu.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/fc2-sum-oracle-cpu.log",
+      "sha256": "c79ee80a24e2559776d520eda3ee57aac00efa45269fcaab6e50efcf37dfcee0",
+      "bytes": 11010
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-h2d-model-01/model-artifacts.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-h2d-model-01/model-artifacts.json",
+      "sha256": "13a5a26d8ff68665790d02c12f7aa5d59d97630be61bf709a78e860e70d0ce8f",
+      "bytes": 563
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-h2d-model-01/receipt.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-h2d-model-01/receipt.json",
+      "sha256": "17cc4eb2403f91b613223c2df5048284535e5f43e94fff78099c7d4aa1312c6a",
+      "bytes": 10468
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/list.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/list.log",
+      "sha256": "43e03ee028a45dd74b6687fdab942ab7e12fa2303f02023f2967245d9b6d9e64",
+      "bytes": 353
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/literal.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/literal.log",
+      "sha256": "9eb03771d7adc400e3e1491a17e87fed7b02bd2c0e113aca0bc05cde693c64a8",
+      "bytes": 195
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-None.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-None.log",
+      "sha256": "9653e26ed12f6f544fb9447a703abad570f74f3bd7b18ab0adfdf7f30e970dc3",
+      "bytes": 5100
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-0.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-0.log",
+      "sha256": "bd15f4ea2455e7e43eb7dd03fe3596940029fca73db0efc077220c43b681418d",
+      "bytes": 5093
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-1.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-1.log",
+      "sha256": "8830dfdbc399165085f19fe953e997be40603ffba65b51bfc7dccfba5e6be81b",
+      "bytes": 5513
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-2.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/policy-2.log",
+      "sha256": "99c42e6915fc74e6ac025f0f0ae2f0a0df0c587c0604dc247822b2020a2c29ad",
+      "bytes": 1827
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/layer-0.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/layer-0.log",
+      "sha256": "72ca78714a1a5c357bad4e3f127472c9605b6ac68ea96c0f8d240cbe5a2e87d2",
+      "bytes": 286635
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/layer-1.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-integration-gate-02/run/layer-1.log",
+      "sha256": "2714bfb4655462a4af3a4df4652ecd8beb898fa53569a40881aadb94bdbedf7e",
+      "bytes": 286635
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-h2d-gates-01/capture-layer-0.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-h2d-gates-01/capture-layer-0.log",
+      "sha256": "e1b47f253106aa8946a9038732563149d69ef3dc9f41c8768782bc4d381bdb63",
+      "bytes": 586751
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/ordered-h2d-gates-01/capture-layer-1.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/ordered-h2d-gates-01/capture-layer-1.log",
+      "sha256": "049e44118eccf6c4efcae463a457884c7fc7919c4e22bbf4f5da678a8c08dbd1",
+      "bytes": 586751
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/route-reducer-build/run/regular-small.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/route-reducer-build/run/regular-small.log",
+      "sha256": "95556a6f0c0b3843c27d0d7aa06a0ba06a2e6ced75b44427107688879d3958af",
+      "bytes": 6471
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/route-reducer-build/run/regular-large.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/route-reducer-build/run/regular-large.log",
+      "sha256": "dc1b4e4b68d83114e1631b460c171c1a544a29a32e57618c7863f85d727d97b3",
+      "bytes": 1433
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/route-reducer-build/run/fast-math-small.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/route-reducer-build/run/fast-math-small.log",
+      "sha256": "95556a6f0c0b3843c27d0d7aa06a0ba06a2e6ced75b44427107688879d3958af",
+      "bytes": 6471
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/recovery-build/route-reducer-build/run/fast-math-large.log",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/recovery-build/route-reducer-build/run/fast-math-large.log",
+      "sha256": "dc1b4e4b68d83114e1631b460c171c1a544a29a32e57618c7863f85d727d97b3",
+      "bytes": 1433
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/manifest.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/manifest.json",
+      "sha256": "16df1c937406559016b6ea7e3817e31fe8a640cdbe8c8b770edc813c2cdf7ccb",
+      "bytes": 8236
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/README.md",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/README.md",
+      "sha256": "cb0c65e1144b1caf2f3e7c99697ff1bd3d99af699a82faa836ca4b52ad3ec319",
+      "bytes": 6216
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/ordered_route_reduce.cuh",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/ordered_route_reduce.cuh",
+      "sha256": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+      "bytes": 2377
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/frozen_route_fixtures.cuh",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/frozen_route_fixtures.cuh",
+      "sha256": "cbe83e39df5381f4c2244ffa046ca14bc644bdc7b6bec5575db2c90394462de8",
+      "bytes": 6971
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/ordered_route_reduce_probe.cu",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-ordered-route-reduce/ordered_route_reduce_probe.cu",
+      "sha256": "f749290f5aa187dfcb41b209ec4159d59635f87c5efbdd6757bac071efcb2f51",
+      "bytes": 11000
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/route_sum_reference.rs",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/route_sum_reference.rs",
+      "sha256": "f924ed705b2ac39fb87a7f90155feed3c57798be45d74ef54272c25c2fb2ac2a",
+      "bytes": 12486
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/fixtures.rs",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/fixtures.rs",
+      "sha256": "99613c856b284fe6128f2bba5039bd70538589e80378be0c425a9eaad39079b4",
+      "bytes": 19378
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/fixtures.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/fixtures.json",
+      "sha256": "082cdc4fe05134dcf23386a66477f3f63ff8faaea8456e7ceb96e60f1ff43c61",
+      "bytes": 26359
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/preparation-state.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/preparation-state.json",
+      "sha256": "06909753292e3da6a8d461e219bca2d870ff35e330b38bdceb638521e9644e5f",
+      "bytes": 1002
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/README.md",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/fp8-kv-precision/devlocal/model-microbench/fp8-kv-precision/fc2-sum-oracle/README.md",
+      "sha256": "00384ef297f4b4bcbd5f13c1abb46916ed95620352deb6c0f55c561c48c16d26",
+      "bytes": 5575
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/ordered-cold2k-profile-analysis/summary.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/ordered-cold2k-profile-analysis/summary.json",
+      "sha256": "cfaeeb2d47b87b6bd0525400f4650b8fcf12e47b3e543e848ca4f78ec41ae41a",
+      "bytes": 9183
+    },
+    {
+      "source_repo_relative": "devlocal/model-microbench/p1-ordered-h2d-01/04-formal-cold/run/cold-i2k.json",
+      "review_package_relative": "evidence/original/devlocal/model-microbench/p1-ordered-h2d-01/04-formal-cold/run/cold-i2k.json",
+      "sha256": "bf25aeccc0b6a303ca1d7de96c14dd6dbbe2f6056b45f0ff8046f2440b92982d",
+      "bytes": 895518
+    }
+  ],
+  "excluded": [
+    "full9 BF16 attention gate",
+    "MTP/callback timing corrections",
+    "stable layout candidate",
+    "shared GDN quantization candidate",
+    "FP8 KV scale changes",
+    "new AOT/public native APIs",
+    "old NaN/FC2-only/expanded-mapping diagnostic tests"
+  ]
+}
