@@ -1,19 +1,25 @@
-#![cfg(feature = "cuda")]
+#![cfg(feature = "qwen35-cuda")]
 
 use std::path::PathBuf;
 use std::time::Instant;
 
-use apxinf_core::{DType, Tensor};
-use apxinf_cuda_new::{transfers, CudaContext};
+use apxinf_core::{DType, Shape, Tensor};
+use apxinf_cuda_new::{
+    ops, transfers, CudaBuffer, CudaContext, EdgeNvfp4MoeArgs, EdgeNvfp4MoeWeights,
+    RoutedMoeConfig,
+};
 use apxinf_model::qwen35moe::config::Qwen35MoeConfig;
 use apxinf_model::qwen35moe::device_weights::{
-    load_qwen35_moe_layer_from_path, DeviceNvfp4RoutedExperts,
+    load_qwen35_moe_layer_from_path, DeviceEdgeNvfp4Experts, DeviceNvfp4RoutedExperts,
 };
 use apxinf_model::qwen35moe::forward::BaseMoeScratch;
 use half::bf16;
 
 const TOKENS_ENV: &str = "APXINF_QWEN35_MOE_BENCH_TOKENS";
 const ITERATIONS_ENV: &str = "APXINF_QWEN35_MOE_BENCH_ITERS";
+const PROBE_TOKENS_ENV: &str = "APXINF_QWEN35_MOE_PROBE_TOKENS";
+const PROBE_LAYER_ENV: &str = "APXINF_QWEN35_MOE_PROBE_LAYER";
+const PROBE_REPEATS: usize = 20;
 
 fn positive_env(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -87,5 +93,220 @@ fn real_checkpoint_first_moe_layer() -> Result<(), Box<dyn std::error::Error>> {
     assert!(output.iter().all(|value| value.to_f32().is_finite()));
     assert!(output.iter().any(|value| value.to_bits() & 0x7fff != 0));
     assert_eq!(scratch.output().dtype(), DType::BF16);
+    Ok(())
+}
+
+fn probe_token_cases() -> Vec<usize> {
+    let Some(value) = std::env::var(PROBE_TOKENS_ENV).ok() else {
+        return vec![1, 4, 2048];
+    };
+    let cases = value
+        .split(',')
+        .map(|item| {
+            let tokens = item.trim().parse::<usize>()
+                .unwrap_or_else(|_| panic!("{PROBE_TOKENS_ENV} must be a comma-separated positive token count list"));
+            assert!(tokens > 0, "{PROBE_TOKENS_ENV} counts must be positive");
+            tokens
+        })
+        .collect::<Vec<_>>();
+    let unique = cases.iter().copied().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), cases.len(), "{PROBE_TOKENS_ENV} contains duplicate cases");
+    cases
+}
+
+fn raw_fnv1a64(bytes: &[u8]) -> String {
+    let digest = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
+    });
+    format!("{digest:016x}")
+}
+
+fn read_gpu_bytes(tensor: &Tensor) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let buffer = CudaBuffer::from_tensor(tensor)?;
+    assert_eq!(buffer.len(), tensor.size_in_bytes(), "probe requires exact tensor storage");
+    let mut bytes = vec![0u8; tensor.size_in_bytes()];
+    buffer.copy_to_host(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn expert_fingerprints(edge: &DeviceEdgeNvfp4Experts) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let tensors = [
+        ("fc1_weight", &edge.fc1_weight), ("fc1_scales", &edge.fc1_scales),
+        ("fc1_alpha", &edge.fc1_alpha), ("input_global_scale", &edge.input_global_scale),
+        ("fc2_weight", &edge.fc2_weight), ("fc2_scales", &edge.fc2_scales),
+        ("fc2_alpha", &edge.fc2_alpha), ("down_input_scale", &edge.down_input_scale),
+    ];
+    let mut fingerprints = Vec::with_capacity(tensors.len());
+    for (name, tensor) in tensors {
+        let bytes = read_gpu_bytes(tensor)?;
+        fingerprints.push(serde_json::json!({
+            "name": name, "dtype": format!("{:?}", tensor.dtype()),
+            "shape": tensor.shape().dims(), "size_bytes": bytes.len(),
+            "raw_fnv1a64": raw_fnv1a64(&bytes),
+        }));
+    }
+    Ok(serde_json::json!(fingerprints))
+}
+
+/// Diagnostic completion is not an accuracy pass: numerical differences are
+/// measured without a tolerance waiver. Launch under /tmp/apxinf-gpu.lock:
+///
+/// flock /tmp/apxinf-gpu.lock env APXINF_QWEN35_CHECKPOINT=/ABS/model cargo test -p apxinf-model \
+///   --no-default-features --features qwen35-cuda --test qwen35_real_moe_bench \
+///   real_checkpoint_edge_fixed_routing_repeat_probe -- --exact --ignored --nocapture --test-threads=1
+///
+/// Defaults: layer27, tokens1/4/2048, 20 repeats per shape. Override layer with
+/// APXINF_QWEN35_MOE_PROBE_LAYER (zero allowed), or select explicit shapes with
+/// APXINF_QWEN35_MOE_PROBE_TOKENS=1,4,2048. This bypasses router/shared experts
+/// and uses a synthetic frozen BF16 input, not a captured model hidden row.
+/// Workspace starts with stream-ordered zeros, then persists without clearing;
+/// this does not test dependence on arbitrary initial padding. Weight/source
+/// hashes are explicitly FNV1a64 fingerprints, not cryptographic attestations.
+#[test]
+#[ignore = "diagnostic only; requires real NVFP4 checkpoint and SM110 CUDA; no accuracy pass"]
+fn real_checkpoint_edge_fixed_routing_repeat_probe() -> Result<(), Box<dyn std::error::Error>> {
+    assert!(ops::edge_nvfp4_moe_available(), "fixed-routing probe requires the real Edge provider");
+    let checkpoint = checkpoint();
+    let config_path = checkpoint.join("config.json");
+    let config = Qwen35MoeConfig::from_json_file(&config_path)?;
+    let layer = std::env::var(PROBE_LAYER_ENV).ok().map(|value| {
+        value.parse::<usize>().unwrap_or_else(|_| panic!("{PROBE_LAYER_ENV} must be a nonnegative integer"))
+    }).unwrap_or(27);
+    let device = std::env::var("APXINF_CUDA_DEVICE").ok().map(|value| {
+        value.parse::<usize>().expect("APXINF_CUDA_DEVICE must be a nonnegative integer")
+    }).unwrap_or(0);
+    let cases = probe_token_cases();
+    let ctx = CudaContext::new(device)?;
+    let moe = load_qwen35_moe_layer_from_path(&ctx, &config, &checkpoint, layer)?;
+    let DeviceNvfp4RoutedExperts::Edge(edge) = &moe.routed_experts else {
+        return Err("real checkpoint did not select Edge; routing-isolated probe was not executed".into());
+    };
+    assert_eq!(config.text_config.num_experts_per_tok, 8);
+    assert_eq!(edge.experts, 256);
+    let route_config = RoutedMoeConfig::new(edge.experts, 8);
+    ctx.synchronize()?;
+    // Hash actual prepared/repacked device weights once before and once after
+    // the entire probe. This is distinct from the per-call exact byte checks
+    // on the input, expert IDs, and F32 routing weights below.
+    let weights_before = expert_fingerprints(edge)?;
+    println!("{}", serde_json::json!({
+        "schema": "apxinf.qwen35.fixed_routing_moe_probe.config.v1",
+        "checkpoint": checkpoint, "checkpoint_config_fnv1a64": raw_fnv1a64(&std::fs::read(&config_path)?),
+        "probe_source_fnv1a64": raw_fnv1a64(include_bytes!("qwen35_real_moe_bench.rs")),
+        "native_wrapper_source_fnv1a64": raw_fnv1a64(include_bytes!("../../apxinf-cuda-new/native/kernels/edge_nvfp4_moe/runner.cu")),
+        "hash_algorithm": "fnv1a64-raw-bytes", "layer": layer, "device": device,
+        "requested_token_cases": cases, "default_full_case_set": cases == [1, 4, 2048],
+        "repeats_per_case": PROBE_REPEATS, "fixed_routing": true, "router_executed": false,
+        "execution_mode": "direct_eager_no_capture",
+        "shared_expert_executed": false, "top_k": 8, "routing_weight": 0.125,
+        "input_pattern": "bf16(((flat_index*17+layer*23+62)%257)/128-1)",
+        "routing_pattern": "(token*17+slot*31+layer)%256; eight unique IDs per token",
+        "checkpoint_expert_tensors": weights_before, "accuracy_status": "unresolved",
+        "performance_accepted": false, "scope": "diagnostic; per-repeat sync/D2H; no performance score",
+    }));
+
+    for tokens in cases {
+        let input_elements = tokens.checked_mul(edge.hidden).expect("probe input size overflow");
+        let input_values = (0..input_elements).map(|index| {
+            bf16::from_f32(((index % 257 * 17 + layer % 257 * 23 + 62) % 257) as f32 / 128.0 - 1.0)
+        }).collect::<Vec<_>>();
+        let ids = (0..tokens).flat_map(|token| {
+            (0..8).map(move |slot| ((token % 256 * 17 + slot * 31 + layer % 256) % 256) as i32)
+        }).collect::<Vec<_>>();
+        for row in ids.chunks_exact(8) {
+            assert_eq!(row.iter().collect::<std::collections::BTreeSet<_>>().len(), 8);
+        }
+        let routing_weights = vec![0.125f32; tokens.checked_mul(8).expect("probe route size overflow")];
+        let input = transfers::to_cuda(&Tensor::from_bf16(vec![tokens, edge.hidden], &input_values)?, device)?;
+        let expert_ids = transfers::to_cuda(&Tensor::from_i32(vec![tokens, 8], &ids)?, device)?;
+        let expert_weights = transfers::to_cuda(&Tensor::from_f32(vec![tokens, 8], &routing_weights)?, device)?;
+        let workspace = CudaBuffer::alloc_zeros_async(
+            ops::edge_nvfp4_moe_workspace_size(route_config, tokens, edge.hidden, edge.intermediate)?, device, ctx.stream(),
+        )?;
+        let mut output = CudaBuffer::alloc_zeros_async(
+            input_elements.checked_mul(DType::BF16.size_in_bytes()).expect("probe output size overflow"), device, ctx.stream(),
+        )?.as_tensor(Shape::new(vec![tokens, edge.hidden]), DType::BF16)?;
+        ctx.synchronize()?;
+        let input_before = read_gpu_bytes(&input)?;
+        let ids_before = read_gpu_bytes(&expert_ids)?;
+        let routing_before = read_gpu_bytes(&expert_weights)?;
+        let expected_input = input_values.iter().flat_map(|value| value.to_bits().to_le_bytes()).collect::<Vec<_>>();
+        let expected_ids = ids.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>();
+        let expected_routing = routing_weights.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>();
+        assert!(input_before == expected_input, "BF16 upload changed probe input");
+        assert!(ids_before == expected_ids, "I32 upload changed fixed expert IDs");
+        assert!(routing_before == expected_routing, "F32 upload changed fixed routing weights");
+        println!("{}", serde_json::json!({
+            "schema": "apxinf.qwen35.fixed_routing_moe_probe.case.v1", "tokens": tokens,
+            "input_raw_fnv1a64": raw_fnv1a64(&input_before), "expert_ids_raw_fnv1a64": raw_fnv1a64(&ids_before),
+            "routing_weights_raw_fnv1a64": raw_fnv1a64(&routing_before), "workspace_bytes": workspace.len(),
+            "workspace_initial_byte": 0, "workspace_reinitialized_between_repeats": false,
+            "same_workspace_all_repeats": true, "output_dtype": "bf16", "fixed_routing": true,
+        }));
+        let mut baseline: Option<Vec<u8>> = None;
+        let mut different_repeats = 0usize;
+        for iteration in 0..PROBE_REPEATS {
+            ops::edge_nvfp4_moe(&ctx, EdgeNvfp4MoeArgs {
+                config: route_config, intermediate: edge.intermediate, input: &input,
+                expert_ids: &expert_ids, expert_weights: &expert_weights,
+                weights: EdgeNvfp4MoeWeights {
+                    fc1_weight: &edge.fc1_weight, fc1_scales: &edge.fc1_scales, fc1_alpha: &edge.fc1_alpha,
+                    input_global_scale: &edge.input_global_scale, fc2_weight: &edge.fc2_weight,
+                    fc2_scales: &edge.fc2_scales, fc2_alpha: &edge.fc2_alpha, down_input_scale: &edge.down_input_scale,
+                }, workspace: &workspace, output: &mut output,
+            })?;
+            ctx.synchronize()?;
+            assert_eq!(output.shape().dims(), [tokens, edge.hidden]);
+            assert_eq!(output.dtype(), DType::BF16);
+            let bytes = read_gpu_bytes(&output)?;
+            assert_eq!(bytes.len(), input_elements * 2);
+            let values = bytes.chunks_exact(2).map(|raw| bf16::from_bits(u16::from_le_bytes([raw[0], raw[1]])).to_f32()).collect::<Vec<_>>();
+            assert!(values.iter().all(|value| value.is_finite()), "nonfinite output at tokens={tokens} iteration={iteration}");
+            assert!(read_gpu_bytes(&input)? == input_before, "input mutated at tokens={tokens} iteration={iteration}");
+            assert!(read_gpu_bytes(&expert_ids)? == ids_before, "expert IDs mutated at tokens={tokens} iteration={iteration}");
+            assert!(read_gpu_bytes(&expert_weights)? == routing_before, "routing weights mutated at tokens={tokens} iteration={iteration}");
+            let first = baseline.get_or_insert_with(|| bytes.clone());
+            let byte_mismatches = first.iter().zip(&bytes).filter(|(left, right)| left != right).count();
+            let first_byte_mismatch = first.iter().zip(&bytes).position(|(left, right)| left != right);
+            let mut max_abs = 0f64;
+            let mut difference_squared = 0f64;
+            let mut baseline_squared = 0f64;
+            for (raw, value) in first.chunks_exact(2).zip(&values) {
+                let expected = f64::from(bf16::from_bits(u16::from_le_bytes([raw[0], raw[1]])).to_f32());
+                let difference = f64::from(*value) - expected;
+                max_abs = max_abs.max(difference.abs());
+                difference_squared += difference * difference;
+                baseline_squared += expected * expected;
+            }
+            let relative_l2 = if baseline_squared > 0.0 { Some((difference_squared / baseline_squared).sqrt()) }
+                else if difference_squared == 0.0 { Some(0.0) } else { None };
+            different_repeats += usize::from(byte_mismatches != 0);
+            println!("{}", serde_json::json!({
+                "schema": "apxinf.qwen35.fixed_routing_moe_probe.iteration.v1", "tokens": tokens, "iteration": iteration,
+                "output_raw_fnv1a64": raw_fnv1a64(&bytes), "baseline_output_raw_fnv1a64": raw_fnv1a64(first),
+                "output_size_bytes": bytes.len(), "byte_mismatches_vs_first": byte_mismatches,
+                "first_byte_mismatch": first_byte_mismatch, "max_absolute_difference": max_abs,
+                "relative_l2": relative_l2, "relative_l2_defined": relative_l2.is_some(),
+                "baseline_l2_squared": baseline_squared, "input_ids_routing_weights_bytewise_unchanged": true,
+                "finite": true, "accuracy_status": "unresolved", "performance_accepted": false,
+            }));
+        }
+        println!("{}", serde_json::json!({
+            "schema": "apxinf.qwen35.fixed_routing_moe_probe.summary.v1", "tokens": tokens,
+            "completed_iterations": PROBE_REPEATS, "non_bitwise_iterations": different_repeats,
+            "bitwise_stable": different_repeats == 0, "fixed_routing": true,
+            "diagnostic_completed": true, "accuracy_status": "unresolved", "performance_accepted": false,
+        }));
+    }
+    ctx.synchronize()?;
+    let weights_after = expert_fingerprints(edge)?;
+    let weights_unchanged = weights_before == weights_after;
+    println!("{}", serde_json::json!({
+        "schema": "apxinf.qwen35.fixed_routing_moe_probe.weight_audit.v1",
+        "checkpoint_expert_tensors_after": weights_after, "before_after_fingerprints_equal": weights_unchanged,
+        "scope": "checkpoint tensor fingerprints before/after all cases; routing weights checked bytewise every call",
+        "accuracy_status": "unresolved", "performance_accepted": false,
+    }));
+    assert!(weights_unchanged, "checkpoint expert tensor fingerprints changed during probe");
     Ok(())
 }

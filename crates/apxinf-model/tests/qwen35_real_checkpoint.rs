@@ -1,8 +1,9 @@
-#![cfg(feature = "cuda")]
+#![cfg(feature = "qwen35-cuda")]
 
 use std::path::{Path, PathBuf};
 
 use apxinf_core::Device;
+use apxinf_model::qwen35moe::{Qwen35KvCacheDType, Qwen35MoeActivation};
 use apxinf_model::{
     AutoModel, GenerationOptions, LlmInput, LoadOptions, SamplingMode, SpeculativeGenerationStats,
 };
@@ -11,6 +12,47 @@ const DEFAULT_OUTPUT_TOKENS: usize = 32;
 const OUTPUT_TOKENS_ENV: &str = "APXINF_QWEN35_PARITY_TOKENS";
 const PROMPT_TOKENS_ENV: &str = "APXINF_QWEN35_PARITY_PROMPT_TOKENS";
 const DIAGNOSTICS_ENV: &str = "APXINF_QWEN35_PARITY_DIAGNOSTICS";
+const TUNING_DIR_ENV: &str = "APXINF_QWEN35_PARITY_TUNING_DIR";
+const FIXED_DEPTH_ENV: &str = "APXINF_QWEN35_MTP_FIXED_DEPTH";
+const MAX_DRAFT_DEPTH: usize = 3;
+
+fn tuning_dir() -> PathBuf {
+    let path = std::env::var_os(TUNING_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("set {TUNING_DIR_ENV} to the absolute pre-tuned recipe directory"));
+    assert!(path.is_absolute(), "{TUNING_DIR_ENV} must be absolute");
+    assert!(
+        std::fs::read_dir(&path)
+            .unwrap_or_else(|error| panic!("read {TUNING_DIR_ENV}: {error}"))
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry.path().is_file()
+                    && entry.path().extension().is_some_and(|ext| ext == "recipe")
+            }),
+        "{TUNING_DIR_ENV} requires existing .recipe files; autotune separately first"
+    );
+    path
+}
+
+fn fixed_depth() -> usize {
+    let depth = std::env::var(FIXED_DEPTH_ENV)
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .unwrap_or_else(|_| panic!("{FIXED_DEPTH_ENV} must be an integer within 1..=3"))
+        })
+        .unwrap_or(MAX_DRAFT_DEPTH);
+    assert!(
+        (1..=MAX_DRAFT_DEPTH).contains(&depth),
+        "{FIXED_DEPTH_ENV} must be within 1..=3"
+    );
+    // This integration-test binary contains only this real-checkpoint test;
+    // run with --test-threads=1 to keep process-global controls isolated.
+    std::env::set_var(FIXED_DEPTH_ENV, depth.to_string());
+    std::env::set_var("APXINF_REQUIRE_RECIPES", "1");
+    depth
+}
 
 fn checkpoint() -> PathBuf {
     std::env::var_os("APXINF_QWEN35_CHECKPOINT")
@@ -94,6 +136,9 @@ fn write_diagnostics(
     stats: &SpeculativeGenerationStats,
     mtp_token_ids: &[u32],
     scalar_token_ids: &[u32],
+    options: &LoadOptions,
+    fixed_depth: usize,
+    prompt_tokens: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path
         .parent()
@@ -105,6 +150,20 @@ fn write_diagnostics(
         "schema": "apxinf.qwen35.real_checkpoint_parity.v1",
         "checkpoint": checkpoint,
         "output_tokens": output_tokens,
+        "prompt_tokens": prompt_tokens,
+        "execution": {
+            "target_kv_dtype": "bf16",
+            "moe_activation": "nvfp4",
+            "tuning_dir": options.tuning_path,
+            "autotune": false,
+            "strict_recipe_required": true,
+            "context_reuse": false,
+            "fixed_depth": fixed_depth,
+            "max_draft_depth": MAX_DRAFT_DEPTH,
+            "text_kv_capacity": options.text_kv_capacity,
+            "draft_kv_dtype": "fp8",
+            "draft_kv_scale": 1.0,
+        },
         "token_ids_equal": mtp_token_ids == scalar_token_ids,
         "mtp_token_ids": mtp_token_ids,
         "scalar_token_ids": scalar_token_ids,
@@ -128,19 +187,36 @@ fn write_diagnostics(
 
 /// Real-checkpoint token parity gate. This is ignored because it loads the
 /// complete 35B NVFP4 checkpoint and requires a CUDA device with enough
-/// visible memory. The model is loaded exactly once; both requests reuse it.
+/// visible memory. Weights are loaded once; each request computes its full
+/// prompt with context reuse disabled. Pre-tune recipes separately first.
 #[test]
 #[ignore = "requires Qwen3.5-35B-A3B-NVFP4 and a large-memory CUDA device"]
 fn neutral_mtp_matches_forced_scalar_greedy() -> Result<(), Box<dyn std::error::Error>> {
     let prompt = prompt();
     let output_tokens = output_tokens();
+    let fixed_depth = fixed_depth();
+    let capacity = prompt
+        .len()
+        .checked_add(output_tokens)
+        .and_then(|value| value.checked_add(MAX_DRAFT_DEPTH))
+        .expect("parity KV capacity overflow");
     let options = LoadOptions {
-        text_kv_capacity: Some(prompt.len() + output_tokens + 3),
+        text_kv_capacity: Some(capacity),
+        qwen35_moe_activation: Some(Qwen35MoeActivation::Nvfp4),
+        qwen35_kv_cache: Some(Qwen35KvCacheDType::Bf16),
+        tuning_path: Some(tuning_dir()),
+        autotune: false,
         ..LoadOptions::default()
     };
     let checkpoint = checkpoint();
     let mut model =
         AutoModel::load_model(Device::Cuda(cuda_device()), checkpoint.clone(), &options)?;
+    model.set_context_reuse(false)?;
+    eprintln!(
+        "Qwen3.5 parity execution: target KV=BF16, draft KV=FP8/scale1, MoE=NVFP4, \
+depth={fixed_depth}, capacity={capacity}, context_reuse=false, autotune=false, strict recipes={:?}",
+        options.tuning_path
+    );
 
     let mtp = model.generate_streaming_with_options(
         LlmInput::text(&prompt),
@@ -148,6 +224,16 @@ fn neutral_mtp_matches_forced_scalar_greedy() -> Result<(), Box<dyn std::error::
         |_token| {},
     )?;
     eprintln!("Qwen3.5 MTP profile:\n{}", mtp.profile.summary());
+    assert_eq!(
+        mtp.profile.input_tokens(),
+        prompt.len(),
+        "MTP must compute the complete prompt"
+    );
+    assert_eq!(
+        mtp.profile.reused_input_tokens(),
+        0,
+        "MTP parity must not reuse a prefix"
+    );
     let stats = model
         .speculative_generation_stats()?
         .expect("neutral greedy request must expose real MTP counters");
@@ -157,6 +243,14 @@ fn neutral_mtp_matches_forced_scalar_greedy() -> Result<(), Box<dyn std::error::
         "MTP request did not execute a draft round"
     );
     assert!(stats.proposed_tokens > 0, "MTP request proposed no tokens");
+    assert!(
+        stats
+            .proposed_by_depth
+            .iter()
+            .skip(fixed_depth)
+            .all(|count| *count == 0),
+        "MTP proposed beyond the requested fixed depth"
+    );
     assert_eq!(
         stats.zero_accept_rounds + stats.partial_accept_rounds + stats.full_accept_rounds,
         stats.rounds,
@@ -173,6 +267,16 @@ fn neutral_mtp_matches_forced_scalar_greedy() -> Result<(), Box<dyn std::error::
         |_token| {},
     )?;
     eprintln!("Qwen3.5 scalar profile:\n{}", scalar.profile.summary());
+    assert_eq!(
+        scalar.profile.input_tokens(),
+        prompt.len(),
+        "scalar must compute the complete prompt"
+    );
+    assert_eq!(
+        scalar.profile.reused_input_tokens(),
+        0,
+        "scalar parity must not reuse a prefix"
+    );
     assert!(
         model.speculative_generation_stats()?.is_none(),
         "forced-scalar request unexpectedly used MTP"
@@ -188,6 +292,9 @@ fn neutral_mtp_matches_forced_scalar_greedy() -> Result<(), Box<dyn std::error::
             &stats,
             &mtp_token_ids,
             &scalar_token_ids,
+            &options,
+            fixed_depth,
+            prompt.len(),
         )?;
     }
     assert_eq!(mtp.tokens.len(), output_tokens);

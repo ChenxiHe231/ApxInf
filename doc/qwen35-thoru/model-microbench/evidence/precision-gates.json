@@ -1,0 +1,108 @@
+{
+  "schema": "apxinf.model-microbench.precision-gates.v1",
+  "status": "partial P2; not full model/MTP/FP8 certification",
+  "stream_order_fix": "7e08bfe",
+  "prepared_bf16_short_long": {
+    "geometries": 40,
+    "bindings_per_geometry": 2,
+    "reference": "independent f64 same prepared BF16 QKV",
+    "hard_absolute_limit": 0.01,
+    "projection_rope_included": false
+  },
+  "prefill_attention": {
+    "gpu_full_shapes": 9,
+    "independent_reference": "declared selected rows only; each selected row all16heads/all256dims",
+    "all_output_rows_independently_checked": false,
+    "fixture": "fixed-per-head-dim-v-bias v2; nondegenerate BF16 output",
+    "hard_absolute_limit": 0.01
+  },
+  "gdn_long": {
+    "cases_passed": 9,
+    "oracle": "GPU canonical single-token recurrence; not independent long math",
+    "state_cosine_min": 0.9998,
+    "state_relative_l2_max": 0.025,
+    "output_cosine_min": 0.999,
+    "output_relative_l2_max": 0.05,
+    "conv": "finite/bitwise",
+    "short_independent_math_suite_after_fix": "5 independent processes passed"
+  },
+  "logs": [
+    {
+      "name": "bf16-short-long.log",
+      "log_sha256": "065202d21413388d179b2033f64425a406e6d2f226e48f53935a592266f84fff",
+      "test_results": [
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 43.08s"
+      ],
+      "max_absolute_recorded": 0.002511143684387207,
+      "fa2_dispatches": 41,
+      "summary_records": 0
+    },
+    {
+      "name": "bf16-prefill.log",
+      "log_sha256": "8cd3cd9c96c14eee40f6c98e7663b7e48da41833a1196c55711b483adfd9c47c",
+      "test_results": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 23.70s"
+      ],
+      "max_absolute_recorded": 0.0023174882,
+      "fa2_dispatches": 11,
+      "summary_records": 9
+    },
+    {
+      "name": "gdn-long.log",
+      "log_sha256": "2eacafd29ef8a6a1de28eb1d0d558567d78db4fad32daa93597caf5d5956332d",
+      "test_results": [
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 27.23s"
+      ],
+      "max_absolute_recorded": 0.2265625,
+      "fa2_dispatches": 0,
+      "summary_records": 0
+    }
+  ],
+  "moe_probe": {
+    "scope": "real layer27 Edge FC1+FC2, static routing, input and routing checked readonly; no router/shared",
+    "summary": [
+      {
+        "accuracy_status": "unresolved",
+        "bitwise_stable": false,
+        "completed_iterations": 20,
+        "diagnostic_completed": true,
+        "fixed_routing": true,
+        "non_bitwise_iterations": 1,
+        "performance_accepted": false,
+        "schema": "apxinf.qwen35.fixed_routing_moe_probe.summary.v1",
+        "tokens": 1
+      },
+      {
+        "accuracy_status": "unresolved",
+        "bitwise_stable": false,
+        "completed_iterations": 20,
+        "diagnostic_completed": true,
+        "fixed_routing": true,
+        "non_bitwise_iterations": 1,
+        "performance_accepted": false,
+        "schema": "apxinf.qwen35.fixed_routing_moe_probe.summary.v1",
+        "tokens": 4
+      },
+      {
+        "accuracy_status": "unresolved",
+        "bitwise_stable": false,
+        "completed_iterations": 20,
+        "diagnostic_completed": true,
+        "fixed_routing": true,
+        "non_bitwise_iterations": 3,
+        "performance_accepted": false,
+        "schema": "apxinf.qwen35.fixed_routing_moe_probe.summary.v1",
+        "tokens": 2048
+      }
+    ],
+    "log_sha256": "4f801e310cbdf30adaf52242f92551ae0bc56c79776d4c7d18cd0b911169f2c2",
+    "claim": "observed non-bitwise output in this low-level path; no isolated proof that bulk reduction alone is cause; no full-model accuracy certification"
+  },
+  "remaining": [
+    "complete-model full15 and MTP scalar parity",
+    "GPU KV lifecycle/checkpoint/rollback beyond operator read-only checks",
+    "attention generated-length endpoints and candidate-specific provider gates",
+    "FP8 reference/calibration/quality",
+    "Graph numerical equality"
+  ]
+}

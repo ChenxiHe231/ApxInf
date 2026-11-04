@@ -105,6 +105,31 @@ fn bitwise_mismatches(got: &[f32], want: &[f32]) -> usize {
         .count()
 }
 
+fn report_stage_difference(name: &str, got: &[f32], want: &[f32]) {
+    assert_eq!(got.len(), want.len());
+    let (cosine, relative) = cosine_rel_l2(got, want);
+    let finite = got.iter().chain(want).all(|value| value.is_finite());
+    let max_abs = got.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let first: Vec<_> = got.iter().zip(want).take(8).map(|(&a, &b)| (a, b)).collect();
+    let mismatches: Vec<_> = got.iter().zip(want).enumerate()
+        .filter(|(_, (a, b))| a.to_bits() != b.to_bits()).take(8)
+        .map(|(index, (&a, &b))| (index, a, b)).collect();
+    println!("gdn-stage {name}: finite={finite} cosine={cosine:.9} relL2={relative:.9} max_abs={max_abs:.9} first_actual_expected={first:?} first_bit_differences={mismatches:?}");
+}
+
+fn report_qkv_stage(name: &str, got: &[f32], want: &[f32]) {
+    assert_eq!(got.len(), QKV);
+    assert_eq!(want.len(), QKV);
+    for (segment, range) in [("Q", 0..QW), ("K", QW..2 * QW), ("V", 2 * QW..QKV)] {
+        report_stage_difference(&format!("{name}/{segment}"), &got[range.clone()], &want[range.clone()]);
+        let got_norms: Vec<_> = got[range.clone()].chunks_exact(D)
+            .map(|head| head.iter().map(|value| (*value as f64).powi(2)).sum::<f64>().sqrt()).collect();
+        let want_norms: Vec<_> = want[range].chunks_exact(D)
+            .map(|head| head.iter().map(|value| (*value as f64).powi(2)).sum::<f64>().sqrt()).collect();
+        println!("gdn-stage {name}/{segment}: per_head_l2_actual={got_norms:?} per_head_l2_expected={want_norms:?}");
+    }
+}
+
 fn assert_long_parity(
     name: &str,
     got: &[f32],
@@ -113,6 +138,8 @@ fn assert_long_parity(
     max_relative_l2: f64,
     require_bit_exact: bool,
 ) {
+    assert!(got.iter().chain(want).all(|value| value.is_finite()),
+            "{name} contains a non-finite value");
     let mismatches = bitwise_mismatches(got, want);
     let max_abs = got
         .iter()
@@ -228,6 +255,35 @@ fn cpu_decode(args: HostDecode<'_>) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) 
         }
     }
     (convolved, decay, beta, gated)
+}
+
+/// CPU-only analytic sanity check of the independent reference, not a CUDA
+/// correctness claim. With zero q/k/v, a=0, A_log=0, dt_bias=0, the nonzero
+/// recurrent state must halve each step and readout remains exactly zero.
+#[test]
+fn cpu_reference_zero_readout_has_analytic_multistep_decay() {
+    let projected = vec![0.0; QKV];
+    let z = vec![0.5; VW];
+    let gates = vec![0.0; VH];
+    let weights = vec![0.0; QKV * CW];
+    let norm = vec![1.0; D];
+    let mut conv_state = vec![0.0; QKV * CW];
+    let initial = 0.125f32;
+    let mut recurrent_state = vec![initial; VH * D * D];
+    for step in 1..=4 {
+        let (convolved, decay, beta, gated) = cpu_decode(HostDecode {
+            projected_qkv: &projected, z: &z, a: &gates, b: &gates,
+            conv_weight: &weights, a_log: &gates, dt_bias: &gates,
+            norm_weight: &norm, conv_state: &mut conv_state,
+            recurrent_state: &mut recurrent_state,
+        });
+        assert!(convolved.iter().chain(&gated).all(|value| *value == 0.0));
+        assert!(conv_state.iter().all(|value| *value == 0.0));
+        assert!(decay.iter().all(|value| (*value + std::f32::consts::LN_2).abs() < 2.0e-5));
+        assert!(beta.iter().all(|value| *value == 0.5));
+        let expected = initial / (1u32 << step) as f32;
+        assert!(recurrent_state.iter().all(|value| value.is_finite() && (*value - expected).abs() < 2.0e-7));
+    }
 }
 
 struct DeviceFixture {
@@ -391,6 +447,10 @@ fn decode_matches_independent_cpu_reference_at_qwen35_geometry() {
     });
 
     assert_eq!(read_f32(&fixture.conv_state), expected_conv_state);
+    // Keep the original full-vector assertions below. This diagnostic splits
+    // the normalized Q/K regions from unnormalized V before a failure aborts
+    // the test; it does not substitute a weaker per-segment gate.
+    report_qkv_stage("full-decode/post-QKnorm", &read_bf16(&fixture.convolved), &expected_convolved);
     for (name, got, want, min_cos, max_rel) in [
         ("convolved", read_bf16(&fixture.convolved), expected_convolved, 0.99999, 0.01),
         ("recurrent", read_f32(&fixture.recurrent_state), expected_recurrent, 0.99999, 0.01),
@@ -414,6 +474,88 @@ fn decode_matches_independent_cpu_reference_at_qwen35_geometry() {
     assert!(max_beta < 2.0e-5, "beta max abs {max_beta}");
 }
 
+/// Isolate the failing preprocessing stages from recurrence/output gating.
+/// Same deterministic fixture as the complete independent decode test, but
+/// only public raw-conv and in-place Q/K-normalization operators are called.
+/// CPU raw-conv uses the *read-back prepared BF16* input/weight values. The
+/// existing independent CPU reference provides the post-QKnorm expected row.
+#[test]
+fn decode_preprocessing_stages_match_independent_cpu_reference() {
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    let projected: Vec<f32> = (0..QKV)
+        .map(|index| ((index * 17 % 53) as f32 - 26.0) / 41.0).collect();
+    let conv_weight: Vec<f32> = (0..QKV * CW)
+        .map(|index| ((index * 5 % 17) as f32 - 8.0) / 23.0).collect();
+    let initial_conv: Vec<f32> = (0..QKV * CW)
+        .map(|index| ((index * 3 % 19) as f32 - 9.0) * 1.0e-3).collect();
+    let projected_device = upload_bf16(&ctx, &projected, vec![QKV]);
+    let weight_device = upload_bf16(&ctx, &conv_weight, vec![QKV, CW]);
+    let state_device = upload_f32(&ctx, &initial_conv, vec![QKV, CW]);
+    let output = zeros(&ctx, vec![QKV], DType::BF16);
+    let prepared_projected = read_bf16(&projected_device);
+    let prepared_weight = read_bf16(&weight_device);
+    assert_eq!(prepared_projected, projected.iter().map(|&value| rb(value)).collect::<Vec<_>>());
+    assert_eq!(prepared_weight, conv_weight.iter().map(|&value| rb(value)).collect::<Vec<_>>());
+
+    // Independent raw convolution oracle; preserve all F32 conv-history
+    // values and BF16 representation boundaries of the existing CPU math.
+    let mut expected_conv = initial_conv.clone();
+    let mut expected_raw = vec![0.0f32; QKV];
+    for channel in 0..QKV {
+        let history = &mut expected_conv[channel * CW..(channel + 1) * CW];
+        history.rotate_left(1);
+        history[CW - 1] = prepared_projected[channel];
+        let mut sum = 0.0f32;
+        for tap in 0..CW { sum += history[tap] * prepared_weight[channel * CW + tap]; }
+        expected_raw[channel] = rb(sum / (1.0 + (-sum).exp()));
+    }
+    let zero_z = vec![0.0; VW];
+    let zero_heads = vec![0.0; VH];
+    let unit_norm = vec![1.0; D];
+    let mut cpu_conv = initial_conv;
+    let mut cpu_recurrent = vec![0.0; VH * D * D];
+    let (expected_normalized, _, _, _) = cpu_decode(HostDecode {
+        projected_qkv: &prepared_projected, z: &zero_z,
+        a: &zero_heads, b: &zero_heads, conv_weight: &prepared_weight,
+        a_log: &zero_heads, dt_bias: &zero_heads, norm_weight: &unit_norm,
+        conv_state: &mut cpu_conv, recurrent_state: &mut cpu_recurrent,
+    });
+    assert_eq!(cpu_conv, expected_conv, "CPU raw and complete reference disagree on conv history");
+    let mut expected_after_q = expected_raw.clone();
+    expected_after_q[..QW].copy_from_slice(&expected_normalized[..QW]);
+
+    ops::gdn_causal_conv_step(&ctx, &state_device, &projected_device, &weight_device, &output).unwrap();
+    ctx.synchronize().unwrap();
+    let raw = read_bf16(&output);
+    assert_eq!(read_f32(&state_device), expected_conv);
+    ops::gdn_l2_normalize_heads(&ctx, &view(&output, 0, vec![KH, D], DType::BF16), ops::QWEN35_GDN_EPSILON).unwrap();
+    ctx.synchronize().unwrap();
+    let after_q = read_bf16(&output);
+    ops::gdn_l2_normalize_heads(&ctx, &view(&output, QW, vec![KH, D], DType::BF16), ops::QWEN35_GDN_EPSILON).unwrap();
+    ctx.synchronize().unwrap();
+    let after_qk = read_bf16(&output);
+
+    // Print all stages before the first numerical assert, so a raw-conv
+    // failure does not hide the Q/K behavior. These are diagnostic numbers;
+    // the complete decode test and its original full-vector gate remain.
+    report_qkv_stage("isolated/raw-conv", &raw, &expected_raw);
+    report_qkv_stage("isolated/after-Qnorm", &after_q, &expected_after_q);
+    report_qkv_stage("isolated/after-QKnorm", &after_qk, &expected_normalized);
+    assert_eq!(bitwise_mismatches(&raw[QW..], &after_q[QW..]), 0, "Qnorm modified K/V");
+    assert_eq!(bitwise_mismatches(&after_q[..QW], &after_qk[..QW]), 0, "Knorm modified Q");
+    assert_eq!(bitwise_mismatches(&raw[2 * QW..], &after_qk[2 * QW..]), 0, "QKnorm modified V");
+    assert_eq!(read_bf16(&projected_device), prepared_projected, "input changed");
+    assert_eq!(read_bf16(&weight_device), prepared_weight, "weight changed");
+    assert_eq!(read_f32(&state_device), expected_conv, "QKnorm changed conv history");
+    for (name, got, want) in [
+        ("raw convolution", raw.as_slice(), expected_raw.as_slice()),
+        ("after Q norm", after_q.as_slice(), expected_after_q.as_slice()),
+        ("after QK norm", after_qk.as_slice(), expected_normalized.as_slice()),
+    ] {
+        assert_long_parity(name, got, want, 0.99999, 0.01, false);
+    }
+}
+
 fn prefill_fixture(
     ctx: &CudaContext,
     tokens: usize,
@@ -425,6 +567,7 @@ fn prefill_fixture(
     a_log: &[f32],
     dt_bias: &[f32],
     norm_weight: &[f32],
+    with_cake: bool,
 ) -> DeviceFixture {
     DeviceFixture {
         projected_qkv: upload_bf16(ctx, projected, vec![tokens, QKV]),
@@ -442,7 +585,7 @@ fn prefill_fixture(
         beta: zeros(ctx, vec![tokens, VH], DType::F32),
         core: zeros(ctx, vec![tokens, VW], DType::BF16),
         gated: zeros(ctx, vec![tokens, VW], DType::BF16),
-        cake: (ctx.caps().sm >= 100).then(|| CakeFixture {
+        cake: (with_cake && ctx.caps().sm >= 100).then(|| CakeFixture {
             q16: zeros(ctx, vec![tokens, KH, D], DType::F16),
             k16: zeros(ctx, vec![tokens, KH, D], DType::F16),
             v16: zeros(ctx, vec![tokens, VH, D], DType::F16),
@@ -496,6 +639,7 @@ fn chunk_prefill_and_decode_share_exact_qwen35_state_contract() {
         &a_log,
         &dt_bias,
         &norm_weight,
+        true,
     );
     let stepped = prefill_fixture(
         &ctx,
@@ -508,6 +652,7 @@ fn chunk_prefill_and_decode_share_exact_qwen35_state_contract() {
         &a_log,
         &dt_bias,
         &norm_weight,
+        false,
     );
 
     ops::qwen35_gdn_prefill(
@@ -632,36 +777,136 @@ fn chunk_prefill_and_decode_share_exact_qwen35_state_contract() {
     assert!(cosine >= 0.999 && relative <= 0.05);
 }
 
-/// Long-sequence gate corresponding to the 2,049-token GDN check used by the
-/// Qwen3.8 MTP tuning. The fast side scans 2,048 tokens in 64-token chunks and
-/// then consumes token 2,049 through decode; the canonical side executes the
-/// same 2,049 rows through the one-token recurrence.
-///
-/// The convolution window is required to be bit-exact unconditionally. Set
-/// `APXINF_QWEN35_REQUIRE_BIT_EXACT_GDN=1` for the final canonical gate, which
-/// additionally requires the complete BF16 output and F32 recurrent state to
-/// be bit-identical. Without that flag the test still prints mismatch counts
-/// and enforces the existing numerical scan contract, allowing it to
-/// characterize a non-canonical kernel before the implementation is changed.
-#[test]
-#[ignore = "long-running 2,049-token exact-geometry CUDA parity gate"]
-fn long_prefill_output_window_and_state_match_canonical_decode() {
-    const TOKENS: usize = 2_049;
-    const SCANNED_TOKENS: usize = 2_048;
+/// Run a contiguous slice through the same prefill adapter as production.
+/// Cake scratch is reused from row zero; input/output views keep the global
+/// row offset. The causal conv and recurrent states are never reset between
+/// segments, which is the prefix -> append contract being tested.
+fn prefill_rows(ctx: &CudaContext, fixture: &DeviceFixture, start: usize, rows: usize) {
+    let cake = fixture.cake_views(rows);
+    ops::qwen35_gdn_prefill(
+        ctx,
+        rows,
+        &ops::Qwen35GdnPrefillArgs {
+            projected_qkv: &view(&fixture.projected_qkv, start * QKV, vec![rows, QKV], DType::BF16),
+            z: &view(&fixture.z, start * VW, vec![rows, VW], DType::BF16),
+            a: &view(&fixture.a, start * VH, vec![rows, VH], DType::BF16),
+            b: &view(&fixture.b, start * VH, vec![rows, VH], DType::BF16),
+            weights: ops::Qwen35GdnCoreWeights {
+                conv: &fixture.conv_weight,
+                a_log: &fixture.a_log,
+                dt_bias: &fixture.dt_bias,
+                norm: &fixture.norm_weight,
+            },
+            state: ops::Qwen35GdnState {
+                conv: &fixture.conv_state,
+                recurrent: &fixture.recurrent_state,
+            },
+            checkpoints: None,
+            scratch: ops::Qwen35GdnPrefillScratch {
+                convolved_qkv: &view(&fixture.convolved, start * QKV, vec![rows, QKV], DType::BF16),
+                decay: &view(&fixture.decay, start * VH, vec![rows, VH], DType::F32),
+                beta: &view(&fixture.beta, start * VH, vec![rows, VH], DType::F32),
+                core_output: &view(&fixture.core, start * VW, vec![rows, VW], DType::BF16),
+                gated_output: &view(&fixture.gated, start * VW, vec![rows, VW], DType::BF16),
+            },
+            cake: cake.as_ref().map(CakeFixture::scratch),
+        },
+    ).unwrap();
+}
 
-    let ctx = CudaContext::new(0).unwrap();
-    let projected: Vec<f32> = (0..TOKENS * QKV)
-        .map(|index| ((index * 13 % 61) as f32 - 30.0) / 47.0)
-        .collect();
-    let z: Vec<f32> = (0..TOKENS * VW)
-        .map(|index| ((index * 7 % 31) as f32 - 15.0) / 17.0)
-        .collect();
-    let a: Vec<f32> = (0..TOKENS * VH)
-        .map(|index| ((index * 3 % 23) as f32 - 11.0) / 19.0)
-        .collect();
-    let b: Vec<f32> = (0..TOKENS * VH)
-        .map(|index| ((index * 5 % 29) as f32 - 14.0) / 13.0)
-        .collect();
+fn decode_row(ctx: &CudaContext, fixture: &DeviceFixture, row: usize) {
+    ops::qwen35_gdn_decode(
+        ctx,
+        &ops::Qwen35GdnDecodeArgs {
+            projected_qkv: &view(&fixture.projected_qkv, row * QKV, vec![QKV], DType::BF16),
+            z: &view(&fixture.z, row * VW, vec![VW], DType::BF16),
+            a: &view(&fixture.a, row * VH, vec![VH], DType::BF16),
+            b: &view(&fixture.b, row * VH, vec![VH], DType::BF16),
+            weights: ops::Qwen35GdnCoreWeights {
+                conv: &fixture.conv_weight,
+                a_log: &fixture.a_log,
+                dt_bias: &fixture.dt_bias,
+                norm: &fixture.norm_weight,
+            },
+            state: ops::Qwen35GdnState {
+                conv: &fixture.conv_state,
+                recurrent: &fixture.recurrent_state,
+            },
+            scratch: ops::Qwen35GdnDecodeScratch {
+                convolved_qkv: &view(&fixture.convolved, row * QKV, vec![QKV], DType::BF16),
+                decay: &view(&fixture.decay, row * VH, vec![VH], DType::F32),
+                beta: &view(&fixture.beta, row * VH, vec![VH], DType::F32),
+                core_output: &view(&fixture.core, row * VW, vec![VW], DType::BF16),
+                gated_output: &view(&fixture.gated, row * VW, vec![VW], DType::BF16),
+            },
+        },
+    ).unwrap();
+}
+
+fn assert_gdn_boundary(
+    label: &str,
+    fast: &DeviceFixture,
+    canonical: &DeviceFixture,
+    output_start: usize,
+    output_rows: usize,
+    require_bit_exact: bool,
+) {
+    let fast_conv = read_f32(&fast.conv_state);
+    let canonical_conv = read_f32(&canonical.conv_state);
+    assert!(fast_conv.iter().chain(&canonical_conv).all(|value| value.is_finite()),
+            "{label}: convolution state is not finite");
+    assert_eq!(bitwise_mismatches(&fast_conv, &canonical_conv), 0,
+               "{label}: causal-convolution window is not bit-exact");
+    // Frozen existing 64-token / 2,049-token contracts. A longer sequence does
+    // not justify relaxing them. Numeric parity and optional bitwise diagnosis
+    // remain separate; scan and recurrence can reorder F32 arithmetic.
+    assert_long_parity(
+        &format!("{label} recurrent state"),
+        &read_f32(&fast.recurrent_state),
+        &read_f32(&canonical.recurrent_state),
+        0.9998, 0.025, require_bit_exact,
+    );
+    assert_long_parity(
+        &format!("{label} gated output rows {output_start}..{}", output_start + output_rows),
+        &read_bf16(&view(&fast.gated, output_start * VW, vec![output_rows, VW], DType::BF16)),
+        &read_bf16(&view(&canonical.gated, output_start * VW, vec![output_rows, VW], DType::BF16)),
+        0.999, 0.05, require_bit_exact,
+    );
+    if output_rows > ops::QWEN35_GDN_SCAN_CHUNK {
+        // A reset at an append boundary could be diluted by thousands of
+        // later rows after the recurrent dynamics forget the prefix. Apply
+        // the existing 64-token output contract to the first chunk as well.
+        let rows = ops::QWEN35_GDN_SCAN_CHUNK;
+        assert_long_parity(
+            &format!("{label} first append/chunk output rows {output_start}..{}", output_start + rows),
+            &read_bf16(&view(&fast.gated, output_start * VW, vec![rows, VW], DType::BF16)),
+            &read_bf16(&view(&canonical.gated, output_start * VW, vec![rows, VW], DType::BF16)),
+            0.999, 0.05, require_bit_exact,
+        );
+    }
+}
+
+/// Long GPU *scheduling/state* oracle: production chunk/Cake prefill versus
+/// one-token CUDA recurrence over identical prepared BF16 inputs. This is not
+/// an independent mathematical oracle; the short CPU reference test supplies
+/// that separate claim. Every segment's full outputs and final state are
+/// checked before a subsequent segment can obscure a boundary failure.
+fn long_prefill_canonical_case(segments: &[usize]) {
+    let started = std::time::Instant::now();
+    assert!(!segments.is_empty());
+    assert!(segments.iter().all(|rows| *rows > 0 && rows % ops::QWEN35_GDN_SCAN_CHUNK == 0));
+    let scanned: usize = segments.iter().sum();
+    let tokens = scanned + 1; // first scalar decode after the last prefill
+    println!("gdn-long prepare segments={segments:?} rows={tokens} target_geometry={KH}/{VH}/{D} tuning=false");
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    let projected: Vec<f32> = (0..tokens * QKV)
+        .map(|index| ((index * 13 % 61) as f32 - 30.0) / 47.0).collect();
+    let z: Vec<f32> = (0..tokens * VW)
+        .map(|index| ((index * 7 % 31) as f32 - 15.0) / 17.0).collect();
+    let a: Vec<f32> = (0..tokens * VH)
+        .map(|index| ((index * 3 % 23) as f32 - 11.0) / 19.0).collect();
+    let b: Vec<f32> = (0..tokens * VH)
+        .map(|index| ((index * 5 % 29) as f32 - 14.0) / 13.0).collect();
     let mut conv_weight = vec![0.0f32; QKV * CW];
     for channel in 0..QKV {
         conv_weight[channel * CW + 3] = 0.75;
@@ -670,258 +915,63 @@ fn long_prefill_output_window_and_state_match_canonical_decode() {
     let a_log: Vec<f32> = (0..VH).map(|head| -1.1 + head as f32 / 71.0).collect();
     let dt_bias: Vec<f32> = (0..VH).map(|head| -0.2 + head as f32 / 83.0).collect();
     let norm_weight: Vec<f32> = (0..D).map(|index| 0.9 + index as f32 / 521.0).collect();
-
-    let fast = prefill_fixture(
-        &ctx,
-        TOKENS,
-        &projected,
-        &z,
-        &a,
-        &b,
-        &conv_weight,
-        &a_log,
-        &dt_bias,
-        &norm_weight,
-    );
-    let canonical = prefill_fixture(
-        &ctx,
-        TOKENS,
-        &projected,
-        &z,
-        &a,
-        &b,
-        &conv_weight,
-        &a_log,
-        &dt_bias,
-        &norm_weight,
-    );
-
-    let cake_views = fast.cake_views(SCANNED_TOKENS);
-    ops::qwen35_gdn_prefill(
-        &ctx,
-        SCANNED_TOKENS,
-        &ops::Qwen35GdnPrefillArgs {
-            projected_qkv: &view(
-                &fast.projected_qkv,
-                0,
-                vec![SCANNED_TOKENS, QKV],
-                DType::BF16,
-            ),
-            z: &view(&fast.z, 0, vec![SCANNED_TOKENS, VW], DType::BF16),
-            a: &view(&fast.a, 0, vec![SCANNED_TOKENS, VH], DType::BF16),
-            b: &view(&fast.b, 0, vec![SCANNED_TOKENS, VH], DType::BF16),
-            weights: ops::Qwen35GdnCoreWeights {
-                conv: &fast.conv_weight,
-                a_log: &fast.a_log,
-                dt_bias: &fast.dt_bias,
-                norm: &fast.norm_weight,
-            },
-            state: ops::Qwen35GdnState {
-                conv: &fast.conv_state,
-                recurrent: &fast.recurrent_state,
-            },
-            checkpoints: None,
-            scratch: ops::Qwen35GdnPrefillScratch {
-                convolved_qkv: &view(
-                    &fast.convolved,
-                    0,
-                    vec![SCANNED_TOKENS, QKV],
-                    DType::BF16,
-                ),
-                decay: &view(
-                    &fast.decay,
-                    0,
-                    vec![SCANNED_TOKENS, VH],
-                    DType::F32,
-                ),
-                beta: &view(
-                    &fast.beta,
-                    0,
-                    vec![SCANNED_TOKENS, VH],
-                    DType::F32,
-                ),
-                core_output: &view(
-                    &fast.core,
-                    0,
-                    vec![SCANNED_TOKENS, VW],
-                    DType::BF16,
-                ),
-                gated_output: &view(
-                    &fast.gated,
-                    0,
-                    vec![SCANNED_TOKENS, VW],
-                    DType::BF16,
-                ),
-            },
-            // Prefix views, because the fixture is profiled for TOKENS while
-            // this prefill covers the chunk-aligned SCANNED_TOKENS. With these
-            // present the comparison below is Cake-prefill versus canonical
-            // per-token decode, which is the handoff production depends on.
-            cake: cake_views.as_ref().map(CakeFixture::scratch),
-        },
-    )
-    .unwrap();
-    ops::qwen35_gdn_decode(
-        &ctx,
-        &ops::Qwen35GdnDecodeArgs {
-            projected_qkv: &view(
-                &fast.projected_qkv,
-                SCANNED_TOKENS * QKV,
-                vec![QKV],
-                DType::BF16,
-            ),
-            z: &view(
-                &fast.z,
-                SCANNED_TOKENS * VW,
-                vec![VW],
-                DType::BF16,
-            ),
-            a: &view(
-                &fast.a,
-                SCANNED_TOKENS * VH,
-                vec![VH],
-                DType::BF16,
-            ),
-            b: &view(
-                &fast.b,
-                SCANNED_TOKENS * VH,
-                vec![VH],
-                DType::BF16,
-            ),
-            weights: ops::Qwen35GdnCoreWeights {
-                conv: &fast.conv_weight,
-                a_log: &fast.a_log,
-                dt_bias: &fast.dt_bias,
-                norm: &fast.norm_weight,
-            },
-            state: ops::Qwen35GdnState {
-                conv: &fast.conv_state,
-                recurrent: &fast.recurrent_state,
-            },
-            scratch: ops::Qwen35GdnDecodeScratch {
-                convolved_qkv: &view(
-                    &fast.convolved,
-                    SCANNED_TOKENS * QKV,
-                    vec![QKV],
-                    DType::BF16,
-                ),
-                decay: &view(
-                    &fast.decay,
-                    SCANNED_TOKENS * VH,
-                    vec![VH],
-                    DType::F32,
-                ),
-                beta: &view(
-                    &fast.beta,
-                    SCANNED_TOKENS * VH,
-                    vec![VH],
-                    DType::F32,
-                ),
-                core_output: &view(
-                    &fast.core,
-                    SCANNED_TOKENS * VW,
-                    vec![VW],
-                    DType::BF16,
-                ),
-                gated_output: &view(
-                    &fast.gated,
-                    SCANNED_TOKENS * VW,
-                    vec![VW],
-                    DType::BF16,
-                ),
-            },
-        },
-    )
-    .unwrap();
-
-    for token in 0..TOKENS {
-        ops::qwen35_gdn_decode(
-            &ctx,
-            &ops::Qwen35GdnDecodeArgs {
-                projected_qkv: &view(
-                    &canonical.projected_qkv,
-                    token * QKV,
-                    vec![QKV],
-                    DType::BF16,
-                ),
-                z: &view(&canonical.z, token * VW, vec![VW], DType::BF16),
-                a: &view(&canonical.a, token * VH, vec![VH], DType::BF16),
-                b: &view(&canonical.b, token * VH, vec![VH], DType::BF16),
-                weights: ops::Qwen35GdnCoreWeights {
-                    conv: &canonical.conv_weight,
-                    a_log: &canonical.a_log,
-                    dt_bias: &canonical.dt_bias,
-                    norm: &canonical.norm_weight,
-                },
-                state: ops::Qwen35GdnState {
-                    conv: &canonical.conv_state,
-                    recurrent: &canonical.recurrent_state,
-                },
-                scratch: ops::Qwen35GdnDecodeScratch {
-                    convolved_qkv: &view(
-                        &canonical.convolved,
-                        token * QKV,
-                        vec![QKV],
-                        DType::BF16,
-                    ),
-                    decay: &view(
-                        &canonical.decay,
-                        token * VH,
-                        vec![VH],
-                        DType::F32,
-                    ),
-                    beta: &view(
-                        &canonical.beta,
-                        token * VH,
-                        vec![VH],
-                        DType::F32,
-                    ),
-                    core_output: &view(
-                        &canonical.core,
-                        token * VW,
-                        vec![VW],
-                        DType::BF16,
-                    ),
-                    gated_output: &view(
-                        &canonical.gated,
-                        token * VW,
-                        vec![VW],
-                        DType::BF16,
-                    ),
-                },
-            },
-        )
-        .unwrap();
-    }
-    ctx.synchronize().unwrap();
-
-    let fast_conv = read_f32(&fast.conv_state);
-    let canonical_conv = read_f32(&canonical.conv_state);
-    assert_eq!(
-        bitwise_mismatches(&fast_conv, &canonical_conv),
-        0,
-        "2,049-token causal-convolution window is not bit-exact"
-    );
-
+    let fast = prefill_fixture(&ctx, tokens, &projected, &z, &a, &b,
+                               &conv_weight, &a_log, &dt_bias, &norm_weight, true);
+    let canonical = prefill_fixture(&ctx, tokens, &projected, &z, &a, &b,
+                                    &conv_weight, &a_log, &dt_bias, &norm_weight, false);
+    // Independent device inputs are retained on both sides. Host F32 source
+    // matrices and unused canonical Cake buffers need not occupy long tests.
+    drop((projected, z, a, b));
     let require_bit_exact = std::env::var("APXINF_QWEN35_REQUIRE_BIT_EXACT_GDN")
         .is_ok_and(|value| value == "1");
-    assert_long_parity(
-        "2,049-token recurrent state",
-        &read_f32(&fast.recurrent_state),
-        &read_f32(&canonical.recurrent_state),
-        0.9998,
-        0.025,
-        require_bit_exact,
-    );
-    assert_long_parity(
-        "2,049-token gated output",
-        &read_bf16(&fast.gated),
-        &read_bf16(&canonical.gated),
-        0.999,
-        0.05,
-        require_bit_exact,
-    );
+    println!("gdn-long segments={segments:?} rows={tokens} oracle=GPU-canonical-recurrence independent_math=false cake={} bit_exact_requested={require_bit_exact}", fast.cake.is_some());
+    let mut start = 0;
+    for &rows in segments {
+        prefill_rows(&ctx, &fast, start, rows);
+        for token in start..start + rows { decode_row(&ctx, &canonical, token); }
+        ctx.synchronize().unwrap();
+        let label = format!("segments={segments:?} boundary={}", start + rows);
+        assert_gdn_boundary(&label, &fast, &canonical, start, rows, require_bit_exact);
+        if segments.len() > 1 && start == 0 {
+            assert!(read_f32(&fast.recurrent_state).iter().any(|value| *value != 0.0),
+                    "append test did not establish a nonzero prefix recurrent state");
+            assert!(read_f32(&fast.conv_state).iter().any(|value| *value != 0.0),
+                    "append test did not establish a nonzero prefix convolution window");
+        }
+        println!("gdn-long {label} elapsed_s={:.3}", started.elapsed().as_secs_f64());
+        start += rows;
+    }
+    decode_row(&ctx, &fast, scanned);
+    decode_row(&ctx, &canonical, scanned);
+    ctx.synchronize().unwrap();
+    assert_gdn_boundary(&format!("segments={segments:?} next-decode"), &fast, &canonical,
+                        scanned, 1, require_bit_exact);
+    println!("gdn-long segments={segments:?} PASS elapsed_s={:.3} (test duration, not inference throughput)", started.elapsed().as_secs_f64());
 }
+
+/// Original 2,048 scan + 1 decode gate, now also checking the scan boundary.
+#[test]
+#[ignore = "long-running 2,049-token exact-geometry CUDA parity gate"]
+fn long_prefill_output_window_and_state_match_canonical_decode() {
+    long_prefill_canonical_case(&[2_048]);
+}
+
+macro_rules! long_gdn_case {
+    ($name:ident, $segments:expr) => {
+        #[test]
+        #[ignore = "long-running exact-geometry GDN prefill/state GPU recurrence gate"]
+        fn $name() { long_prefill_canonical_case($segments); }
+    };
+}
+
+long_gdn_case!(long_prefill_4096_matches_canonical_decode, &[4_096]);
+long_gdn_case!(long_prefill_8192_matches_canonical_decode, &[8_192]);
+long_gdn_case!(long_prefill_16384_matches_canonical_decode, &[16_384]);
+long_gdn_case!(long_prefix_4096_append_4096_matches_canonical_decode, &[4_096, 4_096]);
+long_gdn_case!(long_prefix_8192_append_4096_matches_canonical_decode, &[8_192, 4_096]);
+long_gdn_case!(long_prefix_16384_append_4096_matches_canonical_decode, &[16_384, 4_096]);
+long_gdn_case!(long_prefix_32768_append_4096_matches_canonical_decode, &[32_768, 4_096]);
+long_gdn_case!(long_prefix_49152_append_4096_matches_canonical_decode, &[49_152, 4_096]);
 
 #[test]
 fn invalid_decode_is_rejected_before_state_mutation() {
