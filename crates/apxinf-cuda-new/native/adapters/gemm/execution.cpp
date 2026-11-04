@@ -1,4 +1,5 @@
 #include "internal.h"
+#include "../../framework/strict_recipe.h"
 
 #ifdef APXINF_GEMM_CUTLASS
 #include "../../kernels/cutlass/ops/gemm/gemm_bf16_sm100.h"
@@ -491,6 +492,14 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
 
     bool persist_recipe = false;
     if (execution == nullptr) {
+      if (apxinf::framework::require_recipes()) {
+        throw Failure(APXINF_STATUS_CACHE_MISS,
+                      "strict recipe mode: GEMM recipe missing or not restorable: "
+                      "M=" + std::to_string(normalized_spec.m) +
+                      " N=" + std::to_string(normalized_spec.n) +
+                      " K=" + std::to_string(normalized_spec.k) +
+                      " key=" + key + " cache_dir=" + cache_dir);
+      }
       if (runtime->allow_online_tune && policy->online_tune) {
         const Recipe tuned_recipe = apxinf::gemm::tune(
             normalized_spec, *policy, *bindings, runtime->device,

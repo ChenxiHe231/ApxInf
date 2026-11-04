@@ -830,6 +830,12 @@ impl Qwen35Moe {
         Ok(())
     }
 
+    /// Visible target KV length for checking benchmark timing boundaries.
+    #[doc(hidden)]
+    pub fn benchmark_context_position(&self) -> usize {
+        self.runtime.target().position()
+    }
+
     /// Benchmark-only setup for a scalar chunk-prefill case. The prefix is
     /// committed outside the measured region; an empty prefix leaves the
     /// target session reset for a normal prefill.

@@ -1,0 +1,61 @@
+{
+  "schema": "apxinf.model-microbench.p0-validation.v1",
+  "status": "measurement tooling validated; full15 baseline and P2 not completed",
+  "runtime_parent": "f267f5ae6b597e5a410dcd4d66bdad407fc2b310",
+  "cpu_runner_tests": {
+    "passed": 26,
+    "evidence": {
+      "path": "devlocal/model-microbench/runner/diagnostic-cpu-tests.log",
+      "sha256": "f0ccc00c64f28c9e31837724af0784197df29ca1b281c443ca559f6ac1f92d7f"
+    }
+  },
+  "benchmark_helper_tests": {
+    "passed": 5,
+    "evidence": {
+      "path": "devlocal/model-microbench/p0-cpu.log",
+      "sha256": "b514ec92deba2c9f9e13d3c4a487131ff8c33e99e05d74987b45a8c1a15e9d19"
+    }
+  },
+  "native_recipe_gpu_contract": {
+    "parent_tests_passed": 2,
+    "isolated_operator_stages": 8,
+    "operators": [
+      "GEMM",
+      "attention"
+    ],
+    "stages": [
+      "missing file rejects before enqueue",
+      "independent tuning persists recipe",
+      "fresh-process strict restore preserves output/files",
+      "corrupt recipe rejects without tuning/repair"
+    ],
+    "evidence": {
+      "path": "devlocal/model-microbench/precision/short-and-strict.log",
+      "sha256": "5a11a4261492ed3ebd5fc43f0165f1ea5d9eec5db5519696a4562c6b4d128d83"
+    }
+  },
+  "nvtx": {
+    "qwen35_cuda_only_probe": "Nsight Systems observed one outer and one inner push/pop range",
+    "default": "APXINF_NVTX absent/0: no allocation or library loading per range",
+    "formal_enabled": false
+  },
+  "measurement_contract": {
+    "warmups": 2,
+    "formal_repeats": 5,
+    "prefill_output_tokens": 1,
+    "decode_output_tokens": 1024,
+    "decode_intervals": 1023,
+    "target_kv": "bf16",
+    "draft_kv": "fp8 scale1",
+    "mtp_baseline_depth": 3,
+    "tuning": "separate process only",
+    "strict_native_recipes": true,
+    "diagnostic_repeat_divergence": "explicit opt-in; always accuracy unresolved and no accepted formal performance"
+  },
+  "limitations": [
+    "no completed full15 performance baseline",
+    "repeat-consistent output alone is not full numerical accuracy certification",
+    "profiler times cannot replace uninstrumented formal times",
+    "historical TRT FP8 is not same-precision BF16 comparison"
+  ]
+}

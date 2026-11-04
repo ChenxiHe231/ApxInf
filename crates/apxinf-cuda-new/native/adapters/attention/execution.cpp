@@ -1,4 +1,5 @@
 #include "internal.h"
+#include "../../framework/strict_recipe.h"
 
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -428,6 +429,13 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
     }
 
     bool persist = false;
+    if (execution == nullptr && apxinf::framework::require_recipes()) {
+      throw Failure(APXINF_STATUS_CACHE_MISS,
+                    "strict recipe mode: Attention recipe missing or not restorable: "
+                    "Q=" + std::to_string(normalized.query_tokens) +
+                    " K=" + std::to_string(normalized.key_tokens) +
+                    " key=" + key + " cache_dir=" + cache_dir);
+    }
     if (execution == nullptr && runtime->allow_online_tune && policy->online_tune) {
       recipe = apxinf::attention::tune(normalized, *policy, *bindings,
                                        runtime->device, source);
