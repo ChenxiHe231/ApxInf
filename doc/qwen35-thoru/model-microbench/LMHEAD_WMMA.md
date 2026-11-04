@@ -80,7 +80,76 @@ MTP计数14轮完全相同：324rounds、972proposals、1296target verified rows
 这证明本case的重复/对照一致性，不能代替所有输入或完整模型数学质量认证。
 
 首轮90.40355tok/s与CPU disassembler重叠，仅保留为diagnostic；没有混入以上
-quiet数据。本结果不含天气/AIOS、网络、8K结果、full15或逐case30%达标声明。
+quiet数据。本4K结果不含天气/AIOS、网络、full15或逐case30%达标声明；8K另列如下。
+
+## quiet 同ELF8K补充结果
+
+8K使用相同ELF`84da8cdc…`、相同dirty源码patch`18511ae7…`和checkpoint，
+仍是Graph1、BF16target/draftFP8unit1、NVFP4、greedy固定depth3、1206MHz，
+8192输入/1024输出、1023callback间隔、每臂2warm+5formal。两臂仅WMMA=0/1
+不同，TileN128、MIN_ROWS4、sharedA16off及其他候选flag0保持一致。每臂先独立
+调优再fresh正式进程；正式期间无profile/编译/反汇编。这是当时dirty overlay的
+数据，**早于snapshot hidden-owned修复**，不是当前提交HEAD的clean重测。
+
+|arm|正式中位tok/s|正式中位TPOT ms|
+|---|---:|---:|
+|control|85.380337909808|11.712298457478|
+|candidate|87.120421552225|11.478365028348|
+
+TPOT降低**1.9973315227520438%**。全部14轮digest均为`b84ac991f4c90b97`；
+共同MTP计数为297rounds、891proposals、1188target verified rows、728verified
+accepted、727committed accepted、206full-accept、66partial、25zero-accept、
+1023committed rows、165rolled-back rows。完整字段逐项相同，未靠改变接受率提速。
+JSON补充每轮原始first/last/return ns、TTFT/finalize tail、TPS/TPOT、完整共同
+MTP计数及逐轮SHA、source/ELF/model/recipe/clock/lock/reap绑定。
+
+|arm|iteration|用途|tok/s|
+|---|---:|---|---:|
+|control|0|warmup|85.071625233|
+|control|1|warmup|85.291340976|
+|control|2|formal|85.496465020|
+|control|3|formal|85.290542639|
+|control|4|formal|85.387171738|
+|control|5|formal|85.380337910|
+|control|6|formal|85.181417140|
+|candidate|0|warmup|87.031799226|
+|candidate|1|warmup|87.136439039|
+|candidate|2|formal|87.183657247|
+|candidate|3|formal|86.997209138|
+|candidate|4|formal|87.120421552|
+|candidate|5|formal|86.957488402|
+|candidate|6|formal|87.193057884|
+
+两份实际Nsight stats另显示完整generation capture内的LMhead分布：
+
+|8K路径|旧M1次数/合计s|M4次数/合计s|
+|---|---:|---:|
+|control|892 /1.318245696|297旧SIMT /0.981768480|
+|candidate|892 /1.317252416|297新WMMA /0.757840448|
+
+M4核合计降低22.808639364751247%，与quiet模型TPOT的1.99733%是不同指标。
+这些capture包含prompt Prefill和Decode，并非精确1023callback窗口的NVTX/SQL归因；
+不能相加GPU/API/copy时间推算wall savings，也不能把profile吞吐当quiet正式成绩。
+
+额外的4K/8K归一化分析及其原SHA已绑定在JSON。两者WMMA profile虽同ELF/
+source/env，且使用相同固定seed；prompt长度、token序列、生成输出digest、
+expert routing/state trace和接受率不同：4K是324rounds/158full-accept/273rollback，8K是297/206/165。
+除以rounds只能归一化调用量，不能消除路由/数据值/recipe bucket/缓存等因素。
+FC1/FC2统计还各含40个prompt-layer调用；全GDN family包含Prefill，不能当作纯
+Decode GDN扩展性。因此不把跨4K/8K的核时延差因果归为KV长度，也不把旧4K
+control的另一ELF`b181…`重标成同ELF对照。
+
+### 尚未解决的长上下文质量问题
+
+新实际4K首步诊断已从逐字节相同且finite的初态输入同一个token490：scalar
+inplace true/false均预测15841，verify4首行在两套future tokens及A→B→A replay
+均预测3691。原数值断言失败和controller parser更正另有保留，GPU只执行一次；
+数据与ELF/source/原log SHA见JSON。此实验WMMA关闭；不能据此归因为本项WMMA，
+也不能先认定M1/M4投影或graph binding为根因。
+
+同路径重复一致和WMMA两臂一致不能代替scalar/verification等价或完整模型质量。
+短P2协议通过并未覆盖这个4K首步差异。本补充保留实际计时证据，但不宣称长模型
+正确性、全P2、EOS、full15、独立clean提交GPU重跑或逐case30%目标已验收。
 
 ## 为什么 MIN_ROWS4：8份实际NCU
 

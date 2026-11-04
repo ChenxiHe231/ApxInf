@@ -2817,9 +2817,10 @@
     "weather_E2E": false,
     "full15_complete": false,
     "percase30percent_goal": false,
-    "8K_result_included": false,
+    "8K_result_included": true,
     "model14_repeat_equality_is_full_mathematical_quality_proof": false,
-    "sanitizer_wrapper_identity_is_direct_proc_proof": false
+    "sanitizer_wrapper_identity_is_direct_proc_proof": false,
+    "long_context_scalar_verify_first_step_quality_accepted": false
   },
   "legacy_unchanged_definitions": {
     "review_receipt_path": "devlocal/model-microbench/decode-policy-runner/devlocal/lmhead-wmma-review-01/legacy-exact-functions.json",
@@ -2876,5 +2877,883 @@
       }
     ],
     "manifest_label_correction": "Original freeze substring matcher confused nvfp4_a16_blackwell_gemv with launcher suffix. Exact entry definition SHA is410de669ef48d49c82ba4c61799776d1209351fb402d1676e86a449b5f95b218, unchanged pre/post."
+  },
+  "quiet_formal_8k": {
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/receipt.json",
+      "sha256": "612c822d0c96b68bd1b1c8b550b732c686feeba2c06652e0652f14a66caf9866",
+      "bytes": 25163
+    },
+    "scope": "8K same-ELF WMMA0 versus WMMA1/MIN_ROWS4/Tile128, explicit separate tune before each formal, all other newflags0;1206MHz; no source/build/Thor CPU disassembly or profiling during formal runs",
+    "arms": [
+      {
+        "name": "control",
+        "binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11",
+        "source": {
+          "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+          "source_dirty": true,
+          "source_status": " M crates/apxinf-cuda-new/native/adapters/elementwise/execution.cpp\n M crates/apxinf-cuda-new/native/adapters/qwen35_attention.cu\n M crates/apxinf-cuda-new/native/include/apxinf_cuda/qwen35_attention.h\n M crates/apxinf-cuda-new/native/kernels/custom/gdn_ops.cu\n M crates/apxinf-cuda-new/native/kernels/custom/mlp_ops.h\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv.cu\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv_stub.cpp\n M crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/runner.cu\n M crates/apxinf-cuda-new/src/ffi/abi/qwen35_attention.rs\n M crates/apxinf-cuda-new/src/ffi/raw/cuda_runtime.rs\n M crates/apxinf-cuda-new/src/ops/mlp.rs\n M crates/apxinf-cuda-new/src/ops/mod.rs\n M crates/apxinf-cuda-new/src/ops/qwen35_mixers.rs\n M crates/apxinf-cuda-new/src/transfers.rs\n M crates/apxinf-model/examples/qwen35_mtp_bench.rs\n M crates/apxinf-model/src/qwen35moe/attention_backend.rs\n M crates/apxinf-model/src/qwen35moe/decoder.rs\n M crates/apxinf-model/src/qwen35moe/device_weights.rs\n M crates/apxinf-model/src/qwen35moe/forward.rs\n M crates/apxinf-model/src/qwen35moe/mtp_runtime.rs\n M crates/apxinf-model/src/qwen35moe/session.rs\n M crates/apxinf-model/tests/qwen35_real_moe_bench.rs\n M doc/qwen35-thoru/MODEL_MICROBENCH_PRECISION.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_TASKS.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_USAGE.md\n M scripts/bench_qwen35_model_matrix.py\n M scripts/test_bench_qwen35_model_matrix.py\n?? crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh\n?? crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs\n?? crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs\n?? crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs\n?? crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs\n?? crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs\n?? crates/apxinf-model/examples/support/qwen35_callback_timing.rs\n?? crates/apxinf-model/examples/support/qwen35_decode_profile.rs\n?? crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs\n?? crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs\n?? crates/apxinf-model/tests/qwen35_real_state_protocol.rs\n?? crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs\n?? doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json\n",
+          "source_patch_sha256": "18511ae73e87ff5c4025424f0008e1546928b888d66ee592cf6c14c9d48989d8",
+          "source_untracked_sha256": {
+            "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+            "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+            "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+            "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+            "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+            "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+            "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+            "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+            "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+            "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+            "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+            "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+            "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "10ca34214a87173c09aadad98b6b17ab5083a391af0e587db75b7c85778c06bd",
+            "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+            "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+          }
+        },
+        "model_assets_canonical_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_NVTX": "0",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "0",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/graph1-wmma-min4-tile128-frozen-01/bin/qwen35_mtp_bench",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--mode",
+          "mtp",
+          "--qwen35-kv-cache",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--tuning-dir",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+          "--warmups",
+          "2",
+          "--repeats",
+          "5",
+          "--prompt-tokens",
+          "8192",
+          "--max-new",
+          "1024"
+        ],
+        "median_tps": 85.38033790980842,
+        "median_tpot_ms": 11.712298457478006,
+        "warmups": 2,
+        "measured": 5,
+        "rows": [
+          {
+            "iteration": 0,
+            "warmup": true,
+            "tps": 85.07162523325452,
+            "decode_interval_ms": 12025.161118,
+            "tpot_ms": 11.754800701857283,
+            "first_callback_elapsed_ns": 1963079000,
+            "last_callback_elapsed_ns": 13988240118,
+            "generate_return_elapsed_ns": 13988431627,
+            "ttft_ms": 1963.079,
+            "post_last_callback_ms": 0.191509,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 1,
+            "warmup": true,
+            "tps": 85.29134097595268,
+            "decode_interval_ms": 11994.183563,
+            "tpot_ms": 11.72451961192571,
+            "first_callback_elapsed_ns": 1919363139,
+            "last_callback_elapsed_ns": 13913546702,
+            "generate_return_elapsed_ns": 13913731711,
+            "ttft_ms": 1919.363139,
+            "post_last_callback_ms": 0.185009,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 2,
+            "warmup": false,
+            "tps": 85.49646502003297,
+            "decode_interval_ms": 11965.406988,
+            "tpot_ms": 11.69639001759531,
+            "first_callback_elapsed_ns": 1920813426,
+            "last_callback_elapsed_ns": 13886220414,
+            "generate_return_elapsed_ns": 13886409016,
+            "ttft_ms": 1920.813426,
+            "post_last_callback_ms": 0.18860200000000002,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 3,
+            "warmup": false,
+            "tps": 85.29054263910959,
+            "decode_interval_ms": 11994.295831000001,
+            "tpot_ms": 11.724629355816228,
+            "first_callback_elapsed_ns": 1920593953,
+            "last_callback_elapsed_ns": 13914889784,
+            "generate_return_elapsed_ns": 13915080043,
+            "ttft_ms": 1920.593953,
+            "post_last_callback_ms": 0.19025899999999998,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 4,
+            "warmup": false,
+            "tps": 85.38717173766027,
+            "decode_interval_ms": 11980.722387,
+            "tpot_ms": 11.711361082111436,
+            "first_callback_elapsed_ns": 1921304666,
+            "last_callback_elapsed_ns": 13902027053,
+            "generate_return_elapsed_ns": 13902203747,
+            "ttft_ms": 1921.3046660000002,
+            "post_last_callback_ms": 0.176694,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 5,
+            "warmup": false,
+            "tps": 85.38033790980842,
+            "decode_interval_ms": 11981.681322,
+            "tpot_ms": 11.712298457478006,
+            "first_callback_elapsed_ns": 1918740926,
+            "last_callback_elapsed_ns": 13900422248,
+            "generate_return_elapsed_ns": 13900601988,
+            "ttft_ms": 1918.740926,
+            "post_last_callback_ms": 0.17974,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 6,
+            "warmup": false,
+            "tps": 85.18141714028044,
+            "decode_interval_ms": 12009.661665,
+            "tpot_ms": 11.739649721407623,
+            "first_callback_elapsed_ns": 1919429722,
+            "last_callback_elapsed_ns": 13929091387,
+            "generate_return_elapsed_ns": 13929279285,
+            "ttft_ms": 1919.4297219999999,
+            "post_last_callback_ms": 0.187898,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          }
+        ],
+        "recipes_unchanged": true,
+        "recipe_manifest_sha256": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8",
+        "exit": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "target_binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11"
+        },
+        "gpu_lock": {
+          "path": "/tmp/apxinf-gpu.lock",
+          "acquired": true,
+          "wait_ms": 75.80869499361143,
+          "prior_holder": null,
+          "owner_pid": 176020,
+          "target_binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11"
+        },
+        "gpu_clocks_before": [
+          {
+            "path": "/sys/class/devfreq/gpu-0",
+            "governor": "simple_ondemand",
+            "min_freq": "1206000000",
+            "max_freq": "1206000000",
+            "cur_freq": "1206000000"
+          }
+        ],
+        "gpu_clocks_after": [
+          {
+            "path": "/sys/class/devfreq/gpu-0",
+            "governor": "simple_ondemand",
+            "min_freq": "1206000000",
+            "max_freq": "1206000000",
+            "cur_freq": "1206000000"
+          }
+        ],
+        "raw_receipts": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/control/metadata.json",
+            "sha256": "7ad2d53cc37aee6b40604b0b77b41c8fb1416055b615a410543a3c9be8b76ff5",
+            "bytes": 1114062
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/control/summary.json",
+            "sha256": "18bf8b3f261d0ab9b22f8c14f3d06287ef19becf552c90354eb1c826fc60e6f5",
+            "bytes": 2961793
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/control/decode-kv8k-o1k.json",
+            "sha256": "8de888afcd4a090e8d0956c1f1cdaeee421fc96ed7576277f93ad53e42969bcd",
+            "bytes": 2155307
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/control/decode-kv8k-o1k.log",
+            "sha256": "7455e246d9734c4f1fa181ec7c33228ee6f568149caa8e9ca8a99b24515aba1a",
+            "bytes": 816093
+          }
+        ]
+      },
+      {
+        "name": "candidate",
+        "binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11",
+        "source": {
+          "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+          "source_dirty": true,
+          "source_status": " M crates/apxinf-cuda-new/native/adapters/elementwise/execution.cpp\n M crates/apxinf-cuda-new/native/adapters/qwen35_attention.cu\n M crates/apxinf-cuda-new/native/include/apxinf_cuda/qwen35_attention.h\n M crates/apxinf-cuda-new/native/kernels/custom/gdn_ops.cu\n M crates/apxinf-cuda-new/native/kernels/custom/mlp_ops.h\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv.cu\n M crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv_stub.cpp\n M crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/runner.cu\n M crates/apxinf-cuda-new/src/ffi/abi/qwen35_attention.rs\n M crates/apxinf-cuda-new/src/ffi/raw/cuda_runtime.rs\n M crates/apxinf-cuda-new/src/ops/mlp.rs\n M crates/apxinf-cuda-new/src/ops/mod.rs\n M crates/apxinf-cuda-new/src/ops/qwen35_mixers.rs\n M crates/apxinf-cuda-new/src/transfers.rs\n M crates/apxinf-model/examples/qwen35_mtp_bench.rs\n M crates/apxinf-model/src/qwen35moe/attention_backend.rs\n M crates/apxinf-model/src/qwen35moe/decoder.rs\n M crates/apxinf-model/src/qwen35moe/device_weights.rs\n M crates/apxinf-model/src/qwen35moe/forward.rs\n M crates/apxinf-model/src/qwen35moe/mtp_runtime.rs\n M crates/apxinf-model/src/qwen35moe/session.rs\n M crates/apxinf-model/tests/qwen35_real_moe_bench.rs\n M doc/qwen35-thoru/MODEL_MICROBENCH_PRECISION.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_TASKS.md\n M doc/qwen35-thoru/MODEL_MICROBENCH_USAGE.md\n M scripts/bench_qwen35_model_matrix.py\n M scripts/test_bench_qwen35_model_matrix.py\n?? crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh\n?? crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs\n?? crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs\n?? crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs\n?? crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs\n?? crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs\n?? crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs\n?? crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs\n?? crates/apxinf-model/examples/support/qwen35_callback_timing.rs\n?? crates/apxinf-model/examples/support/qwen35_decode_profile.rs\n?? crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs\n?? crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs\n?? crates/apxinf-model/tests/qwen35_real_state_protocol.rs\n?? crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs\n?? doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json\n",
+          "source_patch_sha256": "18511ae73e87ff5c4025424f0008e1546928b888d66ee592cf6c14c9d48989d8",
+          "source_untracked_sha256": {
+            "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+            "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+            "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+            "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+            "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+            "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+            "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+            "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+            "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+            "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+            "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+            "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+            "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+            "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "10ca34214a87173c09aadad98b6b17ab5083a391af0e587db75b7c85778c06bd",
+            "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+            "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+          }
+        },
+        "model_assets_canonical_sha256": "18e38131fa13ed93300fde557672dad3a72389ac317ef305b47158e5d294989f",
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_NVTX": "0",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/graph1-wmma-min4-tile128-frozen-01/bin/qwen35_mtp_bench",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--mode",
+          "mtp",
+          "--qwen35-kv-cache",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--tuning-dir",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+          "--warmups",
+          "2",
+          "--repeats",
+          "5",
+          "--prompt-tokens",
+          "8192",
+          "--max-new",
+          "1024"
+        ],
+        "median_tps": 87.12042155222548,
+        "median_tpot_ms": 11.478365028347996,
+        "warmups": 2,
+        "measured": 5,
+        "rows": [
+          {
+            "iteration": 0,
+            "warmup": true,
+            "tps": 87.03179922603167,
+            "decode_interval_ms": 11754.324386,
+            "tpot_ms": 11.490053163245356,
+            "first_callback_elapsed_ns": 1962341342,
+            "last_callback_elapsed_ns": 13716665728,
+            "generate_return_elapsed_ns": 13716865830,
+            "ttft_ms": 1962.341342,
+            "post_last_callback_ms": 0.200102,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 1,
+            "warmup": true,
+            "tps": 87.1364390393852,
+            "decode_interval_ms": 11740.208933,
+            "tpot_ms": 11.476255066471163,
+            "first_callback_elapsed_ns": 1924858130,
+            "last_callback_elapsed_ns": 13665067063,
+            "generate_return_elapsed_ns": 13665254609,
+            "ttft_ms": 1924.85813,
+            "post_last_callback_ms": 0.187546,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 2,
+            "warmup": false,
+            "tps": 87.18365724655919,
+            "decode_interval_ms": 11733.850498,
+            "tpot_ms": 11.470039587487781,
+            "first_callback_elapsed_ns": 1924584527,
+            "last_callback_elapsed_ns": 13658435025,
+            "generate_return_elapsed_ns": 13658620692,
+            "ttft_ms": 1924.584527,
+            "post_last_callback_ms": 0.185667,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 3,
+            "warmup": false,
+            "tps": 86.99720913846018,
+            "decode_interval_ms": 11758.997905,
+            "tpot_ms": 11.49462160801564,
+            "first_callback_elapsed_ns": 1920019824,
+            "last_callback_elapsed_ns": 13679017729,
+            "generate_return_elapsed_ns": 13679219932,
+            "ttft_ms": 1920.0198240000002,
+            "post_last_callback_ms": 0.202203,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 4,
+            "warmup": false,
+            "tps": 87.12042155222548,
+            "decode_interval_ms": 11742.367424,
+            "tpot_ms": 11.478365028347996,
+            "first_callback_elapsed_ns": 1925685999,
+            "last_callback_elapsed_ns": 13668053423,
+            "generate_return_elapsed_ns": 13668238367,
+            "ttft_ms": 1925.685999,
+            "post_last_callback_ms": 0.184944,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 5,
+            "warmup": false,
+            "tps": 86.95748840157535,
+            "decode_interval_ms": 11764.36922,
+            "tpot_ms": 11.499872160312806,
+            "first_callback_elapsed_ns": 1926085055,
+            "last_callback_elapsed_ns": 13690454275,
+            "generate_return_elapsed_ns": 13690648886,
+            "ttft_ms": 1926.0850550000002,
+            "post_last_callback_ms": 0.194611,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          },
+          {
+            "iteration": 6,
+            "warmup": false,
+            "tps": 87.19305788367555,
+            "decode_interval_ms": 11732.585423999999,
+            "tpot_ms": 11.468802956011729,
+            "first_callback_elapsed_ns": 1919173342,
+            "last_callback_elapsed_ns": 13651758766,
+            "generate_return_elapsed_ns": 13651940062,
+            "ttft_ms": 1919.173342,
+            "post_last_callback_ms": 0.181296,
+            "token_digest": "b84ac991f4c90b97",
+            "speculation_canonical_sha256": "16b013b62f034bb77b74168cce5a1193d44d9a06553914a332f4026bd307dee6"
+          }
+        ],
+        "recipes_unchanged": true,
+        "recipe_manifest_sha256": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8",
+        "exit": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "target_binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11"
+        },
+        "gpu_lock": {
+          "path": "/tmp/apxinf-gpu.lock",
+          "acquired": true,
+          "wait_ms": 75.81566699809628,
+          "prior_holder": null,
+          "owner_pid": 177332,
+          "target_binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11"
+        },
+        "gpu_clocks_before": [
+          {
+            "path": "/sys/class/devfreq/gpu-0",
+            "governor": "simple_ondemand",
+            "min_freq": "1206000000",
+            "max_freq": "1206000000",
+            "cur_freq": "1206000000"
+          }
+        ],
+        "gpu_clocks_after": [
+          {
+            "path": "/sys/class/devfreq/gpu-0",
+            "governor": "simple_ondemand",
+            "min_freq": "1206000000",
+            "max_freq": "1206000000",
+            "cur_freq": "1206000000"
+          }
+        ],
+        "raw_receipts": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/candidate/metadata.json",
+            "sha256": "ae4e8ed1b2ac42890fb429589b550c9d0f6b4d277403c6a3921eda1201eb3141",
+            "bytes": 1114061
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/candidate/summary.json",
+            "sha256": "c568742423f9c0ae3124d3cd614ad8e3161adef0b70c366d864d9c04d6e56f46",
+            "bytes": 2961730
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/candidate/decode-kv8k-o1k.json",
+            "sha256": "8aa68faa7ac71fb88f07f824d39c9224e27de8e963540131996b5c6f843a5730",
+            "bytes": 2155244
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/candidate/decode-kv8k-o1k.log",
+            "sha256": "84c6cf0d30d178a330cf0bc8f6ea706d8d1d58f8a9e4d696caaee88a1d64c684",
+            "bytes": 816055
+          }
+        ]
+      }
+    ],
+    "all14_MTP_statistics": {
+      "accepted_prefix_by_depth": [
+        272,
+        250,
+        206
+      ],
+      "bonus_tokens": 205,
+      "committed_accepted_tokens": 727,
+      "correction_tokens": 91,
+      "draft_steps": 3,
+      "emitted_tokens": 1023,
+      "full_accept_rounds": 206,
+      "implementation": "qwen3.6_moe_adaptive_mtp",
+      "matched_by_depth": [
+        272,
+        265,
+        233
+      ],
+      "partial_accept_rounds": 66,
+      "proposed_by_depth": [
+        297,
+        297,
+        297
+      ],
+      "proposed_tokens": 891,
+      "rounds": 297,
+      "target_committed_rows": 1023,
+      "target_rolled_back_rows": 165,
+      "target_verified_rows": 1188,
+      "verified_accepted_tokens": 728,
+      "zero_accept_rounds": 25
+    },
+    "all14_MTP_and_digest_equal": true,
+    "only_environment_difference": {
+      "APXINF_NVFP4_A16_WMMA": [
+        "0",
+        "1"
+      ]
+    },
+    "tpot_reduction_percent": 1.9973315227520438,
+    "source_predates_snapshot_hidden_ownership_fix": true,
+    "full_model_quality_accepted": false
+  },
+  "model_kernel_attribution_8k": {
+    "scope": "actual two8K whole-generation captures; diagnostic kernel sums separate from quiet formal score",
+    "arms": [
+      {
+        "arm": "control",
+        "scope": "complete generation capture including prompt Prefill, not exact1023interval SQL/NVTX attribution",
+        "case": {
+          "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/control-profile/decode-kv8k-o1k.json",
+          "sha256": "298bf6b3aa15ee4cb78a219debb561734fabe606fcf68254ca6d1e4135a6cf1b",
+          "bytes": 2184837
+        },
+        "stats_csv": {
+          "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/control-profile/decode-kv8k-o1k.stats.csv",
+          "sha256": "d7dfef1d0d5466afaf623c305f93ba679946776794108d39d5cff558d5ee102b",
+          "bytes": 34453
+        },
+        "raw_log": {
+          "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/control-profile/decode-kv8k-o1k.log",
+          "sha256": "214430a06a705dc6320d99b3cda31397844d47c581ca6fd59fa27d33b3cc2dc4",
+          "bytes": 3633548
+        },
+        "report": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/nsys-wmma-min4-decode8k-control-01/decode-kv8k-o1k.nsys-rep",
+          "size_bytes": 23890937,
+          "sha256": "f016ec641411f28d9ed8d255a67a5f41f475b779e3561b5d3a4d8968f5ba3ec1"
+        },
+        "binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11",
+        "performance_accepted": false,
+        "mtp_rounds": 297,
+        "kernel_total_ns": 12374634017,
+        "selected_lmhead": [
+          {
+            "name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_gemv_bf16<(int)1, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)",
+            "ns": 1318245696,
+            "calls": 892
+          },
+          {
+            "name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_gemv_bf16<(int)4, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)",
+            "ns": 981768480,
+            "calls": 297
+          }
+        ],
+        "groups": {
+          "FC1": {
+            "ns": 1714873502,
+            "calls": 11920,
+            "ms_per_mtp_round": 5.773984855218855,
+            "us_per_call": 143.86522667785238
+          },
+          "FC2": {
+            "ns": 856755456,
+            "calls": 11920,
+            "ms_per_mtp_round": 2.884698505050505,
+            "us_per_call": 71.8754577181208
+          },
+          "BF16_FA2_split_core": {
+            "ns": 1155508384,
+            "calls": 2970,
+            "ms_per_mtp_round": 3.8906006195286196,
+            "us_per_call": 389.06006195286193
+          },
+          "BF16_FA2_family": {
+            "ns": 1394879168,
+            "calls": 5950,
+            "ms_per_mtp_round": 4.696562855218856,
+            "us_per_call": 234.4334736134454
+          },
+          "GDN_recurrent_verify": {
+            "ns": 458793792,
+            "calls": 8910,
+            "ms_per_mtp_round": 1.5447602424242424,
+            "us_per_call": 51.492008080808084
+          },
+          "GDN_entire_family": {
+            "ns": 986191705,
+            "calls": 53610,
+            "ms_per_mtp_round": 3.320510791245791,
+            "us_per_call": 18.395666946465212
+          },
+          "draft_FP8_split_core": {
+            "ns": 327859008,
+            "calls": 1096,
+            "ms_per_mtp_round": 1.103902383838384,
+            "us_per_call": 299.14143065693435
+          },
+          "D2D": {
+            "ns": 290556320,
+            "calls": 41209,
+            "ms_per_mtp_round": 0.9783041077441077,
+            "us_per_call": 7.05079764129195
+          }
+        }
+      },
+      {
+        "arm": "candidate",
+        "scope": "complete generation capture including prompt Prefill, not exact1023interval SQL/NVTX attribution",
+        "case": {
+          "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/candidate-profile/decode-kv8k-o1k.json",
+          "sha256": "5c78b36a8130c3567d8a5f548555fed22f2a93b2acc872aabeac796c403a732e",
+          "bytes": 2184868
+        },
+        "stats_csv": {
+          "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/candidate-profile/decode-kv8k-o1k.stats.csv",
+          "sha256": "d1fff7d266c2c30860b0783f63b8d28c314925fdffc12ea09e2d3a73735f4ee8",
+          "bytes": 34480
+        },
+        "raw_log": {
+          "path": "devlocal/model-microbench/recovery-build/wmma-min4-decode8k-ab-01/candidate-profile/decode-kv8k-o1k.log",
+          "sha256": "10fc154847cc06cc980085303afc8768816ebaab957b005236a1dad4cd2dce2f",
+          "bytes": 3633426
+        },
+        "report": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/nsys-wmma-min4-decode8k-candidate-01/decode-kv8k-o1k.nsys-rep",
+          "size_bytes": 23897233,
+          "sha256": "e0a103cb43a0e02fc2cc258b40994be12df53e876678a7f7f37a79704ea105ec"
+        },
+        "binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11",
+        "performance_accepted": false,
+        "mtp_rounds": 297,
+        "kernel_total_ns": 12173050863,
+        "selected_lmhead": [
+          {
+            "name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_gemv_bf16<(int)1, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)",
+            "ns": 1317252416,
+            "calls": 892
+          },
+          {
+            "name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_wmma_bf16<(int)4, (int)128, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int, int)",
+            "ns": 757840448,
+            "calls": 297
+          }
+        ],
+        "groups": {
+          "FC1": {
+            "ns": 1717162464,
+            "calls": 11920,
+            "ms_per_mtp_round": 5.781691797979798,
+            "us_per_call": 144.05725369127518
+          },
+          "FC2": {
+            "ns": 859779808,
+            "calls": 11920,
+            "ms_per_mtp_round": 2.8948815084175084,
+            "us_per_call": 72.12917852348993
+          },
+          "BF16_FA2_split_core": {
+            "ns": 1155593152,
+            "calls": 2970,
+            "ms_per_mtp_round": 3.890886033670034,
+            "us_per_call": 389.0886033670034
+          },
+          "BF16_FA2_family": {
+            "ns": 1395218080,
+            "calls": 5950,
+            "ms_per_mtp_round": 4.697703973063973,
+            "us_per_call": 234.4904336134454
+          },
+          "GDN_recurrent_verify": {
+            "ns": 459151199,
+            "calls": 8910,
+            "ms_per_mtp_round": 1.5459636329966329,
+            "us_per_call": 51.53212109988777
+          },
+          "GDN_entire_family": {
+            "ns": 986429693,
+            "calls": 53610,
+            "ms_per_mtp_round": 3.321312097643098,
+            "us_per_call": 18.400106192874464
+          },
+          "draft_FP8_split_core": {
+            "ns": 324336000,
+            "calls": 1096,
+            "ms_per_mtp_round": 1.0920404040404041,
+            "us_per_call": 295.9270072992701
+          },
+          "D2D": {
+            "ns": 290671488,
+            "calls": 41209,
+            "ms_per_mtp_round": 0.9786918787878788,
+            "us_per_call": 7.053592370598655
+          }
+        }
+      }
+    ],
+    "m4_old_total_ns": 981768480,
+    "m4_new_total_ns": 757840448,
+    "m4_total_reduction_percent": 22.808639364751247,
+    "normalized_4k8k_analysis": {
+      "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/decode4k8k-normalized-profile-01/analysis.json",
+      "sha256": "6f5adb4ecaa7f23581a9ee406cc9b82477ac58270c4a89c8ec9203485ca447ef",
+      "bytes": 82002
+    },
+    "normalized_4k8k_review": {
+      "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/decode4k8k-normalized-profile-01/REVIEW.md",
+      "sha256": "45d534b50e4b3eff75ca39c7ae52972f1b3a51a395f3334fc09f0d63827d7cd6",
+      "bytes": 6336
+    },
+    "cross_size_cautions": [
+      "Prompt Prefill included; FC1/FC2 known40 prompt-layer calls bound but not subtracted as an estimate.",
+      "4K vs8K use the same fixed seed but different prompt lengths/token sequences, generated outputs and routing/state/acceptance traces. Per-round normalization does not remove those causes; no input-prefix relationship is claimed.",
+      "D2D rows are counts and summed GPU copy duration; no byte counts or unique per-state ownership inferred.",
+      "4K control uses an earlier ELF; cross-size primary comparison uses same-ELF WMMA candidate profiles instead.",
+      "All profile measurements are diagnostic, not quiet formal performance."
+    ],
+    "same_elf_source_environment_4k_wmma_to_8k_wmma": true,
+    "cross_size_workload": [
+      {
+        "tag": "4k-wmma",
+        "input_identity": {
+          "seed_hex": "35a3bf0440960001",
+          "tokens": 4096,
+          "fnv1a64": "da7ee97285eaa2a3",
+          "sha256": "25222540f75fb86a5642ca28152acfdbda3013b95a44d776ffc01e1ea3739ff8"
+        },
+        "output_digest": "694f5386c486b392",
+        "speculation": {
+          "accepted_prefix_by_depth": [
+            291,
+            251,
+            158
+          ],
+          "bonus_tokens": 158,
+          "committed_accepted_tokens": 700,
+          "correction_tokens": 165,
+          "draft_steps": 3,
+          "emitted_tokens": 1023,
+          "full_accept_rounds": 158,
+          "implementation": "qwen3.6_moe_adaptive_mtp",
+          "matched_by_depth": [
+            291,
+            277,
+            212
+          ],
+          "partial_accept_rounds": 133,
+          "proposed_by_depth": [
+            324,
+            324,
+            324
+          ],
+          "proposed_tokens": 972,
+          "rounds": 324,
+          "target_committed_rows": 1023,
+          "target_rolled_back_rows": 273,
+          "target_verified_rows": 1296,
+          "verified_accepted_tokens": 700,
+          "zero_accept_rounds": 33
+        },
+        "rounds": 324
+      },
+      {
+        "tag": "8k-wmma",
+        "input_identity": {
+          "seed_hex": "35a3bf0440960001",
+          "tokens": 8192,
+          "fnv1a64": "1c99f0f992165db5",
+          "sha256": "821bad02a05c0497b525e1aa7573a8659a2d79770e72946674db7cfa224d35fb"
+        },
+        "output_digest": "b84ac991f4c90b97",
+        "speculation": {
+          "accepted_prefix_by_depth": [
+            272,
+            250,
+            206
+          ],
+          "bonus_tokens": 205,
+          "committed_accepted_tokens": 727,
+          "correction_tokens": 91,
+          "draft_steps": 3,
+          "emitted_tokens": 1023,
+          "full_accept_rounds": 206,
+          "implementation": "qwen3.6_moe_adaptive_mtp",
+          "matched_by_depth": [
+            272,
+            265,
+            233
+          ],
+          "partial_accept_rounds": 66,
+          "proposed_by_depth": [
+            297,
+            297,
+            297
+          ],
+          "proposed_tokens": 891,
+          "rounds": 297,
+          "target_committed_rows": 1023,
+          "target_rolled_back_rows": 165,
+          "target_verified_rows": 1188,
+          "verified_accepted_tokens": 728,
+          "zero_accept_rounds": 25
+        },
+        "rounds": 297
+      }
+    ]
+  },
+  "long_context_quality_caveat": {
+    "scope": "separate actual first-step diagnostic, not a WMMA regression attribution",
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/long-first-step-gpu-01/receipt.json",
+      "sha256": "faff9da4e10a6c3a98621a7a820f35a3b5511f4f75fab938b2aa088c85a4e645",
+      "bytes": 1105748
+    },
+    "parser_correction": {
+      "path": "devlocal/model-microbench/recovery-build/long-first-step-gpu-01/parser-correction.json",
+      "sha256": "51d06453447d69a5770dc6fcc6003f92bdf875070ef49ce6026eb4a41aedcd10",
+      "bytes": 313717
+    },
+    "observations": {
+      "path": "devlocal/model-microbench/recovery-build/long-first-step-gpu-01/observations.json",
+      "sha256": "97835876ded968d839b5625565288a4351edc11ed382b0ee1546d87d6f41eaf1",
+      "bytes": 693563
+    },
+    "log": {
+      "path": "devlocal/model-microbench/recovery-build/long-first-step-gpu-01/diagnostic.log",
+      "sha256": "0403ad58aa914de8729bb40492052dc7072748ff345c9c10eb1923df27ae93bf",
+      "bytes": 1164809
+    },
+    "actual_gpu_runs": 1,
+    "quality_accepted": false,
+    "performance_accepted": false,
+    "initial_state_exact_and_finite": true,
+    "first_step_predictions": {
+      "prefill_scalar_hiddenLast": 490,
+      "prefill_coordinator_hiddenAll": 490,
+      "scalar_inplace_true": 15841,
+      "scalar_inplace_false": 15841,
+      "verify4_keep1_A0": 3691,
+      "verify4_keep1_B": 3691,
+      "verify4_keep1_A1": 3691
+    },
+    "verify_future_first_row_output_exact": true,
+    "verify_A_replay_first_row_output_exact": true,
+    "possible_causes": "M1 vsM4 projection arithmetic and other batch/graph bindings remain candidates, not proven causes",
+    "effect_on_existing_wmma_claim": "repeat/same-path A-B timing evidence does not certify scalar/MTP equivalence or all-model quality",
+    "artifact": {
+      "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/apxinf_model-a14b58be4d24da2f",
+      "sha256": "cd729d80ecf5a01975377e32308d8dd9e4edaa377f4867232b2985cfdff245ab",
+      "size_bytes": 37163312
+    },
+    "environment": {
+      "APXINF_REQUIRE_RECIPES": "1",
+      "APXINF_QWEN35_CHECKPOINT": "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+      "APXINF_QWEN35_PARITY_TUNING_DIR": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+      "APXINF_QWEN35_PROTOCOL_GRAPHS": "1",
+      "APXINF_QWEN35_CUDA_GRAPHS": "1",
+      "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+      "APXINF_QWEN35_GRAPH_GDN": "full",
+      "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+      "APXINF_QWEN35_MTP_FIXED_DEPTH": "3",
+      "APXINF_NVFP4_A16_WMMA": "0",
+      "APXINF_QWEN35_W4A16_SHARED": "0",
+      "APXINF_NVTX": "0",
+      "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+      "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+      "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+      "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0"
+    },
+    "source": {
+      "source_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+      "source_dirty": true,
+      "source_patch_sha256": "60c9de67e4d7e7dd930d7125b3800ec72bf5c1bbb4b0414371a1a4b1ba021dde"
+    },
+    "exit": {
+      "returncode": 101,
+      "timed_out": false,
+      "child_reaped": true,
+      "lock_held_until_reaped": true,
+      "backend_task_may_be_live": false,
+      "target_binary_sha256": "cd729d80ecf5a01975377e32308d8dd9e4edaa377f4867232b2985cfdff245ab"
+    }
   }
 }
