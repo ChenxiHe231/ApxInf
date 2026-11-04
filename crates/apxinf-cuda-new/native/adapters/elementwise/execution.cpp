@@ -10,6 +10,8 @@
 #include "../../kernels/custom/mlp_ops.h"
 
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 namespace {
@@ -26,6 +28,36 @@ void check(int status, const char* what) {
 }
 bool valid_extent(int64_t value) {
   return value > 0 && value <= INT32_MAX;
+}
+
+struct Nvfp4A16WmmaPolicy { bool enabled; int tile_n; int min_rows; bool valid; };
+const Nvfp4A16WmmaPolicy& nvfp4_a16_wmma_policy() {
+  static const Nvfp4A16WmmaPolicy policy = [] {
+    const char* enabled = std::getenv("APXINF_NVFP4_A16_WMMA");
+    if (enabled == nullptr || std::strcmp(enabled,"0") == 0)
+      return Nvfp4A16WmmaPolicy{false,64,4,true};
+    if (std::strcmp(enabled,"1") != 0)
+      return Nvfp4A16WmmaPolicy{false,64,4,false};
+    int tile_n = 64;
+    if (const char* tile = std::getenv("APXINF_NVFP4_A16_WMMA_TILE_N")) {
+      if (std::strcmp(tile,"32") == 0) tile_n = 32;
+      else if (std::strcmp(tile,"64") == 0) tile_n = 64;
+      else if (std::strcmp(tile,"128") == 0) tile_n = 128;
+      else return Nvfp4A16WmmaPolicy{false,64,4,false};
+    }
+    int min_rows = 4;
+    if (const char* minimum = std::getenv("APXINF_NVFP4_A16_WMMA_MIN_ROWS")) {
+      if (std::strcmp(minimum,"1") == 0) min_rows = 1;
+      else if (std::strcmp(minimum,"2") == 0) min_rows = 2;
+      else if (std::strcmp(minimum,"3") == 0) min_rows = 3;
+      else if (std::strcmp(minimum,"4") == 0) min_rows = 4;
+      else return Nvfp4A16WmmaPolicy{false,64,4,false};
+    }
+    return Nvfp4A16WmmaPolicy{true,tile_n,min_rows,true};
+  }();
+  if (!policy.valid) throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+      "WMMA requires0/1; enabled TILE_N requires32/64/128 and MIN_ROWS requires1/2/3/4");
+  return policy;
 }
 
 }  // namespace
@@ -189,6 +221,15 @@ extern "C" apxinf_status_t apxinf_nvfp4_a16_blackwell_gemv(
         !valid_extent(rows) || n % 128 != 0 || k % 64 != 0) {
       throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                     "invalid NVFP4-A16 Blackwell GEMV arguments");
+    }
+    const auto& policy = nvfp4_a16_wmma_policy();
+    if (policy.enabled && rows >= policy.min_rows && rows <= 4) {
+      check(apxinf::cuda_new::mlp_ops::nvfp4_a16_blackwell_wmma(
+                activation,qweights,block_scales,global_scale,output,
+                static_cast<int>(n),static_cast<int>(k),static_cast<int>(rows),
+                policy.tile_n,static_cast<cudaStream_t>(stream)),
+            "NVFP4-A16 BF16 WMMA");
+      return;
     }
     check(apxinf::cuda_new::mlp_ops::nvfp4_a16_blackwell_gemv(
               activation, qweights, block_scales, global_scale, output,

@@ -1,0 +1,2880 @@
+{
+  "schema": "apxinf.lmhead_wmma.commit_evidence.v1",
+  "scope": "Original dirty-overlay operator/CPU/sanitizer/profiler and quiet same-ELF4K model records; isolated clean commit not built or GPU-run",
+  "source_manifest": {
+    "base": "2a915f31f2b974cec8b199fb829f99cd2a222077",
+    "source_paths": [
+      {
+        "path": "crates/apxinf-cuda-new/native/adapters/elementwise/execution.cpp",
+        "preimage_sha256": "6b3a4999b08dea48ca2b4970476232097bf511db366a9910cb8d3b6ab9bc0f35",
+        "postimage_sha256": "8a54e68f03f08a27852025ef3e6ef470f609c7110beb52e5c45f934f43dbc153",
+        "bytes": 10274
+      },
+      {
+        "path": "crates/apxinf-cuda-new/native/kernels/custom/mlp_ops.h",
+        "preimage_sha256": "84ee30b4d9c65e4765202627949e2a5debe7beb79cd1100773259f0fefd906a3",
+        "postimage_sha256": "6e80b5ef5973a21871cb55618ffd0e12208cdcba6dab83ea22cbef3a3c1a8b55",
+        "bytes": 5103
+      },
+      {
+        "path": "crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv.cu",
+        "preimage_sha256": "6e90a2936d503edceb41192c0524a9344019882bb5024162b7390399669059ae",
+        "postimage_sha256": "4c39b16b60df229f1f2c1845a188a3c465c1b3d504ce6f7690d7591ce6f9ba2d",
+        "bytes": 15822
+      },
+      {
+        "path": "crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv_stub.cpp",
+        "preimage_sha256": "32a2d01d8d90471acd98d7ece28c422473daa863ccef400577865922b08a0192",
+        "postimage_sha256": "ed0ea4b99ff1b7df81154fd36c47ff25b03f78bb20425caef71a3d5459507f44",
+        "bytes": 435
+      },
+      {
+        "path": "crates/apxinf-cuda-new/src/ops/mlp.rs",
+        "preimage_sha256": "e2ae44558782d3fd067a9e21ed185f18fde15fd6835bf2cb3a65139bd5f015fc",
+        "postimage_sha256": "6b453bdc7da13be4246ca25584ee5d573d27154fb30edbf995d2e1665d4d5b38",
+        "bytes": 15363
+      },
+      {
+        "path": "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs",
+        "preimage_sha256": null,
+        "postimage_sha256": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+        "bytes": 11076
+      },
+      {
+        "path": "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs",
+        "preimage_sha256": null,
+        "postimage_sha256": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+        "bytes": 6825
+      }
+    ],
+    "exact_seven_path_scope": true,
+    "implementation_patch_sha256": "64f9d7a6b0ddea1e39d62d0cca10d25c8217b07c424fd6f2e5b1cc5cf56c2329",
+    "policy_patch_sha256": "2956ae2c9b04308c56a75a5e47f16b64a9ba9a77794ae91395528dd3061014d7",
+    "new_Cargo_GPU_SSH": false
+  },
+  "quiet_formal": {
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/wmma-min4-quiet-same-elf-ab-01/receipt.json",
+      "bytes": 13293,
+      "sha256": "83dc075a115cf792d332ccbba71bfa4af42a95bc03f1bcfaf3613903dcc9915b"
+    },
+    "scope": "quiet same-ELF WMMA0 versus WMMA1/MIN_ROWS4/Tile128, all other newflags0;1206MHz; no source/build/Thor CPU disassembly or profiling during formal runs",
+    "prior_cpu_disassembler_overlap_excluded": "first candidate formal overlapped CPU-only cuobjdump; retained as diagnostic, quiet pair is acceptance reference",
+    "arms": [
+      {
+        "name": "control",
+        "source": {
+          "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+          "dirty": true,
+          "patch_sha256": "18511ae73e87ff5c4025424f0008e1546928b888d66ee592cf6c14c9d48989d8",
+          "complete_source_object_sha256": "3bd673decb5dd9c8c87300b9cc950403ea1550b865f52165d15c968700a0c5b8"
+        },
+        "binary_sha256": {
+          "context": "49005c11289bb067286958d042dbcd4e6527293561f5df092944a94d317182af",
+          "decode": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11"
+        },
+        "model_assets_sha256": {
+          "chat_template.jinja": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+          "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+          "configuration.json": "c1b09db419119513247e9b8b912c4b9897106c9b20c6cada7e107d993c5435eb",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+          "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+          "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+          "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164",
+          "model.safetensors.index.json": "d67403a4e9793c0ba8a136baf14b3b76ec7b32c822267978084895e07ebd8a3e",
+          "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b",
+          "video_preprocessor_config.json": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+          "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+        },
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_NVTX": "0",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "0",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/graph1-wmma-min4-tile128-frozen-01/bin/qwen35_mtp_bench",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--mode",
+          "mtp",
+          "--qwen35-kv-cache",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--tuning-dir",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+          "--warmups",
+          "2",
+          "--repeats",
+          "5",
+          "--prompt-tokens",
+          "4096",
+          "--max-new",
+          "1024"
+        ],
+        "measured_count": 5,
+        "warmup_count": 2,
+        "median_tps": 88.50741794542884,
+        "median_tpot_ms": 11.298488004887586,
+        "rows": [
+          {
+            "iteration": 0,
+            "warmup": true,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 964402268,
+              "generate_return_elapsed_ns": 12525006933,
+              "last_callback_elapsed_ns": 12524683368,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11560.281099999998,
+            "tps": 88.49265784722138,
+            "tpot_ms": 11.300372531769305,
+            "ttft_ms": 964.4022679999999,
+            "post_last_callback_ms": 0.323565,
+            "total_latency_ms": 12525.006933,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 1,
+            "warmup": true,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 935870658,
+              "generate_return_elapsed_ns": 12492237285,
+              "last_callback_elapsed_ns": 12492038933,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11556.168275,
+            "tps": 88.52415226707141,
+            "tpot_ms": 11.296352174975562,
+            "ttft_ms": 935.870658,
+            "post_last_callback_ms": 0.198352,
+            "total_latency_ms": 12492.237285,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 2,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 931858907,
+              "generate_return_elapsed_ns": 12491756674,
+              "last_callback_elapsed_ns": 12491551025,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11559.692117999999,
+            "tps": 88.49716666822388,
+            "tpot_ms": 11.299796791788857,
+            "ttft_ms": 931.8589069999999,
+            "post_last_callback_ms": 0.205649,
+            "total_latency_ms": 12491.756674,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 3,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 938856167,
+              "generate_return_elapsed_ns": 12497404211,
+              "last_callback_elapsed_ns": 12497209396,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11558.353229,
+            "tps": 88.50741794542884,
+            "tpot_ms": 11.298488004887586,
+            "ttft_ms": 938.8561669999999,
+            "post_last_callback_ms": 0.19481500000000002,
+            "total_latency_ms": 12497.404211,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 4,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 932841314,
+              "generate_return_elapsed_ns": 12489180293,
+              "last_callback_elapsed_ns": 12488979701,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11556.138387,
+            "tps": 88.52438121983872,
+            "tpot_ms": 11.296322958944282,
+            "ttft_ms": 932.841314,
+            "post_last_callback_ms": 0.20059200000000002,
+            "total_latency_ms": 12489.180293000001,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 5,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 930411333,
+              "generate_return_elapsed_ns": 12478066637,
+              "last_callback_elapsed_ns": 12477869896,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11547.458563,
+            "tps": 88.59092192613396,
+            "tpot_ms": 11.287838282502443,
+            "ttft_ms": 930.411333,
+            "post_last_callback_ms": 0.196741,
+            "total_latency_ms": 12478.066637,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 6,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 934811175,
+              "generate_return_elapsed_ns": 12500148784,
+              "last_callback_elapsed_ns": 12499951340,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11565.140165,
+            "tps": 88.45547787617323,
+            "tpot_ms": 11.305122350928642,
+            "ttft_ms": 934.811175,
+            "post_last_callback_ms": 0.19744399999999998,
+            "total_latency_ms": 12500.148784,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          }
+        ],
+        "recipe_before_after": {
+          "count": 3097,
+          "manifest_sha256": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8",
+          "unchanged": true
+        },
+        "exit": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "target_binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11"
+        },
+        "gpu_lock": {
+          "path": "/tmp/apxinf-gpu.lock",
+          "acquired": true,
+          "wait_ms": 89.91964800225105,
+          "clock_before": [
+            {
+              "path": "/sys/class/devfreq/gpu-0",
+              "governor": "simple_ondemand",
+              "min_freq": "1206000000",
+              "max_freq": "1206000000",
+              "cur_freq": "1206000000"
+            }
+          ],
+          "clock_after": [
+            {
+              "path": "/sys/class/devfreq/gpu-0",
+              "governor": "simple_ondemand",
+              "min_freq": "1206000000",
+              "max_freq": "1206000000",
+              "cur_freq": "1206000000"
+            }
+          ]
+        },
+        "raw_receipts": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-quiet-same-elf-ab-01/control/summary.json",
+            "bytes": 2961810,
+            "sha256": "33852bdeca517843963bf7b1e0f034a26f1eead905916166a9e5f7d3504712fa"
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-quiet-same-elf-ab-01/control-identity.json",
+            "bytes": 524710,
+            "sha256": "533065f99d3e2be1dcb06b2717c5c3cf9fd3eab89f6647cd6a1a3463998596e2"
+          }
+        ]
+      },
+      {
+        "name": "candidate",
+        "source": {
+          "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+          "dirty": true,
+          "patch_sha256": "18511ae73e87ff5c4025424f0008e1546928b888d66ee592cf6c14c9d48989d8",
+          "complete_source_object_sha256": "3bd673decb5dd9c8c87300b9cc950403ea1550b865f52165d15c968700a0c5b8"
+        },
+        "binary_sha256": {
+          "context": "49005c11289bb067286958d042dbcd4e6527293561f5df092944a94d317182af",
+          "decode": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11"
+        },
+        "model_assets_sha256": {
+          "chat_template.jinja": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+          "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+          "configuration.json": "c1b09db419119513247e9b8b912c4b9897106c9b20c6cada7e107d993c5435eb",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+          "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+          "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+          "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164",
+          "model.safetensors.index.json": "d67403a4e9793c0ba8a136baf14b3b76ec7b32c822267978084895e07ebd8a3e",
+          "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b",
+          "video_preprocessor_config.json": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+          "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+        },
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_NVTX": "0",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "argv": [
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/graph1-wmma-min4-tile128-frozen-01/bin/qwen35_mtp_bench",
+          "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+          "--mode",
+          "mtp",
+          "--qwen35-kv-cache",
+          "bf16",
+          "--qwen35-moe-activation",
+          "nvfp4",
+          "--tuning-dir",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-bf16",
+          "--warmups",
+          "2",
+          "--repeats",
+          "5",
+          "--prompt-tokens",
+          "4096",
+          "--max-new",
+          "1024"
+        ],
+        "measured_count": 5,
+        "warmup_count": 2,
+        "median_tps": 90.40320485784002,
+        "median_tpot_ms": 11.061554748778104,
+        "rows": [
+          {
+            "iteration": 0,
+            "warmup": true,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 970001417,
+              "generate_return_elapsed_ns": 12347938109,
+              "last_callback_elapsed_ns": 12347742479,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11377.741062000001,
+            "tps": 89.9123995198547,
+            "tpot_ms": 11.121936521994135,
+            "ttft_ms": 970.001417,
+            "post_last_callback_ms": 0.19563,
+            "total_latency_ms": 12347.938108999999,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 1,
+            "warmup": true,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 933094000,
+              "generate_return_elapsed_ns": 12234512924,
+              "last_callback_elapsed_ns": 12234313248,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11301.219248000001,
+            "tps": 90.521206389394,
+            "tpot_ms": 11.047135139784945,
+            "ttft_ms": 933.0939999999999,
+            "post_last_callback_ms": 0.199676,
+            "total_latency_ms": 12234.512924,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 2,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 934089694,
+              "generate_return_elapsed_ns": 12245669747,
+              "last_callback_elapsed_ns": 12245472109,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11311.382415,
+            "tps": 90.43987396654558,
+            "tpot_ms": 11.057069809384164,
+            "ttft_ms": 934.089694,
+            "post_last_callback_ms": 0.197638,
+            "total_latency_ms": 12245.669747000002,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 3,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 932934740,
+              "generate_return_elapsed_ns": 12249101044,
+              "last_callback_elapsed_ns": 12248905248,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11315.970508,
+            "tps": 90.40320485784002,
+            "tpot_ms": 11.061554748778104,
+            "ttft_ms": 932.93474,
+            "post_last_callback_ms": 0.195796,
+            "total_latency_ms": 12249.101044,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 4,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 930507046,
+              "generate_return_elapsed_ns": 12246022933,
+              "last_callback_elapsed_ns": 12245827655,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11315.320609,
+            "tps": 90.40839719436005,
+            "tpot_ms": 11.060919461388075,
+            "ttft_ms": 930.5070460000001,
+            "post_last_callback_ms": 0.195278,
+            "total_latency_ms": 12246.022933,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 5,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 933127555,
+              "generate_return_elapsed_ns": 12254339322,
+              "last_callback_elapsed_ns": 12254140173,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11321.012617999999,
+            "tps": 90.36294141863839,
+            "tpot_ms": 11.066483497556208,
+            "ttft_ms": 933.127555,
+            "post_last_callback_ms": 0.199149,
+            "total_latency_ms": 12254.339322,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          },
+          {
+            "iteration": 6,
+            "warmup": false,
+            "output_tokens": 1024,
+            "decode_intervals": 1023,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 932388231,
+              "generate_return_elapsed_ns": 12252362655,
+              "last_callback_elapsed_ns": 12252169229,
+              "origin": "benchmark-generate-entry"
+            },
+            "decode_interval_ms": 11319.780998,
+            "tps": 90.37277312880396,
+            "tpot_ms": 11.06527956793744,
+            "ttft_ms": 932.388231,
+            "post_last_callback_ms": 0.193426,
+            "total_latency_ms": 12252.362655,
+            "token_digest": "694f5386c486b392",
+            "speculation_sha256": "2b2172dd40c0e9c1944430f3c967c1d782bb7f8a621bd6d647809c5815d530a3"
+          }
+        ],
+        "recipe_before_after": {
+          "count": 3097,
+          "manifest_sha256": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8",
+          "unchanged": true
+        },
+        "exit": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "target_binary_sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11"
+        },
+        "gpu_lock": {
+          "path": "/tmp/apxinf-gpu.lock",
+          "acquired": true,
+          "wait_ms": 86.91146300407127,
+          "clock_before": [
+            {
+              "path": "/sys/class/devfreq/gpu-0",
+              "governor": "simple_ondemand",
+              "min_freq": "1206000000",
+              "max_freq": "1206000000",
+              "cur_freq": "1206000000"
+            }
+          ],
+          "clock_after": [
+            {
+              "path": "/sys/class/devfreq/gpu-0",
+              "governor": "simple_ondemand",
+              "min_freq": "1206000000",
+              "max_freq": "1206000000",
+              "cur_freq": "1206000000"
+            }
+          ]
+        },
+        "raw_receipts": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-quiet-same-elf-ab-01/candidate/summary.json",
+            "bytes": 2961737,
+            "sha256": "74ebd6a9c98d0e6ac332d10f3d72cc5416293048cf93d8061a4f35323978716c"
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-quiet-same-elf-ab-01/candidate-identity.json",
+            "bytes": 524710,
+            "sha256": "bddfc1347114db70f2713f3e6680899829d9e1e6998d03e1b86d2c9a7ce66810"
+          }
+        ]
+      }
+    ],
+    "all14_MTP_statistics": {
+      "accepted_prefix_by_depth": [
+        291,
+        251,
+        158
+      ],
+      "bonus_tokens": 158,
+      "committed_accepted_tokens": 700,
+      "correction_tokens": 165,
+      "draft_steps": 3,
+      "emitted_tokens": 1023,
+      "full_accept_rounds": 158,
+      "implementation": "qwen3.6_moe_adaptive_mtp",
+      "matched_by_depth": [
+        291,
+        277,
+        212
+      ],
+      "partial_accept_rounds": 133,
+      "proposed_by_depth": [
+        324,
+        324,
+        324
+      ],
+      "proposed_tokens": 972,
+      "rounds": 324,
+      "target_committed_rows": 1023,
+      "target_rolled_back_rows": 273,
+      "target_verified_rows": 1296,
+      "verified_accepted_tokens": 700,
+      "zero_accept_rounds": 33
+    },
+    "all14_MTP_and_digest_equal": true,
+    "only_environment_difference": {
+      "APXINF_NVFP4_A16_WMMA": [
+        "0",
+        "1"
+      ]
+    },
+    "tpot_reduction_percent": 2.0970350723653275
+  },
+  "operator_gpu_gates": [
+    {
+      "name": "lmhead-wmma-gpu-gates-01",
+      "scope": "Synthetic fixed-op GPU gates only; real vocab geometry does not mean actual checkpoint weights/model equality",
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "f1c025dcf41b69c3882da3b0ea735743bab596a2113c6f4a76e40c2629f0b079",
+        "complete_source_object_sha256": "a97e63a5acd933248d2fef4ea3e7aa02c851e2c58d36784abe66ceec4de22018"
+      },
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+        "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+        "size_bytes": 33047736
+      },
+      "completed": 16,
+      "summary": {
+        "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/summary.json",
+        "bytes": 19583138,
+        "sha256": "01c727167d1682f2005297f535cdb26a91e3e1fa008ffc4da65c022eec763bf5"
+      },
+      "cases": [
+        {
+          "name": "wmma0-tile64-nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "test": "nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "0",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma0-tile64-nvfp4_a16_wmma_all_finite_codes_and_global_scale.log",
+            "bytes": 802564,
+            "sha256": "35621aff709e4e44612ab0591e3b49203e8aabc69a6ec44741087cf8aee49d85"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 161686,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma0-tile64-nvfp4_a16_wmma_packing_and_dense_matrix",
+          "test": "nvfp4_a16_wmma_packing_and_dense_matrix",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "0",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma0-tile64-nvfp4_a16_wmma_packing_and_dense_matrix.log",
+            "bytes": 875410,
+            "sha256": "68298f5ceee0528f3791c01bbd7dbe762a66df618a0c0f07c5f3239331db169e"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 161827,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma0-tile64-nvfp4_a16_wmma_capture_and_validation",
+          "test": "nvfp4_a16_wmma_capture_and_validation",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "0",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma0-tile64-nvfp4_a16_wmma_capture_and_validation.log",
+            "bytes": 805947,
+            "sha256": "11f63d5248e552a9088bbf5b773475cd950569b4636dc2d4235ed5c3ce87b9b5"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 161942,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma0-tile64-nvfp4_a16_wmma_real_vocab_geometry",
+          "test": "nvfp4_a16_wmma_real_vocab_geometry",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "0",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma0-tile64-nvfp4_a16_wmma_real_vocab_geometry.log",
+            "bytes": 804378,
+            "sha256": "9b8dba1c96ee604854e3eb5e663ae5bcafc7ca4280d097d5fe0c318a8ccb1056"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 162053,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile32-nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "test": "nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile32-nvfp4_a16_wmma_all_finite_codes_and_global_scale.log",
+            "bytes": 802564,
+            "sha256": "6c63b01bd90e9151c670f9dea8da5ce8b61092d3e9c179bbf33989a371ec22f7"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 162193,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile32-nvfp4_a16_wmma_packing_and_dense_matrix",
+          "test": "nvfp4_a16_wmma_packing_and_dense_matrix",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile32-nvfp4_a16_wmma_packing_and_dense_matrix.log",
+            "bytes": 875410,
+            "sha256": "5da83e20684554f2647b161ce0db854e570be4c58ff84d8479bd28901a32d2a2"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 162304,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile32-nvfp4_a16_wmma_capture_and_validation",
+          "test": "nvfp4_a16_wmma_capture_and_validation",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile32-nvfp4_a16_wmma_capture_and_validation.log",
+            "bytes": 805947,
+            "sha256": "8fb06b3575c2f57351a067a8f29594cf2ab973f3ca9dd0b54c3cabee091c3263"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 162448,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile32-nvfp4_a16_wmma_real_vocab_geometry",
+          "test": "nvfp4_a16_wmma_real_vocab_geometry",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile32-nvfp4_a16_wmma_real_vocab_geometry.log",
+            "bytes": 804378,
+            "sha256": "3740851e3f51c7110ee4a484f836b86ff31066c0937a0a626be4f7f566efb390"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 162560,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile64-nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "test": "nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile64-nvfp4_a16_wmma_all_finite_codes_and_global_scale.log",
+            "bytes": 802564,
+            "sha256": "8ab0f4f9dbd82b296abf1c1e3a15c6fd95dee98bc904a81e32cf109c2756e884"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 162706,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile64-nvfp4_a16_wmma_packing_and_dense_matrix",
+          "test": "nvfp4_a16_wmma_packing_and_dense_matrix",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile64-nvfp4_a16_wmma_packing_and_dense_matrix.log",
+            "bytes": 875410,
+            "sha256": "e767779284899a42e84bcd5494e4ecab7a2acc6e5676cee861a41f50f407a8a7"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 162815,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile64-nvfp4_a16_wmma_capture_and_validation",
+          "test": "nvfp4_a16_wmma_capture_and_validation",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile64-nvfp4_a16_wmma_capture_and_validation.log",
+            "bytes": 805947,
+            "sha256": "6774d0f1b675ea5f7c2b2e1544682153e589f6b17b2eac3a379cda65d759edd7"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 162927,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile64-nvfp4_a16_wmma_real_vocab_geometry",
+          "test": "nvfp4_a16_wmma_real_vocab_geometry",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile64-nvfp4_a16_wmma_real_vocab_geometry.log",
+            "bytes": 804378,
+            "sha256": "4f1742ef0b51604cf4b433c0742e1da3f861558bda551e43e27cc16e2fc8ee4d"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 163070,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile128-nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "test": "nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile128-nvfp4_a16_wmma_all_finite_codes_and_global_scale.log",
+            "bytes": 802570,
+            "sha256": "f9311ddd727e2ccce7e186739a85b9889122f827864984507092c0e60a50ff01"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 163208,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile128-nvfp4_a16_wmma_packing_and_dense_matrix",
+          "test": "nvfp4_a16_wmma_packing_and_dense_matrix",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile128-nvfp4_a16_wmma_packing_and_dense_matrix.log",
+            "bytes": 875698,
+            "sha256": "e0d5c80af0e4a581b697b7e10a8064123bf3318af7bbee67023e262ce9548f5b"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 163319,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile128-nvfp4_a16_wmma_capture_and_validation",
+          "test": "nvfp4_a16_wmma_capture_and_validation",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile128-nvfp4_a16_wmma_capture_and_validation.log",
+            "bytes": 805967,
+            "sha256": "84d1cf27d8da4fae58412c4cea287116637837a51e670827203d6bfaab5e3f63"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 163428,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile128-nvfp4_a16_wmma_real_vocab_geometry",
+          "test": "nvfp4_a16_wmma_real_vocab_geometry",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gpu-gates-01/wmma1-tile128-nvfp4_a16_wmma_real_vocab_geometry.log",
+            "bytes": 804390,
+            "sha256": "d8056e9740a630c9fbee855516f1bc7dfe57b3778e6e6b31e82f958ce3e48fb5"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 163539,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        }
+      ],
+      "sanitizer_limit": null
+    },
+    {
+      "name": "wmma-min4-raw-gpu-01",
+      "scope": "Synthetic fixed-op GPU gates only; real vocab geometry does not mean actual checkpoint weights/model equality",
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "18511ae73e87ff5c4025424f0008e1546928b888d66ee592cf6c14c9d48989d8",
+        "complete_source_object_sha256": "3bd673decb5dd9c8c87300b9cc950403ea1550b865f52165d15c968700a0c5b8"
+      },
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+        "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+        "size_bytes": 33047760
+      },
+      "completed": 16,
+      "summary": {
+        "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/summary.json",
+        "bytes": 19583880,
+        "sha256": "736fd6efc00848702dc3521ab1c6a2b6a5139587798abf0e1d0b566ad975c696"
+      },
+      "cases": [
+        {
+          "name": "wmma0-tile64-nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "test": "nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "0",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma0-tile64-nvfp4_a16_wmma_all_finite_codes_and_global_scale.log",
+            "bytes": 802564,
+            "sha256": "427494fc8ea3a44b391893ad01e6957da42a80b13a3d0df04925ec9f18397bed"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 168336,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma0-tile64-nvfp4_a16_wmma_packing_and_dense_matrix",
+          "test": "nvfp4_a16_wmma_packing_and_dense_matrix",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "0",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma0-tile64-nvfp4_a16_wmma_packing_and_dense_matrix.log",
+            "bytes": 875410,
+            "sha256": "60ee8ba887e6d119c3afbf1ae76e27336671711c152c7bfd9726fe8c08278f32"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 168482,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma0-tile64-nvfp4_a16_wmma_capture_and_validation",
+          "test": "nvfp4_a16_wmma_capture_and_validation",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "0",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma0-tile64-nvfp4_a16_wmma_capture_and_validation.log",
+            "bytes": 805947,
+            "sha256": "0f4350752fc423ae7a6d6ee4aa0165ff77b12b958d386f949a52191baf46445a"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 168597,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma0-tile64-nvfp4_a16_wmma_real_vocab_geometry",
+          "test": "nvfp4_a16_wmma_real_vocab_geometry",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "0",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma0-tile64-nvfp4_a16_wmma_real_vocab_geometry.log",
+            "bytes": 804378,
+            "sha256": "7837fbe031049e1b58582ab94f0e49ea4b37d4f87e0bc1fc2767ccef214bcc33"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 168710,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile32-nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "test": "nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile32-nvfp4_a16_wmma_all_finite_codes_and_global_scale.log",
+            "bytes": 802564,
+            "sha256": "ea576ab00325cc9e5f5cb7e452eb2bfbf4f4e497d83224816dc367870ac18b91"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 168850,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile32-nvfp4_a16_wmma_packing_and_dense_matrix",
+          "test": "nvfp4_a16_wmma_packing_and_dense_matrix",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile32-nvfp4_a16_wmma_packing_and_dense_matrix.log",
+            "bytes": 875409,
+            "sha256": "ae7d572045eef6f5a7f1d0d5871103e4324b12104ebe222c5ce3c7cd79b4e6db"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 168961,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile32-nvfp4_a16_wmma_capture_and_validation",
+          "test": "nvfp4_a16_wmma_capture_and_validation",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile32-nvfp4_a16_wmma_capture_and_validation.log",
+            "bytes": 805947,
+            "sha256": "f90678c832403ed8e8c169c57f1a0a534d67586042dca91d3ad8e0880364dc3c"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 169070,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile32-nvfp4_a16_wmma_real_vocab_geometry",
+          "test": "nvfp4_a16_wmma_real_vocab_geometry",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile32-nvfp4_a16_wmma_real_vocab_geometry.log",
+            "bytes": 804377,
+            "sha256": "7ca09a232f4e6acfb6d7e1d79751147e94573d091849a14509d8ced60944ac10"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 169220,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile64-nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "test": "nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile64-nvfp4_a16_wmma_all_finite_codes_and_global_scale.log",
+            "bytes": 802564,
+            "sha256": "e99eeb7f77d5b7a512dd89cd34977cb3bc4aa116f95f94703be4264989eee6cf"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 169362,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile64-nvfp4_a16_wmma_packing_and_dense_matrix",
+          "test": "nvfp4_a16_wmma_packing_and_dense_matrix",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile64-nvfp4_a16_wmma_packing_and_dense_matrix.log",
+            "bytes": 875408,
+            "sha256": "ad84ce7ab7922c3d068c6c4e85c4bced347aeb26ac089bc40acf030faaabd6e0"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 169473,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile64-nvfp4_a16_wmma_capture_and_validation",
+          "test": "nvfp4_a16_wmma_capture_and_validation",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile64-nvfp4_a16_wmma_capture_and_validation.log",
+            "bytes": 805947,
+            "sha256": "266a887b409b8f3f8549eb3c244c2e884210d0c95628b6e24f5b98996daad03b"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 169590,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile64-nvfp4_a16_wmma_real_vocab_geometry",
+          "test": "nvfp4_a16_wmma_real_vocab_geometry",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile64-nvfp4_a16_wmma_real_vocab_geometry.log",
+            "bytes": 804378,
+            "sha256": "591756a0919657b8068d13ee62bab6ef3938795987ea88d04e1d281c87be0152"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 169701,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile128-nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "test": "nvfp4_a16_wmma_all_finite_codes_and_global_scale",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile128-nvfp4_a16_wmma_all_finite_codes_and_global_scale.log",
+            "bytes": 802570,
+            "sha256": "e3bc2826766e67969dd77b251f292472ca7702ee868597b3fcd0a37d742001a3"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 169851,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile128-nvfp4_a16_wmma_packing_and_dense_matrix",
+          "test": "nvfp4_a16_wmma_packing_and_dense_matrix",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile128-nvfp4_a16_wmma_packing_and_dense_matrix.log",
+            "bytes": 875698,
+            "sha256": "07965f654614f956364d17d948d5964e16a6704f07174ad4063b1031d90f9631"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 169989,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile128-nvfp4_a16_wmma_capture_and_validation",
+          "test": "nvfp4_a16_wmma_capture_and_validation",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile128-nvfp4_a16_wmma_capture_and_validation.log",
+            "bytes": 805967,
+            "sha256": "c71dfdf528ce46c333c950ba039476b62f26c3c839a17e91e6bb2950bae25a4f"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 170100,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile128-nvfp4_a16_wmma_real_vocab_geometry",
+          "test": "nvfp4_a16_wmma_real_vocab_geometry",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "1",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-gpu-01/wmma1-tile128-nvfp4_a16_wmma_real_vocab_geometry.log",
+            "bytes": 804390,
+            "sha256": "f1ebf86870a16e78f53fbee452d95680722921771d765a1948773e7c714089e0"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949"
+          },
+          "actual_process": {
+            "pid": 170209,
+            "kind": "benchmark",
+            "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+            "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+            "error": null
+          },
+          "identity_scope": "actual direct-process path+SHA plus pre/post frozen-target lock receipt",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        }
+      ],
+      "sanitizer_limit": null
+    },
+    {
+      "name": "lmhead-wmma-sanitizer-gpu-02",
+      "scope": "Synthetic fixed-op GPU gates only; real vocab geometry does not mean actual checkpoint weights/model equality",
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "f1c025dcf41b69c3882da3b0ea735743bab596a2113c6f4a76e40c2629f0b079",
+        "complete_source_object_sha256": "a97e63a5acd933248d2fef4ea3e7aa02c851e2c58d36784abe66ceec4de22018"
+      },
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+        "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+        "size_bytes": 33047736
+      },
+      "completed": 2,
+      "summary": {
+        "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-sanitizer-gpu-02/summary.json",
+        "bytes": 2453247,
+        "sha256": "c9d5123e6ddc2140682475606ac896545daaf720b36d30658423a81590cc3aae"
+      },
+      "cases": [
+        {
+          "name": "wmma1-tile128-memcheck",
+          "test": "memcheck",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-sanitizer-gpu-02/wmma1-tile128-memcheck.log",
+            "bytes": 805918,
+            "sha256": "1a9399c876f39dce545f5ea65663e75733819aa27daa632e95a836866a8ae4ed"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 166551,
+            "kind": "benchmark",
+            "exe": null,
+            "sha256": null,
+            "error": "[Errno 2] No such file or directory: '/proc/166551/exe'"
+          },
+          "identity_scope": "explicit frozen target path plus lock/exit before-after SHA; sanitizer launcher shim may exit before /proc capture; not direct application /proc attestation",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        },
+        {
+          "name": "wmma1-tile128-racecheck",
+          "test": "racecheck",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0"
+          },
+          "log": {
+            "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-sanitizer-gpu-02/wmma1-tile128-racecheck.log",
+            "bytes": 805956,
+            "sha256": "b16cd1fdfcdf34a6d476a25b79bf20c013056e3fabfdaf99455351c856d935a5"
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "target_binary_sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151"
+          },
+          "actual_process": {
+            "pid": 166673,
+            "kind": "benchmark",
+            "exe": null,
+            "sha256": null,
+            "error": "[Errno 2] No such file or directory: '/proc/166673/exe'"
+          },
+          "identity_scope": "explicit frozen target path plus lock/exit before-after SHA; sanitizer launcher shim may exit before /proc capture; not direct application /proc attestation",
+          "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8"
+        }
+      ],
+      "sanitizer_limit": "Original unchanged L0kernel with old dispatch policy; wrapper may exit before proc capture. Explicit frozen target plus lock/exit SHA, not direct application/proc identity."
+    }
+  ],
+  "original_build_source_to_ELF": [
+    {
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-gate-build-01/receipt.json",
+        "bytes": 18248,
+        "sha256": "2f2d55efd810c0e75786604e80743e56ec069a3504cc2310adaa705df19c6572"
+      },
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "f1c025dcf41b69c3882da3b0ea735743bab596a2113c6f4a76e40c2629f0b079",
+        "complete_source_object_sha256": "e15d91d4ad448a545261e471c9f4da36dabbb6f203649a4c534041be36d1cc32"
+      },
+      "artifacts": {
+        "nvfp4_a16_wmma": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+          "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+          "size_bytes": 33047736
+        }
+      },
+      "cleanup_proven": true,
+      "lock_path": "/tmp/apxinf-gpu.lock",
+      "source_unchanged": true
+    },
+    {
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/wmma-min4-raw-build-01/receipt.json",
+        "bytes": 16032,
+        "sha256": "434aae63dcb454cb65950b6da59d41c8ff0cf591b5da474d865f176ecb68c0bc"
+      },
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "18511ae73e87ff5c4025424f0008e1546928b888d66ee592cf6c14c9d48989d8",
+        "complete_source_object_sha256": "1fa5c386c3579724d10c121326e369de75674f683d334c5076889ffcf76215d5"
+      },
+      "artifacts": {
+        "nvfp4_a16_wmma": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+          "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+          "size_bytes": 33047760
+        }
+      },
+      "cleanup_proven": true,
+      "lock_path": "/tmp/apxinf-gpu.lock",
+      "source_unchanged": true
+    },
+    {
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/wmma-min4-benchmarks-01/receipt.json",
+        "bytes": 18433,
+        "sha256": "355607b476acdc34984517c8d033a6d4b4b724fe9fdcb2215325fc4d73282f2e"
+      },
+      "source": {
+        "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+        "dirty": true,
+        "patch_sha256": "18511ae73e87ff5c4025424f0008e1546928b888d66ee592cf6c14c9d48989d8",
+        "complete_source_object_sha256": "1fa5c386c3579724d10c121326e369de75674f683d334c5076889ffcf76215d5"
+      },
+      "artifacts": {
+        "qwen35_context_bench": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/examples/qwen35_context_bench",
+          "sha256": "49005c11289bb067286958d042dbcd4e6527293561f5df092944a94d317182af",
+          "size_bytes": 34289136
+        },
+        "qwen35_mtp_bench": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/examples/qwen35_mtp_bench",
+          "sha256": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11",
+          "size_bytes": 34757656
+        }
+      },
+      "cleanup_proven": true,
+      "lock_path": "/tmp/apxinf-gpu.lock",
+      "source_unchanged": true
+    }
+  ],
+  "CPU": {
+    "math5": {
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/lmhead-reference-linux-cpu-01/receipt.json",
+        "bytes": 1109,
+        "sha256": "a915f1cebd139e3388f9168f8324b935c9695a86ead6f1fe2f0fd1807209b6ff"
+      },
+      "record": {
+        "source_sha256": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+        "compiler": "rustc 1.98.0 (88d9e12ae 2026-08-18)",
+        "compile_argv": [
+          "/home/wwxq/.cargo/bin/rustc",
+          "--edition=2021",
+          "-O",
+          "--test",
+          "/home/wwxq/apxinf-pr117-runtime-2529a7e/devlocal/lmhead-reference-linux-cpu-01/reference.rs",
+          "-o",
+          "/home/wwxq/apxinf-pr117-runtime-2529a7e/devlocal/lmhead-reference-linux-cpu-01/reference-tests"
+        ],
+        "compile_returncode": 0,
+        "test_returncode": 0,
+        "stdout": "\nrunning 5 tests\ntest tests::all_4064_finite_fp4_scale_products_are_exact_bf16 ... ok\ntest tests::constant_and_one_hot_have_analytic_answers_all_rows ... ok\ntest tests::explicit_second_nblock_second_kblock_high_nibble_beacon ... ok\ntest tests::global_scale_must_not_be_rounded_into_bf16_weights ... ok\ntest tests::known_codes_nibbles_and_four_block_groups_are_independent ... ok\n\ntest result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n",
+        "stderr": "",
+        "scope": "std-only CPU mathematical reference, no GPU/model/timing acceptance"
+      },
+      "binary_identity_limit": "Original receipt binds source/compiler/stdout and successful test run, but does not contain CPU executable SHA; no missing ELF hash is invented."
+    },
+    "policy36": {
+      "receipt": {
+        "path": "devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/lmhead-wmma-min-rows-01/cpu-policy-receipt.json",
+        "bytes": 1719,
+        "sha256": "2c86b5f6a043d7fa68f5cf361991816af47236b57c91b4e04138e4c64b73ee57"
+      },
+      "record": {
+        "scope": "Actual local CPU C++17 extraction of exact L1 policy and dispatch expression; no native/CUDA build or GPU execution",
+        "cases": 36,
+        "passed": 36,
+        "compile_command": [
+          "/usr/bin/clang++",
+          "-std=c++17",
+          "-O2",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/lmhead-wmma-min-rows-01/cpu-policy-contract.cpp",
+          "-o",
+          "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/layout-candidate/devlocal/model-microbench-layout/lmhead-wmma-min-rows-01/cpu-policy-contract"
+        ],
+        "compile_exit_code": 0,
+        "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.5.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+        "policy_is_exact_postimage_substring": true,
+        "policy_sha256": "eb0263736ff7709590b2e4ceec80826cf5c41099a9a4f043bf50ec5ed9750b70",
+        "postimage_sha256": "8a54e68f03f08a27852025ef3e6ef470f609c7110beb52e5c45f934f43dbc153",
+        "source_sha256": "c3825b577ac11140ba890a9b1efb43458c6c568dadcff3f2990c9f26e5b4e7a1",
+        "binary_sha256": "d27b330a1d009502007b06d16b82b78aaebde41993144ffa79de9c9e7e270628",
+        "driver_sha256": "33744d7ab472428602b056ab0fd55f3b0c57d94c958e3e9e1bd8fa97eee807c0",
+        "cases_sha256": "23ad1bb0a31fc112d3ad100c6363bf217810b1f834a856bb6ec4bad475fb91ce",
+        "compile_stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "compile_stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  },
+  "NCU": {
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/receipt.json",
+      "bytes": 31125,
+      "sha256": "fe26548d970f1c6a993cb03d8a4cd8194396a5a55e3b60cd7fd720c2b35eda75"
+    },
+    "source": {
+      "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+      "dirty": true,
+      "patch_sha256": "f1c025dcf41b69c3882da3b0ea735743bab596a2113c6f4a76e40c2629f0b079",
+      "complete_source_object_sha256": "e15d91d4ad448a545261e471c9f4da36dabbb6f203649a4c534041be36d1cc32"
+    },
+    "artifact": {
+      "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+      "sha256": "101dd090f8dfcffe0a534b282dffe56c675d04d9f0112a659da442d1b2624151",
+      "size_bytes": 33047736
+    },
+    "scope": "same synthetic operator, no actual checkpoint/model performance claim",
+    "records": [
+      {
+        "name": "wmma0-tile64-m1",
+        "environment": {
+          "APXINF_NVFP4_A16_WMMA": "0",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+          "APXINF_REQUIRE_RECIPES": "1"
+        },
+        "returncode": 0,
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma0-tile64-m1.ncu-rep",
+          "bytes": 614186,
+          "sha256": "b6354e8f111bd13ab7cd0d3fec22e3b294fd2364fdfb87231aeef0f5782715fe"
+        },
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma0-tile64-m1.csv",
+          "bytes": 33974,
+          "sha256": "af6152b99236969d61e6c29d259496c3af7fc405fb11f084132cd863ab664c68"
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma0-tile64-m1.log",
+          "bytes": 4236,
+          "sha256": "9ec82b7f4ff89a37e6f4a0fbe28ec13ae02dac2d897d88243ea011ac0f0a5ffd"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "clock_after": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        }
+      },
+      {
+        "name": "wmma0-tile64-m4",
+        "environment": {
+          "APXINF_NVFP4_A16_WMMA": "0",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+          "APXINF_REQUIRE_RECIPES": "1"
+        },
+        "returncode": 0,
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma0-tile64-m4.ncu-rep",
+          "bytes": 615042,
+          "sha256": "44a25936fb629e58284eaef5c2bbf51271bde7697af4471f8c29d09c2dc164ec"
+        },
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma0-tile64-m4.csv",
+          "bytes": 33963,
+          "sha256": "d5984fcfe8ba26ee4c8cdc68d91379533b255eda65edddd8cb8c87dbc28af54d"
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma0-tile64-m4.log",
+          "bytes": 4236,
+          "sha256": "f9a78a935faf7c064c7c8b788f3b80bf07ac70d98bb6a1c289e1c15166c99b41"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "clock_after": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        }
+      },
+      {
+        "name": "wmma1-tile32-m1",
+        "environment": {
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+          "APXINF_REQUIRE_RECIPES": "1"
+        },
+        "returncode": 0,
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile32-m1.ncu-rep",
+          "bytes": 616034,
+          "sha256": "b1c5f0007ccc76bea6b650e685159746a7464f6822a0a3c56064c81adc3badeb"
+        },
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile32-m1.csv",
+          "bytes": 34037,
+          "sha256": "86ade203d18f131b7daddbbc6b4bd8476e85831a494129f8d2f76a5f521c5c7f"
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile32-m1.log",
+          "bytes": 4236,
+          "sha256": "78402b17dff7a4ca813da84d6b8d4e46a10f6e72b7f558ce6d83fceeaec00d2a"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "clock_after": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        }
+      },
+      {
+        "name": "wmma1-tile32-m4",
+        "environment": {
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "32",
+          "APXINF_REQUIRE_RECIPES": "1"
+        },
+        "returncode": 0,
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile32-m4.ncu-rep",
+          "bytes": 615123,
+          "sha256": "d3ce4d0c93c371e4923ab50c78262aca567d6793d2f90013c4e23191860df7d2"
+        },
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile32-m4.csv",
+          "bytes": 34019,
+          "sha256": "11e8dd36c05d5c725416da259ff6f72aabd381b541bfbbd0110d03a61f415998"
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile32-m4.log",
+          "bytes": 4236,
+          "sha256": "11f61a8fd8e2200b95f9a35d9972ac09213afcf82560677fe27b4e736ed8f1c4"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "clock_after": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        }
+      },
+      {
+        "name": "wmma1-tile64-m1",
+        "environment": {
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+          "APXINF_REQUIRE_RECIPES": "1"
+        },
+        "returncode": 0,
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile64-m1.ncu-rep",
+          "bytes": 614829,
+          "sha256": "468de7d50cd84c57e3e942ff908a74cd680b323cb7677efc18016e8212892f6b"
+        },
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile64-m1.csv",
+          "bytes": 34041,
+          "sha256": "7401511bc7385e3604c9252e4eb3950f4246f5ee8a1bd5e2dba0ad5cc980be23"
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile64-m1.log",
+          "bytes": 4236,
+          "sha256": "bd766457f7f6ad7f998be903f7a429c4110cb387cdd16177845b7377f4a16781"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "clock_after": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        }
+      },
+      {
+        "name": "wmma1-tile64-m4",
+        "environment": {
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "64",
+          "APXINF_REQUIRE_RECIPES": "1"
+        },
+        "returncode": 0,
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile64-m4.ncu-rep",
+          "bytes": 615088,
+          "sha256": "23424a1214f7e89de27df739396390e00ad1cd186007876c5472a08f8e6ae236"
+        },
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile64-m4.csv",
+          "bytes": 34023,
+          "sha256": "ae07efeb0d21aa1b55df239decf550f28825d3bc7b8dea3172aa7683826574a2"
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile64-m4.log",
+          "bytes": 4236,
+          "sha256": "ee2627806924f83dc65af4a3f5581ae0236f00208fcf91f54e3772a39f02b292"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "clock_after": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        }
+      },
+      {
+        "name": "wmma1-tile128-m1",
+        "environment": {
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_REQUIRE_RECIPES": "1"
+        },
+        "returncode": 0,
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile128-m1.ncu-rep",
+          "bytes": 614835,
+          "sha256": "209f10a19f3d531f1f0cda3e309573d04e90702a611bf4f9198a9b35edad8fa5"
+        },
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile128-m1.csv",
+          "bytes": 34042,
+          "sha256": "7472c4be53c911a7964d6eb80efa04be20b58b69aa41551db5e3c498dae66e93"
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile128-m1.log",
+          "bytes": 4249,
+          "sha256": "ca14005e4a7f1c7378e77f2122deabfd6f92058e6b468501f0f851a6b0c345af"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "clock_after": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        }
+      },
+      {
+        "name": "wmma1-tile128-m4",
+        "environment": {
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_REQUIRE_RECIPES": "1"
+        },
+        "returncode": 0,
+        "report": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile128-m4.ncu-rep",
+          "bytes": 616602,
+          "sha256": "e78748d4ed63605237829d185d7f3de0a2bff2ab75d1c0b653883752ab53a96d"
+        },
+        "csv": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile128-m4.csv",
+          "bytes": 34023,
+          "sha256": "53e2b81936dfd70a4cc563935b046fdafda60ddfc98b5db901ffd4f1679b34f9"
+        },
+        "log": {
+          "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/wmma1-tile128-m4.log",
+          "bytes": 4249,
+          "sha256": "09a2715ab169358448ab5e1ca11ef20bb8b79cd485a7ff03567474e0864b5e4e"
+        },
+        "clock_before": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        },
+        "clock_after": {
+          "min_freq": "1206000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "1206000000"
+        }
+      }
+    ],
+    "selected_metrics": {
+      "receipt": {
+        "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-operator-profile-02/selected-metrics.json",
+        "bytes": 6837,
+        "sha256": "3d3a9850715d7f8edcb41a290aa153e86d9e6fdc24fbfd50a46b076800f70531"
+      },
+      "rows": [
+        {
+          "name": "wmma0-tile64-m1",
+          "metrics": {
+            "Kernel Name": {
+              "value": "void unnamed>::nvfp4_a16_blackwell_gemv_bf16<1, 32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)",
+              "unit": ""
+            },
+            "gpu__time_duration.sum": {
+              "value": "1.469472",
+              "unit": "ms"
+            },
+            "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+              "value": "0",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "98.281586",
+              "unit": "%"
+            },
+            "launch__registers_per_thread": {
+              "value": "39",
+              "unit": "register/thread"
+            },
+            "derived__memory_l1_conflicts_shared_nway": {
+              "value": null,
+              "unit": null
+            }
+          }
+        },
+        {
+          "name": "wmma0-tile64-m4",
+          "metrics": {
+            "Kernel Name": {
+              "value": "void unnamed>::nvfp4_a16_blackwell_gemv_bf16<4, 32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)",
+              "unit": ""
+            },
+            "gpu__time_duration.sum": {
+              "value": "3.292032",
+              "unit": "ms"
+            },
+            "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+              "value": "0",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "49.604623",
+              "unit": "%"
+            },
+            "launch__registers_per_thread": {
+              "value": "69",
+              "unit": "register/thread"
+            },
+            "derived__memory_l1_conflicts_shared_nway": {
+              "value": null,
+              "unit": null
+            }
+          }
+        },
+        {
+          "name": "wmma1-tile128-m1",
+          "metrics": {
+            "Kernel Name": {
+              "value": "void unnamed>::nvfp4_a16_blackwell_wmma_bf16<1, 128, 32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int, int)",
+              "unit": ""
+            },
+            "gpu__time_duration.sum": {
+              "value": "2.325472",
+              "unit": "ms"
+            },
+            "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+              "value": "20.279420",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "65.818741",
+              "unit": "%"
+            },
+            "launch__registers_per_thread": {
+              "value": "63",
+              "unit": "register/thread"
+            },
+            "derived__memory_l1_conflicts_shared_nway": {
+              "value": null,
+              "unit": null
+            }
+          }
+        },
+        {
+          "name": "wmma1-tile128-m4",
+          "metrics": {
+            "Kernel Name": {
+              "value": "void unnamed>::nvfp4_a16_blackwell_wmma_bf16<4, 128, 32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int, int)",
+              "unit": ""
+            },
+            "gpu__time_duration.sum": {
+              "value": "2.512960",
+              "unit": "ms"
+            },
+            "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+              "value": "18.745222",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "49.573651",
+              "unit": "%"
+            },
+            "launch__registers_per_thread": {
+              "value": "71",
+              "unit": "register/thread"
+            },
+            "derived__memory_l1_conflicts_shared_nway": {
+              "value": null,
+              "unit": null
+            }
+          }
+        },
+        {
+          "name": "wmma1-tile32-m1",
+          "metrics": {
+            "Kernel Name": {
+              "value": "void unnamed>::nvfp4_a16_blackwell_wmma_bf16<1, 32, 32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int, int)",
+              "unit": ""
+            },
+            "gpu__time_duration.sum": {
+              "value": "2.407616",
+              "unit": "ms"
+            },
+            "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+              "value": "19.570098",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "57.515407",
+              "unit": "%"
+            },
+            "launch__registers_per_thread": {
+              "value": "71",
+              "unit": "register/thread"
+            },
+            "derived__memory_l1_conflicts_shared_nway": {
+              "value": null,
+              "unit": null
+            }
+          }
+        },
+        {
+          "name": "wmma1-tile32-m4",
+          "metrics": {
+            "Kernel Name": {
+              "value": "void unnamed>::nvfp4_a16_blackwell_wmma_bf16<4, 32, 32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int, int)",
+              "unit": ""
+            },
+            "gpu__time_duration.sum": {
+              "value": "2.922848",
+              "unit": "ms"
+            },
+            "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+              "value": "16.117736",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "65.785609",
+              "unit": "%"
+            },
+            "launch__registers_per_thread": {
+              "value": "64",
+              "unit": "register/thread"
+            },
+            "derived__memory_l1_conflicts_shared_nway": {
+              "value": null,
+              "unit": null
+            }
+          }
+        },
+        {
+          "name": "wmma1-tile64-m1",
+          "metrics": {
+            "Kernel Name": {
+              "value": "void unnamed>::nvfp4_a16_blackwell_wmma_bf16<1, 64, 32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int, int)",
+              "unit": ""
+            },
+            "gpu__time_duration.sum": {
+              "value": "2.215456",
+              "unit": "ms"
+            },
+            "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+              "value": "21.258317",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "65.736235",
+              "unit": "%"
+            },
+            "launch__registers_per_thread": {
+              "value": "63",
+              "unit": "register/thread"
+            },
+            "derived__memory_l1_conflicts_shared_nway": {
+              "value": null,
+              "unit": null
+            }
+          }
+        },
+        {
+          "name": "wmma1-tile64-m4",
+          "metrics": {
+            "Kernel Name": {
+              "value": "void unnamed>::nvfp4_a16_blackwell_wmma_bf16<4, 64, 32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int, int)",
+              "unit": ""
+            },
+            "gpu__time_duration.sum": {
+              "value": "2.727136",
+              "unit": "ms"
+            },
+            "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+              "value": "17.266104",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "57.636788",
+              "unit": "%"
+            },
+            "launch__registers_per_thread": {
+              "value": "71",
+              "unit": "register/thread"
+            },
+            "derived__memory_l1_conflicts_shared_nway": {
+              "value": null,
+              "unit": null
+            }
+          }
+        }
+      ]
+    }
+  },
+  "model_kernel_attribution": {
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/wmma-min4-model-kernel-attribution-01/receipt.json",
+      "bytes": 3022,
+      "sha256": "306bf9ae9f1904323537e6df3347c1e81d8778b284fca74685df109db9ea3267"
+    },
+    "record": {
+      "scope": "whole measured generation capture aggregate; no exact NVTX temporal SQL attribution claimed; explicit WMMA_MIN_ROWS4 and sharedA16off",
+      "cases": [
+        {
+          "name": "existing_graph_control",
+          "csv": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/profile/decode-kv4k-o1k.stats.csv",
+          "csv_sha256": "49c184526e3c1665b2eb16e7807cdbfa46995f742275f527d82b67c8b1811600",
+          "kernels": [
+            {
+              "Time (%)": "12.8",
+              "Total Time (ns)": "1438835200",
+              "Instances": "973",
+              "Avg (ns)": "1478761.8",
+              "Med (ns)": "1478784.0",
+              "Min (ns)": "1476640",
+              "Max (ns)": "1485760",
+              "StdDev (ns)": "986.5",
+              "Name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_gemv_bf16<(int)1, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)"
+            },
+            {
+              "Time (%)": "9.5",
+              "Total Time (ns)": "1071483360",
+              "Instances": "324",
+              "Avg (ns)": "3307047.4",
+              "Med (ns)": "3307056.0",
+              "Min (ns)": "3303648",
+              "Max (ns)": "3311648",
+              "StdDev (ns)": "1469.8",
+              "Name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_gemv_bf16<(int)4, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)"
+            }
+          ]
+        },
+        {
+          "name": "wmma_min4",
+          "csv": "devlocal/model-microbench/recovery-build/graph1-wmma-min4-tile128-decode4k-ab-01/profile/decode-kv4k-o1k.stats.csv",
+          "csv_sha256": "b5ac7452f93211a2d366895b11a3b05252770543878430bc347a3b140deea868",
+          "kernels": [
+            {
+              "Time (%)": "13.0",
+              "Total Time (ns)": "1435284960",
+              "Instances": "973",
+              "Avg (ns)": "1475113.0",
+              "Med (ns)": "1474976.0",
+              "Min (ns)": "1472032",
+              "Max (ns)": "1479744",
+              "StdDev (ns)": "1008.4",
+              "Name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_gemv_bf16<(int)1, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)"
+            },
+            {
+              "Time (%)": "7.5",
+              "Total Time (ns)": "825768992",
+              "Instances": "324",
+              "Avg (ns)": "2548669.7",
+              "Med (ns)": "2548576.0",
+              "Min (ns)": "2545440",
+              "Max (ns)": "2552512",
+              "StdDev (ns)": "1375.4",
+              "Name": "void apxinf::cuda_new::mlp_ops::<unnamed>::nvfp4_a16_blackwell_wmma_bf16<(int)4, (int)128, (int)32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int, int)"
+            }
+          ]
+        }
+      ],
+      "m4_total_gpu_ns_before": 1071483360,
+      "m4_total_gpu_ns_after": 825768992,
+      "m4_gpu_total_reduction_percent": 22.932168353972383,
+      "kernel_instance_match": 324,
+      "model_tpot_gain_not_equal_to_operator_gain": true
+    },
+    "actual_profile_bindings": [
+      {
+        "name": "existing-graph1-decode4k-control-01",
+        "scope": "Actual separate whole generation capture incl initial prefill+Decode; profiler is not formal TPS. nsys launcher identity is not assumed direct application/proc attestation.",
+        "source": {
+          "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+          "dirty": true,
+          "patch_sha256": "774ee979ebe6d2ef527cdc3bfb34b077a039fc96710b036f447c8e0d54b69416",
+          "complete_source_object_sha256": "59e72865271339e2caf186d93cf4fc922453adbd1c730e5b1b36fb66c8f35fd6"
+        },
+        "binary_sha256": {
+          "context": "30ff0fba03d9c2371c82c23215165cf850d3a434f03115ea34847d76b90ee28f",
+          "decode": "b181a6f9b020ae6f8a60f6ad33402a80d91df943e2be8cae2175c7fab5ed3b9f"
+        },
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_NVTX": "1",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_GEMM_REPORT": "1",
+          "APXINF_ATTENTION_REPORT": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "native_profile_iterations": 3,
+        "profile_report": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/nsys-existing-graph1-decode4k-control-01/decode-kv4k-o1k.nsys-rep",
+          "size_bytes": 25376622,
+          "sha256": "e0cbc6a1286a80cfe0592a56717eb66250e6918f934397e674dfc5a54f3d00c5"
+        },
+        "report_after_CPU_stats_export": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/nsys-existing-graph1-decode4k-control-01/decode-kv4k-o1k.nsys-rep",
+          "size_bytes": 25376622,
+          "sha256": "e0cbc6a1286a80cfe0592a56717eb66250e6918f934397e674dfc5a54f3d00c5"
+        },
+        "nsys_version": {
+          "argv": [
+            "nsys",
+            "--version"
+          ],
+          "returncode": 0,
+          "stdout": "NVIDIA Nsight Systems version 2025.3.3.80-253335977786v0\n",
+          "stdout_sha256": null
+        },
+        "stats_export": {
+          "argv": [
+            "nsys",
+            "stats",
+            "--report",
+            "cuda_gpu_kern_sum,cuda_api_sum,cuda_gpu_mem_time_sum",
+            "--format",
+            "csv",
+            "--output",
+            "-",
+            "--force-export=true",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/nsys-existing-graph1-decode4k-control-01/decode-kv4k-o1k.nsys-rep"
+          ],
+          "returncode": 0,
+          "stdout_sha256": null,
+          "stderr_sha256": null
+        },
+        "recipe_manifest_sha256_unchanged": "e03a098500c697bdf9ea0e15709e702e92bbddb3a9742d1ce14b4a894a9166a6",
+        "exit": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false
+        },
+        "raw_receipts": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/profile/summary.json",
+            "bytes": 2982883,
+            "sha256": "328144844cd7fa6a347442f37ffd82a834b51193e9f3647162e2884d221488f2"
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/existing-graph1-decode4k-control-01/identity.json",
+            "bytes": 523388,
+            "sha256": "6b1e3e46a59a96b2c5374463b8064f8432fbb03d6cb1f673bfaf965a6a351dc5"
+          }
+        ]
+      },
+      {
+        "name": "graph1-wmma-min4-tile128-decode4k-ab-01",
+        "scope": "Actual separate whole generation capture incl initial prefill+Decode; profiler is not formal TPS. nsys launcher identity is not assumed direct application/proc attestation.",
+        "source": {
+          "commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+          "dirty": true,
+          "patch_sha256": "18511ae73e87ff5c4025424f0008e1546928b888d66ee592cf6c14c9d48989d8",
+          "complete_source_object_sha256": "3bd673decb5dd9c8c87300b9cc950403ea1550b865f52165d15c968700a0c5b8"
+        },
+        "binary_sha256": {
+          "context": "49005c11289bb067286958d042dbcd4e6527293561f5df092944a94d317182af",
+          "decode": "84da8cdce02c63f11c7dfe74b354e9c6ac4a15a4a8ba7440059219462c51fe11"
+        },
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_NVTX": "1",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_GEMM_REPORT": "1",
+          "APXINF_ATTENTION_REPORT": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "native_profile_iterations": 3,
+        "profile_report": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/nsys-graph1-wmma-min4-tile128-decode4k-ab-01/decode-kv4k-o1k.nsys-rep",
+          "size_bytes": 25365386,
+          "sha256": "5d8fa990d99e07d81e578116e7b90a3ac1e6ed44b4e8d81cdaf2fb0ba2d8db54"
+        },
+        "report_after_CPU_stats_export": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/nsys-graph1-wmma-min4-tile128-decode4k-ab-01/decode-kv4k-o1k.nsys-rep",
+          "size_bytes": 25365386,
+          "sha256": "5d8fa990d99e07d81e578116e7b90a3ac1e6ed44b4e8d81cdaf2fb0ba2d8db54"
+        },
+        "nsys_version": {
+          "argv": [
+            "nsys",
+            "--version"
+          ],
+          "returncode": 0,
+          "stdout": "NVIDIA Nsight Systems version 2025.3.3.80-253335977786v0\n",
+          "stdout_sha256": null
+        },
+        "stats_export": {
+          "argv": [
+            "nsys",
+            "stats",
+            "--report",
+            "cuda_gpu_kern_sum,cuda_api_sum,cuda_gpu_mem_time_sum",
+            "--format",
+            "csv",
+            "--output",
+            "-",
+            "--force-export=true",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/nsys-graph1-wmma-min4-tile128-decode4k-ab-01/decode-kv4k-o1k.nsys-rep"
+          ],
+          "returncode": 0,
+          "stdout_sha256": null,
+          "stderr_sha256": null
+        },
+        "recipe_manifest_sha256_unchanged": "763aabd94cb56bac220704b38bba9a302d8b20c8d1ecfa6d01b231f3c9776be8",
+        "exit": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false
+        },
+        "raw_receipts": [
+          {
+            "path": "devlocal/model-microbench/recovery-build/graph1-wmma-min4-tile128-decode4k-ab-01/profile/summary.json",
+            "bytes": 2985466,
+            "sha256": "60e12fd70d2f90afefd4585a72f92c7f446adeb74fdf9b31247295bfb180720d"
+          },
+          {
+            "path": "devlocal/model-microbench/recovery-build/graph1-wmma-min4-tile128-decode4k-ab-01/identity.json",
+            "bytes": 524711,
+            "sha256": "7051d10f7205bc5ad743acd04f641bdb38d3e8192f61335a8730ba87e0aa3654"
+          }
+        ]
+      }
+    ]
+  },
+  "SASS": {
+    "receipt": {
+      "path": "devlocal/model-microbench/recovery-build/lmhead-wmma-sass-02/receipt.json",
+      "bytes": 5203,
+      "sha256": "900823c680bb164ce76ad4fd7e0a1abc09dce30d6ed0e2ba3feac07638b95efb"
+    },
+    "artifact": {
+      "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/deps/nvfp4_a16_wmma-bd55ad15ed1e0c7c",
+      "sha256": "5b7248acbba93d2cf22eecafa01f5a7cca8b81870ff83c1c4575fed638904949",
+      "size_bytes": 33047760
+    },
+    "output_sha256": "5c5fc951776dffee39c4e3369e0d489e980bb0076a4cb7ef0077a8eb693e6d7c",
+    "function_count": 24,
+    "shared_store_instruction_counts_static": {
+      "STS.U16": 48,
+      "STS.128": 96,
+      "STS.64": 96
+    },
+    "scope": "CPU-only fullcuobjdump streamed with function-section text filter; no GPU context/timing",
+    "pair32_source_change_performed": false
+  },
+  "limits": {
+    "isolated_clean_commit_Cargo_or_GPU_run": false,
+    "weather_E2E": false,
+    "full15_complete": false,
+    "percase30percent_goal": false,
+    "8K_result_included": false,
+    "model14_repeat_equality_is_full_mathematical_quality_proof": false,
+    "sanitizer_wrapper_identity_is_direct_proc_proof": false
+  },
+  "legacy_unchanged_definitions": {
+    "review_receipt_path": "devlocal/model-microbench/decode-policy-runner/devlocal/lmhead-wmma-review-01/legacy-exact-functions.json",
+    "review_receipt_sha256": "3acde2bebfc97cadf5bf467fe2f6d69c4a899d00923a38d64680a959cfd75325",
+    "records": [
+      {
+        "function": "load_global_128_no_allocate",
+        "hash_scope": "explicit return-type+exact-function-name signature through closing brace; excludes template/attributes",
+        "before_sha256": "e18b7a34e819ca7410feded4159cbe37c6e743e1bbf7647e1905c8e12b6d6ec0",
+        "after_sha256": "e18b7a34e819ca7410feded4159cbe37c6e743e1bbf7647e1905c8e12b6d6ec0",
+        "byte_identical": true
+      },
+      {
+        "function": "load_global_128_retain",
+        "hash_scope": "explicit return-type+exact-function-name signature through closing brace; excludes template/attributes",
+        "before_sha256": "ce03f55f70ceb2899ec66332bff555a84c6224a04c9b12af638085fe53e2b668",
+        "after_sha256": "ce03f55f70ceb2899ec66332bff555a84c6224a04c9b12af638085fe53e2b668",
+        "byte_identical": true
+      },
+      {
+        "function": "fp4_pair_to_float2",
+        "hash_scope": "explicit return-type+exact-function-name signature through closing brace; excludes template/attributes",
+        "before_sha256": "70430204a975dec839e592f69be22967dab332a9b96f3a1a618244e3f374a73b",
+        "after_sha256": "70430204a975dec839e592f69be22967dab332a9b96f3a1a618244e3f374a73b",
+        "byte_identical": true
+      },
+      {
+        "function": "fp8_pair_to_float2",
+        "hash_scope": "explicit return-type+exact-function-name signature through closing brace; excludes template/attributes",
+        "before_sha256": "91b626aa97e2bb36507df5a39eca1187d95f75cae0f86016ad18a7710348ef54",
+        "after_sha256": "91b626aa97e2bb36507df5a39eca1187d95f75cae0f86016ad18a7710348ef54",
+        "byte_identical": true
+      },
+      {
+        "function": "nvfp4_a16_blackwell_gemv_bf16",
+        "hash_scope": "explicit return-type+exact-function-name signature through closing brace; excludes template/attributes",
+        "before_sha256": "18ee1242579eb4f3534d7026493ce54e34e8d32cbff86749be81416c0de5c017",
+        "after_sha256": "18ee1242579eb4f3534d7026493ce54e34e8d32cbff86749be81416c0de5c017",
+        "byte_identical": true
+      },
+      {
+        "function": "launch_nvfp4_a16_blackwell_gemv",
+        "hash_scope": "explicit return-type+exact-function-name signature through closing brace; excludes template/attributes",
+        "before_sha256": "70b5261f8127531186f036fea21a5c2e9fcffc6dbaf68af0e217f736fb41dd1a",
+        "after_sha256": "70b5261f8127531186f036fea21a5c2e9fcffc6dbaf68af0e217f736fb41dd1a",
+        "byte_identical": true
+      },
+      {
+        "function": "nvfp4_a16_blackwell_gemv",
+        "hash_scope": "explicit return-type+exact-function-name signature through closing brace; excludes template/attributes",
+        "before_sha256": "410de669ef48d49c82ba4c61799776d1209351fb402d1676e86a449b5f95b218",
+        "after_sha256": "410de669ef48d49c82ba4c61799776d1209351fb402d1676e86a449b5f95b218",
+        "byte_identical": true
+      }
+    ],
+    "manifest_label_correction": "Original freeze substring matcher confused nvfp4_a16_blackwell_gemv with launcher suffix. Exact entry definition SHA is410de669ef48d49c82ba4c61799776d1209351fb402d1676e86a449b5f95b218, unchanged pre/post."
+  }
+}

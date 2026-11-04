@@ -94,4 +94,10 @@ int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
                              const void* global_scale, void* output, int n,
                              int k, int rows, cudaStream_t stream);
 
+// Internal BF16-WMMA implementation of the same W4A16 contract, M1..4.
+int nvfp4_a16_blackwell_wmma(const void* activation, const void* qweights,
+                           const void* block_scales, const void* global_scale,
+                           void* output, int n, int k, int rows, int tile_n,
+                           cudaStream_t stream);
+
 }  // namespace apxinf::cuda_new::mlp_ops

@@ -339,7 +339,10 @@ pub fn nvfp4_a16_blackwell_gemv(
     if q_dims.len() != 4 || q_dims[2..] != [128, 32] {
         return Err(invalid("NVFP4-A16 qweights must be [N/128, K/64, 128, 32]"));
     }
-    let (n, k) = (q_dims[0] * 128, q_dims[1] * 64);
+    let n = q_dims[0].checked_mul(128).filter(|n| *n > 0 && i32::try_from(*n).is_ok())
+        .ok_or_else(|| invalid("NVFP4-A16 N extent overflow"))?;
+    let k = q_dims[1].checked_mul(64).filter(|k| *k > 0 && i32::try_from(*k).is_ok())
+        .ok_or_else(|| invalid("NVFP4-A16 K extent overflow"))?;
     let scale_dims = block_scales.shape().dims().to_vec();
     if scale_dims != [q_dims[0], q_dims[1], 128, 4] {
         return Err(invalid("NVFP4-A16 scales must be [N/128, K/64, 128, 4]"));
@@ -361,6 +364,14 @@ pub fn nvfp4_a16_blackwell_gemv(
     let scale_buffer = tensor_storage(ctx, block_scales, DType::F8E4M3, &scale_dims)?;
     let global_buffer = tensor_storage(ctx, global_scale, DType::F32, &[1])?;
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
+    let output_start = output_buffer.ptr() as usize;
+    let output_end = output_start.saturating_add(output_buffer.len());
+    for source in [&activation_buffer,&qweight_buffer,&scale_buffer,&global_buffer] {
+        let start = source.ptr() as usize;
+        if output_start < start.saturating_add(source.len()) && start < output_end {
+            return Err(invalid("NVFP4-A16 output must not overlap any input binding"));
+        }
+    }
     unsafe {
         status::check(abi::apxinf_nvfp4_a16_blackwell_gemv(
             activation_buffer.ptr(),

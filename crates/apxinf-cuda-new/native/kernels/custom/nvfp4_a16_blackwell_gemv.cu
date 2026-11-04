@@ -13,6 +13,7 @@
 #include <cuda_fp4.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#include <mma.h>
 
 namespace apxinf::cuda_new::mlp_ops {
 namespace {
@@ -184,6 +185,122 @@ void launch_nvfp4_a16_blackwell_gemv(
   }
 }
 
+// BF16 A and exact BF16(E2M1 * E4M3-block-scale) B; no activation
+// quantization. The separate F32 global scale remains AFTER the full dot.
+// Pad only the WMMA M dimension to16. N tiling divides the original N128
+// packing; each CTA stages exactly one contiguous tile's packed rows.
+template <int kRows, int kTileN, int kStaticKBlocks>
+__global__ __launch_bounds__(kTileN * 2, 1)
+void nvfp4_a16_blackwell_wmma_bf16(
+    const __nv_bfloat16* __restrict__ activation,
+    const unsigned char* __restrict__ qweights,
+    const unsigned char* __restrict__ block_scales,
+    const float* __restrict__ global_scale,
+    __nv_bfloat16* __restrict__ output, int n, int runtime_k_blocks) {
+  constexpr int kBlockThreads = kTileN * 2;
+  constexpr int kWmmaStride = kKTile + 8; // multiple8, rotate shared-memory banks
+  __shared__ __align__(32) __nv_bfloat16 shared_a[16][kWmmaStride];
+  __shared__ __align__(32) __nv_bfloat16 shared_b[kTileN][kWmmaStride];
+  __shared__ __align__(32) float shared_output[16][kTileN];
+  const int tid = threadIdx.x;
+  const int warp = tid / 32;
+  const int local_n = tid / 2;
+  const int k_half = tid & 1;
+  const int column = static_cast<int>(blockIdx.x) * kTileN + local_n;
+  const int k_blocks = kStaticKBlocks == 0 ? runtime_k_blocks : kStaticKBlocks;
+  const int k = k_blocks * kKTile;
+  // Inactive M rows stay zero throughout all K tiles. Initialization is
+  // outside the K loop and fenced before active-row stores/WMMA reads.
+  for (int i = tid; i < 16 * kKTile; i += kBlockThreads)
+    shared_a[i / kKTile][i % kKTile] = __float2bfloat16_rn(0.0F);
+  __syncthreads();
+  using namespace nvcuda;
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> accumulator;
+  wmma::fill_fragment(accumulator, 0.0F);
+#pragma unroll 1
+  for (int kb = 0; kb < k_blocks; ++kb) {
+    for (int i = tid; i < kRows * kKTile; i += kBlockThreads) {
+      const int row = i / kKTile;
+      const int component = i % kKTile;
+      shared_a[row][component] = activation[
+          static_cast<long long>(row) * k + kb * kKTile + component];
+    }
+    const long long tile_row =
+        (static_cast<long long>(column / kNTile) * k_blocks + kb) *
+            kNTile + column % kNTile;
+    const Uint4 packed = load_global_128_no_allocate(
+        qweights + tile_row * kPackedBytesPerRowTile + k_half * 16);
+    const unsigned short sf = *reinterpret_cast<const unsigned short*>(
+        block_scales + tile_row * kScalesPerRowTile + k_half * 2);
+    const float2 scales = fp8_pair_to_float2(sf);
+    const unsigned int words[4]{packed.x, packed.y, packed.z, packed.w};
+#pragma unroll
+    for (int word = 0; word < 4; ++word) {
+#pragma unroll
+      for (int byte = 0; byte < 4; ++byte) {
+        const int pair = word * 4 + byte;
+        const float2 w = fp4_pair_to_float2((words[word] >> (byte * 8)) & 0xffU);
+        const float scale = pair < 8 ? scales.x : scales.y;
+        // Every finite FP4*E4M3 product has <=6 significant binary bits and
+        // magnitude between2^-10 and2688 (or zero), exactly representable BF16.
+        // global_scale is intentionally excluded from this conversion.
+        shared_b[local_n][k_half * 32 + pair * 2] =
+            __float2bfloat16_rn(w.x * scale);
+        shared_b[local_n][k_half * 32 + pair * 2 + 1] =
+            __float2bfloat16_rn(w.y * scale);
+      }
+    }
+    __syncthreads();
+#pragma unroll
+    for (int component = 0; component < kKTile; component += 16) {
+      wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16,
+                     wmma::row_major> a_fragment;
+      wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16,
+                     wmma::col_major> b_fragment;
+      wmma::load_matrix_sync(a_fragment, &shared_a[0][component], kWmmaStride);
+      wmma::load_matrix_sync(b_fragment, &shared_b[warp * 16][component], kWmmaStride);
+      wmma::mma_sync(accumulator, a_fragment, b_fragment, accumulator);
+    }
+    __syncthreads(); // all WMMA reads finish before next tile overwrites sharedB/A
+  }
+  wmma::store_matrix_sync(&shared_output[0][warp * 16], accumulator,
+                          kTileN, wmma::mem_row_major);
+  __syncthreads();
+  for (int i = tid; i < kRows * kTileN; i += kBlockThreads) {
+    const int row = i / kTileN;
+    const int col = i % kTileN;
+    output[static_cast<long long>(row) * n +
+           static_cast<long long>(blockIdx.x) * kTileN + col] =
+        __float2bfloat16_rn(shared_output[row][col] * global_scale[0]);
+  }
+}
+
+template <int Rows, int TileN>
+void launch_nvfp4_a16_blackwell_wmma(
+    const __nv_bfloat16* a, const unsigned char* w,
+    const unsigned char* s, const float* g, __nv_bfloat16* o,
+    int n, int k, cudaStream_t stream) {
+  if (k == 2048) {
+    nvfp4_a16_blackwell_wmma_bf16<Rows, TileN, 32>
+        <<<n / TileN, TileN * 2, 0, stream>>>(a, w, s, g, o, n, 32);
+  } else {
+    nvfp4_a16_blackwell_wmma_bf16<Rows, TileN, 0>
+        <<<n / TileN, TileN * 2, 0, stream>>>(a, w, s, g, o, n, k / kKTile);
+  }
+}
+
+template <int Rows>
+void dispatch_nvfp4_a16_wmma_tile(
+    const __nv_bfloat16* a, const unsigned char* w,
+    const unsigned char* s, const float* g, __nv_bfloat16* o,
+    int n, int k, int tile_n, cudaStream_t stream) {
+  switch (tile_n) {
+    case 32: launch_nvfp4_a16_blackwell_wmma<Rows, 32>(a,w,s,g,o,n,k,stream); break;
+    case 64: launch_nvfp4_a16_blackwell_wmma<Rows, 64>(a,w,s,g,o,n,k,stream); break;
+    case 128: launch_nvfp4_a16_blackwell_wmma<Rows, 128>(a,w,s,g,o,n,k,stream); break;
+  }
+}
+
 }  // namespace
 
 int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
@@ -221,6 +338,30 @@ int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
     case 16:
       launch_nvfp4_a16_blackwell_gemv<16>(a, w, s, g, o, n, k, stream);
       break;
+  }
+  return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+
+// Internal provider entry selected only in the L1 adapter. Public L3/C ABI is
+// unchanged, old Rows8/16 remain available through the original implementation.
+int nvfp4_a16_blackwell_wmma(const void* activation, const void* qweights,
+                           const void* block_scales, const void* global_scale,
+                           void* output, int n, int k, int rows, int tile_n,
+                           cudaStream_t stream) {
+  if (!activation || !qweights || !block_scales || !global_scale || !output ||
+      n <= 0 || k <= 0 || n % kNTile || k % kKTile ||
+      rows < 1 || rows > 4 || (tile_n != 32 && tile_n != 64 && tile_n != 128)) return -1;
+  const auto* a = static_cast<const __nv_bfloat16*>(activation);
+  const auto* w = static_cast<const unsigned char*>(qweights);
+  const auto* s = static_cast<const unsigned char*>(block_scales);
+  const auto* g = static_cast<const float*>(global_scale);
+  auto* o = static_cast<__nv_bfloat16*>(output);
+  switch (rows) {
+    case 1: dispatch_nvfp4_a16_wmma_tile<1>(a,w,s,g,o,n,k,tile_n,stream); break;
+    case 2: dispatch_nvfp4_a16_wmma_tile<2>(a,w,s,g,o,n,k,tile_n,stream); break;
+    case 3: dispatch_nvfp4_a16_wmma_tile<3>(a,w,s,g,o,n,k,tile_n,stream); break;
+    case 4: dispatch_nvfp4_a16_wmma_tile<4>(a,w,s,g,o,n,k,tile_n,stream); break;
   }
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }
