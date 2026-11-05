@@ -645,7 +645,7 @@ fn dynamic_decode_long_tail_matches_f64_with_tiny_query_and_weights() {
 }
 
 // This tiny positive V scale needs a subnormal residual in the three-part
-// decomposition. Tensor PV must take its FP32 tile fallback instead of FTZ.
+// decomposition. Tensor PV normalizes weights per row and restores them in FP32 instead of FTZ.
 #[test]
 fn dynamic_decode_preserves_tiny_value_scale() {
     let ctx = CudaContext::new(0).unwrap();
@@ -702,6 +702,69 @@ fn dynamic_decode_preserves_tiny_value_scale() {
         ctx.synchronize().unwrap();
         for got in transfers::to_cpu(&out).unwrap().as_bf16().unwrap() {
             assert!((got.to_f32() / (scale * ops::decode_e4m3(value_code)) - 1.0).abs() < 0.004);
+        }
+    }
+}
+
+// The MTP verifier reads rows causally: row r of an R-row call must equal a
+// single-row decode at valid-R+1+r, including splits fully masked for early rows.
+#[test]
+fn dynamic_multi_row_matches_single_row_decode() {
+    let ctx = CudaContext::new(0).unwrap();
+    let tokens = 520;
+    let kh = patterned_bf16(tokens * 512, 37, 251, 96.0);
+    let vh = patterned_bf16(tokens * 512, 53, 241, 80.0);
+    let key = ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
+    let value = ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
+    let kc = zeros(&ctx, vec![tokens, 2, 256], DType::F8E4M3);
+    let vc = zeros(&ctx, vec![tokens, 2, 256], DType::F8E4M3);
+    let ks = zeros(&ctx, vec![tokens, 2], DType::F32);
+    let vs = zeros(&ctx, vec![tokens, 2], DType::F32);
+    let cache = || ops::Qwen35DynamicFp8KvCache {
+        key: &kc,
+        value: &vc,
+        key_scales: &ks,
+        value_scales: &vs,
+    };
+    ops::qwen35_dynamic_kv_append(&ctx, tokens, 0, &key, &value, cache()).unwrap();
+    let splits = ops::qwen35_dynamic_decode_max_splits(tokens).unwrap();
+    let qh = patterned_bf16(4 * 4096, 29, 239, 64.0);
+    let run = |rows: usize, valid: usize, q: &[bf16]| -> Vec<f32> {
+        let query =
+            ordered_to_cuda(&Tensor::from_bf16(vec![rows, 16, 256], q).unwrap(), 0).unwrap();
+        let pm = zeros(&ctx, vec![rows * 16, splits], DType::F32);
+        let ps = zeros(&ctx, vec![rows * 16, splits], DType::F32);
+        let po = zeros(&ctx, vec![rows * 16, splits, 256], DType::F32);
+        let out = zeros(&ctx, vec![rows, 16, 256], DType::BF16);
+        ops::qwen35_dynamic_decode_attention(
+            &ctx,
+            valid,
+            &query,
+            cache(),
+            ops::Qwen35DynamicDecodeScratch {
+                partial_max: &pm,
+                partial_sum: &ps,
+                partial_output: &po,
+            },
+            &out,
+        )
+        .unwrap();
+        ctx.synchronize().unwrap();
+        let out = transfers::to_cpu(&out).unwrap();
+        out.as_bf16().unwrap().iter().map(|v| v.to_f32()).collect()
+    };
+    for rows in 2..=4 {
+        for valid in [rows, 33, 129, 130, 131, 257, 258, 259, 513, 520] {
+            let all = run(rows, valid, &qh[..rows * 4096]);
+            for r in 0..rows {
+                let one = run(1, valid - rows + 1 + r, &qh[r * 4096..(r + 1) * 4096]);
+                for (i, (got, want)) in all[r * 4096..(r + 1) * 4096].iter().zip(&one).enumerate() {
+                    assert!(
+                        got.is_finite() && (got - want).abs() <= 2.0e-2 * want.abs().max(0.05),
+                        "rows={rows} valid={valid} r={r} i={i} got={got} want={want}"
+                    );
+                }
+            }
         }
     }
 }

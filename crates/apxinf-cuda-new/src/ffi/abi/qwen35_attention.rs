@@ -4,7 +4,8 @@ use super::types::{CudaStream, Runtime};
 
 pub(crate) const SPEC_VERSION: u32 = 2;
 pub(crate) const DYNAMIC_KV_SPEC_VERSION: u32 = 1;
-pub(crate) const DYNAMIC_DECODE_SPEC_VERSION: u32 = 2;
+pub(crate) const DYNAMIC_DECODE_SPEC_VERSION: u32 = 3;
+pub(crate) const DYNAMIC_DECODE_MAX_ROWS: usize = 4;
 pub(crate) const QUERY_PREPARE_SPEC_VERSION: u32 = 1;
 pub(crate) const DECODE_SPLIT_TOKENS: usize = 256;
 pub(crate) const MIN_DECODE_SPLIT_TOKENS: usize = 128;
@@ -104,6 +105,7 @@ pub(crate) struct DynamicDecodeSpec {
     pub valid_tokens: u32,
     pub cache_capacity: u32,
     pub max_splits: u32,
+    pub rows: u32,
 }
 
 #[repr(C)]

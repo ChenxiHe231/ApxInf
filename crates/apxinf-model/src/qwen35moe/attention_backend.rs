@@ -193,8 +193,8 @@ impl Qwen35Fp8AttentionBackend {
         cache_capacity: usize,
         phase: DecoderPhase,
     ) -> Result<&mut AttentionScratch> {
-        let dynamic_decode =
-            self.kv_cache_dtype == Qwen35KvCacheDType::Fp8Dynamic && phase == DecoderPhase::Decode;
+        let dynamic_decode = self.kv_cache_dtype == Qwen35KvCacheDType::Fp8Dynamic
+            && tokens <= ops::QWEN35_MTP_DRAFT_STEPS + 1;
         let key = (ctx.device_id(), tokens, cache_capacity, dynamic_decode);
         if !self.scratch.contains_key(&key) {
             let profile =
@@ -873,7 +873,7 @@ fn run_dynamic_fp8_attention(
     )?;
 
     let valid = request.start_position + tokens;
-    if request.phase == DecoderPhase::Decode {
+    if tokens <= ops::QWEN35_MTP_DRAFT_STEPS + 1 {
         ops::qwen35_dynamic_decode_attention_gated(
             ctx,
             valid,
@@ -1029,7 +1029,8 @@ impl AttentionScratch {
             ops::QWEN35_ATTENTION_HEAD_DIM,
         ];
         let (fp8_key_bf16, fp8_value_bf16) = if cache_dtype == Qwen35KvCacheDType::Fp8
-            || (cache_dtype == Qwen35KvCacheDType::Fp8Dynamic && phase == DecoderPhase::Prefill)
+            || (cache_dtype == Qwen35KvCacheDType::Fp8Dynamic
+                && tokens > ops::QWEN35_MTP_DRAFT_STEPS + 1)
         {
             (
                 Some(zeros(ctx, fp8_cache_shape.clone(), DType::BF16)?),
@@ -1039,16 +1040,18 @@ impl AttentionScratch {
             (None, None)
         };
         let (dynamic_partial_max, dynamic_partial_sum, dynamic_partial_output) =
-            if cache_dtype == Qwen35KvCacheDType::Fp8Dynamic && phase == DecoderPhase::Decode {
+            if cache_dtype == Qwen35KvCacheDType::Fp8Dynamic
+                && tokens <= ops::QWEN35_MTP_DRAFT_STEPS + 1
+            {
                 let max_splits = ops::qwen35_dynamic_decode_max_splits(physical_cache_capacity)?;
-                let stats_shape = vec![ops::QWEN35_ATTENTION_Q_HEADS, max_splits];
+                let stats_shape = vec![tokens * ops::QWEN35_ATTENTION_Q_HEADS, max_splits];
                 (
                     Some(zeros(ctx, stats_shape.clone(), DType::F32)?),
                     Some(zeros(ctx, stats_shape, DType::F32)?),
                     Some(zeros(
                         ctx,
                         vec![
-                            ops::QWEN35_ATTENTION_Q_HEADS,
+                            tokens * ops::QWEN35_ATTENTION_Q_HEADS,
                             max_splits,
                             ops::QWEN35_ATTENTION_HEAD_DIM,
                         ],

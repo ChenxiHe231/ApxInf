@@ -1299,7 +1299,7 @@ __global__ void dynamic_decode_reduce_kernel(
     __nv_bfloat16* __restrict__ output, int num_splits, int max_splits) {
   const int query_head = blockIdx.x;
   const int dim = threadIdx.x;
-  if (query_head >= kQHeads || dim >= kHeadDim) return;
+  if (dim >= kHeadDim) return;
   __shared__ float partial[kWarps];
   __shared__ float weights[kThreads];
   const int64_t base = static_cast<int64_t>(query_head) * max_splits;
@@ -1364,7 +1364,234 @@ __global__ void dynamic_kv_dequant_kernel(
                                  value_scales[scale_index]);
 }
 
+// Multi-row direct dynamic-FP8 attention: rows = 1 (decode) .. 4 (MTP verifier).
+__device__ __forceinline__ void e4m3x4_to_bf16(unsigned int w, uint2& out) {
+  // E4M3 bit pattern placed in BF16 fields equals value * 2^-120 (subnormals included).
+  const __nv_bfloat162 k = __halves2bfloat162(__ushort_as_bfloat16(0x7b80), __ushort_as_bfloat16(0x7b80));
+  unsigned int lo = __byte_perm(w, 0, 0x1404), hi = __byte_perm(w, 0, 0x3424);
+  lo = (lo & 0x80008000U) | ((lo & 0x7f007f00U) >> 4);
+  hi = (hi & 0x80008000U) | ((hi & 0x7f007f00U) >> 4);
+  __nv_bfloat162 a = __hmul2(*reinterpret_cast<__nv_bfloat162*>(&lo), k);
+  __nv_bfloat162 b = __hmul2(*reinterpret_cast<__nv_bfloat162*>(&hi), k);
+  out.x = *reinterpret_cast<unsigned int*>(&a);
+  out.y = *reinterpret_cast<unsigned int*>(&b);
+}
+constexpr int kMrTile = 32, kMrLd = 264, kMrPld = 40;
+template <int kSplit, int kRows> constexpr size_t mr_smem() {
+  constexpr int MP = (kRows * 8 + 15) / 16 * 16;
+  constexpr size_t parts = 2 * MP * kMrPld * 2 > 8192 ? 2 * MP * kMrPld * 2 : 8192;
+  return size_t(MP) * kMrLd * 2 + size_t(kMrTile) * kMrLd * 2 + size_t(MP) * (kSplit + 4) * 4 + parts + 2 * kSplit * 4 + MP * 4;
+}
+__device__ __forceinline__ void mr_load(const __nv_fp8_e4m3* base, int first, int count, int kv, uint4* r) {
+#pragma unroll
+  for (int j = 0; j < 2; ++j) {
+    const int c = threadIdx.x + j * 256, t = c >> 4, d = (c & 15) * 16;
+    r[j] = t < count ? *reinterpret_cast<const uint4*>(base + (static_cast<int64_t>(first + t) * kKvHeads + kv) * kHeadDim + d)
+                     : make_uint4(0, 0, 0, 0);
+  }
+}
+__device__ __forceinline__ void mr_store(__nv_bfloat16* kvs, const uint4* r) {
+#pragma unroll
+  for (int j = 0; j < 2; ++j) {
+    const int c = threadIdx.x + j * 256, t = c >> 4, d = (c & 15) * 16;
+    uint2 o[4];
+    e4m3x4_to_bf16(r[j].x, o[0]); e4m3x4_to_bf16(r[j].y, o[1]);
+    e4m3x4_to_bf16(r[j].z, o[2]); e4m3x4_to_bf16(r[j].w, o[3]);
+    uint4* dst = reinterpret_cast<uint4*>(kvs + t * kMrLd + d);
+    dst[0] = make_uint4(o[0].x, o[0].y, o[1].x, o[1].y);
+    dst[1] = make_uint4(o[2].x, o[2].y, o[3].x, o[3].y);
+  }
+}
+template <int kSplit, int kRows>
+__global__ __launch_bounds__(256) void dynamic_mr_kernel(
+    const __nv_bfloat16* __restrict__ query, const __nv_fp8_e4m3* __restrict__ key_cache,
+    const __nv_fp8_e4m3* __restrict__ value_cache, const float* __restrict__ key_scales,
+    const float* __restrict__ value_scales, float* __restrict__ partial_max,
+    float* __restrict__ partial_sum, float* __restrict__ partial_output,
+    int valid_tokens, int max_splits) {
+  namespace wmma = nvcuda::wmma;
+  constexpr int M = kRows * 8, MP = (M + 15) / 16 * 16, MT = MP / 16, NT = MT * 2, NP = 8 / NT;
+  constexpr int SLD = kSplit + 4;
+  extern __shared__ __align__(128) unsigned char sm[];
+  auto* q = reinterpret_cast<__nv_bfloat16*>(sm);
+  auto* kvs = q + MP * kMrLd;
+  auto* sc = reinterpret_cast<float*>(kvs + kMrTile * kMrLd);
+  auto* pr = reinterpret_cast<__nv_bfloat16*>(sc + MP * SLD);
+  auto* red = reinterpret_cast<float*>(pr);
+  constexpr int kPartBytes = 2 * MP * kMrPld * 2 > 8192 ? 2 * MP * kMrPld * 2 : 8192;
+  auto* ks = reinterpret_cast<float*>(reinterpret_cast<unsigned char*>(pr) + kPartBytes);
+  auto* vs = ks + kSplit;
+  auto* wsc = vs + kSplit;
+  const int split = blockIdx.x, kv = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int begin = split * kSplit;
+  const int count = min(kSplit, valid_tokens - begin);
+  if (count <= 0) return;
+  const int tiles = (count + kMrTile - 1) / kMrTile;
+  uint4 reg[2];
+  mr_load(key_cache, begin, min(kMrTile, count), kv, reg);
+  for (int i = tid; i < MP * kHeadDim; i += 256) {
+    const int m = i >> 8, d = i & 255, r = m >> 3, h = m & 7;
+    q[m * kMrLd + d] = m < M ? query[(r * kQHeads + kv * kQueriesPerKvHead + h) * kHeadDim + d] : __float2bfloat16(0.0F);
+  }
+  for (int i = tid; i < kSplit; i += 256) {
+    const int64_t row = static_cast<int64_t>(begin + i) * kKvHeads + kv;
+    ks[i] = i < count ? key_scales[row] : 0.0F;
+    vs[i] = i < count ? value_scales[row] : 0.0F;
+  }
+  for (int tile = 0; tile < tiles; ++tile) {
+    const int t0 = tile * kMrTile;
+    mr_store(kvs, reg);
+    if (tile + 1 < tiles) mr_load(key_cache, begin + t0 + kMrTile, min(kMrTile, count - t0 - kMrTile), kv, reg);
+    else mr_load(value_cache, begin, min(kMrTile, count), kv, reg);
+    __syncthreads();
+    {
+      const int ot = warp % NT, kp = warp / NT, mt = ot >> 1, nt = ot & 1;
+      wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> a;
+      wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> b;
+      wmma::fragment<wmma::accumulator, 16, 16, 16, float> c;
+      wmma::fill_fragment(c, 0.0F);
+#pragma unroll
+      for (int d = kp * (kHeadDim / NP); d < (kp + 1) * (kHeadDim / NP); d += 16) {
+        wmma::load_matrix_sync(a, q + mt * 16 * kMrLd + d, kMrLd);
+        wmma::load_matrix_sync(b, kvs + nt * 16 * kMrLd + d, kMrLd);
+        wmma::mma_sync(c, a, b, c);
+      }
+      wmma::store_matrix_sync(red + warp * 256, c, 16, wmma::mem_row_major);
+    }
+    __syncthreads();
+    for (int e = tid; e < MP * kMrTile; e += 256) {
+      const int m = e >> 5, tok = e & 31, ot = (m >> 4) * 2 + (tok >> 4), idx = (m & 15) * 16 + (tok & 15);
+      float s = 0.0F;
+#pragma unroll
+      for (int kp = 0; kp < NP; ++kp) s += red[(kp * NT + ot) * 256 + idx];
+      sc[m * SLD + t0 + tok] = s * ks[t0 + tok] * 0.0625F;
+    }
+  }
+  __syncthreads();
+  for (int m = warp; m < M; m += 8) {
+    const int r = m >> 3, h = m & 7;
+    const int lim = min(valid_tokens - kRows + 1 + r - begin, kSplit);
+    float mx = -CUDART_INF_F;
+    for (int j = lane; j < lim; j += 32) mx = fmaxf(mx, sc[m * SLD + j]);
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffU, mx, delta));
+    float sum = 0.0F, wm = 0.0F;
+    for (int j = lane; j < tiles * kMrTile; j += 32) {
+      const float p = j < lim ? __expf(sc[m * SLD + j] - mx) : 0.0F;
+      const float w = p * vs[j];
+      sum += p;
+      wm = fmaxf(wm, w);
+      sc[m * SLD + j] = w;
+    }
+#pragma unroll
+    for (int delta = 16; delta > 0; delta >>= 1) {
+      sum += __shfl_xor_sync(0xffffffffU, sum, delta);
+      wm = fmaxf(wm, __shfl_xor_sync(0xffffffffU, wm, delta));
+    }
+    // Tensor cores flush BF16 subnormals: keep PV weights in [0,1] per row and
+    // restore the magnitude in FP32 when the split result is written.
+    wm = wm > 0.0F ? wm : 1.0F;
+    const float inv = 1.0F / wm;
+    const bool use_inv = isfinite(inv);
+    for (int j = lane; j < tiles * kMrTile; j += 32) {
+      const float w = sc[m * SLD + j];
+      sc[m * SLD + j] = use_inv ? w * inv : w / wm;
+    }
+    if (lane == 0) {
+      const int64_t pi = static_cast<int64_t>(r * kQHeads + kv * kQueriesPerKvHead + h) * max_splits + split;
+      partial_max[pi] = mx;
+      partial_sum[pi] = sum;
+      wsc[m] = wm;
+    }
+  }
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[MT][2];
+#pragma unroll
+  for (int mt = 0; mt < MT; ++mt) { wmma::fill_fragment(acc[mt][0], 0.0F); wmma::fill_fragment(acc[mt][1], 0.0F); }
+  for (int tile = 0; tile < tiles; ++tile) {
+    const int t0 = tile * kMrTile;
+    __syncthreads();
+    mr_store(kvs, reg);
+    if (tile + 1 < tiles) mr_load(value_cache, begin + t0 + kMrTile, min(kMrTile, count - t0 - kMrTile), kv, reg);
+    for (int e = tid; e < MP * kMrTile; e += 256) {
+      const int m = e >> 5, t = e & 31;
+      const float w = m < M ? sc[m * SLD + t0 + t] : 0.0F;
+      const __nv_bfloat16 hi = __float2bfloat16(w);
+      const float r1 = w - __bfloat162float(hi);
+      const __nv_bfloat16 mid = __float2bfloat16(r1);
+      pr[m * kMrPld + t] = hi;
+      pr[MP * kMrPld + m * kMrPld + t] = mid;
+    }
+    __syncthreads();
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> a;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> b;
+#pragma unroll
+    for (int ts = 0; ts < kMrTile; ts += 16) {
+#pragma unroll
+      for (int n = 0; n < 2; ++n) {
+        wmma::load_matrix_sync(b, kvs + ts * kMrLd + warp * 32 + n * 16, kMrLd);
+#pragma unroll
+        for (int mt = 0; mt < MT; ++mt) {
+#pragma unroll
+          for (int part = 0; part < 2; ++part) {
+            wmma::load_matrix_sync(a, pr + part * MP * kMrPld + mt * 16 * kMrPld + ts, kMrPld);
+            wmma::mma_sync(acc[mt][n], a, b, acc[mt][n]);
+          }
+        }
+      }
+    }
+  }
+  __syncthreads();
+  auto* out = reinterpret_cast<float*>(kvs);
+#pragma unroll
+  for (int mt = 0; mt < MT; ++mt)
+#pragma unroll
+    for (int n = 0; n < 2; ++n)
+      wmma::store_matrix_sync(out + mt * 16 * kHeadDim + warp * 32 + n * 16, acc[mt][n], kHeadDim, wmma::mem_row_major);
+  __syncthreads();
+  for (int e = tid; e < M * kHeadDim; e += 256) {
+    const int m = e >> 8, d = e & 255, r = m >> 3, h = m & 7;
+    const int64_t pi = static_cast<int64_t>(r * kQHeads + kv * kQueriesPerKvHead + h) * max_splits + split;
+    partial_output[pi * kHeadDim + d] = out[e] * wsc[m];
+  }
+}
+
+template <int kSplit, int kRows>
+void launch_dynamic_mr(const apxinf_qwen35_dynamic_decode_spec_t& spec,
+                       const apxinf_qwen35_dynamic_decode_bindings_t& bindings,
+                       cudaStream_t stream, int num_splits) {
+  static const cudaError_t attribute = cudaFuncSetAttribute(
+      dynamic_mr_kernel<kSplit, kRows>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(mr_smem<kSplit, kRows>()));
+  apxinf::framework::check_cuda(attribute);
+  dynamic_mr_kernel<kSplit, kRows>
+      <<<dim3(num_splits, kKvHeads), 256, mr_smem<kSplit, kRows>(), stream>>>(
+          static_cast<const __nv_bfloat16*>(bindings.query),
+          static_cast<const __nv_fp8_e4m3*>(bindings.key_cache),
+          static_cast<const __nv_fp8_e4m3*>(bindings.value_cache),
+          static_cast<const float*>(bindings.key_scales),
+          static_cast<const float*>(bindings.value_scales),
+          static_cast<float*>(bindings.partial_max),
+          static_cast<float*>(bindings.partial_sum),
+          static_cast<float*>(bindings.partial_output),
+          static_cast<int>(spec.valid_tokens),
+          static_cast<int>(spec.max_splits));
+}
+
+template <int kSplit>
+void launch_dynamic_mr_rows(const apxinf_qwen35_dynamic_decode_spec_t& spec,
+                            const apxinf_qwen35_dynamic_decode_bindings_t& bindings,
+                            cudaStream_t stream, int num_splits) {
+  switch (spec.rows) {
+    case 1: return launch_dynamic_mr<kSplit, 1>(spec, bindings, stream, num_splits);
+    case 2: return launch_dynamic_mr<kSplit, 2>(spec, bindings, stream, num_splits);
+    case 3: return launch_dynamic_mr<kSplit, 3>(spec, bindings, stream, num_splits);
+    default: return launch_dynamic_mr<kSplit, 4>(spec, bindings, stream, num_splits);
+  }
+}
+
 enum class DecodeKernel {
+  MultiRow,
   Baseline,
   RegisterQk1,
   RegisterQk4,
@@ -1375,7 +1602,7 @@ enum class DecodeKernel {
 };
 
 struct DecodeOptions {
-  DecodeKernel kernel = DecodeKernel::Baseline;
+  DecodeKernel kernel = DecodeKernel::MultiRow;
   int split_tokens = kDecodeSplitTokens;
   const char* error = nullptr;
 };
@@ -1386,7 +1613,9 @@ const DecodeOptions& decode_options() {
     DecodeOptions result;
     const char* kernel = std::getenv("APXINF_QWEN35_DECODE_KERNEL");
     if (kernel && *kernel) {
-      if (!std::strcmp(kernel, "baseline")) {
+      if (!std::strcmp(kernel, "mr")) {
+        result.kernel = DecodeKernel::MultiRow;
+      } else if (!std::strcmp(kernel, "baseline")) {
         result.kernel = DecodeKernel::Baseline;
       } else if (!std::strcmp(kernel, "reg-qk1")) {
         result.kernel = DecodeKernel::RegisterQk1;
@@ -1479,6 +1708,7 @@ void launch_dynamic_decode_split(
         case DecodeKernel::RegisterQk8:
           return launch_dynamic_decode_register<kSplitTokens, 8>(
               spec, bindings, stream, num_splits);
+        case DecodeKernel::MultiRow:
         case DecodeKernel::Baseline:
         case DecodeKernel::TensorQk1:
         case DecodeKernel::TensorQk4:
@@ -1558,7 +1788,8 @@ bool valid_dynamic_decode_spec(
       (static_cast<uint64_t>(spec.valid_tokens) + APXINF_QWEN35_MIN_DECODE_SPLIT_TOKENS - 1) /
       APXINF_QWEN35_MIN_DECODE_SPLIT_TOKENS;
   return spec.version == APXINF_QWEN35_DYNAMIC_DECODE_SPEC_VERSION &&
-         spec.valid_tokens > 0 && spec.valid_tokens <= spec.cache_capacity &&
+         spec.rows > 0 && spec.rows <= APXINF_QWEN35_DYNAMIC_DECODE_MAX_ROWS &&
+         spec.valid_tokens >= spec.rows && spec.valid_tokens <= spec.cache_capacity &&
          spec.cache_capacity <= INT_MAX && spec.max_splits > 0 &&
          spec.max_splits <= INT_MAX && splits <= spec.max_splits;
 }
@@ -1779,7 +2010,24 @@ extern "C" apxinf_status_t apxinf_qwen35_dynamic_decode_attention(
     const int num_splits = static_cast<int>(
         (static_cast<uint64_t>(spec->valid_tokens) + split_tokens - 1) /
         split_tokens);
-    switch (split_tokens) {
+    const bool multi_row =
+        spec->rows > 1 || options.kernel == DecodeKernel::MultiRow;
+    if (multi_row) {
+      switch (split_tokens) {
+        case 128:
+          launch_dynamic_mr_rows<128>(*spec, *bindings, stream, num_splits);
+          break;
+        case 256:
+          launch_dynamic_mr_rows<256>(*spec, *bindings, stream, num_splits);
+          break;
+        case 512:
+          launch_dynamic_mr_rows<512>(*spec, *bindings, stream, num_splits);
+          break;
+        default:
+          throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                        "unsupported multi-row decode split tokens");
+      }
+    } else switch (split_tokens) {
       case 128:
         launch_dynamic_decode_split<128>(
             *spec, *bindings, stream, num_splits, options.kernel);
@@ -1801,7 +2049,7 @@ extern "C" apxinf_status_t apxinf_qwen35_dynamic_decode_attention(
             "unsupported Qwen3.5 decode split tokens");
     }
     apxinf::framework::check_cuda(cudaGetLastError());
-    dynamic_decode_reduce_kernel<<<kQHeads, kThreads, 0, stream>>>(
+    dynamic_decode_reduce_kernel<<<kQHeads * spec->rows, kThreads, 0, stream>>>(
         static_cast<const float*>(bindings->partial_max),
         static_cast<const float*>(bindings->partial_sum),
         static_cast<const float*>(bindings->partial_output),

@@ -544,7 +544,7 @@ pub fn qwen35_dynamic_kv_prepare(
     }
 }
 
-/// Decode one query row directly from dynamic E4M3 K/V. Cache values are
+/// Decode 1..=4 causal query rows ending at `valid_tokens` directly from dynamic E4M3 K/V. Cache values are
 /// converted only in registers/shared memory; no BF16 cache is materialized.
 pub fn qwen35_dynamic_decode_attention(
     ctx: &CudaContext,
@@ -587,7 +587,11 @@ fn dynamic_decode_attention(
     if valid_tokens == 0 || valid_tokens > capacity || i32::try_from(valid_tokens).is_err() {
         return Err(invalid("Qwen3.5 dynamic decode valid length is invalid"));
     }
-    let query_shape = [1, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_HEAD_DIM];
+    let rows = query.shape().dims().first().copied().unwrap_or(0);
+    if rows == 0 || rows > abi::DYNAMIC_DECODE_MAX_ROWS || rows > valid_tokens {
+        return Err(invalid("Qwen3.5 dynamic decode row count is invalid"));
+    }
+    let query_shape = [rows, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_HEAD_DIM];
     let query = tensor_storage(ctx, query, DType::BF16, &query_shape)?;
     let output = tensor_storage(ctx, output, DType::BF16, &query_shape)?;
     let gate = gate
@@ -596,12 +600,12 @@ fn dynamic_decode_attention(
 
     let partial_shape = scratch.partial_max.shape().dims();
     if partial_shape.len() != 2
-        || partial_shape[0] != QWEN35_ATTENTION_Q_HEADS
+        || partial_shape[0] != rows * QWEN35_ATTENTION_Q_HEADS
         || partial_shape[1] == 0
         || scratch.partial_sum.shape().dims() != partial_shape
     {
         return Err(invalid(
-            "Qwen3.5 dynamic decode partial statistics must match [16,max_splits]",
+            "Qwen3.5 dynamic decode partial statistics must match [rows*16,max_splits]",
         ));
     }
     let max_splits = partial_shape[1];
@@ -619,7 +623,7 @@ fn dynamic_decode_attention(
         scratch.partial_output,
         DType::F32,
         &[
-            QWEN35_ATTENTION_Q_HEADS,
+            rows * QWEN35_ATTENTION_Q_HEADS,
             max_splits,
             QWEN35_ATTENTION_HEAD_DIM,
         ],
@@ -639,6 +643,7 @@ fn dynamic_decode_attention(
         valid_tokens: valid_tokens as u32,
         cache_capacity: capacity as u32,
         max_splits: max_splits as u32,
+        rows: rows as u32,
     };
     let bindings = abi::DynamicDecodeBindings {
         query: query.ptr(),

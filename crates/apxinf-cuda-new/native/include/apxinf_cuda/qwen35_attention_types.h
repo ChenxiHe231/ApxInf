@@ -14,7 +14,8 @@
 #define APXINF_QWEN35_ROTARY_DIM 64u
 #define APXINF_QWEN35_ATTENTION_MAX_SPLITS 32u
 #define APXINF_QWEN35_DYNAMIC_KV_SPEC_VERSION 1u
-#define APXINF_QWEN35_DYNAMIC_DECODE_SPEC_VERSION 2u
+#define APXINF_QWEN35_DYNAMIC_DECODE_SPEC_VERSION 3u
+#define APXINF_QWEN35_DYNAMIC_DECODE_MAX_ROWS 4u
 #define APXINF_QWEN35_QUERY_PREPARE_SPEC_VERSION 1u
 #define APXINF_QWEN35_DECODE_SPLIT_TOKENS 256u
 #define APXINF_QWEN35_MIN_DECODE_SPLIT_TOKENS 128u
@@ -113,24 +114,26 @@ typedef struct {
   uint32_t valid_tokens;
   uint32_t cache_capacity;
   uint32_t max_splits;
+  /* Causal query rows ending at valid_tokens: 1 for decode, up to 4 for MTP. */
+  uint32_t rows;
 } apxinf_qwen35_dynamic_decode_spec_t;
 
 typedef struct {
-  /* BF16 [1,16,256]. */
+  /* BF16 [rows,16,256]. */
   const void* query;
   /* F8E4M3 [capacity,2,256] and FP32 [capacity,2]. */
   const void* key_cache;
   const void* value_cache;
   const void* key_scales;
   const void* value_scales;
-  /* FP32 workspaces [16,max_splits], [16,max_splits] and
-     [16,max_splits,256]. */
+  /* FP32 workspaces [rows*16,max_splits], [rows*16,max_splits] and
+     [rows*16,max_splits,256]. */
   void* partial_max;
   void* partial_sum;
   void* partial_output;
-  /* Optional BF16 [1,16,256] sigmoid logits; null returns ungated output. */
+  /* Optional BF16 [rows,16,256] sigmoid logits; null returns ungated output. */
   const void* gate;
-  /* BF16 [1,16,256]. */
+  /* BF16 [rows,16,256]. */
   void* output;
   apxinf_cuda_stream_t stream;
 } apxinf_qwen35_dynamic_decode_bindings_t;
