@@ -50,6 +50,8 @@ barrier-stall ratio从1.867234降到0.214520，支持减少同步开销这一解
 全部248320输出、16个稀疏K地址锚点、只读输入和256B guards、3次Graph重放和3次eager检查通过；
 两臂496640B输出逐字节一致。另4项既有回归通过，其中real-vocab的M1 A/B/A实际覆盖新增分支。
 memcheck为0 errors，racecheck为0 hazards、0 errors、0 warnings。
+sanitizer实际执行`nvfp4_a16_wmma_real_vocab_geometry`，覆盖M1..4 eager A/B/A；
+Graph重放和16个K地址锚点由独立普通执行验证。
 16个地址锚点是正向检查，未宣称为坏kernel注入测试。
 
 [完整证据](evidence/lmhead-m1-stage-all.json)绑定实际源码overlay、ELF/native archive、
