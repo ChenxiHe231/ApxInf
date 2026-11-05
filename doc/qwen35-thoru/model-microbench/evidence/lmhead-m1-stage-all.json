@@ -1,0 +1,2606 @@
+{
+  "schema": "apxinf.qwen35.lmhead-m1-stage-all.v1",
+  "publication_parent": "2d6b5b95a3fe932425e6037e38940160d33d26dc",
+  "tested_source": {
+    "base_commit": "8278871a6bedee3af92cc512842b3ae458440cbf",
+    "patch_sha256": "0e87a2422b7272b1d08faee4331567c77c414bff14cf3079d1d8fa68e4fdc38c",
+    "untracked_sha256": {
+      "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/ordered_route_reduce.cuh": "1aee469ae9b5bc067d0dabf2d46d0ebcaee2aa5b78d37924537710bc276f277b",
+      "crates/apxinf-cuda-new/native/kernels/fa2/fa2_packed_gqa.cu": "a912c38d427f1d8032a16feccc338e77a9e975b80ca5c72ec184b55b2f85d22f",
+      "crates/apxinf-cuda-new/native/kernels/fa2/flash_attn/packed_gqa_fwd.h": "c3dccf7123b75a2a75977eb2d4ebad271738e73b15931e883303aa1406f0c05e",
+      "crates/apxinf-cuda-new/src/ops/qwen35_attention_bf16.rs": "69c0c9bcbd91e4ca2da8bf49a75ea623116d4c76e526af0250f26a5203690131",
+      "crates/apxinf-cuda-new/tests/fa2_packed_gqa.rs": "c4600c2cea4b00becbc32d0aeabe3beb2937db0569944dbc7906d78467bfee17",
+      "crates/apxinf-cuda-new/tests/fa2_packed_gqa_bench.rs": "478df2984ad7b1774c4e1dae01408514efdaed8272802205dee92fc3f6a833c6",
+      "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs": "9866719933ba5b377688fb5635c0e352efd1610b051672382f8d0b3220e39c32",
+      "crates/apxinf-cuda-new/tests/qwen35_attention_bf16_fused.rs": "51af2d1c8fc1a1fab4ab768752b9a67ee9e9d76782ce395a768bb923675462d4",
+      "crates/apxinf-cuda-new/tests/qwen35_gdn_causal_prologue.rs": "3bfb9c09590e9ab1430bd2fecd48a5d670f4bd3d51587cf98abea93a8349f8c8",
+      "crates/apxinf-cuda-new/tests/qwen35_gdn_independent_math.rs": "110aaa5c5d8d4094ba2f323fedfa1e587113aa02624dd4f9777a2a17629eb3a1",
+      "crates/apxinf-cuda-new/tests/qwen35_h2d_stream_order.rs": "e4d4f84beab6bade85f03a2e2429809ac8ea17a43136e27455de66536926091d",
+      "crates/apxinf-cuda-new/tests/support/fa2_packed_gqa_uniform_reference.rs": "a05d69831dd5f3fae800dd1ca77827408e0d00a6e43a0998efd2163fb517dcba",
+      "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98",
+      "crates/apxinf-cuda-new/tests/support/qwen35_bf16_fused_reference.rs": "2aa2c94274f758338f2aa3690828ec2e99c9c0cfd88228bc36877af8f0517bf9",
+      "crates/apxinf-cuda-new/tests/support/qwen35_gdn_math_asset.rs": "c11fde98e847f2634765bbfb593fbd1ca35da704918bcafd8d5b5f1315641d46",
+      "crates/apxinf-model/examples/support/qwen35_callback_timing.rs": "89677179479086d064bc2bd1dfbcdb360b8f528b33d483292626960bfd692b2a",
+      "crates/apxinf-model/examples/support/qwen35_decode_profile.rs": "5fac02e0a236854d6060c9713e4e29216ebae30e10928e6c759ecbe6a69fc23f",
+      "crates/apxinf-model/src/qwen35moe/long_static_fp8_reference.rs": "370054f025649954fe792d596ff37b69ac86bea71654e5129410a5b4d3614edb",
+      "crates/apxinf-model/tests/qwen35_bf16_kv_lifecycle.rs": "389345a357327ba6cc79888a37892db96633bea43cc6ee4c0f3331b9632f9888",
+      "crates/apxinf-model/tests/qwen35_checkpoint_bf16_attention.rs": "3c3e895c9bb4863d09d73ce2e270798f0e66521f00f04f24784ab7218689f521",
+      "crates/apxinf-model/tests/qwen35_real_state_protocol.rs": "c2b69f56a2d8706379c874f6cf0df25389dd34d2631d2373a97250ac3484d5be",
+      "crates/apxinf-model/tests/support/qwen35_checkpoint_attention_math.rs": "ce77a5aab5134c8fc332f565357904d0a39b7336b17586b6873b9ff2df6c7672",
+      "doc/qwen35-thoru/model-microbench/evidence/callback-v2-and-p2-status.json": "7d3d15d57ebe3930fc77a0987d445327bbecc07c79cfe0e667079484fe6e9f71"
+    },
+    "scope": "timing uses the documented experimental overlay; published native and test postimages match frozen tested files; unpublished default-off positions and cfg(test) diagnostics are outside this commit"
+  },
+  "source_files": [
+    {
+      "path": "crates/apxinf-cuda-new/native/kernels/custom/nvfp4_a16_blackwell_gemv.cu",
+      "preimage_sha256": "4c39b16b60df229f1f2c1845a188a3c465c1b3d504ce6f7690d7591ce6f9ba2d",
+      "postimage_sha256": "b83e9e5d2d548f914af0d112c0a2f28f75839bfd1b3bf62b97454c9f79068111",
+      "preimage_bytes": 15822,
+      "postimage_bytes": 20894
+    },
+    {
+      "path": "crates/apxinf-cuda-new/tests/nvfp4_a16_wmma.rs",
+      "preimage_sha256": "6537806fc65d094eafc684efe63a13293fa64f236eff9c51eb598cb19cd60930",
+      "postimage_sha256": "9866719933ba5b377688fb5635c0e352efd1610b051672382f8d0b3220e39c32",
+      "preimage_bytes": 11076,
+      "postimage_bytes": 17902
+    }
+  ],
+  "independent_reference": {
+    "path": "crates/apxinf-cuda-new/tests/support/nvfp4_a16_independent_reference.rs",
+    "sha256": "196fe40be0880bb222d973455574d0ba82e69485fc078cee83f65935f9667b98"
+  },
+  "artifacts": {
+    "operator": {
+      "status": "frozen_actual_ELF_and_native_GPU_pending",
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/nvfp4_a16_wmma",
+        "sha256": "1ceb7a3104ed32fd1a6e3bb85d98940d15ea1c7e06173ca0c291e7ee24835d39",
+        "size_bytes": 33711200
+      },
+      "list_stdout": "nvfp4_a16_m1_stage_all_event_bench: test\nnvfp4_a16_wmma_all_finite_codes_and_global_scale: test\nnvfp4_a16_wmma_capture_and_validation: test\nnvfp4_a16_wmma_packing_and_dense_matrix: test\nnvfp4_a16_wmma_real_vocab_geometry: test\nreference::tests::all_4064_finite_fp4_scale_products_are_exact_bf16: test\nreference::tests::constant_and_one_hot_have_analytic_answers_all_rows: test\nreference::tests::explicit_second_nblock_second_kblock_high_nibble_beacon: test\nreference::tests::global_scale_must_not_be_rounded_into_bf16_weights: test\nreference::tests::known_codes_nibbles_and_four_block_groups_are_independent: test\n\n10 tests, 0 benchmarks\n",
+      "ids": [],
+      "native_archive_sha256": "3ff9e244e4320befce68575f24876f9edbe483cff0943c6caa070329b9d35f7c",
+      "native_copy": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/libapxinf_gemm_native.a",
+      "native_build_script": {
+        "reason": "build-script-executed",
+        "package_id": "path+file:///opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/crates/apxinf-cuda-new#0.1.0",
+        "linked_libs": [
+          "static=apxinf_gemm_native",
+          "static=apxinf_edge_nvfp4_moe_sm110_cuda12",
+          "static=apxinf_edge_bf16_moe_sm110_cuda12",
+          "cublasLt",
+          "cublas",
+          "cudart",
+          "cuda",
+          "stdc++"
+        ],
+        "linked_paths": [
+          "native=/usr/local/cuda/lib64",
+          "native=/usr/local/cuda/targets/aarch64-linux/lib",
+          "native=/usr/local/cuda/thor/targets/aarch64-linux/lib",
+          "native=/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/build/apxinf-cuda-new-bdc6b45cbce59c62/out",
+          "native=/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/aot/aarch64-sm110-cuda12",
+          "native=/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/crates/apxinf-cuda-new/native/kernels/edge_bf16_moe/aot/aarch64-sm110-cuda12"
+        ],
+        "cfgs": [
+          "apxinf_edge_nvfp4_moe",
+          "apxinf_edge_bf16_moe",
+          "apxinf_fa2_decode"
+        ],
+        "env": [
+          [
+            "APXINF_KERNEL_BUILD_ID",
+            "gemm-kb1-cd9800c2b6bc6d05b55c19c4ea36d605"
+          ]
+        ],
+        "out_dir": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/build/apxinf-cuda-new-bdc6b45cbce59c62/out"
+      },
+      "freeze01_failed_only_native_lookup": true
+    },
+    "model": {
+      "artifacts": {
+        "qwen35_context_bench": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_context_bench",
+          "sha256": "397df35b6998321c758079ec13c30a6d4b7b1bf9676f865b50c37b17f6af4f99",
+          "size_bytes": 34949264,
+          "build_ids": [
+            "attention-kb1-1be98f5387acae8edc0852a681e9a973",
+            "gemm-kb1-cd9800c2b6bc6d05b55c19c4ea36d605"
+          ]
+        },
+        "qwen35_mtp_bench": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_mtp_bench",
+          "sha256": "bc61b5b4fbbf85383678c1f7e686e134c425cbe4d41b07e1262e16faa8165dae",
+          "size_bytes": 35419288,
+          "build_ids": [
+            "attention-kb1-1be98f5387acae8edc0852a681e9a973",
+            "gemm-kb1-cd9800c2b6bc6d05b55c19c4ea36d605"
+          ]
+        }
+      },
+      "native_archive_sha256": "35777b368b3c1206c86a098e14463da69cb0ebc0c6b7b4975306e2540dfed500",
+      "native_copy": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/libapxinf_gemm_native.a",
+      "native_build_script": {
+        "reason": "build-script-executed",
+        "package_id": "path+file:///opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/crates/apxinf-cuda-new#0.1.0",
+        "linked_libs": [
+          "static=apxinf_gemm_native",
+          "static=apxinf_edge_nvfp4_moe_sm110_cuda12",
+          "static=apxinf_edge_bf16_moe_sm110_cuda12",
+          "cublasLt",
+          "cublas",
+          "cudart",
+          "cuda",
+          "stdc++"
+        ],
+        "linked_paths": [
+          "native=/usr/local/cuda/lib64",
+          "native=/usr/local/cuda/targets/aarch64-linux/lib",
+          "native=/usr/local/cuda/thor/targets/aarch64-linux/lib",
+          "native=/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/build/apxinf-cuda-new-b7190ba26173bea0/out",
+          "native=/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/aot/aarch64-sm110-cuda12",
+          "native=/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/crates/apxinf-cuda-new/native/kernels/edge_bf16_moe/aot/aarch64-sm110-cuda12"
+        ],
+        "cfgs": [
+          "apxinf_edge_nvfp4_moe",
+          "apxinf_edge_bf16_moe",
+          "apxinf_fa2_decode"
+        ],
+        "env": [
+          [
+            "APXINF_KERNEL_BUILD_ID",
+            "gemm-kb1-cd9800c2b6bc6d05b55c19c4ea36d605"
+          ]
+        ],
+        "out_dir": "/opt/data/dev/apxinf-qwen35-thoru-perf/target/release/build/apxinf-cuda-new-b7190ba26173bea0/out"
+      }
+    }
+  },
+  "operator": {
+    "receipt": {
+      "status": "actual_synthetic_operator_quality_and_stream_event_pair_complete",
+      "artifact": {
+        "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/nvfp4_a16_wmma",
+        "sha256": "1ceb7a3104ed32fd1a6e3bb85d98940d15ea1c7e06173ca0c291e7ee24835d39",
+        "size_bytes": 33711200
+      },
+      "arms": [
+        {
+          "name": "original",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0",
+            "APXINF_GEMM_REPORT": "0",
+            "APXINF_ATTENTION_REPORT": "0",
+            "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+            "APXINF_EDGE_NVFP4_MOE_FC1_ACC1_E32": "0",
+            "APXINF_NVFP4_A16_M1_STAGE_ALL": "0",
+            "APXINF_LMHEAD_BENCH_OUTPUT": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-operator-01/original.bf16"
+          },
+          "command": [
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/nvfp4_a16_wmma",
+            "--exact",
+            "nvfp4_a16_m1_stage_all_event_bench",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "transport": {
+            "transport_returncode": 0,
+            "wall_ms": 12243.962583,
+            "transport_timeout": false
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "recipes_after": {
+              "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-fa2-model-4k-reference-s-formal-01",
+              "count": 757,
+              "manifest_sha256": "054a515dee5e9948849530cddbf4e02db3cffa7ad7268e8859790ffd200b8d92"
+            },
+            "hardware_after": {
+              "memory": {
+                "CmaTotal": "524288 kB",
+                "CmaFree": "376536 kB",
+                "HugePages_Total": "2048",
+                "HugePages_Free": "2033",
+                "HugePages_Rsvd": "0",
+                "HugePages_Surp": "0",
+                "Hugepagesize": "2048 kB"
+              },
+              "gpu_clocks": [
+                {
+                  "path": "/sys/class/devfreq/gpu-0",
+                  "governor": "simple_ondemand",
+                  "min_freq": "1206000000",
+                  "max_freq": "1206000000",
+                  "cur_freq": "1206000000"
+                }
+              ]
+            },
+            "target_binary_sha256": "1ceb7a3104ed32fd1a6e3bb85d98940d15ea1c7e06173ca0c291e7ee24835d39"
+          },
+          "clock_restore": {
+            "restored": {
+              "min_freq": "54000000",
+              "max_freq": "1206000000",
+              "governor": "simple_ondemand",
+              "cur_freq": "54000000"
+            },
+            "ok": true,
+            "lock_held": true,
+            "child_reaped": true
+          },
+          "median_event_per_call_ms": 1.460530853,
+          "quality_pass": true,
+          "log_sha256": "78dde60cb7eb7cf721ca283d7d34615e844db65ed89c08a4e71f40872d4a9621"
+        },
+        {
+          "name": "candidate",
+          "environment": {
+            "APXINF_NVFP4_A16_WMMA": "1",
+            "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+            "APXINF_REQUIRE_RECIPES": "1",
+            "APXINF_NVTX": "0",
+            "APXINF_GEMM_REPORT": "0",
+            "APXINF_ATTENTION_REPORT": "0",
+            "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+            "APXINF_EDGE_NVFP4_MOE_FC1_ACC1_E32": "0",
+            "APXINF_NVFP4_A16_M1_STAGE_ALL": "1",
+            "APXINF_LMHEAD_BENCH_OUTPUT": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-operator-01/candidate.bf16"
+          },
+          "command": [
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/nvfp4_a16_wmma",
+            "--exact",
+            "nvfp4_a16_m1_stage_all_event_bench",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1"
+          ],
+          "transport": {
+            "transport_returncode": 0,
+            "wall_ms": 10133.981166999998,
+            "transport_timeout": false
+          },
+          "exit": {
+            "returncode": 0,
+            "timed_out": false,
+            "child_reaped": true,
+            "lock_held_until_reaped": true,
+            "backend_task_may_be_live": false,
+            "recipes_after": {
+              "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-fa2-model-4k-reference-s-formal-01",
+              "count": 757,
+              "manifest_sha256": "054a515dee5e9948849530cddbf4e02db3cffa7ad7268e8859790ffd200b8d92"
+            },
+            "hardware_after": {
+              "memory": {
+                "CmaTotal": "524288 kB",
+                "CmaFree": "384052 kB",
+                "HugePages_Total": "2048",
+                "HugePages_Free": "2033",
+                "HugePages_Rsvd": "0",
+                "HugePages_Surp": "0",
+                "Hugepagesize": "2048 kB"
+              },
+              "gpu_clocks": [
+                {
+                  "path": "/sys/class/devfreq/gpu-0",
+                  "governor": "simple_ondemand",
+                  "min_freq": "1206000000",
+                  "max_freq": "1206000000",
+                  "cur_freq": "1206000000"
+                }
+              ]
+            },
+            "target_binary_sha256": "1ceb7a3104ed32fd1a6e3bb85d98940d15ea1c7e06173ca0c291e7ee24835d39"
+          },
+          "clock_restore": {
+            "restored": {
+              "min_freq": "54000000",
+              "max_freq": "1206000000",
+              "governor": "simple_ondemand",
+              "cur_freq": "54000000"
+            },
+            "ok": true,
+            "lock_held": true,
+            "child_reaped": true
+          },
+          "median_event_per_call_ms": 1.253963852,
+          "quality_pass": true,
+          "log_sha256": "741a2dd9f4515ae0880b6cbff2c44eb73843d311ddfdb37631f709a30d1182f9"
+        }
+      ],
+      "source_unchanged": true,
+      "recipes_unchanged": true,
+      "raw_output_exact": true,
+      "raw_output_sha256": "4ca4c021b33b1f0aa36ce8883a8c2946b08bdc5cee24d503251a6e3010900264",
+      "duration_reduction_percent": 14.14328225766005,
+      "model_performance_accepted": false,
+      "full_precision_accepted": false,
+      "scope": "2warm5 each,100calls per CUDAevent interval includes possible host enqueue gaps; synthetic full-vocab inputs; no model result"
+    },
+    "raw_output_sha256": "4ca4c021b33b1f0aa36ce8883a8c2946b08bdc5cee24d503251a6e3010900264",
+    "limitations": "five measured event batches of100calls per arm; host enqueue gaps can be included;16 sparse K anchors are positive address witnesses, not16 negative controls; no malformed-kernel GPU injection"
+  },
+  "regression": {
+    "result": {
+      "transport_returncode": 0,
+      "wall_ms": 8501.179334,
+      "transport_timeout": false
+    },
+    "artifact": {
+      "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/nvfp4_a16_wmma",
+      "sha256": "1ceb7a3104ed32fd1a6e3bb85d98940d15ea1c7e06173ca0c291e7ee24835d39",
+      "size_bytes": 33711200
+    },
+    "environment": {
+      "APXINF_NVFP4_A16_WMMA": "1",
+      "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+      "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+      "APXINF_REQUIRE_RECIPES": "1",
+      "APXINF_NVTX": "0",
+      "APXINF_GEMM_REPORT": "0",
+      "APXINF_ATTENTION_REPORT": "0",
+      "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+      "APXINF_EDGE_NVFP4_MOE_FC1_ACC1_E32": "0",
+      "APXINF_NVFP4_A16_M1_STAGE_ALL": "1",
+      "APXINF_LMHEAD_BENCH_OUTPUT": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-regression-01/not-written.bf16"
+    },
+    "test_result": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 7.80s"
+    ],
+    "exits": [
+      {
+        "returncode": 0,
+        "timed_out": false,
+        "child_reaped": true,
+        "lock_held_until_reaped": true,
+        "backend_task_may_be_live": false,
+        "recipes_after": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-fa2-model-4k-reference-s-formal-01",
+          "count": 757,
+          "manifest_sha256": "054a515dee5e9948849530cddbf4e02db3cffa7ad7268e8859790ffd200b8d92"
+        },
+        "hardware_after": {
+          "memory": {
+            "CmaTotal": "524288 kB",
+            "CmaFree": "384428 kB",
+            "HugePages_Total": "2048",
+            "HugePages_Free": "2033",
+            "HugePages_Rsvd": "0",
+            "HugePages_Surp": "0",
+            "Hugepagesize": "2048 kB"
+          },
+          "gpu_clocks": [
+            {
+              "path": "/sys/class/devfreq/gpu-0",
+              "governor": "simple_ondemand",
+              "min_freq": "1206000000",
+              "max_freq": "1206000000",
+              "cur_freq": "1206000000"
+            }
+          ]
+        },
+        "target_binary_sha256": "1ceb7a3104ed32fd1a6e3bb85d98940d15ea1c7e06173ca0c291e7ee24835d39"
+      }
+    ],
+    "clock_restored": [
+      {
+        "restored": {
+          "min_freq": "54000000",
+          "max_freq": "1206000000",
+          "governor": "simple_ondemand",
+          "cur_freq": "54000000"
+        },
+        "ok": true,
+        "lock_held": true,
+        "child_reaped": true
+      }
+    ]
+  },
+  "model": {
+    "receipt": {
+      "status": "paired_model_timing_complete_full_P2_unresolved",
+      "scope": "strict repeat/digest controlled paired model timing; not independent full P2 quality acceptance",
+      "stages": [
+        {
+          "name": "inspect",
+          "argv": [
+            "/Library/Developer/CommandLineTools/usr/bin/python3",
+            "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/fixed_clock_m1_matrix.py",
+            "--ssh-host",
+            "thor-u",
+            "--workdir",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner",
+            "--context-binary",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_context_bench",
+            "--decode-binary",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_mtp_bench",
+            "--checkpoint",
+            "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+            "--tuning-dir",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-fa2-model-4k-reference-s-formal-01",
+            "--mode",
+            "mtp",
+            "--mtp-strategy",
+            "fixed",
+            "--mtp-depth",
+            "3",
+            "--kv-cache",
+            "bf16",
+            "--moe-activation",
+            "nvfp4",
+            "--case",
+            "decode-kv4k-o1k",
+            "--timeout-sec",
+            "600",
+            "--lock-timeout-sec",
+            "120",
+            "--env",
+            "APXINF_QWEN35_CUDA_GRAPHS=1",
+            "--env",
+            "APXINF_QWEN35_VERIFY_GRAPHS=0",
+            "--env",
+            "APXINF_QWEN35_GRAPH_GDN=full",
+            "--env",
+            "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE=1",
+            "--env",
+            "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS=0",
+            "--env",
+            "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS=0",
+            "--env",
+            "APXINF_QWEN35_MTP_MATERIALIZE_SESSION=0",
+            "--env",
+            "APXINF_QWEN35_BF16_FUSED_ATTENTION=0",
+            "--env",
+            "APXINF_NVFP4_A16_WMMA=1",
+            "--env",
+            "APXINF_NVFP4_A16_WMMA_TILE_N=128",
+            "--env",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS=4",
+            "--env",
+            "APXINF_QWEN35_W4A16_SHARED=0",
+            "--env",
+            "APXINF_NVTX=0",
+            "--env",
+            "APXINF_FA2_PACKED_GQA=1",
+            "--env",
+            "APXINF_QWEN35_MTP_PERSISTENT_POSITIONS=0",
+            "--env",
+            "APXINF_EDGE_NVFP4_MOE_FC1_ACC1_E32=0",
+            "--inspect"
+          ],
+          "returncode": 0
+        },
+        {
+          "name": "original",
+          "argv": [
+            "/Library/Developer/CommandLineTools/usr/bin/python3",
+            "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/fixed_clock_m1_matrix.py",
+            "--ssh-host",
+            "thor-u",
+            "--workdir",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner",
+            "--context-binary",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_context_bench",
+            "--decode-binary",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_mtp_bench",
+            "--checkpoint",
+            "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+            "--tuning-dir",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-fa2-model-4k-reference-s-formal-01",
+            "--mode",
+            "mtp",
+            "--mtp-strategy",
+            "fixed",
+            "--mtp-depth",
+            "3",
+            "--kv-cache",
+            "bf16",
+            "--moe-activation",
+            "nvfp4",
+            "--case",
+            "decode-kv4k-o1k",
+            "--timeout-sec",
+            "600",
+            "--lock-timeout-sec",
+            "120",
+            "--env",
+            "APXINF_QWEN35_CUDA_GRAPHS=1",
+            "--env",
+            "APXINF_QWEN35_VERIFY_GRAPHS=0",
+            "--env",
+            "APXINF_QWEN35_GRAPH_GDN=full",
+            "--env",
+            "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE=1",
+            "--env",
+            "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS=0",
+            "--env",
+            "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS=0",
+            "--env",
+            "APXINF_QWEN35_MTP_MATERIALIZE_SESSION=0",
+            "--env",
+            "APXINF_QWEN35_BF16_FUSED_ATTENTION=0",
+            "--env",
+            "APXINF_NVFP4_A16_WMMA=1",
+            "--env",
+            "APXINF_NVFP4_A16_WMMA_TILE_N=128",
+            "--env",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS=4",
+            "--env",
+            "APXINF_QWEN35_W4A16_SHARED=0",
+            "--env",
+            "APXINF_NVTX=0",
+            "--env",
+            "APXINF_FA2_PACKED_GQA=1",
+            "--env",
+            "APXINF_QWEN35_MTP_PERSISTENT_POSITIONS=0",
+            "--env",
+            "APXINF_EDGE_NVFP4_MOE_FC1_ACC1_E32=0",
+            "--env",
+            "APXINF_NVFP4_A16_M1_STAGE_ALL=0",
+            "--metadata",
+            "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/identity.json",
+            "--run-mode",
+            "formal",
+            "--warmups",
+            "2",
+            "--repeats",
+            "5",
+            "--output",
+            "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/original"
+          ],
+          "returncode": 0
+        },
+        {
+          "name": "candidate",
+          "argv": [
+            "/Library/Developer/CommandLineTools/usr/bin/python3",
+            "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/fixed_clock_m1_matrix.py",
+            "--ssh-host",
+            "thor-u",
+            "--workdir",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner",
+            "--context-binary",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_context_bench",
+            "--decode-binary",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_mtp_bench",
+            "--checkpoint",
+            "/opt/data/models/Qwen3.6-35B-A3B-NVFP4",
+            "--tuning-dir",
+            "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recipes-fa2-model-4k-reference-s-formal-01",
+            "--mode",
+            "mtp",
+            "--mtp-strategy",
+            "fixed",
+            "--mtp-depth",
+            "3",
+            "--kv-cache",
+            "bf16",
+            "--moe-activation",
+            "nvfp4",
+            "--case",
+            "decode-kv4k-o1k",
+            "--timeout-sec",
+            "600",
+            "--lock-timeout-sec",
+            "120",
+            "--env",
+            "APXINF_QWEN35_CUDA_GRAPHS=1",
+            "--env",
+            "APXINF_QWEN35_VERIFY_GRAPHS=0",
+            "--env",
+            "APXINF_QWEN35_GRAPH_GDN=full",
+            "--env",
+            "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE=1",
+            "--env",
+            "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS=0",
+            "--env",
+            "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS=0",
+            "--env",
+            "APXINF_QWEN35_MTP_MATERIALIZE_SESSION=0",
+            "--env",
+            "APXINF_QWEN35_BF16_FUSED_ATTENTION=0",
+            "--env",
+            "APXINF_NVFP4_A16_WMMA=1",
+            "--env",
+            "APXINF_NVFP4_A16_WMMA_TILE_N=128",
+            "--env",
+            "APXINF_NVFP4_A16_WMMA_MIN_ROWS=4",
+            "--env",
+            "APXINF_QWEN35_W4A16_SHARED=0",
+            "--env",
+            "APXINF_NVTX=0",
+            "--env",
+            "APXINF_FA2_PACKED_GQA=1",
+            "--env",
+            "APXINF_QWEN35_MTP_PERSISTENT_POSITIONS=0",
+            "--env",
+            "APXINF_EDGE_NVFP4_MOE_FC1_ACC1_E32=0",
+            "--env",
+            "APXINF_NVFP4_A16_M1_STAGE_ALL=1",
+            "--metadata",
+            "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/identity.json",
+            "--run-mode",
+            "formal",
+            "--warmups",
+            "2",
+            "--repeats",
+            "5",
+            "--output",
+            "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/candidate"
+          ],
+          "returncode": 0
+        }
+      ],
+      "full_P2_accepted": false,
+      "helper_sha256": "044847351f3df3aec9e43a52eb9073f33fee7246a1141a1d0879a7ea68410097",
+      "median_tps": [
+        87.16200932675316,
+        88.67599076228866
+      ],
+      "tpot_reduction_percent": 1.7073183197851005,
+      "token_digest": "a79ed7c8bf839729",
+      "speculation": {
+        "accepted_prefix_by_depth": [
+          303,
+          208,
+          163
+        ],
+        "bonus_tokens": 163,
+        "committed_accepted_tokens": 673,
+        "correction_tokens": 187,
+        "draft_steps": 3,
+        "emitted_tokens": 1023,
+        "full_accept_rounds": 163,
+        "implementation": "qwen3.6_moe_adaptive_mtp",
+        "matched_by_depth": [
+          303,
+          237,
+          242
+        ],
+        "partial_accept_rounds": 140,
+        "proposed_by_depth": [
+          351,
+          351,
+          351
+        ],
+        "proposed_tokens": 1053,
+        "rounds": 351,
+        "target_committed_rows": 1023,
+        "target_rolled_back_rows": 381,
+        "target_verified_rows": 1404,
+        "verified_accepted_tokens": 674,
+        "zero_accept_rounds": 48
+      },
+      "all14_digests_and_speculation_equal": true
+    },
+    "arms": [
+      {
+        "name": "original",
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_NVTX": "0",
+          "APXINF_FA2_PACKED_GQA": "1",
+          "APXINF_QWEN35_MTP_PERSISTENT_POSITIONS": "0",
+          "APXINF_EDGE_NVFP4_MOE_FC1_ACC1_E32": "0",
+          "APXINF_NVFP4_A16_M1_STAGE_ALL": "0",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "native_iterations": [
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 970632833,
+              "generate_return_elapsed_ns": 12830355442,
+              "last_callback_elapsed_ns": 12830185007,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11859.552173999999,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 86.25958088390126,
+            "iteration": 0,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11859.424674,
+              "generation_tokens_per_second": 86.26050825574812,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12830.055035,
+              "ttft_ms": 970.630361
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.170435,
+            "prefill_tokens_per_second": 4219.9273100418595,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12830.355442,
+            "ttft_ms": 970.632833,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 933597139,
+              "generate_return_elapsed_ns": 12671263646,
+              "last_callback_elapsed_ns": 12671105396,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11737.508257,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 87.156488208637,
+            "iteration": 1,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11737.402533999999,
+              "generation_tokens_per_second": 87.15727325842774,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12670.997441,
+              "ttft_ms": 933.594907
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.15825,
+            "prefill_tokens_per_second": 4387.331354064914,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12671.263646,
+            "ttft_ms": 933.597139,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 939752527,
+              "generate_return_elapsed_ns": 12677659312,
+              "last_callback_elapsed_ns": 12677492432,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11737.739905,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 87.15476814784644,
+            "iteration": 2,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11737.630591000001,
+              "generation_tokens_per_second": 87.15557983094136,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12677.380461,
+              "ttft_ms": 939.74987
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.16688,
+            "prefill_tokens_per_second": 4358.59429192043,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12677.659312,
+            "ttft_ms": 939.752527,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 936891981,
+              "generate_return_elapsed_ns": 12690821192,
+              "last_callback_elapsed_ns": 12690658914,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11753.766932999999,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 87.03592693571407,
+            "iteration": 3,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11753.654012,
+              "generation_tokens_per_second": 87.03676311686212,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12690.543679,
+              "ttft_ms": 936.889667
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.162278,
+            "prefill_tokens_per_second": 4371.902079499173,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12690.821192,
+            "ttft_ms": 936.891981,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 938898324,
+              "generate_return_elapsed_ns": 12673515720,
+              "last_callback_elapsed_ns": 12673363100,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11734.464775999999,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 87.17909333984268,
+            "iteration": 4,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11734.357939,
+              "generation_tokens_per_second": 87.17988707332545,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12673.25405,
+              "ttft_ms": 938.896111
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.15262,
+            "prefill_tokens_per_second": 4362.559709926589,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12673.51572,
+            "ttft_ms": 938.898324,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 937259278,
+              "generate_return_elapsed_ns": 12668518433,
+              "last_callback_elapsed_ns": 12668364035,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11731.104757000001,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 87.2040631458492,
+            "iteration": 5,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11730.997091000001,
+              "generation_tokens_per_second": 87.2048634966284,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12668.253999,
+              "ttft_ms": 937.256908
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.154398,
+            "prefill_tokens_per_second": 4370.188800627696,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12668.518433,
+            "ttft_ms": 937.259278,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 934599935,
+              "generate_return_elapsed_ns": 12671525664,
+              "last_callback_elapsed_ns": 12671364701,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11736.764766,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 87.16200932675316,
+            "iteration": 6,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11736.658608999998,
+              "generation_tokens_per_second": 87.16279769912835,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12671.256155,
+              "ttft_ms": 934.597546
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.160963,
+            "prefill_tokens_per_second": 4382.623887085975,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12671.525664,
+            "ttft_ms": 934.5999350000001,
+            "warmup": false
+          }
+        ],
+        "observed": {
+          "input_identity": {
+            "seed_hex": "35a3bf0440960001",
+            "tokens": 4096,
+            "fnv1a64": "da7ee97285eaa2a3",
+            "sha256": "25222540f75fb86a5642ca28152acfdbda3013b95a44d776ffc01e1ea3739ff8"
+          },
+          "measured_iterations": 5,
+          "primary_metric": "decode_tokens_per_second",
+          "observed_median": 87.16200932675316,
+          "observed_p90": 87.2040631458492,
+          "min": 87.03592693571407,
+          "max": 87.2040631458492,
+          "decode_tpot_ms": 11.47288833431085,
+          "output_digest": "a79ed7c8bf839729",
+          "output_digests": [
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729"
+          ],
+          "measured_primary_values": [
+            87.15476814784644,
+            87.03592693571407,
+            87.17909333984268,
+            87.2040631458492,
+            87.16200932675316
+          ],
+          "measured_decode_tpot_ms": [
+            11.473841549364614,
+            11.489508243401758,
+            11.470640054740956,
+            11.467355578690128,
+            11.47288833431085
+          ],
+          "total_iterations": 7,
+          "warmup_iterations": 2,
+          "decode_timing_method": "host-callback-first-last-v2",
+          "measured_callback_timing": [
+            {
+              "tps": 87.15476814784644,
+              "ttft_ms": 939.752527,
+              "interval_ms": 11737.739905,
+              "tail_ms": 0.16688,
+              "total_ms": 12677.659312,
+              "legacy_decode_ms": 11737.630591000001,
+              "legacy_tps": 87.15557983094136
+            },
+            {
+              "tps": 87.03592693571407,
+              "ttft_ms": 936.891981,
+              "interval_ms": 11753.766932999999,
+              "tail_ms": 0.162278,
+              "total_ms": 12690.821192,
+              "legacy_decode_ms": 11753.654012,
+              "legacy_tps": 87.03676311686212
+            },
+            {
+              "tps": 87.17909333984268,
+              "ttft_ms": 938.898324,
+              "interval_ms": 11734.464775999999,
+              "tail_ms": 0.15262,
+              "total_ms": 12673.51572,
+              "legacy_decode_ms": 11734.357939,
+              "legacy_tps": 87.17988707332545
+            },
+            {
+              "tps": 87.2040631458492,
+              "ttft_ms": 937.259278,
+              "interval_ms": 11731.104757000001,
+              "tail_ms": 0.154398,
+              "total_ms": 12668.518433,
+              "legacy_decode_ms": 11730.997091000001,
+              "legacy_tps": 87.2048634966284
+            },
+            {
+              "tps": 87.16200932675316,
+              "ttft_ms": 934.5999350000001,
+              "interval_ms": 11736.764766,
+              "tail_ms": 0.160963,
+              "total_ms": 12671.525664,
+              "legacy_decode_ms": 11736.658608999998,
+              "legacy_tps": 87.16279769912835
+            }
+          ],
+          "decode_tpot_distribution": {
+            "sample_scope": "per_iteration_mean_callback_interval_ms_not_per_token_latency",
+            "median": 11.47288833431085,
+            "p90": 11.489508243401758,
+            "min": 11.467355578690128,
+            "max": 11.489508243401758
+          },
+          "repeat_divergences": [],
+          "comparison_policy": "strict-repeat-consistency-v1",
+          "diagnostic_only": false,
+          "mtp_policy": {
+            "strategy": "fixed",
+            "fixed_depth": 3,
+            "maximum_draft_depth": 3,
+            "scalar_tpot_ms": null
+          },
+          "fa2_packed_gqa": {
+            "effective": 1,
+            "reporting": "explicit_pinned_0_or_1"
+          },
+          "observed_max_proposed_depth": 3
+        },
+        "recipe_manifest_sha256": "054a515dee5e9948849530cddbf4e02db3cffa7ad7268e8859790ffd200b8d92",
+        "recipe_count": 757,
+        "strict_require_recipes": "1",
+        "recipe_audit_scope": "formal dispatch reports are disabled; zero reported audit dispatches is not zero executed dispatches; strict recipe-only execution and immutable inventory enforced",
+        "actual_process": {
+          "pid": 44418,
+          "kind": "benchmark",
+          "direct_child_inherits_gpu_lock": true,
+          "effective_mtp_environment": {
+            "APXINF_QWEN35_MTP_FIXED_DEPTH": "3",
+            "APXINF_QWEN35_SCALAR_TPOT_MS": null
+          },
+          "effective_attention_environment": {
+            "APXINF_FA2_PACKED_GQA": "1"
+          },
+          "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_mtp_bench",
+          "sha256": "bc61b5b4fbbf85383678c1f7e686e134c425cbe4d41b07e1262e16faa8165dae"
+        },
+        "exit_receipt": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "hardware_after": {
+            "memory": {
+              "CmaTotal": "524288 kB",
+              "CmaFree": "7532 kB",
+              "HugePages_Total": "20480",
+              "HugePages_Free": "20465",
+              "HugePages_Rsvd": "0",
+              "HugePages_Surp": "0",
+              "Hugepagesize": "2048 kB"
+            },
+            "gpu_clocks": [
+              {
+                "path": "/sys/class/devfreq/gpu-0",
+                "governor": "simple_ondemand",
+                "min_freq": "1206000000",
+                "max_freq": "1206000000",
+                "cur_freq": "1206000000"
+              }
+            ]
+          },
+          "target_binary_sha256": "bc61b5b4fbbf85383678c1f7e686e134c425cbe4d41b07e1262e16faa8165dae"
+        },
+        "gpu_clock": [
+          {
+            "path": "/sys/class/devfreq/gpu-0",
+            "governor": "simple_ondemand",
+            "min_freq": "1206000000",
+            "max_freq": "1206000000",
+            "cur_freq": "1206000000"
+          }
+        ],
+        "clock_restored": {
+          "restored": {
+            "min_freq": "54000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "54000000"
+          },
+          "ok": true,
+          "lock_held": true,
+          "child_reaped": true
+        },
+        "pool_restored": {
+          "total_pages": 2048,
+          "free_pages": 2033,
+          "request_ok": true
+        },
+        "checkpoint_sha256": {
+          "chat_template.jinja": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+          "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+          "configuration.json": "c1b09db419119513247e9b8b912c4b9897106c9b20c6cada7e107d993c5435eb",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+          "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+          "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+          "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164",
+          "model.safetensors.index.json": "d67403a4e9793c0ba8a136baf14b3b76ec7b32c822267978084895e07ebd8a3e",
+          "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b",
+          "video_preprocessor_config.json": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+          "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+        },
+        "log": {
+          "path": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/original/decode-kv4k-o1k.log",
+          "sha256": "1fec7c3e206663ad72ae2278a5203edd81367719e0d2eca12107e792ebdedc31",
+          "bytes": 220660
+        }
+      },
+      {
+        "name": "candidate",
+        "environment": {
+          "APXINF_QWEN35_CUDA_GRAPHS": "1",
+          "APXINF_QWEN35_VERIFY_GRAPHS": "0",
+          "APXINF_QWEN35_GRAPH_GDN": "full",
+          "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE": "1",
+          "APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS": "0",
+          "APXINF_QWEN35_VERIFY_PROJECTION_SESSIONS": "0",
+          "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+          "APXINF_QWEN35_BF16_FUSED_ATTENTION": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_QWEN35_W4A16_SHARED": "0",
+          "APXINF_NVTX": "0",
+          "APXINF_FA2_PACKED_GQA": "1",
+          "APXINF_QWEN35_MTP_PERSISTENT_POSITIONS": "0",
+          "APXINF_EDGE_NVFP4_MOE_FC1_ACC1_E32": "0",
+          "APXINF_NVFP4_A16_M1_STAGE_ALL": "1",
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_QWEN35_MTP_FIXED_DEPTH": "3"
+        },
+        "native_iterations": [
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 966234472,
+              "generate_return_elapsed_ns": 12629822543,
+              "last_callback_elapsed_ns": 12629656914,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11663.422442,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 87.71010439578829,
+            "iteration": 0,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11663.293656,
+              "generation_tokens_per_second": 87.71107289009511,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12629.525054,
+              "ttft_ms": 966.231398
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.165629,
+            "prefill_tokens_per_second": 4239.136688553169,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12629.822543,
+            "ttft_ms": 966.234472,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 928547564,
+              "generate_return_elapsed_ns": 12472077229,
+              "last_callback_elapsed_ns": 12471918534,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11543.37097,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 88.62229262653594,
+            "iteration": 1,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11543.244008,
+              "generation_tokens_per_second": 88.62326736669638,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12471.788906,
+              "ttft_ms": 928.544898
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.158695,
+            "prefill_tokens_per_second": 4411.190292024718,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12472.077229,
+            "ttft_ms": 928.5475640000001,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 929402056,
+              "generate_return_elapsed_ns": 12473272915,
+              "last_callback_elapsed_ns": 12473107387,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11543.705331,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 88.61972570044632,
+            "iteration": 2,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11543.580643,
+              "generation_tokens_per_second": 88.62068292651854,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12472.980318,
+              "ttft_ms": 929.399675
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.16552799999999998,
+            "prefill_tokens_per_second": 4407.134644858156,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12473.272915000001,
+            "ttft_ms": 929.402056,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 928394102,
+              "generate_return_elapsed_ns": 12459909618,
+              "last_callback_elapsed_ns": 12459753081,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11531.358979,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 88.71460873458253,
+            "iteration": 3,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11531.237686,
+              "generation_tokens_per_second": 88.71554189209174,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12459.629611,
+              "ttft_ms": 928.391925
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.15653699999999998,
+            "prefill_tokens_per_second": 4411.919454438757,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12459.909618,
+            "ttft_ms": 928.3941020000001,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 928850686,
+              "generate_return_elapsed_ns": 12480401091,
+              "last_callback_elapsed_ns": 12480233378,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11551.382692000001,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 88.56082663666632,
+            "iteration": 4,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11551.254887,
+              "generation_tokens_per_second": 88.56180648834123,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12480.103146,
+              "ttft_ms": 928.848259
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.167713,
+            "prefill_tokens_per_second": 4409.750740066741,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12480.401091,
+            "ttft_ms": 928.850686,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 934385954,
+              "generate_return_elapsed_ns": 12470926618,
+              "last_callback_elapsed_ns": 12470766785,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11536.380831,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 88.67599076228866,
+            "iteration": 5,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11536.258980999999,
+              "generation_tokens_per_second": 88.6769273891009,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12470.642611,
+              "ttft_ms": 934.38363
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.159833,
+            "prefill_tokens_per_second": 4383.6275389901675,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12470.926618,
+            "ttft_ms": 934.385954,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "callback_timing": {
+              "callback_count": 1024,
+              "clock": "std::time::Instant",
+              "clock_reads": 4,
+              "decode_intervals": 1023,
+              "first_callback_elapsed_ns": 929258685,
+              "generate_return_elapsed_ns": 12464308720,
+              "last_callback_elapsed_ns": 12464139960,
+              "origin": "benchmark-generate-entry"
+            },
+            "computed_prompt_tokens": 4096,
+            "decode_interval_ms": 11534.881275,
+            "decode_intervals": 1023,
+            "decode_tokens_per_second": 88.68751880586652,
+            "iteration": 6,
+            "legacy_engine_profile": {
+              "decode_including_finalize_ms": 11534.752458,
+              "generation_tokens_per_second": 88.6885092441227,
+              "schema": "apxinf.qwen35.legacy-engine-profile.v1",
+              "scope": "first_model_token_ready_to_engine_finalize_callbacks_excluded",
+              "total_latency_ms": 12464.00868,
+              "ttft_ms": 929.256222
+            },
+            "mode": "mtp",
+            "output_tokens": 1024,
+            "performance_eligible": true,
+            "post_last_callback_ms": 0.16876,
+            "prefill_tokens_per_second": 4407.814601162431,
+            "profiling": false,
+            "prompt_tokens": 4096,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "reused_prompt_tokens": 0,
+            "schema": "apxinf.qwen35.benchmark.iteration.v2",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                303,
+                208,
+                163
+              ],
+              "bonus_tokens": 163,
+              "committed_accepted_tokens": 673,
+              "correction_tokens": 187,
+              "draft_steps": 3,
+              "emitted_tokens": 1023,
+              "full_accept_rounds": 163,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                303,
+                237,
+                242
+              ],
+              "partial_accept_rounds": 140,
+              "proposed_by_depth": [
+                351,
+                351,
+                351
+              ],
+              "proposed_tokens": 1053,
+              "rounds": 351,
+              "target_committed_rows": 1023,
+              "target_rolled_back_rows": 381,
+              "target_verified_rows": 1404,
+              "verified_accepted_tokens": 674,
+              "zero_accept_rounds": 48
+            },
+            "strict_recipe_required": true,
+            "timing_method": "host-callback-first-last-v2",
+            "token_digest_fnv1a64": "a79ed7c8bf839729",
+            "total_latency_ms": 12464.30872,
+            "ttft_ms": 929.258685,
+            "warmup": false
+          }
+        ],
+        "observed": {
+          "input_identity": {
+            "seed_hex": "35a3bf0440960001",
+            "tokens": 4096,
+            "fnv1a64": "da7ee97285eaa2a3",
+            "sha256": "25222540f75fb86a5642ca28152acfdbda3013b95a44d776ffc01e1ea3739ff8"
+          },
+          "measured_iterations": 5,
+          "primary_metric": "decode_tokens_per_second",
+          "observed_median": 88.67599076228866,
+          "observed_p90": 88.71460873458253,
+          "min": 88.56082663666632,
+          "max": 88.71460873458253,
+          "decode_tpot_ms": 11.277009609970674,
+          "output_digest": "a79ed7c8bf839729",
+          "output_digests": [
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729",
+            "a79ed7c8bf839729"
+          ],
+          "measured_primary_values": [
+            88.61972570044632,
+            88.71460873458253,
+            88.56082663666632,
+            88.67599076228866,
+            88.68751880586652
+          ],
+          "measured_decode_tpot_ms": [
+            11.284169434017594,
+            11.272100663734117,
+            11.291674185728251,
+            11.277009609970674,
+            11.275543768328445
+          ],
+          "total_iterations": 7,
+          "warmup_iterations": 2,
+          "decode_timing_method": "host-callback-first-last-v2",
+          "measured_callback_timing": [
+            {
+              "tps": 88.61972570044632,
+              "ttft_ms": 929.402056,
+              "interval_ms": 11543.705331,
+              "tail_ms": 0.16552799999999998,
+              "total_ms": 12473.272915000001,
+              "legacy_decode_ms": 11543.580643,
+              "legacy_tps": 88.62068292651854
+            },
+            {
+              "tps": 88.71460873458253,
+              "ttft_ms": 928.3941020000001,
+              "interval_ms": 11531.358979,
+              "tail_ms": 0.15653699999999998,
+              "total_ms": 12459.909618,
+              "legacy_decode_ms": 11531.237686,
+              "legacy_tps": 88.71554189209174
+            },
+            {
+              "tps": 88.56082663666632,
+              "ttft_ms": 928.850686,
+              "interval_ms": 11551.382692000001,
+              "tail_ms": 0.167713,
+              "total_ms": 12480.401091,
+              "legacy_decode_ms": 11551.254887,
+              "legacy_tps": 88.56180648834123
+            },
+            {
+              "tps": 88.67599076228866,
+              "ttft_ms": 934.385954,
+              "interval_ms": 11536.380831,
+              "tail_ms": 0.159833,
+              "total_ms": 12470.926618,
+              "legacy_decode_ms": 11536.258980999999,
+              "legacy_tps": 88.6769273891009
+            },
+            {
+              "tps": 88.68751880586652,
+              "ttft_ms": 929.258685,
+              "interval_ms": 11534.881275,
+              "tail_ms": 0.16876,
+              "total_ms": 12464.30872,
+              "legacy_decode_ms": 11534.752458,
+              "legacy_tps": 88.6885092441227
+            }
+          ],
+          "decode_tpot_distribution": {
+            "sample_scope": "per_iteration_mean_callback_interval_ms_not_per_token_latency",
+            "median": 11.277009609970674,
+            "p90": 11.291674185728251,
+            "min": 11.272100663734117,
+            "max": 11.291674185728251
+          },
+          "repeat_divergences": [],
+          "comparison_policy": "strict-repeat-consistency-v1",
+          "diagnostic_only": false,
+          "mtp_policy": {
+            "strategy": "fixed",
+            "fixed_depth": 3,
+            "maximum_draft_depth": 3,
+            "scalar_tpot_ms": null
+          },
+          "fa2_packed_gqa": {
+            "effective": 1,
+            "reporting": "explicit_pinned_0_or_1"
+          },
+          "observed_max_proposed_depth": 3
+        },
+        "recipe_manifest_sha256": "054a515dee5e9948849530cddbf4e02db3cffa7ad7268e8859790ffd200b8d92",
+        "recipe_count": 757,
+        "strict_require_recipes": "1",
+        "recipe_audit_scope": "formal dispatch reports are disabled; zero reported audit dispatches is not zero executed dispatches; strict recipe-only execution and immutable inventory enforced",
+        "actual_process": {
+          "pid": 45271,
+          "kind": "benchmark",
+          "direct_child_inherits_gpu_lock": true,
+          "effective_mtp_environment": {
+            "APXINF_QWEN35_MTP_FIXED_DEPTH": "3",
+            "APXINF_QWEN35_SCALAR_TPOT_MS": null
+          },
+          "effective_attention_environment": {
+            "APXINF_FA2_PACKED_GQA": "1"
+          },
+          "exe": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-model-frozen-01/qwen35_mtp_bench",
+          "sha256": "bc61b5b4fbbf85383678c1f7e686e134c425cbe4d41b07e1262e16faa8165dae"
+        },
+        "exit_receipt": {
+          "returncode": 0,
+          "timed_out": false,
+          "child_reaped": true,
+          "lock_held_until_reaped": true,
+          "backend_task_may_be_live": false,
+          "hardware_after": {
+            "memory": {
+              "CmaTotal": "524288 kB",
+              "CmaFree": "32928 kB",
+              "HugePages_Total": "20480",
+              "HugePages_Free": "20465",
+              "HugePages_Rsvd": "0",
+              "HugePages_Surp": "0",
+              "Hugepagesize": "2048 kB"
+            },
+            "gpu_clocks": [
+              {
+                "path": "/sys/class/devfreq/gpu-0",
+                "governor": "simple_ondemand",
+                "min_freq": "1206000000",
+                "max_freq": "1206000000",
+                "cur_freq": "1206000000"
+              }
+            ]
+          },
+          "target_binary_sha256": "bc61b5b4fbbf85383678c1f7e686e134c425cbe4d41b07e1262e16faa8165dae"
+        },
+        "gpu_clock": [
+          {
+            "path": "/sys/class/devfreq/gpu-0",
+            "governor": "simple_ondemand",
+            "min_freq": "1206000000",
+            "max_freq": "1206000000",
+            "cur_freq": "1206000000"
+          }
+        ],
+        "clock_restored": {
+          "restored": {
+            "min_freq": "54000000",
+            "max_freq": "1206000000",
+            "governor": "simple_ondemand",
+            "cur_freq": "54000000"
+          },
+          "ok": true,
+          "lock_held": true,
+          "child_reaped": true
+        },
+        "pool_restored": {
+          "total_pages": 2048,
+          "free_pages": 2033,
+          "request_ok": true
+        },
+        "checkpoint_sha256": {
+          "chat_template.jinja": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+          "config.json": "58aefa1c9eff7989f431d748f2ddec39446cb1fd2a69acc46e285c6a37b0cecc",
+          "configuration.json": "c1b09db419119513247e9b8b912c4b9897106c9b20c6cada7e107d993c5435eb",
+          "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+          "hf_quant_config.json": "75fe7cc8d5836b58734e05ee67423a4ce91d602aaad45c8173a1b7597cd57663",
+          "model-00001-of-00003.safetensors": "07141c2db92e47bc08777132cd1a0323faf300eab3a7d7c111bc2bf075fda050",
+          "model-00002-of-00003.safetensors": "6dea9c759a0f941cf9e1cc1501216b0e107966a66c90425050e212efbd053f02",
+          "model-00003-of-00003.safetensors": "9758875fc55e49561165f4a44342b654c123c3e25c6811b34abb83553fb1a164",
+          "model.safetensors.index.json": "d67403a4e9793c0ba8a136baf14b3b76ec7b32c822267978084895e07ebd8a3e",
+          "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+          "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+          "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b",
+          "video_preprocessor_config.json": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+          "vocab.json": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+        },
+        "log": {
+          "path": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/candidate/decode-kv4k-o1k.log",
+          "sha256": "292179d9de0b975420355089313343d1f150d9f1745f3306cd6bc30dbca4c64c",
+          "bytes": 221074
+        }
+      }
+    ],
+    "timing_scope": "1024 callbacks /1023 first-to-last host intervals; TTFT and last-to-return tail separate; 2warm5 per arm, same ELF and fixed1206MHz, recipes757 unchanged",
+    "full_P2_accepted": false,
+    "full_15_case_matrix_complete": false
+  },
+  "ncu": {
+    "scope": "one selected kernel per arm; launch-skip201 after initial1+two100call warmup batches; cacheall/kernel replay; profiler durations are not quiet performance samples",
+    "selected": {
+      "original": {
+        "Kernel Name": {
+          "value": "void unnamed>::nvfp4_a16_blackwell_gemv_bf16<1, 32>(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)",
+          "unit": ""
+        },
+        "gpu__time_duration.sum": {
+          "value": "1.464384",
+          "unit": "ms"
+        },
+        "launch__registers_per_thread": {
+          "value": "39",
+          "unit": "register/thread"
+        },
+        "launch__grid_size": {
+          "value": "1940",
+          "unit": ""
+        },
+        "launch__block_size": {
+          "value": "256",
+          "unit": ""
+        },
+        "launch__shared_mem_per_block_static": {
+          "value": "272",
+          "unit": "byte/block"
+        },
+        "launch__shared_mem_per_block_dynamic": {
+          "value": "0",
+          "unit": "byte/block"
+        },
+        "sm__warps_active.avg.per_cycle_active": {
+          "value": "47.177538",
+          "unit": "warp"
+        },
+        "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+          "value": "1.867234",
+          "unit": "inst"
+        },
+        "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+          "value": "3.902229",
+          "unit": "inst"
+        }
+      },
+      "candidate": {
+        "Kernel Name": {
+          "value": "unnamed>::nvfp4_a16_blackwell_m1_stage_all_bf16(const __nv_bfloat16 *, const unsigned char *, const unsigned char *, const float *, __nv_bfloat16 *, int)",
+          "unit": ""
+        },
+        "gpu__time_duration.sum": {
+          "value": "1.255904",
+          "unit": "ms"
+        },
+        "launch__registers_per_thread": {
+          "value": "42",
+          "unit": "register/thread"
+        },
+        "launch__grid_size": {
+          "value": "1940",
+          "unit": ""
+        },
+        "launch__block_size": {
+          "value": "256",
+          "unit": ""
+        },
+        "launch__shared_mem_per_block_static": {
+          "value": "8.704000",
+          "unit": "Kbyte/block"
+        },
+        "launch__shared_mem_per_block_dynamic": {
+          "value": "0",
+          "unit": "byte/block"
+        },
+        "sm__warps_active.avg.per_cycle_active": {
+          "value": "38.225520",
+          "unit": "warp"
+        },
+        "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+          "value": "0.214520",
+          "unit": "inst"
+        },
+        "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+          "value": "4.916535",
+          "unit": "inst"
+        }
+      }
+    },
+    "single_point_duration_reduction_percent": 14.236702941305012,
+    "records": [
+      {
+        "name": "original",
+        "command": [
+          "/opt/nvidia/nsight-compute/2025.1.1/ncu",
+          "--target-processes",
+          "all",
+          "--kernel-name-base",
+          "function",
+          "--kernel-name",
+          "regex:.*nvfp4_a16_blackwell_(gemv_bf16|m1_stage_all_bf16).*",
+          "--launch-skip",
+          "201",
+          "--launch-count",
+          "1",
+          "--replay-mode",
+          "kernel",
+          "--clock-control",
+          "none",
+          "--cache-control",
+          "all",
+          "--section",
+          "LaunchStats",
+          "--section",
+          "Occupancy",
+          "--section",
+          "SpeedOfLight",
+          "--section",
+          "MemoryWorkloadAnalysis",
+          "--section",
+          "WarpStateStats",
+          "--export",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/original",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/nvfp4_a16_wmma",
+          "--exact",
+          "nvfp4_a16_m1_stage_all_event_bench",
+          "--ignored",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_NVTX": "0",
+          "APXINF_GEMM_REPORT": "0",
+          "APXINF_ATTENTION_REPORT": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_NVFP4_A16_M1_STAGE_ALL": "0",
+          "APXINF_LMHEAD_BENCH_OUTPUT": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/original.bf16"
+        },
+        "launch_skip": 201,
+        "arm_identity": "must verify original GEMV versus stage_all eligible M1 kernel actual symbol; same grid1940/block256",
+        "returncode": 0,
+        "cleanup": {
+          "pid": 46613,
+          "pgid": 46613,
+          "direct_child_inherits_lock": true,
+          "proven": true,
+          "descendants_reaped": [],
+          "returncode": 0,
+          "members_after": [],
+          "direct_child_reaped": true
+        },
+        "log_sha256": "edf6693869c0f60d060c1d5fc9933dc10c909959e2bca3383186dfb1fddf865d",
+        "report": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/original.ncu-rep",
+          "bytes": 623852,
+          "sha256": "5c916a3768eac2d946fc69f62cc6aa1831833778e66e993c622b540b7bfea6e7"
+        },
+        "csv": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/original.csv",
+          "bytes": 33955,
+          "sha256": "2078d8415387844ae03dd75bd5523ae5302d6ceaae517f2cbdbc67927a3ec231"
+        }
+      },
+      {
+        "name": "candidate",
+        "command": [
+          "/opt/nvidia/nsight-compute/2025.1.1/ncu",
+          "--target-processes",
+          "all",
+          "--kernel-name-base",
+          "function",
+          "--kernel-name",
+          "regex:.*nvfp4_a16_blackwell_(gemv_bf16|m1_stage_all_bf16).*",
+          "--launch-skip",
+          "201",
+          "--launch-count",
+          "1",
+          "--replay-mode",
+          "kernel",
+          "--clock-control",
+          "none",
+          "--cache-control",
+          "all",
+          "--section",
+          "LaunchStats",
+          "--section",
+          "Occupancy",
+          "--section",
+          "SpeedOfLight",
+          "--section",
+          "MemoryWorkloadAnalysis",
+          "--section",
+          "WarpStateStats",
+          "--export",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/candidate",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/nvfp4_a16_wmma",
+          "--exact",
+          "nvfp4_a16_m1_stage_all_event_bench",
+          "--ignored",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_NVTX": "0",
+          "APXINF_GEMM_REPORT": "0",
+          "APXINF_ATTENTION_REPORT": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_NVFP4_A16_M1_STAGE_ALL": "1",
+          "APXINF_LMHEAD_BENCH_OUTPUT": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/candidate.bf16"
+        },
+        "launch_skip": 201,
+        "arm_identity": "must verify original GEMV versus stage_all eligible M1 kernel actual symbol; same grid1940/block256",
+        "returncode": 0,
+        "cleanup": {
+          "pid": 46732,
+          "pgid": 46732,
+          "direct_child_inherits_lock": true,
+          "proven": true,
+          "descendants_reaped": [],
+          "returncode": 0,
+          "members_after": [],
+          "direct_child_reaped": true
+        },
+        "log_sha256": "737eadd4aaa16d93f9bbee0d01712f017c3e904b26e21ef5d97664c93ccb1b86",
+        "report": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/candidate.ncu-rep",
+          "bytes": 623847,
+          "sha256": "6a700723e306757b65e1f2f6abd4262a9c0587b1e24524c6044a2505c5797090"
+        },
+        "csv": {
+          "path": "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/candidate.csv",
+          "bytes": 33970,
+          "sha256": "20c6b46695049970db3fb79fd817ba189b162416b32c04bca9e5db0f159dbf79"
+        }
+      }
+    ],
+    "sanitizers": [
+      {
+        "tool": "memcheck",
+        "command": [
+          "/usr/local/cuda/bin/compute-sanitizer",
+          "--tool",
+          "memcheck",
+          "--error-exitcode",
+          "86",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/nvfp4_a16_wmma",
+          "--exact",
+          "nvfp4_a16_wmma_real_vocab_geometry",
+          "--ignored",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_NVTX": "0",
+          "APXINF_GEMM_REPORT": "0",
+          "APXINF_ATTENTION_REPORT": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_NVFP4_A16_M1_STAGE_ALL": "1"
+        },
+        "returncode": 0,
+        "cleanup": {
+          "pid": 46081,
+          "pgid": 46081,
+          "direct_child_inherits_lock": true,
+          "proven": true,
+          "descendants_reaped": [],
+          "returncode": 0,
+          "members_after": [],
+          "direct_child_reaped": true
+        },
+        "log_sha256": "cfe58873c748cb11dddc69ff555a6b4c8816c3e21cc87dfc2bbcfe5c3c3d8c5d"
+      },
+      {
+        "tool": "racecheck",
+        "command": [
+          "/usr/local/cuda/bin/compute-sanitizer",
+          "--tool",
+          "racecheck",
+          "--error-exitcode",
+          "86",
+          "/opt/data/dev/apxinf-qwen35-thoru-perf/devlocal/commit-audit/runner/devlocal/model-microbench/recovery-build/m1-stageall-frozen-01/nvfp4_a16_wmma",
+          "--exact",
+          "nvfp4_a16_wmma_real_vocab_geometry",
+          "--ignored",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "environment": {
+          "APXINF_REQUIRE_RECIPES": "1",
+          "APXINF_NVTX": "0",
+          "APXINF_GEMM_REPORT": "0",
+          "APXINF_ATTENTION_REPORT": "0",
+          "APXINF_NVFP4_A16_WMMA": "1",
+          "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+          "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+          "APXINF_NVFP4_A16_M1_STAGE_ALL": "1"
+        },
+        "returncode": 0,
+        "cleanup": {
+          "pid": 46134,
+          "pgid": 46134,
+          "direct_child_inherits_lock": true,
+          "proven": true,
+          "descendants_reaped": [],
+          "returncode": 0,
+          "members_after": [],
+          "direct_child_reaped": true
+        },
+        "log_sha256": "74660ecf888804672e9cbae46646fb00f818df03823b74a399586755a933ed17"
+      }
+    ],
+    "clock_fixed": {
+      "min_freq": "1206000000",
+      "max_freq": "1206000000",
+      "cur_freq": "1206000000",
+      "governor": "simple_ondemand"
+    },
+    "clock_restored": {
+      "min_freq": "54000000",
+      "max_freq": "1206000000",
+      "cur_freq": "54000000",
+      "governor": "simple_ondemand"
+    },
+    "cleanup_proven": true,
+    "bytes_provenance": [
+      {
+        "name": "original.ncu-rep",
+        "sha256": "5c916a3768eac2d946fc69f62cc6aa1831833778e66e993c622b540b7bfea6e7"
+      },
+      {
+        "name": "original.csv",
+        "sha256": "2078d8415387844ae03dd75bd5523ae5302d6ceaae517f2cbdbc67927a3ec231"
+      },
+      {
+        "name": "candidate.ncu-rep",
+        "sha256": "6a700723e306757b65e1f2f6abd4262a9c0587b1e24524c6044a2505c5797090"
+      },
+      {
+        "name": "candidate.csv",
+        "sha256": "20c6b46695049970db3fb79fd817ba189b162416b32c04bca9e5db0f159dbf79"
+      },
+      {
+        "name": "memcheck.log",
+        "sha256": "cfe58873c748cb11dddc69ff555a6b4c8816c3e21cc87dfc2bbcfe5c3c3d8c5d"
+      },
+      {
+        "name": "racecheck.log",
+        "sha256": "74660ecf888804672e9cbae46646fb00f818df03823b74a399586755a933ed17"
+      }
+    ],
+    "interpretation": "lower barrier-stall ratio accompanies lower duration although registers/shared memory rise and measured active warps fall; ratio is not a percentage; physical DRAM bandwidth not measured"
+  },
+  "acceptance": {
+    "default_enabled": false,
+    "operator_quality": true,
+    "paired_4k_repeat_consistency": true,
+    "optional_feature_only": true,
+    "full_P2": false,
+    "P5": false,
+    "target_30_percent_achieved": false
+  },
+  "raw_records": [
+    {
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-source-prepare-01/manifest.json",
+      "sha256": "0a9a77d13d27bad03930c47af18fa3f6233a55011a7661ec89948d15a39b4c0a",
+      "bytes": 1072
+    },
+    {
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-build-01/receipt.json",
+      "sha256": "4804f24fae687434aa78634e5c75fe4fca8a098ef765d5f1c5145218585f2ef8",
+      "bytes": 19394
+    },
+    {
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-freeze-01/receipt.json",
+      "sha256": "598493ce9a7fb28df7f08b0db60158a23427963fa2a3295616d61327f3f8c86b",
+      "bytes": 9582
+    },
+    {
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-operator-01/receipt.json",
+      "sha256": "ee2a55bc223e652559da7579e3d03449fd4432f0926522943e2d89d5738a9e52",
+      "bytes": 304632
+    },
+    {
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-model-02/receipt.json",
+      "sha256": "6b56385b33a1df6d02022758a3ff2375023d201f99b389e984bb8092a98eb832",
+      "bytes": 9787
+    },
+    {
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/receipt.json",
+      "sha256": "d5a84172f184069a4415e0bdbfdf0b61210ecbbfe0dfdcbeffa59776fc9b1637",
+      "bytes": 173270
+    },
+    {
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/qwen35-mtp-serving/devlocal/commit-audit/review/devlocal/model-microbench/worktree/devlocal/model-microbench/recovery-build/m1-stageall-ncu-01/selected-metrics.json",
+      "sha256": "bdfc66ad114853cf369566af80e1b31dd716058bc6bf52f1c041697920ed9add",
+      "bytes": 2290
+    }
+  ]
+}

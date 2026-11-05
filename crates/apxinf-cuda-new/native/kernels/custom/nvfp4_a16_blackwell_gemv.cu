@@ -14,6 +14,8 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <mma.h>
+#include <cstdlib>
+#include <cstring>
 
 namespace apxinf::cuda_new::mlp_ops {
 namespace {
@@ -155,6 +157,104 @@ void nvfp4_a16_blackwell_gemv_bf16(
       }
     }
     __syncthreads();
+  }
+
+#pragma unroll
+  for (int activation_row = 0; activation_row < kRows; ++activation_row) {
+    accumulators[activation_row] += __shfl_xor_sync(
+        0xFFFFFFFFU, accumulators[activation_row], 1, kWarpSize);
+    if (k_half == 0) {
+      output[static_cast<long long>(activation_row) * n + output_column] =
+          __float2bfloat16_rn(accumulators[activation_row] * global_scale[0]);
+    }
+  }
+}
+
+// Experimental LM-head M1/K2048 only. No new arithmetic/quantization path:
+// the original per-lane K-block/pair FMA sequence is retained. GPU validation
+// and register/occupancy checks are mandatory before any performance claim.
+__global__ __launch_bounds__(kThreadsPerBlock, 1)
+void nvfp4_a16_blackwell_m1_stage_all_bf16(
+    const __nv_bfloat16* __restrict__ activation,
+    const unsigned char* __restrict__ qweights,
+    const unsigned char* __restrict__ block_scales,
+    const float* __restrict__ global_scale,
+    __nv_bfloat16* __restrict__ output, int runtime_k_blocks) {
+  constexpr int kRows = 1;
+  constexpr int kStaticKBlocks = 32;
+  __shared__ __align__(16) float shared_activation[32 * kSmemRowStride];
+
+  const int lane = static_cast<int>(threadIdx.x) & (kWarpSize - 1);
+  const int warp = static_cast<int>(threadIdx.x) / kWarpSize;
+  const int row_in_tile = warp * kRowsPerWarp + lane / 2;
+  const int k_half = lane & 1;
+  const int n_block = static_cast<int>(blockIdx.x);
+  const int output_column = n_block * kNTile + row_in_tile;
+  const int k_blocks =
+      kStaticKBlocks == 0 ? runtime_k_blocks : kStaticKBlocks;
+  const int k = k_blocks * kKTile;
+  const int n = static_cast<int>(gridDim.x) * kNTile;
+  float accumulators[kRows]{};
+
+  // Keep the original 128-bit retain load and BF16-pair conversion, but
+  // stage all K blocks once. Each K64 keeps its original four-float half pad.
+  constexpr int kElementsPerVector = sizeof(Uint4) / sizeof(__nv_bfloat16);
+  constexpr int kVectors = 2048 / kElementsPerVector;
+  for (int vector = static_cast<int>(threadIdx.x); vector < kVectors;
+       vector += kThreadsPerBlock) {
+    const Uint4 packed_activation = load_global_128_retain(
+        activation + vector * kElementsPerVector);
+    const __nv_bfloat16* packed_elements =
+        reinterpret_cast<const __nv_bfloat16*>(&packed_activation);
+    const int element = vector * kElementsPerVector;
+    const int k_block = element / kKTile;
+    const int logical_k = element % kKTile;
+    const int padded_k = logical_k + (logical_k >= kKTile / 2 ? 4 : 0);
+    float2* staged_pairs = reinterpret_cast<float2*>(
+        shared_activation + k_block * kSmemRowStride + padded_k);
+#pragma unroll
+    for (int pair = 0; pair < kElementsPerVector / 2; ++pair) {
+      staged_pairs[pair] = __bfloat1622float2(
+          *reinterpret_cast<const __nv_bfloat162*>(packed_elements + pair * 2));
+    }
+  }
+  __syncthreads();
+  for (int k_block = 0; k_block < k_blocks; ++k_block) {
+    const long long row_tile_index =
+        (static_cast<long long>(n_block) * k_blocks + k_block) * kNTile +
+        row_in_tile;
+    const unsigned char* packed_pointer =
+        qweights + row_tile_index * kPackedBytesPerRowTile +
+        k_half * kPackedBytesPerThread;
+    const Uint4 packed_weights = load_global_128_no_allocate(packed_pointer);
+    const unsigned short packed_scales =
+        *reinterpret_cast<const unsigned short*>(
+            block_scales + row_tile_index * kScalesPerRowTile + k_half * 2);
+    const float2 scales = fp8_pair_to_float2(packed_scales);
+    const unsigned int words[4]{packed_weights.x, packed_weights.y,
+                                packed_weights.z, packed_weights.w};
+
+#pragma unroll
+    for (int word = 0; word < 4; ++word) {
+#pragma unroll
+      for (int byte = 0; byte < 4; ++byte) {
+        const int pair = word * 4 + byte;
+        const unsigned int packed_byte =
+            (words[word] >> (byte * 8)) & 0xFFU;
+        const float2 weights = fp4_pair_to_float2(packed_byte);
+        const float scale = pair < 8 ? scales.x : scales.y;
+        const int k_in_tile = k_half * kSmemHalfStride + pair * 2;
+#pragma unroll
+        for (int activation_row = 0; activation_row < kRows;
+             ++activation_row) {
+          const float2 values = *reinterpret_cast<const float2*>(
+              shared_activation + k_block * kSmemRowStride + k_in_tile);
+          const float dot = fmaf(values.x, weights.x, values.y * weights.y);
+          accumulators[activation_row] =
+              fmaf(dot, scale, accumulators[activation_row]);
+        }
+      }
+    }
   }
 
 #pragma unroll
@@ -320,9 +420,22 @@ int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
   const auto* g = static_cast<const float*>(global_scale);
   auto* o = static_cast<__nv_bfloat16*>(output);
   switch (rows) {
-    case 1:
-      launch_nvfp4_a16_blackwell_gemv<1>(a, w, s, g, o, n, k, stream);
+    case 1: {
+      static const int stage_all_mode = [] {
+        const char* value = std::getenv("APXINF_NVFP4_A16_M1_STAGE_ALL");
+        if (!value || std::strcmp(value, "0") == 0) return 0;
+        if (std::strcmp(value, "1") == 0) return 1;
+        return -1;
+      }();
+      if (stage_all_mode < 0) return -3;
+      if (stage_all_mode == 1 && n == 248320 && k == 2048) {
+        nvfp4_a16_blackwell_m1_stage_all_bf16
+            <<<n / kNTile, kThreadsPerBlock, 0, stream>>>(a, w, s, g, o, 32);
+      } else {
+        launch_nvfp4_a16_blackwell_gemv<1>(a, w, s, g, o, n, k, stream);
+      }
       break;
+    }
     case 2:
       launch_nvfp4_a16_blackwell_gemv<2>(a, w, s, g, o, n, k, stream);
       break;

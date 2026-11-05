@@ -108,3 +108,121 @@ fn nvfp4_a16_wmma_capture_and_validation(){
  assert!(ops::nvfp4_a16_blackwell_gemv(&ctx,&input.view,&w.q.view,&w.s.view,&w.g.view,&input.view).is_err());ctx.synchronize().unwrap();assert_eq!(input.raw(),before);w.readonly();
  println!("A16-GATE capture PASS shapes=4 graph_replays=8 eager_replays=8 warmups=4 alias_reject_before_write=true performance_eligible=false");
 }
+
+// Test-only timing handles: the public CudaEvent intentionally disables timing.
+// No production API or tolerance changes. All timing excludes fixture/reference,
+// allocation, poison, D2H verification and graph quality checks.
+mod m1_stage_all_event_api {
+    use std::ffi::c_void;
+    #[link(name = "cudart")]
+    extern "C" {
+        fn cudaEventCreate(event: *mut *mut c_void) -> i32;
+        fn cudaEventDestroy(event: *mut c_void) -> i32;
+        fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> i32;
+        fn cudaEventSynchronize(event: *mut c_void) -> i32;
+        fn cudaEventElapsedTime(ms: *mut f32, start: *mut c_void, end: *mut c_void) -> i32;
+    }
+    pub struct TimingEvent(*mut c_void);
+    impl TimingEvent {
+        pub fn new() -> Self {
+            let mut event = std::ptr::null_mut();
+            assert_eq!(unsafe { cudaEventCreate(&mut event) }, 0);
+            assert!(!event.is_null());
+            Self(event)
+        }
+        pub fn record(&self, stream: *mut c_void) {
+            assert_eq!(unsafe { cudaEventRecord(self.0, stream) }, 0);
+        }
+        pub fn synchronize(&self) {
+            assert_eq!(unsafe { cudaEventSynchronize(self.0) }, 0);
+        }
+        pub fn elapsed_ms(&self, end: &Self) -> f32 {
+            let mut ms = f32::NAN;
+            assert_eq!(unsafe { cudaEventElapsedTime(&mut ms, self.0, end.0) }, 0);
+            assert!(ms.is_finite() && ms > 0.0);
+            ms
+        }
+    }
+    impl Drop for TimingEvent {
+        fn drop(&mut self) {
+            let status = unsafe { cudaEventDestroy(self.0) };
+            if status != 0 && !std::thread::panicking() {
+                panic!("test-only timing event destroy failed: {status}");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "GPU exclusive lock/fixed1206; real-vocab synthetic M1 F64 oracle, 2warm5 event batches, graph guards; explicit new output path"]
+fn nvfp4_a16_m1_stage_all_event_bench() {
+    use std::io::Write;
+    use m1_stage_all_event_api::TimingEvent;
+    const CALLS: usize = 100;
+    let (wmma_enabled, _) = policy();
+    if wmma_enabled {
+        assert_eq!(std::env::var("APXINF_NVFP4_A16_WMMA_MIN_ROWS").unwrap_or_else(|_| "4".into()), "4", "M1 must remain on GEMV dispatch");
+    }
+    let flag = std::env::var("APXINF_NVFP4_A16_M1_STAGE_ALL").unwrap_or_else(|_| "0".into());
+    assert!(flag == "0" || flag == "1");
+    let output_path = std::path::PathBuf::from(
+        std::env::var_os("APXINF_LMHEAD_BENCH_OUTPUT").expect("explicit fresh raw-output path required"));
+    assert!(output_path.is_absolute() && !output_path.exists());
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    let (n, k) = (248320, 2048);
+    let (q, s) = reference::packed_fixture(n, k);
+    let mut a = reference::activation(1, k);
+    // Every K address contributes in the dense oracle fixture, including the
+    // zero values of the frozen generator replaced by exact nonzero BF16.
+    for (index, value) in a.iter_mut().enumerate() {
+        if *value == 0.0 { *value = if index % 2 == 0 { 1.0 / 128.0 } else { -1.0 / 128.0 }; }
+    }
+    assert_eq!(a.len(), 2048); assert!(a.iter().all(|value| value.is_finite() && *value != 0.0));
+    println!("M1-FIXTURE M=1 N={n} K={k} A_fnv={} q_fnv={} SF_fnv={} global_scale_bits={:08x} all2048_A_nonzero=true independent_reference=frozen-F64", fnv(&bytes(&a)), fnv(&q), fnv(&s), (1.0f32 / 128.0).to_bits());
+    let gold = reference::evaluate(n, k, 1, &a, &q, &s, 1.0 / 128.0).unwrap();
+    let w = Weight::new(&ctx, n, k, &q, &s, 1.0 / 128.0);
+    let input = Guarded::new(&ctx, vec![1, k], DType::BF16, bytes(&a));
+    let out = Guarded::new(&ctx, vec![1, n], DType::BF16, vec![0xff; n * 2]);
+    w.run(&ctx, &input, &out).unwrap(); ctx.synchronize().unwrap();
+    let first = check(&w, &input, &out, &gold.output, 1, "M1-event-initial", false);
+    let start = TimingEvent::new(); let end = TimingEvent::new();
+    let stream = ctx.stream().handle() as *mut std::ffi::c_void;
+    let mut measured_ms = Vec::new();
+    for batch in 0..7 {
+        out.poison(&ctx); ctx.synchronize().unwrap();
+        let host_started = std::time::Instant::now();
+        start.record(stream);
+        for _ in 0..CALLS { w.run(&ctx, &input, &out).unwrap(); }
+        end.record(stream); end.synchronize();
+        let host_ms = host_started.elapsed().as_secs_f64() * 1000.0;
+        let event_ms = f64::from(start.elapsed_ms(&end));
+        assert_eq!(check(&w, &input, &out, &gold.output, 1, "M1-event-repeat", false), first);
+        if batch >= 2 { measured_ms.push(event_ms / CALLS as f64); }
+        println!("M1-EVENT batch={batch} warmup={} calls={CALLS} M=1 N={n} K={k} stage_all={flag} event_batch_ms={event_ms:.9} event_per_call_ms={:.9} host_batch_ms={host_ms:.9} output_fnv={} performance_eligible=false scope=synthetic-operator-event-stream-interval", batch < 2, event_ms / CALLS as f64, fnv(&first));
+    }
+    // Sparse boundary anchors reuse the frozen scalar weight decoder, O(N)
+    // each rather than evaluating a full N*K dot for each fixture.
+    const ANCHORS: [usize; 16] = [0, 1, 15, 16, 31, 32, 47, 48, 63, 64, 65, 1023, 1024, 1983, 1984, 2047];
+    for inner in ANCHORS {
+        let mut basis = vec![0.0; k]; basis[inner] = 1.0;
+        let expected = (0..n).map(|column| reference::bf16(
+            reference::weight(n, k, column, inner, &q, &s).unwrap() as f32 * (1.0 / 128.0)
+        )).collect::<Vec<_>>();
+        let anchor = Guarded::new(&ctx, vec![1, k], DType::BF16, bytes(&basis));
+        out.poison(&ctx); w.run(&ctx, &anchor, &out).unwrap(); ctx.synchronize().unwrap();
+        check(&w, &anchor, &out, &expected, 1, &format!("M1-K-anchor-{inner}"), false);
+    }
+    // The old N256 capture gate does not exercise the N248320-only candidate.
+    let graph = apxinf_cuda_new::capture(&ctx, || w.run(&ctx, &input, &out)).unwrap();
+    for repeat in 0..6 {
+        out.poison(&ctx); ctx.synchronize().unwrap();
+        if repeat % 2 == 0 { graph.replay().unwrap(); } else { w.run(&ctx, &input, &out).unwrap(); }
+        ctx.synchronize().unwrap();
+        assert_eq!(check(&w, &input, &out, &gold.output, 1, "M1-graph-eager", false), first);
+    }
+    assert_eq!(measured_ms.len(), 5);
+    measured_ms.sort_by(f64::total_cmp);
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&output_path).unwrap();
+    file.write_all(&first).unwrap(); file.sync_all().unwrap();
+    println!("M1-EVENT PASS warmup_batches=2 measured_batches=5 calls_per_batch={CALLS} median_event_per_call_ms={:.9} sparse_K_anchors=16 all2048_dense_A_nonzero=true graph_replays=3 eager_checks=3 output_bytes={} output_fnv={} F64_threshold_strict=0.01 all_output_elements_checked=true guards=true readonly_full=true performance_eligible=false", measured_ms[2], first.len(), fnv(&first));
+}
