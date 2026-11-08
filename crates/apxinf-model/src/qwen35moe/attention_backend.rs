@@ -197,6 +197,14 @@ impl Qwen35Fp8AttentionBackend {
             && tokens <= ops::QWEN35_MTP_DRAFT_STEPS + 1;
         let key = (ctx.device_id(), tokens, cache_capacity, dynamic_decode);
         if !self.scratch.contains_key(&key) {
+            // Prefill lengths differ on almost every AIOS request. Each profile
+            // owns full-capacity dequant buffers, so retaining one per length
+            // grew device memory by ~140 MB per request until CUDA OOM. Keep
+            // the fixed decode/verify profiles and at most one prefill profile.
+            if tokens > ops::QWEN35_MTP_DRAFT_STEPS + 1 {
+                self.scratch
+                    .retain(|existing, _| existing.1 <= ops::QWEN35_MTP_DRAFT_STEPS + 1);
+            }
             let profile =
                 AttentionScratch::new(ctx, tokens, cache_capacity, self.kv_cache_dtype, phase)?;
             self.scratch.insert(key, profile);

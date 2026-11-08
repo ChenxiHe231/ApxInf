@@ -783,6 +783,11 @@ impl Qwen35Moe {
     }
 
     fn take_mtp_prompt_prefix_cache(&mut self, capacity: usize) -> Result<SystemPrefixCache> {
+        // Allocate every prompt checkpoint at the session capacity. Exact-size
+        // snapshots grow with each AIOS turn, so an evicted smaller snapshot
+        // could never be reused and each request carved a new, larger block
+        // out of the HugeTLB pool until generation failed with CUDA OOM.
+        let capacity = capacity.max(self.runtime.target().capacity());
         let reusable = if self.mtp_prompt_prefix_caches.len() >= MTP_PROMPT_PREFIX_CACHE_ENTRIES {
             self.mtp_prompt_prefix_caches.pop_back()
         } else {
