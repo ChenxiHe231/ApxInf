@@ -182,9 +182,18 @@ pub fn parse_qwen3_xml(
         if !valid_identifier(&name) {
             return Err(protocol_error("invalid function name in tool call"));
         }
-        let definition = registry
-            .get(&name)
-            .ok_or_else(|| protocol_error(format!("model called unknown function '{name}'")))?;
+        // Lenient mode (APXINF_TOOL_CALL_LENIENT=1) mirrors vLLM/TRT-LLM parsers:
+        // unknown functions and schema mismatches are passed to the client, which
+        // returns a tool error the model can recover from, instead of aborting the
+        // whole response.
+        let lenient = tool_call_lenient();
+        let definition = match registry.get(&name) {
+            Some(definition) => Some(definition),
+            None if lenient => None,
+            None => {
+                return Err(protocol_error(format!("model called unknown function '{name}'")))
+            }
+        };
         if let ToolChoice::Function(required) = choice {
             if required != &name {
                 return Err(protocol_error(format!(
@@ -205,7 +214,14 @@ pub fn parse_qwen3_xml(
                 return Err(protocol_error("invalid parameter name in tool call"));
             }
             let raw = cursor.take_until("</parameter>")?.trim();
-            let value = serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()));
+            let declared = definition.and_then(|d| parameter_type(&d.parameters, &parameter));
+            let value = if lenient && declared == Some("string") {
+                // Qwen XML carries every value as text; keep it a string when the
+                // schema says so (e.g. radius=5000 for a string-typed parameter).
+                Value::String(raw.to_owned())
+            } else {
+                serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+            };
             if arguments.insert(parameter.clone(), value).is_some() {
                 return Err(protocol_error(format!(
                     "duplicate parameter '{parameter}' in call to '{name}'"
@@ -215,7 +231,16 @@ pub fn parse_qwen3_xml(
         cursor.expect("</function>")?;
         cursor.skip_ws();
         cursor.expect("</tool_call>")?;
-        validate_arguments(&name, &arguments, &definition.parameters).map_err(protocol_error)?;
+        if let Some(definition) = definition {
+            if let Err(reason) = validate_arguments(&name, &arguments, &definition.parameters) {
+                if !lenient {
+                    return Err(protocol_error(reason));
+                }
+                eprintln!("[tool-call] schema mismatch passed through: {reason}");
+            }
+        } else {
+            eprintln!("[tool-call] unknown function passed through: {name}");
+        }
         calls.push(ToolCall {
             id: String::new(),
             kind: "function".into(),
@@ -240,6 +265,14 @@ pub fn parse_qwen3_xml(
         content: prefix,
         tool_calls: calls,
     })
+}
+
+fn tool_call_lenient() -> bool {
+    std::env::var("APXINF_TOOL_CALL_LENIENT").is_ok_and(|v| v == "1")
+}
+
+fn parameter_type<'s>(schema: &'s Value, parameter: &str) -> Option<&'s str> {
+    schema.get("properties")?.get(parameter)?.get("type")?.as_str()
 }
 
 fn protocol_error(message: impl Into<String>) -> ApiError {
