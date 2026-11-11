@@ -1487,6 +1487,7 @@ struct MtpScratch {
     attention_scores: Tensor,
     attention_partial_output: Tensor,
     attention_partial_stats: Tensor,
+    draft_attention_workspace: Option<Tensor>,
     projected: Tensor,
     moe_out: Tensor,
     final_hidden: Tensor,
@@ -1515,6 +1516,15 @@ impl MtpScratch {
         if cache_capacity == 0 || cache_capacity % ops::QWEN35_KV_CACHE_BLOCK_TOKENS != 0 {
             return Err(invalid("Qwen3.5 MTP scratch capacity is not page aligned"));
         }
+        let draft_attention_workspace =
+            if std::env::var("APXINF_QWEN35_MTP_SPLIT_KV").as_deref() == Ok("1")
+                && matches!(ctx.caps().sm, 101 | 110)
+            {
+                let elements = ops::qwen35_draft_attention_workspace_elements(cache_capacity)?;
+                Some(zeros(ctx, vec![elements], DType::F32)?)
+            } else {
+                None
+            };
         Ok(Self {
             cache_capacity,
             token: zeros(ctx, vec![1], DType::I32)?,
@@ -1570,6 +1580,7 @@ impl MtpScratch {
                 ],
                 DType::F32,
             )?,
+            draft_attention_workspace,
             projected: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             moe_out: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             final_hidden: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
@@ -1779,36 +1790,37 @@ fn forward_one(
         vec![1, geometry.query_heads, geometry.head_dim],
         DType::BF16,
     )?;
-    ops::qwen35_attention_fp8(
-        ctx,
-        1,
-        ops::Qwen35Fp8AttentionArgs {
-            projected_query_gate: &scratch.q_fused,
-            projected_key: &scratch.projected_key,
-            projected_value: &scratch.projected_value,
-            query_norm: &attention.q_norm,
-            key_norm: &attention.k_norm,
-            positions: position,
-            cache: ops::Qwen35Fp8KvCache {
-                key: &state.key,
-                value: &state.value,
-            },
-            scratch: ops::Qwen35AttentionScratch {
-                query: &scratch.query,
-                gate: &scratch.query_gate,
-                output: &attention_out,
-                scores: &scratch.attention_scores,
-                partial_output: &scratch.attention_partial_output,
-                partial_stats: &scratch.attention_partial_stats,
-            },
-            cache_offset: cache_row,
-            scales: ops::Qwen35KvCacheScales {
-                key: MTP_KV_SCALE,
-                value: MTP_KV_SCALE,
-            },
-            rope_theta,
+    let attention_args = ops::Qwen35Fp8AttentionArgs {
+        projected_query_gate: &scratch.q_fused,
+        projected_key: &scratch.projected_key,
+        projected_value: &scratch.projected_value,
+        query_norm: &attention.q_norm,
+        key_norm: &attention.k_norm,
+        positions: position,
+        cache: ops::Qwen35Fp8KvCache {
+            key: &state.key,
+            value: &state.value,
         },
-    )?;
+        scratch: ops::Qwen35AttentionScratch {
+            query: &scratch.query,
+            gate: &scratch.query_gate,
+            output: &attention_out,
+            scores: &scratch.attention_scores,
+            partial_output: &scratch.attention_partial_output,
+            partial_stats: &scratch.attention_partial_stats,
+        },
+        cache_offset: cache_row,
+        scales: ops::Qwen35KvCacheScales {
+            key: MTP_KV_SCALE,
+            value: MTP_KV_SCALE,
+        },
+        rope_theta,
+    };
+    if let Some(workspace) = &scratch.draft_attention_workspace {
+        ops::qwen35_attention_fp8_draft(ctx, attention_args, workspace)?;
+    } else {
+        ops::qwen35_attention_fp8(ctx, 1, attention_args)?;
+    }
     let mut projected = scratch.projected.clone();
     ops::gemm(
         ctx,

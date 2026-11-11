@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stddef.h>
+
 #include "qwen35_attention_types.h"
 #include "status.h"
 
@@ -13,6 +15,13 @@ extern "C" {
 apxinf_status_t apxinf_qwen35_attention_fp8(
     apxinf_runtime_t runtime, const apxinf_qwen35_attention_spec_t* spec,
     const apxinf_qwen35_attention_bindings_t* bindings);
+
+/* Single-row draft attention for finite unit-scale E4M3 K/V.
+   Workspace is FP32 and covers split maxima, sums and value accumulators. */
+apxinf_status_t apxinf_qwen35_attention_fp8_draft(
+    apxinf_runtime_t runtime, const apxinf_qwen35_attention_spec_t* spec,
+    const apxinf_qwen35_attention_bindings_t* bindings, float* workspace,
+    size_t workspace_elements);
 
 /* Split Q/gate, Q RMSNorm and RoPE with intermediate BF16 rounding. */
 apxinf_status_t apxinf_qwen35_query_prepare(

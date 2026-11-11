@@ -1291,6 +1291,7 @@ __global__ void dynamic_decode_register_prefetch_kernel(
 #endif
 }
 
+template <bool kUnitDraft = false>
 __global__ void dynamic_decode_reduce_kernel(
     const float* __restrict__ partial_max,
     const float* __restrict__ partial_sum,
@@ -1341,11 +1342,17 @@ __global__ void dynamic_decode_reduce_kernel(
     __syncthreads();
   }
   const float denominator = block_sum(sum, partial);
-  // Preserve the decomposed path's BF16 attention rounding before the gate.
-  const __nv_bfloat16 attention = __float2bfloat16(value / denominator);
   const int index = query_head * kHeadDim + dim;
-  output[index] = gate == nullptr ? attention : __float2bfloat16(
-      __bfloat162float(attention) / (1.0F + __expf(-__bfloat162float(gate[index]))));
+  if constexpr (kUnitDraft) {
+    // Static FP8 attention applies the gate before its single BF16 rounding.
+    const float sigmoid = 1.0F / (1.0F + __expf(-__bfloat162float(gate[index])));
+    output[index] = __float2bfloat16((value / denominator) * sigmoid);
+  } else {
+    // Preserve the decomposed path's BF16 attention rounding before the gate.
+    const __nv_bfloat16 attention = __float2bfloat16(value / denominator);
+    output[index] = gate == nullptr ? attention : __float2bfloat16(
+        __bfloat162float(attention) / (1.0F + __expf(-__bfloat162float(gate[index]))));
+  }
 }
 
 __global__ void dynamic_kv_dequant_kernel(
@@ -1377,10 +1384,10 @@ __device__ __forceinline__ void e4m3x4_to_bf16(unsigned int w, uint2& out) {
   out.y = *reinterpret_cast<unsigned int*>(&b);
 }
 constexpr int kMrTile = 32, kMrLd = 264, kMrPld = 40;
-template <int kSplit, int kRows> constexpr size_t mr_smem() {
+template <int kSplit, int kRows, bool kUnitDraft = false> constexpr size_t mr_smem() {
   constexpr int MP = (kRows * 8 + 15) / 16 * 16;
   constexpr size_t parts = 2 * MP * kMrPld * 2 > 8192 ? 2 * MP * kMrPld * 2 : 8192;
-  return size_t(MP) * kMrLd * 2 + size_t(kMrTile) * kMrLd * 2 + size_t(MP) * (kSplit + 4) * 4 + parts + 2 * kSplit * 4 + MP * 4;
+  return size_t(MP) * kMrLd * 2 + size_t(kMrTile) * kMrLd * 2 + size_t(MP) * (kSplit + 4) * 4 + parts + (kUnitDraft ? 0 : 2 * kSplit * 4) + MP * 4;
 }
 __device__ __forceinline__ void mr_load(const __nv_fp8_e4m3* base, int first, int count, int kv, uint4* r) {
 #pragma unroll
@@ -1402,7 +1409,7 @@ __device__ __forceinline__ void mr_store(__nv_bfloat16* kvs, const uint4* r) {
     dst[1] = make_uint4(o[2].x, o[2].y, o[3].x, o[3].y);
   }
 }
-template <int kSplit, int kRows>
+template <int kSplit, int kRows, bool kUnitDraft = false>
 __global__ __launch_bounds__(256) void dynamic_mr_kernel(
     const __nv_bfloat16* __restrict__ query, const __nv_fp8_e4m3* __restrict__ key_cache,
     const __nv_fp8_e4m3* __restrict__ value_cache, const float* __restrict__ key_scales,
@@ -1421,7 +1428,7 @@ __global__ __launch_bounds__(256) void dynamic_mr_kernel(
   constexpr int kPartBytes = 2 * MP * kMrPld * 2 > 8192 ? 2 * MP * kMrPld * 2 : 8192;
   auto* ks = reinterpret_cast<float*>(reinterpret_cast<unsigned char*>(pr) + kPartBytes);
   auto* vs = ks + kSplit;
-  auto* wsc = vs + kSplit;
+  auto* wsc = kUnitDraft ? ks : vs + kSplit;
   const int split = blockIdx.x, kv = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int begin = split * kSplit;
   const int count = min(kSplit, valid_tokens - begin);
@@ -1433,10 +1440,12 @@ __global__ __launch_bounds__(256) void dynamic_mr_kernel(
     const int m = i >> 8, d = i & 255, r = m >> 3, h = m & 7;
     q[m * kMrLd + d] = m < M ? query[(r * kQHeads + kv * kQueriesPerKvHead + h) * kHeadDim + d] : __float2bfloat16(0.0F);
   }
-  for (int i = tid; i < kSplit; i += 256) {
-    const int64_t row = static_cast<int64_t>(begin + i) * kKvHeads + kv;
-    ks[i] = i < count ? key_scales[row] : 0.0F;
-    vs[i] = i < count ? value_scales[row] : 0.0F;
+  if constexpr (!kUnitDraft) {
+    for (int i = tid; i < kSplit; i += 256) {
+      const int64_t row = static_cast<int64_t>(begin + i) * kKvHeads + kv;
+      ks[i] = i < count ? key_scales[row] : 0.0F;
+      vs[i] = i < count ? value_scales[row] : 0.0F;
+    }
   }
   for (int tile = 0; tile < tiles; ++tile) {
     const int t0 = tile * kMrTile;
@@ -1464,7 +1473,7 @@ __global__ __launch_bounds__(256) void dynamic_mr_kernel(
       float s = 0.0F;
 #pragma unroll
       for (int kp = 0; kp < NP; ++kp) s += red[(kp * NT + ot) * 256 + idx];
-      sc[m * SLD + t0 + tok] = s * ks[t0 + tok] * 0.0625F;
+      sc[m * SLD + t0 + tok] = (kUnitDraft ? s : s * ks[t0 + tok]) * 0.0625F;
     }
   }
   __syncthreads();
@@ -1478,7 +1487,7 @@ __global__ __launch_bounds__(256) void dynamic_mr_kernel(
     float sum = 0.0F, wm = 0.0F;
     for (int j = lane; j < tiles * kMrTile; j += 32) {
       const float p = j < lim ? __expf(sc[m * SLD + j] - mx) : 0.0F;
-      const float w = p * vs[j];
+      const float w = kUnitDraft ? p : p * vs[j];
       sum += p;
       wm = fmaxf(wm, w);
       sc[m * SLD + j] = w;
@@ -1818,7 +1827,96 @@ bool valid_dynamic_dequant_bindings(
          bindings.key != nullptr && bindings.value != nullptr;
 }
 
+void launch_static_fp8_prepare(const apxinf_qwen35_attention_spec_t& spec,
+                               const apxinf_qwen35_attention_bindings_t& bindings,
+                               cudaStream_t stream) {
+  const float key_scale = spec.key_scale;
+  const float value_scale = spec.value_scale;
+  const dim3 query_grid(spec.tokens, kQHeads);
+  prepare_query_kernel<<<query_grid, kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(bindings.projected_query_gate),
+      static_cast<const __nv_bfloat16*>(bindings.query_norm),
+      static_cast<const int32_t*>(bindings.positions),
+      static_cast<__nv_bfloat16*>(bindings.query),
+      static_cast<__nv_bfloat16*>(bindings.gate), spec.tokens,
+      spec.rope_theta, spec.rms_epsilon);
+  apxinf::framework::check_cuda(cudaGetLastError());
+
+  const dim3 kv_grid(spec.tokens, kKvHeads);
+  append_kv_kernel<<<kv_grid, kThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(bindings.projected_key),
+      static_cast<const __nv_bfloat16*>(bindings.projected_value),
+      static_cast<const __nv_bfloat16*>(bindings.key_norm),
+      static_cast<const int32_t*>(bindings.positions),
+      static_cast<__nv_fp8_e4m3*>(bindings.key_cache),
+      static_cast<__nv_fp8_e4m3*>(bindings.value_cache), spec.tokens,
+      spec.cache_offset, spec.rope_theta, spec.rms_epsilon, key_scale,
+      value_scale);
+  apxinf::framework::check_cuda(cudaGetLastError());
+}
+
+template <int kSplit>
+void launch_fp8_draft(const apxinf_qwen35_attention_spec_t& spec,
+                      const apxinf_qwen35_attention_bindings_t& bindings,
+                      float* workspace, size_t workspace_elements,
+                      cudaStream_t stream) {
+  const int valid_tokens = spec.cache_offset + 1;
+  const int splits = (valid_tokens - 1) / kSplit + 1;
+  const size_t stats_elements = static_cast<size_t>(kQHeads) * splits;
+  if (workspace_elements < stats_elements * (kHeadDim + 2)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                  "Qwen3.5 draft split-KV workspace is too small");
+  }
+  constexpr size_t shared_bytes = mr_smem<kSplit, 1, true>();
+  if constexpr (shared_bytes > 48 * 1024) {
+    apxinf::framework::check_cuda(cudaFuncSetAttribute(
+        dynamic_mr_kernel<kSplit, 1, true>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_bytes)));
+  }
+  launch_static_fp8_prepare(spec, bindings, stream);
+  float* partial_max = workspace;
+  float* partial_sum = partial_max + stats_elements;
+  float* partial_output = partial_sum + stats_elements;
+  dynamic_mr_kernel<kSplit, 1, true>
+      <<<dim3(splits, kKvHeads), kThreads, shared_bytes, stream>>>(
+          static_cast<const __nv_bfloat16*>(bindings.query),
+          static_cast<const __nv_fp8_e4m3*>(bindings.key_cache),
+          static_cast<const __nv_fp8_e4m3*>(bindings.value_cache),
+          nullptr, nullptr, partial_max, partial_sum, partial_output,
+          valid_tokens, splits);
+  apxinf::framework::check_cuda(cudaGetLastError());
+  dynamic_decode_reduce_kernel<true><<<kQHeads, kThreads, 0, stream>>>(
+      partial_max, partial_sum, partial_output,
+      static_cast<const __nv_bfloat16*>(bindings.gate),
+      static_cast<__nv_bfloat16*>(bindings.output), splits, splits);
+  apxinf::framework::check_cuda(cudaGetLastError());
+}
+
 }  // namespace
+
+extern "C" apxinf_status_t apxinf_qwen35_attention_fp8_draft(
+    apxinf_runtime_t runtime, const apxinf_qwen35_attention_spec_t* spec,
+    const apxinf_qwen35_attention_bindings_t* bindings, float* workspace,
+    size_t workspace_elements) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr ||
+        !valid_spec(*spec) || !valid_bindings(*bindings) || workspace == nullptr ||
+        reinterpret_cast<uintptr_t>(workspace) % alignof(float) != 0 ||
+        reinterpret_cast<uintptr_t>(bindings->key_cache) % 16 != 0 ||
+        reinterpret_cast<uintptr_t>(bindings->value_cache) % 16 != 0 ||
+        spec->tokens != 1 || spec->key_scale != 1.0F || spec->value_scale != 1.0F) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid Qwen3.5 unit-scale FP8 draft attention arguments");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    const auto stream = static_cast<cudaStream_t>(bindings->stream);
+    if (spec->cache_offset < 8192) {
+      launch_fp8_draft<128>(*spec, *bindings, workspace, workspace_elements, stream);
+    } else {
+      launch_fp8_draft<256>(*spec, *bindings, workspace, workspace_elements, stream);
+    }
+  });
+}
 
 extern "C" apxinf_status_t apxinf_qwen35_attention_fp8(
     apxinf_runtime_t runtime, const apxinf_qwen35_attention_spec_t* spec,
@@ -1833,27 +1931,7 @@ extern "C" apxinf_status_t apxinf_qwen35_attention_fp8(
     auto stream = static_cast<cudaStream_t>(bindings->stream);
     const float key_scale = spec->key_scale;
     const float value_scale = spec->value_scale;
-    const dim3 query_grid(spec->tokens, kQHeads);
-    prepare_query_kernel<<<query_grid, kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(bindings->projected_query_gate),
-        static_cast<const __nv_bfloat16*>(bindings->query_norm),
-        static_cast<const int32_t*>(bindings->positions),
-        static_cast<__nv_bfloat16*>(bindings->query),
-        static_cast<__nv_bfloat16*>(bindings->gate), spec->tokens,
-        spec->rope_theta, spec->rms_epsilon);
-    apxinf::framework::check_cuda(cudaGetLastError());
-
-    const dim3 kv_grid(spec->tokens, kKvHeads);
-    append_kv_kernel<<<kv_grid, kThreads, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(bindings->projected_key),
-        static_cast<const __nv_bfloat16*>(bindings->projected_value),
-        static_cast<const __nv_bfloat16*>(bindings->key_norm),
-        static_cast<const int32_t*>(bindings->positions),
-        static_cast<__nv_fp8_e4m3*>(bindings->key_cache),
-        static_cast<__nv_fp8_e4m3*>(bindings->value_cache), spec->tokens,
-        spec->cache_offset, spec->rope_theta, spec->rms_epsilon, key_scale,
-        value_scale);
-    apxinf::framework::check_cuda(cudaGetLastError());
+    launch_static_fp8_prepare(*spec, *bindings, stream);
 
     const int valid_tokens = spec->cache_offset + spec->tokens;
     const int automatic_splits = min(
@@ -2049,7 +2127,7 @@ extern "C" apxinf_status_t apxinf_qwen35_dynamic_decode_attention(
             "unsupported Qwen3.5 decode split tokens");
     }
     apxinf::framework::check_cuda(cudaGetLastError());
-    dynamic_decode_reduce_kernel<<<kQHeads * spec->rows, kThreads, 0, stream>>>(
+    dynamic_decode_reduce_kernel<><<<kQHeads * spec->rows, kThreads, 0, stream>>>(
         static_cast<const float*>(bindings->partial_max),
         static_cast<const float*>(bindings->partial_sum),
         static_cast<const float*>(bindings->partial_output),

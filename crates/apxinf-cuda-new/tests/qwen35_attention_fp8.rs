@@ -524,3 +524,171 @@ fn qwen35_decode_is_bit_exact_across_critical_kv_lengths() {
         }
     }
 }
+// Append to crates/apxinf-cuda-new/tests/qwen35_attention_fp8.rs.
+// Uses that test module's bf16_fixture, positions, fp8_bytes and bf16_bits helpers.
+#[test]
+#[ignore = "Thor GPU correctness gate; run under the shared GPU lock"]
+fn qwen35_draft_attention_append_and_graph_contract() {
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    assert!(matches!(ctx.caps().sm, 101 | 110), "requires Jetson Thor");
+
+    let q_heads = ops::QWEN35_ATTENTION_Q_HEADS;
+    let kv_heads = ops::QWEN35_ATTENTION_KV_HEADS;
+    let head_dim = ops::QWEN35_ATTENTION_HEAD_DIM;
+    let kv_width = ops::QWEN35_ATTENTION_KV_WIDTH;
+    let page = ops::QWEN35_KV_CACHE_BLOCK_TOKENS;
+    let unit = ops::Qwen35KvCacheScales { key: 1.0, value: 1.0 };
+
+    let upload = |host| transfers::to_cuda_on_stream(&ctx, host).unwrap();
+    let zero = |shape: Vec<usize>, dtype: DType| {
+        let bytes = shape.iter().product::<usize>() * dtype.size_in_bytes();
+        CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
+            .unwrap()
+            .as_tensor(Shape::new(shape), dtype)
+            .unwrap()
+    };
+    let projected_query_gate =
+        upload(bf16_fixture(vec![1, ops::QWEN35_ATTENTION_Q_PROJECTION_WIDTH], 97, 29.0).0);
+    let projected_key = upload(bf16_fixture(vec![1, kv_width], 53, 17.0).0);
+    let projected_value = upload(bf16_fixture(vec![1, kv_width], 41, 31.0).0);
+    let norm = upload(bf16_fixture(vec![head_dim], 11, 64.0).0);
+
+    // Cover the page boundary, the 128/256 split transition, a partial 48K split,
+    // and a split reduction spanning more than 256 partials.
+    for offset in [127, 128, 8191, 8192, 49_152, 65_536] {
+        let shape = fp8_cache_shape(offset + 2);
+        let capacity = shape[0] * page;
+        let row = offset * kv_width;
+        let codes = [0x01, 0x81, 0x08, 0x88, 0x38, 0xb8, 0x40, 0xc0];
+        let seed = |shift: usize| {
+            let mut bytes = vec![0x7e; capacity * kv_width];
+            for (index, byte) in bytes[..row].iter_mut().enumerate() {
+                let kv_head = index / head_dim % kv_heads;
+                *byte = codes[(index * 5 + index / kv_width + 3 * kv_head + shift) % codes.len()];
+            }
+            bytes
+        };
+        let key_seed = seed(0);
+        let value_seed = seed(3);
+        let key_cache: [_; 2] = std::array::from_fn(|_| {
+            upload(Tensor::from_f8_e4m3(shape.clone(), &key_seed).unwrap())
+        });
+        let value_cache: [_; 2] = std::array::from_fn(|_| {
+            upload(Tensor::from_f8_e4m3(shape.clone(), &value_seed).unwrap())
+        });
+
+        let positions = upload(Tensor::from_i32(vec![3, 1], &positions(offset, 1)).unwrap());
+        let query = zero(vec![1, q_heads, head_dim], DType::BF16);
+        let gate = zero(vec![1, q_heads, head_dim], DType::BF16);
+        let output = zero(vec![1, q_heads, head_dim], DType::BF16);
+        let scores = zero(vec![1, q_heads, capacity], DType::F32);
+        let splits = ops::QWEN35_ATTENTION_MAX_SPLITS;
+        let partial_output = zero(
+            vec![1, kv_heads, splits, q_heads / kv_heads, head_dim], DType::F32,
+        );
+        let partial_stats = zero(
+            vec![1, kv_heads, splits, q_heads / kv_heads, 2], DType::F32,
+        );
+        let workspace_elements = ops::qwen35_draft_attention_workspace_elements(capacity).unwrap();
+        let workspace = zero(vec![workspace_elements], DType::F32);
+
+        let args = |arm: usize, cache_offset, scales| ops::Qwen35Fp8AttentionArgs {
+            projected_query_gate: &projected_query_gate,
+            projected_key: &projected_key,
+            projected_value: &projected_value,
+            query_norm: &norm,
+            key_norm: &norm,
+            positions: &positions,
+            cache: ops::Qwen35Fp8KvCache { key: &key_cache[arm], value: &value_cache[arm] },
+            scratch: ops::Qwen35AttentionScratch {
+                query: &query, gate: &gate, output: &output, scores: &scores,
+                partial_output: &partial_output, partial_stats: &partial_stats,
+            },
+            cache_offset,
+            scales,
+            rope_theta: 10_000_000.0,
+        };
+
+        if offset == 128 {
+            let undersized = zero(vec![workspace_elements - 1], DType::F32);
+            let non_unit = ops::Qwen35KvCacheScales { key: 0.5, value: 1.0 };
+            for (invalid_offset, invalid_scale, invalid_workspace) in [
+                (offset, unit, &undersized),
+                (capacity, unit, &workspace),
+                (offset, non_unit, &workspace),
+            ] {
+                assert!(
+                    ops::qwen35_attention_fp8_draft(
+                        &ctx, args(1, invalid_offset, invalid_scale), invalid_workspace,
+                    ).is_err()
+                );
+                ctx.synchronize().unwrap();
+                assert_eq!(fp8_bytes(&key_cache[1]), key_seed, "rejected call changed K");
+                assert_eq!(fp8_bytes(&value_cache[1]), value_seed, "rejected call changed V");
+            }
+
+            let misaligned_key = CudaBuffer::alloc(key_seed.len() + 1, ctx.device_id())
+                .unwrap()
+                .view(1, key_seed.len())
+                .unwrap()
+                .as_tensor(Shape::new(shape.clone()), DType::F8E4M3)
+                .unwrap();
+            transfers::copy_cpu_to_cuda_on_stream(
+                &ctx,
+                Tensor::from_f8_e4m3(shape.clone(), &key_seed).unwrap(),
+                &misaligned_key,
+            ).unwrap();
+            let invalid = ops::Qwen35Fp8AttentionArgs {
+                cache: ops::Qwen35Fp8KvCache { key: &misaligned_key, value: &value_cache[1] },
+                ..args(1, offset, unit)
+            };
+            assert!(ops::qwen35_attention_fp8_draft(&ctx, invalid, &workspace).is_err());
+            ctx.synchronize().unwrap();
+            assert_eq!(fp8_bytes(&misaligned_key), key_seed);
+            assert_eq!(fp8_bytes(&value_cache[1]), value_seed);
+        }
+
+        ops::qwen35_attention_fp8(&ctx, 1, args(0, offset, unit)).unwrap();
+        ctx.synchronize().unwrap();
+        let expected_key = fp8_bytes(&key_cache[0]);
+        let expected_value = fp8_bytes(&value_cache[0]);
+        let expected_query = bf16_bits(&query);
+        let expected_gate = bf16_bits(&gate);
+        let expected_output = bf16_bits(&output);
+
+        let launch = || ops::qwen35_attention_fp8_draft(&ctx, args(1, offset, unit), &workspace);
+        launch().unwrap();
+        ctx.synchronize().unwrap();
+        let actual_output = bf16_bits(&output);
+        for (&actual, expected) in actual_output.iter().zip(expected_output) {
+            let actual = bf16::from_bits(actual).to_f32();
+            let expected = bf16::from_bits(expected).to_f32();
+            assert!(actual.is_finite() && (actual - expected).abs() <= 0.004 * expected.abs() + 5e-4,
+                    "offset {offset}: {actual} vs {expected}");
+        }
+        assert_eq!(bf16_bits(&query), expected_query);
+        assert_eq!(bf16_bits(&gate), expected_gate);
+
+        let graph = apxinf_cuda_new::capture(&ctx, launch).unwrap();
+        for cache in [&key_cache[1], &value_cache[1]] {
+            CudaBuffer::from_tensor(cache).unwrap().view(row, kv_width).unwrap()
+                .memset_async(0x7e, ctx.stream()).unwrap();
+        }
+        CudaBuffer::from_tensor(&output).unwrap().memset_async(0xff, ctx.stream()).unwrap();
+        graph.replay().unwrap();
+        ctx.synchronize().unwrap();
+
+        assert_eq!(bf16_bits(&output), actual_output, "offset {offset}: graph/eager");
+        for (cache, baseline, original) in [
+            (&key_cache[1], &expected_key, &key_seed),
+            (&value_cache[1], &expected_value, &value_seed),
+        ] {
+            let actual = fp8_bytes(cache);
+            assert_eq!(&actual[..row], &original[..row], "offset {offset}: prefix changed");
+            assert_eq!(&actual[row..row + kv_width], &baseline[row..row + kv_width],
+                       "offset {offset}: appended FP8 bytes");
+            assert_eq!(&actual[row + kv_width..], &original[row + kv_width..],
+                       "offset {offset}: tail changed");
+        }
+    }
+}
