@@ -44,6 +44,18 @@ pub(crate) struct Bindings {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StaticKvBindings {
+    pub projected_key: *const c_void,
+    pub projected_value: *const c_void,
+    pub key_norm: *const c_void,
+    pub positions: *const c_void,
+    pub key_cache: *mut c_void,
+    pub value_cache: *mut c_void,
+    pub stream: CudaStream,
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DynamicKvSpec {
     pub version: u32,
@@ -184,6 +196,12 @@ unsafe extern "C" {
         bindings: *const Bindings,
         workspace: *mut f32,
         workspace_elements: usize,
+    ) -> i32;
+
+    pub(crate) fn apxinf_qwen35_static_kv_append(
+        runtime: Runtime,
+        spec: *const Spec,
+        bindings: *const StaticKvBindings,
     ) -> i32;
 
     pub(crate) fn apxinf_qwen35_dynamic_kv_append(

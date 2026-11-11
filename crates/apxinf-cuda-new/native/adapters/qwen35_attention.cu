@@ -1827,11 +1827,24 @@ bool valid_dynamic_dequant_bindings(
          bindings.key != nullptr && bindings.value != nullptr;
 }
 
+void launch_static_kv_append(const apxinf_qwen35_attention_spec_t& spec,
+                             const apxinf_qwen35_static_kv_bindings_t& bindings) {
+  const dim3 kv_grid(spec.tokens, kKvHeads);
+  append_kv_kernel<<<kv_grid, kThreads, 0, static_cast<cudaStream_t>(bindings.stream)>>>(
+      static_cast<const __nv_bfloat16*>(bindings.projected_key),
+      static_cast<const __nv_bfloat16*>(bindings.projected_value),
+      static_cast<const __nv_bfloat16*>(bindings.key_norm),
+      static_cast<const int32_t*>(bindings.positions),
+      static_cast<__nv_fp8_e4m3*>(bindings.key_cache),
+      static_cast<__nv_fp8_e4m3*>(bindings.value_cache), spec.tokens,
+      spec.cache_offset, spec.rope_theta, spec.rms_epsilon, spec.key_scale,
+      spec.value_scale);
+  apxinf::framework::check_cuda(cudaGetLastError());
+}
+
 void launch_static_fp8_prepare(const apxinf_qwen35_attention_spec_t& spec,
-                               const apxinf_qwen35_attention_bindings_t& bindings,
-                               cudaStream_t stream) {
-  const float key_scale = spec.key_scale;
-  const float value_scale = spec.value_scale;
+                              const apxinf_qwen35_attention_bindings_t& bindings,
+                              cudaStream_t stream) {
   const dim3 query_grid(spec.tokens, kQHeads);
   prepare_query_kernel<<<query_grid, kThreads, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(bindings.projected_query_gate),
@@ -1842,17 +1855,10 @@ void launch_static_fp8_prepare(const apxinf_qwen35_attention_spec_t& spec,
       spec.rope_theta, spec.rms_epsilon);
   apxinf::framework::check_cuda(cudaGetLastError());
 
-  const dim3 kv_grid(spec.tokens, kKvHeads);
-  append_kv_kernel<<<kv_grid, kThreads, 0, stream>>>(
-      static_cast<const __nv_bfloat16*>(bindings.projected_key),
-      static_cast<const __nv_bfloat16*>(bindings.projected_value),
-      static_cast<const __nv_bfloat16*>(bindings.key_norm),
-      static_cast<const int32_t*>(bindings.positions),
-      static_cast<__nv_fp8_e4m3*>(bindings.key_cache),
-      static_cast<__nv_fp8_e4m3*>(bindings.value_cache), spec.tokens,
-      spec.cache_offset, spec.rope_theta, spec.rms_epsilon, key_scale,
-      value_scale);
-  apxinf::framework::check_cuda(cudaGetLastError());
+  launch_static_kv_append(spec, {bindings.projected_key, bindings.projected_value,
+                                bindings.key_norm, bindings.positions,
+                                bindings.key_cache, bindings.value_cache,
+                                bindings.stream});
 }
 
 template <int kSplit>
@@ -1983,6 +1989,23 @@ extern "C" apxinf_status_t apxinf_qwen35_attention_fp8(
         static_cast<__nv_bfloat16*>(bindings->output), spec->tokens,
         splits, value_scale);
     apxinf::framework::check_cuda(cudaGetLastError());
+  });
+}
+
+extern "C" apxinf_status_t apxinf_qwen35_static_kv_append(
+    apxinf_runtime_t runtime, const apxinf_qwen35_attention_spec_t* spec,
+    const apxinf_qwen35_static_kv_bindings_t* bindings) {
+  return apxinf::framework::abi_boundary([&] {
+    if (runtime == nullptr || spec == nullptr || bindings == nullptr ||
+        !valid_spec(*spec) || bindings->projected_key == nullptr ||
+        bindings->projected_value == nullptr || bindings->key_norm == nullptr ||
+        bindings->positions == nullptr || bindings->key_cache == nullptr ||
+        bindings->value_cache == nullptr) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid Qwen3.5 static FP8 K/V append arguments");
+    }
+    apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    launch_static_kv_append(*spec, *bindings);
   });
 }
 

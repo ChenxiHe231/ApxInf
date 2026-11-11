@@ -143,25 +143,72 @@ pub fn qwen35_attention_fp8_draft(
     attention_fp8(ctx, 1, args, Some(workspace))
 }
 
-fn attention_fp8(
+pub struct Qwen35StaticFp8KvAppendArgs<'a> {
+    pub projected_key: &'a Tensor,
+    pub projected_value: &'a Tensor,
+    pub key_norm: &'a Tensor,
+    pub positions: &'a Tensor,
+    pub cache: Qwen35Fp8KvCache<'a>,
+    pub cache_offset: usize,
+    pub scales: Qwen35KvCacheScales,
+    pub rope_theta: f32,
+}
+
+/// Apply the static FP8 attention path's K normalization, RoPE and cache write.
+/// Uses the same BF16 rounding and FP8 conversion as full attention.
+pub fn qwen35_static_kv_append(
     ctx: &CudaContext,
     tokens: usize,
-    args: Qwen35Fp8AttentionArgs<'_>,
-    draft_workspace: Option<&Tensor>,
+    args: Qwen35StaticFp8KvAppendArgs<'_>,
 ) -> Result<()> {
+    let spec = static_fp8_spec(tokens, &args.cache, args.cache_offset, args.scales, args.rope_theta)?;
+    let projection_shape = [tokens, QWEN35_ATTENTION_KV_WIDTH];
+    let projected_key = tensor_storage(ctx, args.projected_key, DType::BF16, &projection_shape)?;
+    let projected_value = tensor_storage(ctx, args.projected_value, DType::BF16, &projection_shape)?;
+    let key_norm = tensor_storage(ctx, args.key_norm, DType::BF16, &[QWEN35_ATTENTION_HEAD_DIM])?;
+    let positions = tensor_storage(ctx, args.positions, DType::I32, &[3, tokens])?;
+    let cache_shape = args.cache.key.shape().dims();
+    let key_cache = tensor_storage(ctx, args.cache.key, DType::F8E4M3, cache_shape)?;
+    let value_cache = tensor_storage(ctx, args.cache.value, DType::F8E4M3, cache_shape)?;
+    validate_disjoint(
+        &[&projected_key, &projected_value, &key_norm, &positions],
+        &[&key_cache, &value_cache],
+    )?;
+    let bindings = abi::StaticKvBindings {
+        projected_key: projected_key.ptr(),
+        projected_value: projected_value.ptr(),
+        key_norm: key_norm.ptr(),
+        positions: positions.ptr(),
+        key_cache: key_cache.ptr(),
+        value_cache: value_cache.ptr(),
+        stream: ctx.stream().handle(),
+    };
+    crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
+    unsafe {
+        status::check(abi::apxinf_qwen35_static_kv_append(ctx.runtime(), &spec, &bindings))
+    }
+}
+
+fn static_fp8_spec(
+    tokens: usize,
+    cache: &Qwen35Fp8KvCache<'_>,
+    cache_offset: usize,
+    scales: Qwen35KvCacheScales,
+    rope_theta: f32,
+) -> Result<abi::Spec> {
     if tokens == 0 || i32::try_from(tokens).is_err() {
         return Err(invalid("Qwen3.5 attention token count is invalid"));
     }
-    if !args.rope_theta.is_finite() || args.rope_theta <= 0.0 {
+    if !rope_theta.is_finite() || rope_theta <= 0.0 {
         return Err(invalid("Qwen3.5 attention RoPE theta is invalid"));
     }
-    args.scales.validate()?;
-    let cache_shape = args.cache.key.shape().dims();
+    scales.validate()?;
+    let cache_shape = cache.key.shape().dims();
     if cache_shape.len() != 4
         || cache_shape[1] != QWEN35_KV_CACHE_BLOCK_TOKENS
         || cache_shape[2..] != [QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_HEAD_DIM]
         || cache_shape[0] == 0
-        || cache_shape != args.cache.value.shape().dims()
+        || cache_shape != cache.value.shape().dims()
     {
         return Err(invalid(
             "Qwen3.5 FP8 K/V caches must match [blocks, 128, 2, 256]",
@@ -170,16 +217,34 @@ fn attention_fp8(
     let capacity = cache_shape[0]
         .checked_mul(QWEN35_KV_CACHE_BLOCK_TOKENS)
         .ok_or_else(|| invalid("Qwen3.5 attention cache capacity overflow"))?;
-    let end = args
-        .cache_offset
+    let end = cache_offset
         .checked_add(tokens)
         .ok_or_else(|| invalid("Qwen3.5 attention cache range overflow"))?;
-    if end > capacity
-        || i32::try_from(args.cache_offset).is_err()
-        || i32::try_from(capacity).is_err()
-    {
+    if end > capacity || i32::try_from(cache_offset).is_err() || i32::try_from(capacity).is_err() {
         return Err(invalid("Qwen3.5 attention cache append exceeds capacity"));
     }
+
+    Ok(abi::Spec {
+        version: abi::SPEC_VERSION,
+        tokens: tokens as u32,
+        cache_offset: cache_offset as u32,
+        cache_capacity: capacity as u32,
+        rope_theta,
+        rms_epsilon: QWEN35_ATTENTION_RMS_EPSILON,
+        key_scale: scales.key,
+        value_scale: scales.value,
+    })
+}
+
+fn attention_fp8(
+    ctx: &CudaContext,
+    tokens: usize,
+    args: Qwen35Fp8AttentionArgs<'_>,
+    draft_workspace: Option<&Tensor>,
+) -> Result<()> {
+    let spec = static_fp8_spec(tokens, &args.cache, args.cache_offset, args.scales, args.rope_theta)?;
+    let cache_shape = args.cache.key.shape().dims();
+    let capacity = spec.cache_capacity as usize;
 
     let projected_query_gate = tensor_storage(
         ctx,
@@ -313,16 +378,6 @@ fn attention_fp8(
         validate_disjoint(&written, &[workspace])?;
     }
 
-    let spec = abi::Spec {
-        version: abi::SPEC_VERSION,
-        tokens: tokens as u32,
-        cache_offset: args.cache_offset as u32,
-        cache_capacity: capacity as u32,
-        rope_theta: args.rope_theta,
-        rms_epsilon: QWEN35_ATTENTION_RMS_EPSILON,
-        key_scale: args.scales.key,
-        value_scale: args.scales.value,
-    };
     let bindings = abi::Bindings {
         projected_query_gate: projected_query_gate.ptr(),
         projected_key: projected_key.ptr(),
@@ -863,7 +918,7 @@ fn validate_disjoint(inputs: &[&CudaBuffer], outputs: &[&CudaBuffer]) -> Result<
                 .iter()
                 .any(|other| storage_overlaps(other, output))
         {
-            return Err(invalid("dynamic attention writable buffers overlap"));
+            return Err(invalid("Qwen3.5 attention writable buffers overlap"));
         }
     }
     Ok(())

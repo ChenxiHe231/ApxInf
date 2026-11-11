@@ -23,6 +23,12 @@ apxinf_status_t apxinf_qwen35_attention_fp8_draft(
     const apxinf_qwen35_attention_bindings_t* bindings, float* workspace,
     size_t workspace_elements);
 
+/* Append only the static-scale FP8 K/V rows, with the same K norm/RoPE
+   and FP8 conversion as apxinf_qwen35_attention_fp8. */
+apxinf_status_t apxinf_qwen35_static_kv_append(
+    apxinf_runtime_t runtime, const apxinf_qwen35_attention_spec_t* spec,
+    const apxinf_qwen35_static_kv_bindings_t* bindings);
+
 /* Split Q/gate, Q RMSNorm and RoPE with intermediate BF16 rounding. */
 apxinf_status_t apxinf_qwen35_query_prepare(
     apxinf_runtime_t runtime, const apxinf_qwen35_query_prepare_spec_t* spec,
