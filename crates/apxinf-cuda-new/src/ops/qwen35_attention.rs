@@ -110,6 +110,45 @@ pub fn qwen35_attention_fp8(
     tokens: usize,
     args: Qwen35Fp8AttentionArgs<'_>,
 ) -> Result<()> {
+    attention_fp8(ctx, tokens, args, None)
+}
+
+/// Workspace size for draft attention at any live length up to physical capacity.
+pub fn qwen35_draft_attention_workspace_elements(physical_capacity: usize) -> Result<usize> {
+    if physical_capacity == 0 || i32::try_from(physical_capacity).is_err() {
+        return Err(invalid("Qwen3.5 draft attention cache capacity is invalid"));
+    }
+    let splits = physical_capacity
+        .min(8192)
+        .div_ceil(abi::MIN_DECODE_SPLIT_TOKENS)
+        .max(physical_capacity.div_ceil(abi::DECODE_SPLIT_TOKENS));
+    splits
+        .checked_mul(QWEN35_ATTENTION_Q_HEADS * (QWEN35_ATTENTION_HEAD_DIM + 2))
+        .ok_or_else(|| invalid("Qwen3.5 draft attention workspace size overflow"))
+}
+
+/// Append one row and evaluate split-KV attention with unit-scale E4M3 draft KV.
+/// The caller retains the workspace through execution on this CUDA stream.
+pub fn qwen35_attention_fp8_draft(
+    ctx: &CudaContext,
+    args: Qwen35Fp8AttentionArgs<'_>,
+    workspace: &Tensor,
+) -> Result<()> {
+    if !matches!(ctx.caps().sm, 101 | 110) {
+        return Err(invalid("Qwen3.5 draft split-KV attention requires Thor"));
+    }
+    if args.scales.key != 1.0 || args.scales.value != 1.0 {
+        return Err(invalid("Qwen3.5 draft split-KV attention requires unit K/V scales"));
+    }
+    attention_fp8(ctx, 1, args, Some(workspace))
+}
+
+fn attention_fp8(
+    ctx: &CudaContext,
+    tokens: usize,
+    args: Qwen35Fp8AttentionArgs<'_>,
+    draft_workspace: Option<&Tensor>,
+) -> Result<()> {
     if tokens == 0 || i32::try_from(tokens).is_err() {
         return Err(invalid("Qwen3.5 attention token count is invalid"));
     }
@@ -230,6 +269,17 @@ pub fn qwen35_attention_fp8(
         ],
     )?;
 
+    let draft_workspace = draft_workspace
+        .map(|workspace| {
+            let elements = qwen35_draft_attention_workspace_elements(capacity)?;
+            if key_cache.ptr() as usize % 16 != 0 || value_cache.ptr() as usize % 16 != 0 {
+                return Err(invalid("Qwen3.5 draft split-KV cache must be 16-byte aligned"));
+            }
+            let storage = tensor_storage(ctx, workspace, DType::F32, &[elements])?;
+            Ok((storage, elements))
+        })
+        .transpose()?;
+
     let read_only = [
         &projected_query_gate,
         &projected_key,
@@ -256,6 +306,11 @@ pub fn qwen35_attention_fp8(
                 ));
             }
         }
+    }
+
+    if let Some((workspace, _)) = &draft_workspace {
+        validate_disjoint(&read_only, &[workspace])?;
+        validate_disjoint(&written, &[workspace])?;
     }
 
     let spec = abi::Spec {
@@ -287,11 +342,16 @@ pub fn qwen35_attention_fp8(
     };
     crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
     unsafe {
-        status::check(abi::apxinf_qwen35_attention_fp8(
-            ctx.runtime(),
-            &spec,
-            &bindings,
-        ))
+        status::check(match draft_workspace {
+            Some((workspace, elements)) => abi::apxinf_qwen35_attention_fp8_draft(
+                ctx.runtime(),
+                &spec,
+                &bindings,
+                workspace.ptr().cast(),
+                elements,
+            ),
+            None => abi::apxinf_qwen35_attention_fp8(ctx.runtime(), &spec, &bindings),
+        })
     }
 }
 

@@ -80,7 +80,8 @@ pub use norm::{
 pub use pointwise::{pointwise, PointwiseActivation, PointwiseArgs, PointwiseSemantic};
 pub use quantization::{quantization, QuantizationArgs, QuantizationSemantic};
 pub use qwen35_attention::{
-    decode_e4m3, encode_e4m3, qwen35_attention_fp8, qwen35_attention_reference,
+    decode_e4m3, encode_e4m3, qwen35_attention_fp8, qwen35_attention_fp8_draft,
+    qwen35_attention_reference, qwen35_draft_attention_workspace_elements,
     qwen35_dynamic_decode_attention, qwen35_dynamic_decode_attention_gated,
     qwen35_dynamic_decode_max_splits, qwen35_dynamic_kv_append, qwen35_dynamic_kv_dequant,
     qwen35_dynamic_kv_prepare, qwen35_query_prepare, qwen35_suffix_fmha, Qwen35AttentionReferenceArgs,

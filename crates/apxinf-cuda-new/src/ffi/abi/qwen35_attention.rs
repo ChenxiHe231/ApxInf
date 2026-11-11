@@ -178,6 +178,14 @@ unsafe extern "C" {
         bindings: *const Bindings,
     ) -> i32;
 
+    pub(crate) fn apxinf_qwen35_attention_fp8_draft(
+        runtime: Runtime,
+        spec: *const Spec,
+        bindings: *const Bindings,
+        workspace: *mut f32,
+        workspace_elements: usize,
+    ) -> i32;
+
     pub(crate) fn apxinf_qwen35_dynamic_kv_append(
         runtime: Runtime,
         spec: *const DynamicKvSpec,
