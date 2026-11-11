@@ -67,14 +67,10 @@ bool ordered_reduce_enabled() {
   return policy.enabled;
 }
 
-bool parallel_layout_enabled(int tokens) {
-  static const bool enabled = [] {
-    const char* value = std::getenv("APXINF_EDGE_NVFP4_MOE_PARALLEL_LAYOUT");
-    return value != nullptr && std::strcmp(value, "1") == 0;
-  }();
-  // Only use sizes covered by the Prefill operator screen. Decode retains
-  // its combined layout and quantization kernel.
-  return enabled && tokens >= 5 && tokens <= 8192;
+bool uses_parallel_layout(int tokens) {
+  // Only use sizes covered by the prefill operator screen. Small batches
+  // use the combined layout and quantization kernel.
+  return tokens >= 5 && tokens <= 8192;
 }
 
 size_t checked_size_add(size_t a, size_t b) {
@@ -147,7 +143,7 @@ WorkspaceLayout workspace_layout(const apxinf_moe_edge_nvfp4_spec_t& spec) {
         static_cast<size_t>(layout.permuted_m) * spec.intermediate / 2);
   place(layout.fc1_sf,
         static_cast<size_t>(layout.permuted_m) * layout.padded_inter_sf);
-  if (parallel_layout_enabled(spec.tokens)) {
+  if (uses_parallel_layout(spec.tokens)) {
     const int blocks = apxinf::experimental::parallel_moe_layout::blocks_for(
         static_cast<int>(routes));
     place(layout.route_block_counts, static_cast<size_t>(blocks) * spec.experts * sizeof(int32_t));
@@ -478,7 +474,7 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
         bindings.input_global_scale, permutation, tile_group, tile_limit,
         num_tiles, input_fp4, input_sf);
   } else {
-    if (parallel_layout_enabled(spec.tokens)) {
+    if (uses_parallel_layout(spec.tokens)) {
       apxinf::experimental::parallel_moe_layout::launch(
           bindings.expert_ids, routes, layout.permuted_m,
           at<int32_t>(bindings.workspace, layout.route_block_counts),

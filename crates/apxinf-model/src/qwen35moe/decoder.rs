@@ -1153,8 +1153,7 @@ impl Qwen35Decoder {
             && self.architecture.hidden_size == 2048
             && decode_phases.is_none()
             && verify_phases.is_none()
-            && gdn_checkpoints.is_none()
-            && fused_prefill_residual_enabled();
+            && gdn_checkpoints.is_none();
         for (layer_offset, (layer, resident)) in self
             .architecture
             .layers
@@ -1762,13 +1761,6 @@ pub(super) fn trace_hash(label: &str, index: usize, tensor: &Tensor) {
         "[qwen35-hash] {label}[{index}] shape={:?} = {hash:016x}",
         tensor.shape().dims()
     );
-}
-
-fn fused_prefill_residual_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("APXINF_QWEN35_PREFILL_FUSED_RESIDUAL_NORM").as_deref() == Ok("1")
-    })
 }
 
 fn run_decode_moe_tail(

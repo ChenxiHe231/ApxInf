@@ -724,6 +724,78 @@ pub fn qwen35_dynamic_kv_dequant(
     }
 }
 
+/// The Thor SM101 build provides the D256 suffix FMHA kernel.
+pub const QWEN35_SUFFIX_FMHA_AVAILABLE: bool = cfg!(apxinf_qwen35_suffix_fmha);
+
+/// Evaluate exact-live BF16 suffix-causal attention with scale 1/sqrt(256).
+/// No online tuning or workspace allocation. The caller applies the output
+/// gate after this operation materializes its BF16 result.
+#[cfg(apxinf_qwen35_suffix_fmha)]
+pub fn qwen35_suffix_fmha(
+    ctx: &CudaContext,
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+    output: &mut Tensor,
+) -> Result<()> {
+    let query_tokens = query.shape().dims().get(1).copied().unwrap_or(0);
+    let key_tokens = key.shape().dims().get(1).copied().unwrap_or(0);
+    if query_tokens <= super::qwen35_mtp::QWEN35_MTP_DRAFT_STEPS + 1
+        || key_tokens < query_tokens
+        || key_tokens > 262_144
+    {
+        return Err(invalid("unsupported Qwen3.5 suffix FMHA shape"));
+    }
+    let query_shape = [
+        1,
+        query_tokens,
+        QWEN35_ATTENTION_Q_HEADS,
+        QWEN35_ATTENTION_HEAD_DIM,
+    ];
+    let key_shape = [
+        1,
+        key_tokens,
+        QWEN35_ATTENTION_KV_HEADS,
+        QWEN35_ATTENTION_HEAD_DIM,
+    ];
+    let query = tensor_storage(ctx, query, DType::BF16, &query_shape)?;
+    let key = tensor_storage(ctx, key, DType::BF16, &key_shape)?;
+    let value = tensor_storage(ctx, value, DType::BF16, &key_shape)?;
+    let output = tensor_storage(ctx, output, DType::BF16, &query_shape)?;
+    validate_disjoint(&[&query, &key, &value], &[&output])?;
+    let spec = abi::SuffixFmhaSpec {
+        version: abi::SUFFIX_FMHA_SPEC_VERSION,
+        query_tokens: query_tokens as u32,
+        key_tokens: key_tokens as u32,
+    };
+    let bindings = abi::SuffixFmhaBindings {
+        query: query.ptr(),
+        key: key.ptr(),
+        value: value.ptr(),
+        output: output.ptr(),
+        stream: ctx.stream().handle(),
+    };
+    crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
+    unsafe {
+        status::check(abi::apxinf_qwen35_suffix_fmha(
+            ctx.runtime(),
+            &spec,
+            &bindings,
+        ))
+    }
+}
+
+#[cfg(not(apxinf_qwen35_suffix_fmha))]
+pub fn qwen35_suffix_fmha(
+    _ctx: &CudaContext,
+    _query: &Tensor,
+    _key: &Tensor,
+    _value: &Tensor,
+    _output: &mut Tensor,
+) -> Result<()> {
+    Err(invalid("Qwen3.5 suffix FMHA was not compiled for this target"))
+}
+
 fn validate_disjoint(inputs: &[&CudaBuffer], outputs: &[&CudaBuffer]) -> Result<()> {
     for (i, output) in outputs.iter().enumerate() {
         if inputs.iter().any(|input| storage_overlaps(input, output))
