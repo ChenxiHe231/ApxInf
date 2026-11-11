@@ -12,6 +12,15 @@ unsafe extern "C" {
         epsilon: f32,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_new_add_rms_norm_bf16(
+        addend: *const c_void,
+        residual: *mut c_void,
+        weight: *const c_void,
+        normalized: *mut c_void,
+        epsilon: f32,
+        stream: CudaStream,
+    ) -> i32;
+
     pub(crate) fn apxinf_swiglu_bf16(
         fused_gate_up: *const c_void,
         output: *mut c_void,

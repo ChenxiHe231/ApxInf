@@ -1148,6 +1148,13 @@ impl Qwen35Decoder {
             std::env::var("APXINF_QWEN35_GRAPH_ATTN_MOE").as_deref() != Ok("0");
         let time_verify_layers =
             std::env::var("APXINF_QWEN35_VERIFY_LAYER_TIMING").as_deref() == Ok("1");
+        let fuse_prefill_residual = phase == DecoderPhase::Prefill
+            && tokens == 4096
+            && self.architecture.hidden_size == 2048
+            && decode_phases.is_none()
+            && verify_phases.is_none()
+            && gdn_checkpoints.is_none()
+            && fused_prefill_residual_enabled();
         for (layer_offset, (layer, resident)) in self
             .architecture
             .layers
@@ -1367,11 +1374,27 @@ impl Qwen35Decoder {
                         }
                         trace_hash("gdn_norm", layer.index, &scratch.normalized);
                         trace_hash("gdn_mix", layer.index, scratch.gdn.output());
-                        ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
-                            .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
+                        if fuse_prefill_residual {
+                            ops::mlp::add_rms_norm_prefill(
+                                ctx,
+                                scratch.gdn.output(),
+                                &scratch.hidden,
+                                &resident.post_attention_layernorm,
+                                &scratch.normalized,
+                                self.rms_norm_eps,
+                            )
+                            .map_err(|error| layer_error(layer.index, "GDN residual RMSNorm", error))?;
+                        } else {
+                            ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
+                                .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
+                        }
                         trace_hash("gdn_res", layer.index, &scratch.hidden);
-                        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
-                            .map_err(|error| layer_error(layer.index, "MoE tail", error))?;
+                        let moe = if fuse_prefill_residual {
+                            run_moe_from_normalized(ctx, resident, scratch)
+                        } else {
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        };
+                        moe.map_err(|error| layer_error(layer.index, "MoE tail", error))?;
                     }
                     gdn_index += 1;
                 }
@@ -1402,15 +1425,31 @@ impl Qwen35Decoder {
                             &mut attention_caches[attention_index],
                         )
                         .map_err(|error| layer_error(layer.index, "attention", error))?;
-                    ops::add_into(ctx, &scratch.mixer_output, &scratch.hidden)
-                        .map_err(|error| layer_error(layer.index, "attention residual", error))?;
+                    if fuse_prefill_residual {
+                        ops::mlp::add_rms_norm_prefill(
+                            ctx,
+                            &scratch.mixer_output,
+                            &scratch.hidden,
+                            &resident.post_attention_layernorm,
+                            &scratch.normalized,
+                            self.rms_norm_eps,
+                        )
+                        .map_err(|error| layer_error(layer.index, "attention residual RMSNorm", error))?;
+                    } else {
+                        ops::add_into(ctx, &scratch.mixer_output, &scratch.hidden)
+                            .map_err(|error| layer_error(layer.index, "attention residual", error))?;
+                    }
                     if let Some(phases) = decode_phases.filter(|_| graph_attention_moe) {
                         phases[layer_offset].replay().map_err(|error| {
                             layer_error(layer.index, "attention MoE graph replay", error)
                         })?;
                     } else {
-                        run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
-                            .map_err(|error| layer_error(layer.index, "MoE tail", error))?;
+                        let moe = if fuse_prefill_residual {
+                            run_moe_from_normalized(ctx, resident, scratch)
+                        } else {
+                            run_decode_moe_tail(ctx, resident, scratch, self.rms_norm_eps)
+                        };
+                        moe.map_err(|error| layer_error(layer.index, "MoE tail", error))?;
                     }
                     attention_index += 1;
                 }
@@ -1725,6 +1764,13 @@ pub(super) fn trace_hash(label: &str, index: usize, tensor: &Tensor) {
     );
 }
 
+fn fused_prefill_residual_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("APXINF_QWEN35_PREFILL_FUSED_RESIDUAL_NORM").as_deref() == Ok("1")
+    })
+}
+
 fn run_decode_moe_tail(
     ctx: &CudaContext,
     resident: &DeviceLayerWeights,
@@ -1738,6 +1784,14 @@ fn run_decode_moe_tail(
         &mut scratch.normalized,
         rms_norm_eps,
     )?;
+    run_moe_from_normalized(ctx, resident, scratch)
+}
+
+fn run_moe_from_normalized(
+    ctx: &CudaContext,
+    resident: &DeviceLayerWeights,
+    scratch: &mut DecoderScratch,
+) -> Result<()> {
     scratch.moe.run(ctx, &resident.moe, &scratch.normalized)?;
     ops::add_into(ctx, scratch.moe.output(), &scratch.hidden)
 }
