@@ -24,6 +24,7 @@
 #include <string>
 
 #include "ordered_route_reduce.cuh"
+#include "parallel_layout.cuh"
 
 using apxinf::framework::Failure;
 
@@ -66,6 +67,16 @@ bool ordered_reduce_enabled() {
   return policy.enabled;
 }
 
+bool parallel_layout_enabled(int tokens) {
+  static const bool enabled = [] {
+    const char* value = std::getenv("APXINF_EDGE_NVFP4_MOE_PARALLEL_LAYOUT");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+  }();
+  // Only use sizes covered by the Prefill operator screen. Decode retains
+  // its combined layout and quantization kernel.
+  return enabled && tokens >= 5 && tokens <= 8192;
+}
+
 size_t checked_size_add(size_t a, size_t b) {
   if (b > std::numeric_limits<size_t>::max() - a) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "Edge NVFP4 MoE workspace size addition overflow");
@@ -89,6 +100,9 @@ struct WorkspaceLayout {
   size_t num_tiles{};
   size_t fc1_fp4{};
   size_t fc1_sf{};
+  size_t route_block_counts{};
+  size_t route_ranks{};
+  size_t route_offsets{};
   size_t expanded_bf16{};  // Private [tokens, top_k, hidden], enabled policy only.
   size_t total{};
   int32_t permuted_m{};
@@ -133,6 +147,13 @@ WorkspaceLayout workspace_layout(const apxinf_moe_edge_nvfp4_spec_t& spec) {
         static_cast<size_t>(layout.permuted_m) * spec.intermediate / 2);
   place(layout.fc1_sf,
         static_cast<size_t>(layout.permuted_m) * layout.padded_inter_sf);
+  if (parallel_layout_enabled(spec.tokens)) {
+    const int blocks = apxinf::experimental::parallel_moe_layout::blocks_for(
+        static_cast<int>(routes));
+    place(layout.route_block_counts, static_cast<size_t>(blocks) * spec.experts * sizeof(int32_t));
+    place(layout.route_ranks, static_cast<size_t>(routes) * sizeof(int32_t));
+    place(layout.route_offsets, static_cast<size_t>(spec.experts) * sizeof(int32_t));
+  }
   if (ordered_reduce_enabled()) {
     const size_t expanded_elements = checked_size_mul(static_cast<size_t>(routes), spec.hidden);
     place(layout.expanded_bf16, checked_size_mul(expanded_elements, sizeof(uint16_t)));
@@ -457,9 +478,18 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
         bindings.input_global_scale, permutation, tile_group, tile_limit,
         num_tiles, input_fp4, input_sf);
   } else {
-    build_layout_kernel<<<1, 256, 3 * spec.experts * sizeof(int32_t), stream>>>(
-        bindings.expert_ids, permutation, tile_group, tile_limit, num_tiles,
-        routes, spec.experts, layout.permuted_m);
+    if (parallel_layout_enabled(spec.tokens)) {
+      apxinf::experimental::parallel_moe_layout::launch(
+          bindings.expert_ids, routes, layout.permuted_m,
+          at<int32_t>(bindings.workspace, layout.route_block_counts),
+          at<int32_t>(bindings.workspace, layout.route_ranks),
+          at<int32_t>(bindings.workspace, layout.route_offsets),
+          permutation, tile_group, tile_limit, num_tiles, stream);
+    } else {
+      build_layout_kernel<<<1, 256, 3 * spec.experts * sizeof(int32_t), stream>>>(
+          bindings.expert_ids, permutation, tile_group, tile_limit, num_tiles,
+          routes, spec.experts, layout.permuted_m);
+    }
     const int column_threads = spec.hidden / 8;
     const int blocks_per_sm = std::max(1, kMaxResidentThreadsPerSm /
                                              std::min(column_threads, kThreads));
