@@ -1,3 +1,4 @@
+use std::time::Instant;
 use std::sync::{
     atomic::{AtomicU8, Ordering},
     mpsc::{sync_channel, SyncSender as JobSender, TrySendError},
@@ -30,6 +31,7 @@ impl JobResponse {
 struct Job {
     request: EngineRequest,
     response: JobResponse,
+    timing: Option<(u64, Instant)>,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +86,14 @@ impl WorkerClient {
                     if job.response.is_closed() {
                         continue;
                     }
+                    let started = job.timing.map(|(sequence, enqueued)| {
+                        let started = Instant::now();
+                        eprintln!(
+                            "aios worker start: sequence={sequence:016x} queue_ms={:.6}",
+                            (started - enqueued).as_secs_f64() * 1_000.0
+                        );
+                        (sequence, started)
+                    });
                     match job.response {
                         JobResponse::Complete(response) => {
                             let result = engine.complete(job.request);
@@ -137,6 +147,12 @@ impl WorkerClient {
                             }
                         }
                     }
+                    if let Some((sequence, started)) = started {
+                        eprintln!(
+                            "aios worker end: sequence={sequence:016x} worker_ms={:.6}",
+                            started.elapsed().as_secs_f64() * 1_000.0
+                        );
+                    }
                 }
             })
             .expect("create ApxInf inference worker thread");
@@ -183,6 +199,7 @@ impl WorkerClient {
         match self.sender.try_send(Job {
             request,
             response: JobResponse::Complete(response),
+            timing: None,
         }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => return Err(ApiError::queue_full()),
@@ -196,6 +213,14 @@ impl WorkerClient {
     pub fn submit_stream(
         &self,
         request: EngineRequest,
+    ) -> Result<mpsc::Receiver<Result<EngineStreamEvent, ApiError>>, ApiError> {
+        self.submit_stream_for_request(request, None)
+    }
+
+    pub(crate) fn submit_stream_for_request(
+        &self,
+        request: EngineRequest,
+        sequence: Option<u64>,
     ) -> Result<mpsc::Receiver<Result<EngineStreamEvent, ApiError>>, ApiError> {
         match self.status.state.load(Ordering::Acquire) {
             LOADING => return Err(ApiError::unavailable("model is still loading")),
@@ -219,6 +244,9 @@ impl WorkerClient {
         match self.sender.try_send(Job {
             request,
             response: JobResponse::Stream(response),
+            timing: sequence
+                .filter(|_| std::env::var("APXINF_AIOS_TIMELINE").as_deref() == Ok("1"))
+                .map(|sequence| (sequence, Instant::now())),
         }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => return Err(ApiError::queue_full()),

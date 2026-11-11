@@ -18,6 +18,7 @@ pub struct GenerationProfile {
     start_time: Instant,
     first_token_time: Option<Instant>,
     end_time: Option<Instant>,
+    decode_end: Option<(Instant, Duration)>,
     excluded_time: Duration,
     input_tokens: usize,
     output_tokens: usize,
@@ -31,6 +32,7 @@ impl GenerationProfile {
             start_time: Instant::now(),
             first_token_time: None,
             end_time: None,
+            decode_end: None,
             excluded_time: Duration::ZERO,
             input_tokens: 0,
             output_tokens: 0,
@@ -43,6 +45,18 @@ impl GenerationProfile {
         if self.first_token_time.is_none() {
             self.first_token_time = Some(Instant::now());
         }
+    }
+
+    /// Record completion of the decode loop before publishing reusable state.
+    pub(crate) fn record_decode_end(&mut self) {
+        self.decode_end = Some((Instant::now(), self.excluded_time));
+    }
+
+    /// Decode-loop time excluding streaming callbacks, in milliseconds.
+    pub fn decode_loop_ms(&self) -> Option<f64> {
+        let (end, excluded) = self.decode_end?;
+        let first = self.first_token_time?;
+        Some((end - first).saturating_sub(excluded).as_secs_f64() * 1_000.0)
     }
 
     /// Finalize the profile with token counts and record end time.

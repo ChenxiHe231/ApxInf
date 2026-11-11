@@ -181,7 +181,7 @@ async fn chat_completions(
     let id = format!("chatcmpl-{sequence:016x}");
     let created = unix_seconds();
     if stream {
-        let receiver = state.worker.submit_stream(engine_request)?;
+        let receiver = state.worker.submit_stream_for_request(engine_request, Some(sequence))?;
         return Ok(streaming_response(
             receiver,
             registry,
@@ -283,7 +283,7 @@ async fn messages(
     let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let id = format!("msg-{sequence:016x}");
     if stream {
-        let receiver = state.worker.submit_stream(engine_request)?;
+        let receiver = state.worker.submit_stream_for_request(engine_request, Some(sequence))?;
         return Ok(anthropic_streaming_response(
             receiver,
             registry,
