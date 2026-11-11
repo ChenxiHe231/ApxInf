@@ -261,7 +261,6 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(apxinf_edge_nvfp4_moe)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_edge_bf16_moe)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_decode)");
-    println!("cargo:rustc-check-cfg=cfg(apxinf_qwen35_suffix_fmha)");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH");
@@ -340,8 +339,6 @@ fn main() {
         cpu_arch == "aarch64" && selection.targets.len() == 1 && selection.targets[0].sm() == 101;
     if edge_nvfp4_moe {
         println!("cargo:rustc-cfg=apxinf_edge_nvfp4_moe");
-        // The fixed Qwen suffix FMHA has been screened on CUDA12 Thor.
-        println!("cargo:rustc-cfg=apxinf_qwen35_suffix_fmha");
     }
     let edge_bf16_root = native.join("kernels/edge_bf16_moe");
     let edge_bf16_header = edge_bf16_root
@@ -504,9 +501,6 @@ fn main() {
             ]);
         }
         cutlass_sources.push(adapters.join("attention/providers/cutlass.cu"));
-        if edge_nvfp4_moe {
-            cutlass_sources.push(adapters.join("qwen35_suffix_fmha.cu"));
-        }
         // Vendored FlashInfer Cake GDN prefill: plain CUDA C++, but it needs
         // the same compute_110a codegen as the CUTLASS group because it emits
         // tcgen05 and TMA. See native/kernels/flashinfer_gdn/README.md.
@@ -765,10 +759,7 @@ fn main() {
                 "-DAPXINF_CORR_RING2=1",
                 "-DAPXINF_LOAD_SHAPE_PER_MODE=1",
             ];
-            if matches!(
-                file_name,
-                Some("fmha_d256_causal_sm110.cu" | "qwen35_suffix_fmha.cu")
-            ) {
+            if file_name == Some("fmha_d256_causal_sm110.cu") {
                 command.args(D256_COMMON).args([
                     "-DAPXINF_EX2_EMU_FREQ=14",
                     "-DAPXINF_EX2_EMU_RES=6",
