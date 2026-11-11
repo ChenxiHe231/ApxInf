@@ -154,21 +154,3 @@ typedef struct {
   void* value;
   apxinf_cuda_stream_t stream;
 } apxinf_qwen35_dynamic_dequant_bindings_t;
-
-#define APXINF_QWEN35_SUFFIX_FMHA_SPEC_VERSION 1
-#define APXINF_QWEN35_SUFFIX_FMHA_QUERY_TOKENS 4096
-#define APXINF_QWEN35_SUFFIX_FMHA_KEY_TOKENS 53248
-
-typedef struct {
-  uint32_t version;
-  uint32_t query_tokens;
-  uint32_t key_tokens;
-} apxinf_qwen35_suffix_fmha_spec_t;
-
-typedef struct {
-  const void* query; /* BF16 [1,query_tokens,16,256]. */
-  const void* key; /* BF16 [1,key_tokens,2,256]. */
-  const void* value; /* Same shape as key. */
-  void* output; /* Same shape as query, distinct storage. */
-  apxinf_cuda_stream_t stream;
-} apxinf_qwen35_suffix_fmha_bindings_t;
