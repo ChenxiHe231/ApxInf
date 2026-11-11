@@ -801,7 +801,7 @@ fn upload_nvfp4(
         ],
         &format!("{label} block scales"),
     )?;
-    let a16 = (label == "lm_head" || w4a16_shared_enabled())
+    let a16 = (label == "lm_head")
         .then(|| repack_and_upload_nvfp4_a16(ctx, &weights, label))
         .transpose()?;
     let weight_scale_2_value = weights.weight_scale_2;
@@ -1104,14 +1104,6 @@ fn transpose_and_upload_bf16(
         bytes,
     )?;
     transfers::to_cuda_on_stream(ctx, host)
-}
-
-fn w4a16_lm_head_enabled() -> bool {
-    std::env::var("APXINF_QWEN35_W4A16_LM_HEAD").ok().as_deref() == Some("1")
-}
-
-fn w4a16_shared_enabled() -> bool {
-    std::env::var("APXINF_QWEN35_W4A16_SHARED").ok().as_deref() == Some("1")
 }
 
 /// Repack checkpoint-native ModelOpt NVFP4 bytes into Edge-LLM's dense

@@ -843,6 +843,9 @@ fn main() {
         if native_sm110 {
             command.arg("-DAPXINF_SEGMENTED_ATTENTION_SM110=1");
         }
+        if edge_nvfp4_moe && stem == "nvfp4_a16_blackwell_gemv" {
+            command.arg("-DAPXINF_THOR_NVFP4_LM_HEAD=1");
+        }
         if has_cutlass_sm89 {
             command.arg("-DAPXINF_GEMM_CUTLASS_SM89=1");
         }

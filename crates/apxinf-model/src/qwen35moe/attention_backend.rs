@@ -224,8 +224,7 @@ impl Qwen35Fp8AttentionBackend {
     ) -> Result<Option<Rc<PreparedExecution>>> {
         let fixed_profile = phase == DecoderPhase::Decode
             || (phase == DecoderPhase::Prefill && tokens == ops::QWEN35_MTP_DRAFT_STEPS + 1);
-        if !fixed_profile || std::env::var("APXINF_QWEN35_ATTENTION_SESSIONS").as_deref() == Ok("0")
-        {
+        if !fixed_profile {
             return Ok(None);
         }
         let key = (ctx.device_id(), layer_index, tokens);

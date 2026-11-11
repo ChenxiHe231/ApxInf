@@ -14,8 +14,6 @@
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <mma.h>
-#include <cstdlib>
-#include <cstring>
 
 namespace apxinf::cuda_new::mlp_ops {
 namespace {
@@ -375,32 +373,6 @@ void nvfp4_a16_blackwell_wmma_bf16(
   }
 }
 
-template <int Rows, int TileN>
-void launch_nvfp4_a16_blackwell_wmma(
-    const __nv_bfloat16* a, const unsigned char* w,
-    const unsigned char* s, const float* g, __nv_bfloat16* o,
-    int n, int k, cudaStream_t stream) {
-  if (k == 2048) {
-    nvfp4_a16_blackwell_wmma_bf16<Rows, TileN, 32>
-        <<<n / TileN, TileN * 2, 0, stream>>>(a, w, s, g, o, n, 32);
-  } else {
-    nvfp4_a16_blackwell_wmma_bf16<Rows, TileN, 0>
-        <<<n / TileN, TileN * 2, 0, stream>>>(a, w, s, g, o, n, k / kKTile);
-  }
-}
-
-template <int Rows>
-void dispatch_nvfp4_a16_wmma_tile(
-    const __nv_bfloat16* a, const unsigned char* w,
-    const unsigned char* s, const float* g, __nv_bfloat16* o,
-    int n, int k, int tile_n, cudaStream_t stream) {
-  switch (tile_n) {
-    case 32: launch_nvfp4_a16_blackwell_wmma<Rows, 32>(a,w,s,g,o,n,k,stream); break;
-    case 64: launch_nvfp4_a16_blackwell_wmma<Rows, 64>(a,w,s,g,o,n,k,stream); break;
-    case 128: launch_nvfp4_a16_blackwell_wmma<Rows, 128>(a,w,s,g,o,n,k,stream); break;
-  }
-}
-
 }  // namespace
 
 int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
@@ -419,23 +391,25 @@ int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
   const auto* s = static_cast<const unsigned char*>(block_scales);
   const auto* g = static_cast<const float*>(global_scale);
   auto* o = static_cast<__nv_bfloat16*>(output);
-  switch (rows) {
-    case 1: {
-      static const int stage_all_mode = [] {
-        const char* value = std::getenv("APXINF_NVFP4_A16_M1_STAGE_ALL");
-        if (!value || std::strcmp(value, "0") == 0) return 0;
-        if (std::strcmp(value, "1") == 0) return 1;
-        return -1;
-      }();
-      if (stage_all_mode < 0) return -3;
-      if (stage_all_mode == 1 && n == 248320 && k == 2048) {
-        nvfp4_a16_blackwell_m1_stage_all_bf16
-            <<<n / kNTile, kThreadsPerBlock, 0, stream>>>(a, w, s, g, o, 32);
-      } else {
-        launch_nvfp4_a16_blackwell_gemv<1>(a, w, s, g, o, n, k, stream);
-      }
-      break;
+#if defined(APXINF_THOR_NVFP4_LM_HEAD)
+  if (n == 248320 && k == 2048) {
+    constexpr int kLmHeadKTiles = 2048 / kKTile;
+    if (rows == 1) {
+      nvfp4_a16_blackwell_m1_stage_all_bf16
+          <<<n / kNTile, kThreadsPerBlock, 0, stream>>>(a, w, s, g, o, kLmHeadKTiles);
+      return cudaGetLastError() == cudaSuccess ? 0 : -2;
     }
+    if (rows == 4) {
+      nvfp4_a16_blackwell_wmma_bf16<4, kNTile, kLmHeadKTiles>
+          <<<n / kNTile, kNTile * 2, 0, stream>>>(a, w, s, g, o, n, kLmHeadKTiles);
+      return cudaGetLastError() == cudaSuccess ? 0 : -2;
+    }
+  }
+#endif
+  switch (rows) {
+    case 1:
+      launch_nvfp4_a16_blackwell_gemv<1>(a, w, s, g, o, n, k, stream);
+      break;
     case 2:
       launch_nvfp4_a16_blackwell_gemv<2>(a, w, s, g, o, n, k, stream);
       break;
@@ -451,30 +425,6 @@ int nvfp4_a16_blackwell_gemv(const void* activation, const void* qweights,
     case 16:
       launch_nvfp4_a16_blackwell_gemv<16>(a, w, s, g, o, n, k, stream);
       break;
-  }
-  return cudaGetLastError() == cudaSuccess ? 0 : -2;
-}
-
-
-// Internal provider entry selected only in the L1 adapter. Public L3/C ABI is
-// unchanged, old Rows8/16 remain available through the original implementation.
-int nvfp4_a16_blackwell_wmma(const void* activation, const void* qweights,
-                           const void* block_scales, const void* global_scale,
-                           void* output, int n, int k, int rows, int tile_n,
-                           cudaStream_t stream) {
-  if (!activation || !qweights || !block_scales || !global_scale || !output ||
-      n <= 0 || k <= 0 || n % kNTile || k % kKTile ||
-      rows < 1 || rows > 4 || (tile_n != 32 && tile_n != 64 && tile_n != 128)) return -1;
-  const auto* a = static_cast<const __nv_bfloat16*>(activation);
-  const auto* w = static_cast<const unsigned char*>(qweights);
-  const auto* s = static_cast<const unsigned char*>(block_scales);
-  const auto* g = static_cast<const float*>(global_scale);
-  auto* o = static_cast<__nv_bfloat16*>(output);
-  switch (rows) {
-    case 1: dispatch_nvfp4_a16_wmma_tile<1>(a,w,s,g,o,n,k,tile_n,stream); break;
-    case 2: dispatch_nvfp4_a16_wmma_tile<2>(a,w,s,g,o,n,k,tile_n,stream); break;
-    case 3: dispatch_nvfp4_a16_wmma_tile<3>(a,w,s,g,o,n,k,tile_n,stream); break;
-    case 4: dispatch_nvfp4_a16_wmma_tile<4>(a,w,s,g,o,n,k,tile_n,stream); break;
   }
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
 }

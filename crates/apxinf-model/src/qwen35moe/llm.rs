@@ -79,18 +79,21 @@ struct AdaptiveMtpController {
 }
 
 impl AdaptiveMtpController {
-    fn new() -> Self {
-        let scalar_tpot_ms = std::env::var("APXINF_QWEN35_SCALAR_TPOT_MS")
-            .ok()
-            .and_then(|value| value.parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value > 0.0)
-            // Measured Thor scalar decode reference. Production/demo scripts
-            // override this with the same-run scalar calibration.
-            .unwrap_or(19.42);
-        let fixed_depth = std::env::var("APXINF_QWEN35_MTP_FIXED_DEPTH")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|depth| (1..=QWEN35_MTP_DRAFT_STEPS).contains(depth));
+    fn new(thor_dynamic_fp8_decode: bool) -> Self {
+        let (fixed_depth, scalar_tpot_ms) = if thor_dynamic_fp8_decode {
+            (Some(QWEN35_MTP_DRAFT_STEPS), 19.42)
+        } else {
+            let fixed_depth = std::env::var("APXINF_QWEN35_MTP_FIXED_DEPTH")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|depth| (1..=QWEN35_MTP_DRAFT_STEPS).contains(depth));
+            let scalar_tpot_ms = std::env::var("APXINF_QWEN35_SCALAR_TPOT_MS")
+                .ok()
+                .and_then(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(19.42);
+            (fixed_depth, scalar_tpot_ms)
+        };
         Self {
             observations: VecDeque::with_capacity(ADAPTIVE_MTP_HISTORY),
             rounds: 0,
@@ -405,7 +408,9 @@ impl Qwen35Moe {
                 attention.kv_cache_scales = kv_cache_scales;
             }
         }
-        let decoder = Qwen35Decoder::new(&config)?;
+        let thor_dynamic_fp8_decode =
+            execution.uses_thor_dynamic_fp8_decode(ctx.device_id(), kv_capacity);
+        let decoder = Qwen35Decoder::with_execution(&config, thor_dynamic_fp8_decode)?;
         let attention =
             Qwen35Fp8AttentionBackend::with_kv_cache(&config, execution.kv_cache, kv_cache_scales)?;
         let target = Qwen35Session::new(&ctx, &decoder, &weights, attention, kv_capacity)?;
@@ -1054,7 +1059,7 @@ impl Qwen35Moe {
         profile.record_first_token();
         profile.run_unprofiled(|| on_token(first));
 
-        let mut adaptive = AdaptiveMtpController::new();
+        let mut adaptive = AdaptiveMtpController::new(self.decoder.thor_dynamic_fp8_decode());
         let mut scalar_fallback = false;
         while tokens.len() < policy.max_new_tokens && !self.runtime.is_finished() {
             if policy
@@ -1554,6 +1559,15 @@ mod tests {
             last_depth: QWEN35_MTP_DRAFT_STEPS,
             scalar_tpot_ms: 19.42,
             fixed_depth: None,
+        }
+    }
+
+    #[test]
+    fn thor_dynamic_fp8_keeps_depth_three_at_low_acceptance() {
+        let mut controller = AdaptiveMtpController::new(true);
+        for _ in 0..16 {
+            controller.observe(3, 0, 45.0);
+            assert_eq!(controller.next_depth(), QWEN35_MTP_DRAFT_STEPS);
         }
     }
 

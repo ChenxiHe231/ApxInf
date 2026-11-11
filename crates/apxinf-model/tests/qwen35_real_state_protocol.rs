@@ -71,7 +71,6 @@ impl Fixture {
         let protocol_graphs_env = std::env::var_os("APXINF_QWEN35_PROTOCOL_GRAPHS");
         let graphs = parse_protocol_graphs(protocol_graphs_env.as_deref())?;
         std::env::set_var("APXINF_REQUIRE_RECIPES", "1");
-        std::env::set_var("APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE", "1");
         std::env::set_var("APXINF_QWEN35_CUDA_GRAPHS", if graphs { "1" } else { "0" });
         std::env::set_var("APXINF_QWEN35_VERIFY_GRAPHS", "0");
         let checkpoint = PathBuf::from(std::env::var_os("APXINF_QWEN35_CHECKPOINT")

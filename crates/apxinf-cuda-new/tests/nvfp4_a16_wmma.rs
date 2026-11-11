@@ -1,4 +1,4 @@
-//! Ignored GPU oracle/guard tests for default-off W4A16 WMMA candidate.
+//! Ignored GPU oracle/guard tests for W4A16 GEMV and Thor LM-head dispatch.
 //! Use the unchanged safe L3 op and C ABI. Model/precision/perf acceptance is
 //! separate; this fixture is synthetic, including real vocab geometry only.
 use apxinf_core::{DType,Device,Shape,Tensor};
@@ -31,11 +31,6 @@ impl Weight{
  fn run(&self,ctx:&CudaContext,a:&Guarded,out:&Guarded)->apxinf_core::Result<()>{ops::nvfp4_a16_blackwell_gemv(ctx,&a.view,&self.q.view,&self.s.view,&self.g.view,&out.view)}
  fn readonly(&self){self.q.readonly();self.s.readonly();self.g.readonly();}
 }
-fn policy()->(bool,usize){
- let enabled=match std::env::var("APXINF_NVFP4_A16_WMMA").as_deref(){Err(_)|Ok("0")=>false,Ok("1")=>true,_=>panic!("WMMA flag must be0/1")};
- let tile=if enabled{match std::env::var("APXINF_NVFP4_A16_WMMA_TILE_N").as_deref(){Err(_)|Ok("64")=>64,Ok("32")=>32,Ok("128")=>128,_=>panic!("TileN must32/64/128")}}else{0};
- (enabled,tile)
-}
 fn check(w:&Weight,a:&Guarded,o:&Guarded,expected:&[f32],rows:usize,label:&str,constant:bool)->Vec<u8>{
  w.readonly();a.readonly();let raw=o.payload();let got=decode(&raw);assert_eq!(got.len(),rows*w.n);assert_eq!(got.len(),expected.len());
  let mut worst=0.0f64;let mut row_max=vec![0.0f64;rows];let mut argmaxes=Vec::new();
@@ -46,7 +41,7 @@ fn check(w:&Weight,a:&Guarded,o:&Guarded,expected:&[f32],rows:usize,label:&str,c
   let g=reference::argmax(gr);let e=reference::argmax(er);assert_eq!(g,e,"argmax differs in row{row}");argmaxes.push(g);
  }
  assert!(worst<MAX_ABS,"{label} max_abs{worst} must be strictly <{MAX_ABS}");
- let (requested,tile)=policy();println!("A16-GATE label={label} N={} K={} M={rows} requested_wmma={requested} tileN={tile} max_abs={worst} row_max_abs={row_max:?} argmax={argmaxes:?} output_fnv={} readonly_full=true guards=true BF16_A=true global_scale_after_dot=true performance_eligible=false",w.n,w.k,fnv(&raw));raw
+ println!("A16-GATE label={label} N={} K={} M={rows} max_abs={worst} row_max_abs={row_max:?} argmax={argmaxes:?} output_fnv={} readonly_full=true guards=true BF16_A=true global_scale_after_dot=true performance_eligible=false",w.n,w.k,fnv(&raw));raw
 }
 fn ab_a(ctx:&CudaContext,w:&Weight,rows:usize,a:&[f32],expected:&[f32],label:&str){
  let input=Guarded::new(ctx,vec![rows,w.k],DType::BF16,bytes(a));let neg=a.iter().map(|x|-*x).collect::<Vec<_>>();let other=Guarded::new(ctx,vec![rows,w.k],DType::BF16,bytes(&neg));
@@ -58,9 +53,9 @@ fn ab_a(ctx:&CudaContext,w:&Weight,rows:usize,a:&[f32],expected:&[f32],label:&st
  out.poison(ctx);w.run(ctx,&input,&out).unwrap();ctx.synchronize().unwrap();assert_eq!(check(w,&input,&out,expected,rows,&format!("{label}-A-repeat"),false),first);assert_eq!(bout.payload(),b);other.readonly();
 }
 #[test]
-#[ignore="GPU exclusive lock; M1..4, N128/256, K64/128/192/1984/2048/2112; fresh process per tile"]
+#[ignore="GPU exclusive lock; M1..4, N128/256, K64/128/192/1984/2048/2112"]
 fn nvfp4_a16_wmma_packing_and_dense_matrix(){
- let _=policy();let ctx=CudaContext::new_with_autotune(0,false).unwrap();let mut cases=0;
+ let ctx=CudaContext::new_with_autotune(0,false).unwrap();let mut cases=0;
  for n in [128,256]{for k in [64,128,192,1984,2048,2112]{
   let(q,s)=reference::packed_fixture(n,k);let w=Weight::new(&ctx,n,k,&q,&s,1.0/128.0);
   let dense=reference::activation(4,k);let gold=reference::evaluate(n,k,4,&dense,&q,&s,1.0/128.0).unwrap();
@@ -74,7 +69,7 @@ fn nvfp4_a16_wmma_packing_and_dense_matrix(){
 #[test]
 #[ignore="GPU exclusive lock; actual Qwen vocab248320/K2048 geometry, synthetic immutable weights; expensive CPU F64 reference"]
 fn nvfp4_a16_wmma_real_vocab_geometry(){
- let _=policy();let ctx=CudaContext::new_with_autotune(0,false).unwrap();let(n,k)=(248320,2048);
+ let ctx=CudaContext::new_with_autotune(0,false).unwrap();let(n,k)=(248320,2048);
  let(q,s)=reference::packed_fixture(n,k);let a=reference::activation(4,k);let gold=reference::evaluate(n,k,4,&a,&q,&s,1.0/128.0).unwrap();
  println!("A16-REF real-vocab synthetic N={n} K={k} max_abs_dot={} max_l1_dot={} q_fnv={} sf_fnv={}",gold.max_abs_dot,gold.max_l1_dot,fnv(&q),fnv(&s));
  let w=Weight::new(&ctx,n,k,&q,&s,1.0/128.0);for rows in 1..=4{ab_a(&ctx,&w,rows,&a[..rows*k],&gold.output[..rows*n],"real-vocab");}
@@ -83,7 +78,7 @@ fn nvfp4_a16_wmma_real_vocab_geometry(){
 #[test]
 #[ignore="GPU exclusive lock; exhaustive finite weight product oracle and global F32 stage literal"]
 fn nvfp4_a16_wmma_all_finite_codes_and_global_scale(){
- let _=policy();let ctx=CudaContext::new_with_autotune(0,false).unwrap();let(n,k)=(4096,64);let mut q=vec![0;n*k/2];let mut s=vec![0x38;n*k/16];let finite=(0u8..=255).filter(|c|c&0x7f!=0x7f).collect::<Vec<_>>();
+ let ctx=CudaContext::new_with_autotune(0,false).unwrap();let(n,k)=(4096,64);let mut q=vec![0;n*k/2];let mut s=vec![0x38;n*k/16];let finite=(0u8..=255).filter(|c|c&0x7f!=0x7f).collect::<Vec<_>>();
  for col in 0..4064{let tile=(col/128)*128+col%128;q[tile*32]=((col%16)as u8)&15;s[tile*4]=finite[col/16];}
  let mut a=vec![0.;k];a[0]=1.;let gold=reference::evaluate(n,k,1,&a,&q,&s,1.0).unwrap();let w=Weight::new(&ctx,n,k,&q,&s,1.0);let input=Guarded::new(&ctx,vec![1,k],DType::BF16,bytes(&a));let out=Guarded::new(&ctx,vec![1,n],DType::BF16,vec![0xff;n*2]);
  w.run(&ctx,&input,&out).unwrap();ctx.synchronize().unwrap();let b=check(&w,&input,&out,&gold.output,1,"all4064-finite-products",false);assert_eq!(b,bytes(&gold.output));
@@ -99,7 +94,7 @@ fn nvfp4_a16_wmma_all_finite_codes_and_global_scale(){
 #[test]
 #[ignore="GPU exclusive lock; all small rows eager/graph/metadata failure gates"]
 fn nvfp4_a16_wmma_capture_and_validation(){
- let _=policy();let ctx=CudaContext::new_with_autotune(0,false).unwrap();let(n,k)=(256,2048);let(q,s)=reference::packed_fixture(n,k);let a=reference::activation(4,k);let gold=reference::evaluate(n,k,4,&a,&q,&s,1.0/128.0).unwrap();let w=Weight::new(&ctx,n,k,&q,&s,1.0/128.0);
+ let ctx=CudaContext::new_with_autotune(0,false).unwrap();let(n,k)=(256,2048);let(q,s)=reference::packed_fixture(n,k);let a=reference::activation(4,k);let gold=reference::evaluate(n,k,4,&a,&q,&s,1.0/128.0).unwrap();let w=Weight::new(&ctx,n,k,&q,&s,1.0/128.0);
  for rows in 1..=4{let input=Guarded::new(&ctx,vec![rows,k],DType::BF16,bytes(&a[..rows*k]));let out=Guarded::new(&ctx,vec![rows,n],DType::BF16,vec![0xff;rows*n*2]);
   w.run(&ctx,&input,&out).unwrap();ctx.synchronize().unwrap();let b=check(&w,&input,&out,&gold.output[..rows*n],rows,"capture-warm",false);
   let graph=apxinf_cuda_new::capture(&ctx,||w.run(&ctx,&input,&out)).unwrap();for i in 0..4{out.poison(&ctx);if i%2==0{graph.replay().unwrap();}else{w.run(&ctx,&input,&out).unwrap();}ctx.synchronize().unwrap();assert_eq!(check(&w,&input,&out,&gold.output[..rows*n],rows,if i%2==0{"graph"}else{"eager"},false),b);}
@@ -159,12 +154,7 @@ fn nvfp4_a16_m1_stage_all_event_bench() {
     use std::io::Write;
     use m1_stage_all_event_api::TimingEvent;
     const CALLS: usize = 100;
-    let (wmma_enabled, _) = policy();
-    if wmma_enabled {
-        assert_eq!(std::env::var("APXINF_NVFP4_A16_WMMA_MIN_ROWS").unwrap_or_else(|_| "4".into()), "4", "M1 must remain on GEMV dispatch");
-    }
-    let flag = std::env::var("APXINF_NVFP4_A16_M1_STAGE_ALL").unwrap_or_else(|_| "0".into());
-    assert!(flag == "0" || flag == "1");
+    assert!(ops::edge_nvfp4_moe_available(), "Stage All requires the Thor SM101 build");
     let output_path = std::path::PathBuf::from(
         std::env::var_os("APXINF_LMHEAD_BENCH_OUTPUT").expect("explicit fresh raw-output path required"));
     assert!(output_path.is_absolute() && !output_path.exists());
@@ -198,7 +188,7 @@ fn nvfp4_a16_m1_stage_all_event_bench() {
         let event_ms = f64::from(start.elapsed_ms(&end));
         assert_eq!(check(&w, &input, &out, &gold.output, 1, "M1-event-repeat", false), first);
         if batch >= 2 { measured_ms.push(event_ms / CALLS as f64); }
-        println!("M1-EVENT batch={batch} warmup={} calls={CALLS} M=1 N={n} K={k} stage_all={flag} event_batch_ms={event_ms:.9} event_per_call_ms={:.9} host_batch_ms={host_ms:.9} output_fnv={} performance_eligible=false scope=synthetic-operator-event-stream-interval", batch < 2, event_ms / CALLS as f64, fnv(&first));
+        println!("M1-EVENT batch={batch} warmup={} calls={CALLS} M=1 N={n} K={k} stage_all=1 event_batch_ms={event_ms:.9} event_per_call_ms={:.9} host_batch_ms={host_ms:.9} output_fnv={} performance_eligible=false scope=synthetic-operator-event-stream-interval", batch < 2, event_ms / CALLS as f64, fnv(&first));
     }
     // Sparse boundary anchors reuse the frozen scalar weight decoder, O(N)
     // each rather than evaluating a full N*K dot for each fixture.

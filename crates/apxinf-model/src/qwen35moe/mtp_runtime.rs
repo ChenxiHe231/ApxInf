@@ -1169,12 +1169,6 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
             ctx.synchronize().map_err(Error::Cuda)?;
         }
         mark("draft", phase);
-        // A/B escape hatch for validating the device-resident draft chain.
-        // The disabled path deliberately reads proposals here, recreating the
-        // old draft -> host synchronization before target verification.
-        let host_proposals = (!mtp_device_chain_enabled())
-            .then(|| draft.read_proposals())
-            .transpose()?;
         let phase = std::time::Instant::now();
         let verification = {
             let _range = crate::profiling::trace::range("qwen35_mtp_verify");
@@ -1191,11 +1185,10 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         mark("verify", phase);
         let phase = std::time::Instant::now();
         let resolution = verification.resolve(ctx, &draft)?;
-        let proposals = host_proposals.unwrap_or_else(|| resolution.proposals.clone());
-        debug_assert_eq!(proposals, resolution.proposals);
+        let proposals = &resolution.proposals;
         debug_assert_eq!(proposals.len(), draft.draft_steps());
         let ticket = schedule
-            .begin_round(pending, &proposals)
+            .begin_round(pending, proposals)
             .map_err(schedule_error)?;
         let plan = schedule
             .finish_round(ticket, &resolution.predictions)
@@ -2415,15 +2408,6 @@ fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
 }
 
-fn mtp_device_chain_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("APXINF_QWEN35_MTP_DEVICE_CHAIN")
-            .map(|value| !matches!(value.as_str(), "0" | "false" | "off"))
-            .unwrap_or(true)
-    })
-}
-
 fn schedule_error(error: impl std::fmt::Display) -> Error {
     invalid(format!("Qwen3.5 MTP schedule: {error}"))
 }
@@ -2560,7 +2544,6 @@ pub(super) mod gpu_raw_protocol {
             let protocol_graphs_env = std::env::var_os("APXINF_QWEN35_PROTOCOL_GRAPHS");
             let graphs = parse_protocol_graphs(protocol_graphs_env.as_deref())?;
             std::env::set_var("APXINF_REQUIRE_RECIPES", if allow_online_tune { "0" } else { "1" });
-            std::env::set_var("APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE", "1");
             std::env::set_var("APXINF_QWEN35_CUDA_GRAPHS", if graphs { "1" } else { "0" });
             std::env::set_var("APXINF_QWEN35_VERIFY_GRAPHS", "0");
             let checkpoint = PathBuf::from(std::env::var_os("APXINF_QWEN35_CHECKPOINT").expect("checkpoint env"));

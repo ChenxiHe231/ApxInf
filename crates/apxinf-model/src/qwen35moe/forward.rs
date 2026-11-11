@@ -349,14 +349,10 @@ impl BaseMoeScratch {
         let config = RoutedMoeConfig::new(self.experts, self.top_k);
         let nvfp4_ok = weights.activation == Qwen35MoeActivation::Nvfp4;
 
-        if self.tokens == 1 && std::env::var("APXINF_QWEN35_ROUTER_GEMV").as_deref() == Ok("1") {
-            ops::bf16_gemv(ctx, input, &weights.router.weight, &self.router_logits)?;
-        } else {
-            ops::gemm(
-                ctx,
-                ops::GemmArgs::new(input, &weights.router.weight, &mut self.router_logits),
-            )?;
-        }
+        ops::gemm(
+            ctx,
+            ops::GemmArgs::new(input, &weights.router.weight, &mut self.router_logits),
+        )?;
         if matches!(&weights.routed_experts, DeviceNvfp4RoutedExperts::Edge(_)) {
             ops::routed_moe_route_topk(
                 ctx,
@@ -437,23 +433,14 @@ impl BaseMoeScratch {
                 },
             )?;
             self.run_shared_nvfp4(ctx, weights, input)?;
-            if self.tokens == 1 && std::env::var("APXINF_QWEN35_GATE_GEMV").as_deref() == Ok("1") {
-                ops::bf16_gemv(
-                    ctx,
+            ops::gemm(
+                ctx,
+                ops::GemmArgs::new(
                     input,
                     &weights.shared_expert_gate.weight,
-                    &self.shared_gate_logits,
-                )?;
-            } else {
-                ops::gemm(
-                    ctx,
-                    ops::GemmArgs::new(
-                        input,
-                        &weights.shared_expert_gate.weight,
-                        &mut self.shared_gate_logits,
-                    ),
-                )?;
-            }
+                    &mut self.shared_gate_logits,
+                ),
+            )?;
             let shared_gate_logits =
                 view(&self.shared_gate_logits, vec![self.tokens], DType::BF16)?;
             return ops::routed_moe_add_shared(
@@ -875,60 +862,6 @@ impl BaseMoeScratch {
             .inter_scales
             .as_ref()
             .ok_or_else(|| invalid("shared NVFP4 intermediate scales are unavailable"))?;
-
-        if matches!(self.tokens, 1 | 2 | 3 | 4 | 8 | 16) {
-            if let (Some(gate), Some(up), Some(down)) = (
-                weights.shared_gate.a16.as_ref(),
-                weights.shared_up.a16.as_ref(),
-                weights.shared_down.a16.as_ref(),
-            ) {
-                let half_fused_bytes =
-                    self.tokens * self.intermediate * DType::BF16.size_in_bytes();
-                let gate_output = CudaBuffer::from_tensor(expert_fused)
-                    .map_err(Error::Cuda)?
-                    .view(0, half_fused_bytes)
-                    .map_err(Error::Cuda)?
-                    .as_tensor(
-                        Shape::new(vec![self.tokens, self.intermediate]),
-                        DType::BF16,
-                    )
-                    .map_err(Error::Cuda)?;
-                let up_output = CudaBuffer::from_tensor(expert_fused)
-                    .map_err(Error::Cuda)?
-                    .view(half_fused_bytes, half_fused_bytes)
-                    .map_err(Error::Cuda)?
-                    .as_tensor(
-                        Shape::new(vec![self.tokens, self.intermediate]),
-                        DType::BF16,
-                    )
-                    .map_err(Error::Cuda)?;
-                ops::nvfp4_a16_blackwell_gemv(
-                    ctx,
-                    input,
-                    &gate.qweight,
-                    &gate.block_scales,
-                    &gate.global_scale,
-                    &gate_output,
-                )?;
-                ops::nvfp4_a16_blackwell_gemv(
-                    ctx,
-                    input,
-                    &up.qweight,
-                    &up.block_scales,
-                    &up.global_scale,
-                    &up_output,
-                )?;
-                ops::swiglu_split(ctx, &gate_output, &up_output, &self.shared_intermediate)?;
-                return ops::nvfp4_a16_blackwell_gemv(
-                    ctx,
-                    &self.shared_intermediate,
-                    &down.qweight,
-                    &down.block_scales,
-                    &down.global_scale,
-                    &self.shared_output,
-                );
-            }
-        }
 
         let nvfp4_gemm = |a: &Tensor,
                           a_scales: &Tensor,

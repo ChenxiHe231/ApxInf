@@ -10,6 +10,7 @@ use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 use apxinf_cuda_new::{
     ops, transfers, CudaBuffer, CudaContext, CudaEvent, ExecutionSession, PreparedPhase,
 };
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -408,14 +409,35 @@ impl DecoderOutput {
 pub struct Qwen35Decoder {
     architecture: Qwen35MoeArchitecture,
     rms_norm_eps: f32,
+    thor_dynamic_fp8_decode: bool,
 }
 
 impl Qwen35Decoder {
     pub fn new(config: &Qwen35MoeConfig) -> Result<Self> {
+        Self::with_execution(config, false)
+    }
+
+    pub(super) fn with_execution(
+        config: &Qwen35MoeConfig,
+        thor_dynamic_fp8_decode: bool,
+    ) -> Result<Self> {
         Ok(Self {
             architecture: Qwen35MoeArchitecture::from_config(config)?,
             rms_norm_eps: config.text_config.rms_norm_eps,
+            thor_dynamic_fp8_decode,
         })
+    }
+
+    pub(super) fn thor_dynamic_fp8_decode(&self) -> bool {
+        self.thor_dynamic_fp8_decode
+    }
+
+    fn graph_gdn_mode(&self) -> Cow<'static, str> {
+        if self.thor_dynamic_fp8_decode {
+            Cow::Borrowed("full")
+        } else {
+            Cow::Owned(std::env::var("APXINF_QWEN35_GRAPH_GDN").unwrap_or_default())
+        }
     }
 
     pub fn architecture(&self) -> &Qwen35MoeArchitecture {
@@ -798,8 +820,8 @@ impl Qwen35Decoder {
         gdn_states: &[GdnState],
         scratch: &mut DecoderScratch,
     ) -> Result<Vec<Qwen35DecodePhase>> {
-        let graph_gdn_mode = std::env::var("APXINF_QWEN35_GRAPH_GDN").unwrap_or_default();
-        let graph_gdn_full = matches!(graph_gdn_mode.as_str(), "full" | "prepared");
+        let graph_gdn_mode = self.graph_gdn_mode();
+        let graph_gdn_full = matches!(graph_gdn_mode.as_ref(), "full" | "prepared");
         let graph_gdn_moe = graph_gdn_mode == "moe";
         let parallel_gdn = graph_gdn_mode == "parallel";
         let parallel_streams = parallel_gdn
@@ -894,7 +916,7 @@ impl Qwen35Decoder {
         graph_phases: &[Qwen35DecodePhase],
         scratch: &mut DecoderScratch,
     ) -> Result<()> {
-        let graph_gdn_full = std::env::var("APXINF_QWEN35_GRAPH_GDN").as_deref() == Ok("full");
+        let graph_gdn_full = self.graph_gdn_mode() == "full";
         if eager_phases.len() != self.architecture.layers.len()
             || graph_phases.len() != self.architecture.layers.len()
         {
@@ -1135,17 +1157,17 @@ impl Qwen35Decoder {
                 ));
             }
         }
-        let graph_gdn_mode = std::env::var("APXINF_QWEN35_GRAPH_GDN").unwrap_or_default();
+        let graph_gdn_mode = self.graph_gdn_mode();
         let graph_gdn = matches!(
-            graph_gdn_mode.as_str(),
+            graph_gdn_mode.as_ref(),
             "1" | "moe" | "full" | "prepared" | "parallel"
         );
         let graph_gdn_moe = graph_gdn_mode == "moe";
         let graph_gdn_full = graph_gdn_mode == "full";
         let prepared_gdn_full = graph_gdn_mode == "prepared";
         let parallel_gdn = graph_gdn_mode == "parallel";
-        let graph_attention_moe =
-            std::env::var("APXINF_QWEN35_GRAPH_ATTN_MOE").as_deref() != Ok("0");
+        let graph_attention_moe = self.thor_dynamic_fp8_decode
+            || std::env::var("APXINF_QWEN35_GRAPH_ATTN_MOE").as_deref() != Ok("0");
         let time_verify_layers =
             std::env::var("APXINF_QWEN35_VERIFY_LAYER_TIMING").as_deref() == Ok("1");
         let fuse_prefill_residual = phase == DecoderPhase::Prefill
