@@ -144,6 +144,27 @@ pub(crate) struct DynamicDequantBindings {
     pub stream: CudaStream,
 }
 
+#[cfg(apxinf_qwen35_suffix_fmha)]
+pub(crate) const SUFFIX_FMHA_SPEC_VERSION: u32 = 1;
+
+#[cfg(apxinf_qwen35_suffix_fmha)]
+#[repr(C)]
+pub(crate) struct SuffixFmhaSpec {
+    pub version: u32,
+    pub query_tokens: u32,
+    pub key_tokens: u32,
+}
+
+#[cfg(apxinf_qwen35_suffix_fmha)]
+#[repr(C)]
+pub(crate) struct SuffixFmhaBindings {
+    pub query: *const c_void,
+    pub key: *const c_void,
+    pub value: *const c_void,
+    pub output: *mut c_void,
+    pub stream: CudaStream,
+}
+
 unsafe extern "C" {
     pub(crate) fn apxinf_qwen35_query_prepare(
         runtime: Runtime,
@@ -173,6 +194,13 @@ unsafe extern "C" {
         runtime: Runtime,
         spec: *const DynamicDecodeSpec,
         bindings: *const DynamicDecodeBindings,
+    ) -> i32;
+
+    #[cfg(apxinf_qwen35_suffix_fmha)]
+    pub(crate) fn apxinf_qwen35_suffix_fmha(
+        runtime: Runtime,
+        spec: *const SuffixFmhaSpec,
+        bindings: *const SuffixFmhaBindings,
     ) -> i32;
 
     pub(crate) fn apxinf_qwen35_dynamic_kv_dequant(
