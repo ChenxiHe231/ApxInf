@@ -62,6 +62,16 @@ typedef struct {
 } apxinf_qwen35_attention_bindings_t;
 
 typedef struct {
+  const void* projected_key; /* BF16 [T,2,256]. */
+  const void* projected_value; /* BF16 [T,2,256]. */
+  const void* key_norm; /* BF16 [256], zero-centered. */
+  const void* positions; /* I32 [3,T]. */
+  void* key_cache; /* F8E4M3 [capacity,2,256]. */
+  void* value_cache; /* F8E4M3 [capacity,2,256]. */
+  apxinf_cuda_stream_t stream;
+} apxinf_qwen35_static_kv_bindings_t;
+
+typedef struct {
   uint32_t version;
   uint32_t tokens;
   uint32_t cache_offset;

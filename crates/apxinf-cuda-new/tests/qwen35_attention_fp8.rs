@@ -692,3 +692,93 @@ fn qwen35_draft_attention_append_and_graph_contract() {
         }
     }
 }
+
+#[test]
+fn qwen35_static_kv_append_matches_full_attention_cache_bytes() {
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    let width = ops::QWEN35_ATTENTION_KV_WIDTH;
+    let head_dim = ops::QWEN35_ATTENTION_HEAD_DIM;
+    let qkv = patterned_bf16(ops::QWEN35_ATTENTION_Q_PROJECTION_WIDTH, 17, 101, 37.0);
+    let key = patterned_bf16(width, 13, 83, 31.0);
+    let value = patterned_bf16(width, 19, 79, 29.0);
+    let norm = patterned_bf16(head_dim, 11, 29, 112.0);
+    let key_gpu = transfers::to_cuda_on_stream(&ctx, bf16_tensor(&key, vec![1, width])).unwrap();
+    let value_gpu = transfers::to_cuda_on_stream(&ctx, bf16_tensor(&value, vec![1, width])).unwrap();
+    let norm_gpu = transfers::to_cuda_on_stream(&ctx, bf16_tensor(&norm, vec![head_dim])).unwrap();
+    let unit = ops::Qwen35KvCacheScales { key: 1.0, value: 1.0 };
+
+    for offset in [127, 128] {
+        let shape = fp8_cache_shape(offset + 2);
+        let row = offset * width;
+        let capacity = shape[0] * ops::QWEN35_KV_CACHE_BLOCK_TOKENS;
+        let mut seed = vec![0x7e; capacity * width];
+        seed[..row].fill(0xb8);
+        let upload = || {
+            let host = Tensor::from_f8_e4m3(shape.clone(), &seed).unwrap();
+            transfers::to_cuda_on_stream(&ctx, host).unwrap()
+        };
+        let legacy_key = upload();
+        let legacy_value = upload();
+        let append_key = upload();
+        let append_value = upload();
+        let position_values = positions(offset + 1, 1);
+        let position = transfers::to_cuda_on_stream(
+            &ctx,
+            Tensor::from_i32(vec![3, 1], &position_values).unwrap(),
+        )
+        .unwrap();
+
+        let args = |cache_offset| ops::Qwen35StaticFp8KvAppendArgs {
+            projected_key: &key_gpu,
+            projected_value: &value_gpu,
+            key_norm: &norm_gpu,
+            positions: &position,
+            cache: ops::Qwen35Fp8KvCache { key: &append_key, value: &append_value },
+            cache_offset,
+            scales: unit,
+            rope_theta: 10_000_000.0,
+        };
+        let overlap = ops::Qwen35StaticFp8KvAppendArgs {
+            cache: ops::Qwen35Fp8KvCache { key: &append_key, value: &append_key },
+            ..args(offset)
+        };
+        assert!(ops::qwen35_static_kv_append(&ctx, 1, overlap).is_err());
+        assert!(ops::qwen35_static_kv_append(&ctx, 1, args(capacity)).is_err());
+        ctx.synchronize().unwrap();
+        assert_eq!(fp8_bytes(&append_key), seed);
+        assert_eq!(fp8_bytes(&append_value), seed);
+
+        run_attention(
+            &ctx, 1, offset, &qkv, &key, &value, &norm, &norm, &position_values,
+            &legacy_key, &legacy_value, unit,
+        );
+        let expected_key = fp8_bytes(&legacy_key);
+        let expected_value = fp8_bytes(&legacy_value);
+        assert_ne!(&expected_key[row..row + width], &seed[row..row + width]);
+        let value_bytes: Vec<_> = value.iter().copied().map(ops::encode_e4m3).collect();
+        assert_eq!(&expected_value[row..row + width], value_bytes.as_slice());
+        for cache in [&expected_key, &expected_value] {
+            assert_eq!(&cache[..row], &seed[..row]);
+            assert_eq!(&cache[row + width..], &seed[row + width..]);
+        }
+
+        let append = || ops::qwen35_static_kv_append(&ctx, 1, args(offset));
+        append().unwrap();
+        ctx.synchronize().unwrap();
+        assert_eq!(fp8_bytes(&append_key), expected_key);
+        assert_eq!(fp8_bytes(&append_value), expected_value);
+        let graph = apxinf_cuda_new::capture(&ctx, append).unwrap();
+        for cache in [&append_key, &append_value] {
+            CudaBuffer::from_tensor(cache)
+                .unwrap()
+                .view(row, width)
+                .unwrap()
+                .memset_async(0x7e, ctx.stream())
+                .unwrap();
+        }
+        graph.replay().unwrap();
+        ctx.synchronize().unwrap();
+        assert_eq!(fp8_bytes(&append_key), expected_key);
+        assert_eq!(fp8_bytes(&append_value), expected_value);
+    }
+}

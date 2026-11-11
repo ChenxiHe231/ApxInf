@@ -183,6 +183,7 @@ pub struct Qwen35MtpRuntime {
     geometry: AttentionGeometry,
     rms_norm_eps: f32,
     rope_theta: f32,
+    kv_only_materialization: bool,
     scratch: Option<MtpScratch>,
     prefill_scratch: Option<MtpPrefillScratch>,
     pending_draft: Option<PendingDraft>,
@@ -213,6 +214,8 @@ impl Qwen35MtpRuntime {
             geometry,
             rms_norm_eps: text.rms_norm_eps,
             rope_theta: text.rope_parameters.rope_theta,
+            kv_only_materialization: std::env::var("APXINF_QWEN35_MTP_KV_ONLY_MATERIALIZE")
+                .as_deref() == Ok("1"),
             scratch: None,
             prefill_scratch: None,
             pending_draft: None,
@@ -769,6 +772,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             let geometry = self.geometry;
             let eps = self.rms_norm_eps;
             let theta = self.rope_theta;
+            let kv_only = self.kv_only_materialization;
             let scratch = self.ensure_scratch(ctx, shadow.capacity)?;
             transfers::copy_cuda_to_cuda(ctx, &scratch.next_token, &scratch.token)?;
             write_text_position(
@@ -801,6 +805,7 @@ impl MtpBackend for Qwen35MtpRuntime {
                 &rope_position,
                 materialize_row,
                 pending.draft_steps,
+                kv_only,
             )?;
         } else if committed_rows > pending.draft_steps {
             return Err(invalid(
@@ -1518,17 +1523,31 @@ struct MtpMaterializeBinding {
 }
 
 impl MtpMaterializeBinding {
-    fn new(ctx: &CudaContext, weights: &Qwen35DeviceWeights) -> Result<Self> {
+    fn new(ctx: &CudaContext, weights: &Qwen35DeviceWeights, kv_only: bool) -> Result<Self> {
         let mtp = &weights.mtp;
         let attention = &mtp.layer.attention;
         let moe = &mtp.layer.moe;
-        let operands = [&mtp.fc.weight, &attention.q_proj.weight,
-            &attention.k_proj.weight, &attention.v_proj.weight, &attention.o_proj.weight,
-            &moe.router.weight, &moe.shared_gate.weight, &moe.shared_up.weight,
-            &moe.shared_down.weight, &moe.shared_expert_gate.weight];
+        let operands = [
+            &mtp.fc.weight,
+            &attention.k_proj.weight,
+            &attention.v_proj.weight,
+            &attention.q_proj.weight,
+            &attention.o_proj.weight,
+            &moe.router.weight,
+            &moe.shared_gate.weight,
+            &moe.shared_up.weight,
+            &moe.shared_down.weight,
+            &moe.shared_expert_gate.weight,
+        ];
         // Reference MoE is one stateless raw launch. Edge MoE adds five
         // GEMMs with stable views into the same MtpScratch allocations.
-        let gemm_count = if matches!(&moe.routed_experts, DeviceDenseRoutedExperts::Edge(_)) { 10 } else { 5 };
+        let gemm_count = if kv_only {
+            3
+        } else if matches!(&moe.routed_experts, DeviceDenseRoutedExperts::Edge(_)) {
+            10
+        } else {
+            5
+        };
         let mut gemm_weights = [0; 10];
         for (slot, tensor) in gemm_weights[..gemm_count].iter_mut().zip(&operands) {
             *slot = tensor.storage().as_gpu().map(|storage| storage.ptr())
@@ -1707,10 +1726,11 @@ fn materialize_final_proposal(
     position: &Tensor,
     cache_row: usize,
     draft_step: usize,
+    kv_only: bool,
 ) -> Result<()> {
     let enabled = std::env::var("APXINF_QWEN35_MTP_MATERIALIZE_SESSION").as_deref() == Ok("1");
     let session = if enabled {
-        let binding = MtpMaterializeBinding::new(ctx, weights)?;
+        let binding = MtpMaterializeBinding::new(ctx, weights, kv_only)?;
         if scratch.materialize_session.as_ref().is_none_or(|cached| cached.binding != binding) {
             scratch.materialize_session = Some(MtpMaterializeSession {
                 binding,
@@ -1725,8 +1745,33 @@ fn materialize_final_proposal(
     };
     // prepare executes this real row once; never prepare and then execute the
     // same materialization twice. Unlike draft, this tape has no LM-head GEMM.
-    let mut forward = || forward_one(ctx, weights, state, scratch, geometry, eps,
-        rope_theta, base_hidden, token, position, cache_row, draft_step, false);
+    let mut forward = || {
+        if !kv_only {
+            return forward_one(
+                ctx, weights, state, scratch, geometry, eps, rope_theta, base_hidden, token,
+                position, cache_row, draft_step, false,
+            );
+        }
+
+        // Only this proposal's K/V and cache position survive publication.
+        // Use the same M=1 FC and K/V projections as the normal draft step.
+        project_mtp_input(ctx, weights, scratch, eps, base_hidden, token)?;
+        project_mtp_kv(ctx, &weights.mtp, scratch)?;
+        ops::qwen35_static_kv_append(
+            ctx,
+            1,
+            ops::Qwen35StaticFp8KvAppendArgs {
+                projected_key: &scratch.projected_key,
+                projected_value: &scratch.projected_value,
+                key_norm: &weights.mtp.layer.attention.k_norm,
+                positions: position,
+                cache: ops::Qwen35Fp8KvCache { key: &state.key, value: &state.value },
+                cache_offset: cache_row,
+                scales: ops::Qwen35KvCacheScales { key: MTP_KV_SCALE, value: MTP_KV_SCALE },
+                rope_theta,
+            },
+        )
+    };
     let result = match session.as_ref() {
         Some((execution, true)) => execution.run(forward),
         Some((execution, false)) => execution.prepare(forward),
@@ -1734,9 +1779,11 @@ fn materialize_final_proposal(
     };
     if enabled {
         scratch.materialize_session.as_mut().expect("initialized materialization session").prepared = result.is_ok();
-        // Do not retry a partially executed row. Drain before returning an
-        // error, leave it unprepared and let the existing transaction abort.
-        if result.is_err() { ctx.synchronize().map_err(Error::Cuda)?; }
+    }
+    if (enabled || kv_only) && result.is_err() {
+        // A failed submission may have left writes to the shadow in flight.
+        // Drain them before returning without publishing the transaction.
+        ctx.synchronize().map_err(Error::Cuda)?;
     }
     // prepare_commit retains its unconditional successful ctx synchronization,
     // position validation and publish boundary after this function returns.
@@ -1789,25 +1836,14 @@ fn run_draft_chain(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn forward_one(
+fn project_mtp_input(
     ctx: &CudaContext,
     weights: &Qwen35DeviceWeights,
-    state: &mut Qwen35MtpState,
-    scratch: &mut MtpScratch,
-    geometry: AttentionGeometry,
+    scratch: &MtpScratch,
     eps: f32,
-    rope_theta: f32,
     base_hidden: &Tensor,
     token: &Tensor,
-    position: &Tensor,
-    cache_row: usize,
-    draft_step: usize,
-    produce_logits: bool,
 ) -> Result<()> {
-    if cache_row >= state.capacity {
-        return Err(invalid("Qwen3.5 MTP cache row exceeds capacity"));
-    }
     let mtp = &weights.mtp;
     ops::embedding_gather(ctx, &weights.embedding, token, &scratch.embedding)?;
     ops::mlp::rms_norm(
@@ -1838,13 +1874,15 @@ fn forward_one(
         &mtp.layer.input_layernorm,
         &scratch.normalized,
         eps,
-    )?;
+    )
+}
+
+fn project_mtp_kv(
+    ctx: &CudaContext,
+    mtp: &DeviceMtpWeights,
+    scratch: &MtpScratch,
+) -> Result<()> {
     let attention = &mtp.layer.attention;
-    let mut q_fused = scratch.q_fused.clone();
-    ops::gemm(
-        ctx,
-        ops::GemmArgs::new(&scratch.normalized, &attention.q_proj.weight, &mut q_fused),
-    )?;
     let mut projected_key = scratch.projected_key.clone();
     let mut projected_value = scratch.projected_value.clone();
     ops::gemm(
@@ -1862,7 +1900,37 @@ fn forward_one(
             &attention.v_proj.weight,
             &mut projected_value,
         ),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forward_one(
+    ctx: &CudaContext,
+    weights: &Qwen35DeviceWeights,
+    state: &mut Qwen35MtpState,
+    scratch: &mut MtpScratch,
+    geometry: AttentionGeometry,
+    eps: f32,
+    rope_theta: f32,
+    base_hidden: &Tensor,
+    token: &Tensor,
+    position: &Tensor,
+    cache_row: usize,
+    draft_step: usize,
+    produce_logits: bool,
+) -> Result<()> {
+    if cache_row >= state.capacity {
+        return Err(invalid("Qwen3.5 MTP cache row exceeds capacity"));
+    }
+    project_mtp_input(ctx, weights, scratch, eps, base_hidden, token)?;
+    let mtp = &weights.mtp;
+    let attention = &mtp.layer.attention;
+    let mut q_fused = scratch.q_fused.clone();
+    ops::gemm(
+        ctx,
+        ops::GemmArgs::new(&scratch.normalized, &attention.q_proj.weight, &mut q_fused),
     )?;
+    project_mtp_kv(ctx, mtp, scratch)?;
     let attention_out = reshape(
         &scratch.attention_out,
         vec![1, geometry.query_heads, geometry.head_dim],
