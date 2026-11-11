@@ -5,6 +5,8 @@
 //! the target architecture. Its persistent K/V cache follows TensorRT Edge's
 //! static unit-scale E4M3 contract and the same 128-token paging as the target.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 use apxinf_cuda_new::{ops, transfers, CudaBuffer, CudaContext, ExecutionSession};
 
@@ -107,6 +109,9 @@ pub struct Qwen35MtpState {
     capacity: usize,
     position: Option<MtpPositionContract>,
     generation: u64,
+    // Distinguishes allocations and writes even when snapshot restore reuses
+    // the same position and transaction generation.
+    cache_revision: u64,
 }
 
 impl Qwen35MtpState {
@@ -129,11 +134,44 @@ pub struct PreparedMtpPrefill {
 pub struct PreparedMtpCommit {
     generation: u64,
     position: MtpPositionContract,
+    committed_cache_revision: u64,
+    shadow_cache_revision: u64,
+    preserved_rows: usize,
+}
+
+#[derive(Clone, Copy)]
+struct DraftKvPrefix {
+    source_revision: u64,
+    destination_revision: u64,
+    rows: usize,
+}
+
+impl DraftKvPrefix {
+    fn reusable_rows(self, source_revision: u64, destination_revision: u64, rows: usize) -> usize {
+        if self.source_revision == source_revision
+            && self.destination_revision == destination_revision
+            && self.rows <= rows
+        {
+            self.rows
+        } else {
+            0
+        }
+    }
+}
+
+fn next_cache_revision() -> Result<u64> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |revision| {
+        revision.checked_add(1)
+    })
+    .map_err(|_| invalid("Qwen3.5 MTP cache revision overflow"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingDraft {
     shadow_generation: u64,
+    committed_cache_revision: u64,
+    shadow_cache_revision: u64,
     start: MtpPositionContract,
     draft_steps: usize,
 }
@@ -148,6 +186,8 @@ pub struct Qwen35MtpRuntime {
     scratch: Option<MtpScratch>,
     prefill_scratch: Option<MtpPrefillScratch>,
     pending_draft: Option<PendingDraft>,
+    draft_kv_suffix_sync: bool,
+    synced_draft_prefix: Option<DraftKvPrefix>,
 }
 
 impl Qwen35MtpRuntime {
@@ -176,6 +216,9 @@ impl Qwen35MtpRuntime {
             scratch: None,
             prefill_scratch: None,
             pending_draft: None,
+            draft_kv_suffix_sync: std::env::var("APXINF_QWEN35_MTP_DRAFT_KV_SUFFIX_SYNC")
+                .as_deref() == Ok("1"),
+            synced_draft_prefix: None,
         })
     }
 
@@ -210,6 +253,50 @@ impl Qwen35MtpRuntime {
             .prefill_scratch
             .as_mut()
             .expect("MTP prefill scratch was initialized"))
+    }
+
+    fn copy_state_rows(
+        &mut self,
+        ctx: &CudaContext,
+        source: &Qwen35MtpState,
+        destination: &mut Qwen35MtpState,
+        first_row: usize,
+    ) -> Result<()> {
+        validate_state_storage(ctx, source, self.geometry)?;
+        validate_state_storage(ctx, destination, self.geometry)?;
+        let rows = source.position.map_or(0, |position| position.cache_rows);
+        if rows > destination.capacity || first_row > rows {
+            return Err(invalid(
+                "Qwen3.5 MTP destination cache cannot hold the source prefix",
+            ));
+        }
+        let generation = source
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| invalid("Qwen3.5 MTP shadow generation overflow"))?;
+        destination.cache_revision = next_cache_revision()?;
+        self.pending_draft = None;
+        if first_row < rows {
+            let view = |cache| {
+                cache_rows_view(
+                    cache,
+                    first_row,
+                    rows - first_row,
+                    self.geometry.kv_heads,
+                    self.geometry.head_dim,
+                )
+            };
+            let source_key = view(&source.key)?;
+            let destination_key = view(&destination.key)?;
+            let source_value = view(&source.value)?;
+            let destination_value = view(&destination.value)?;
+            destination.position = None;
+            transfers::copy_cuda_to_cuda(ctx, &source_key, &destination_key)?;
+            transfers::copy_cuda_to_cuda(ctx, &source_value, &destination_value)?;
+        }
+        destination.position = source.position;
+        destination.generation = generation;
+        Ok(())
     }
 
     fn validate_weights(&self, ctx: &CudaContext, weights: &Qwen35DeviceWeights) -> Result<()> {
@@ -266,11 +353,20 @@ impl MtpBackend for Qwen35MtpRuntime {
             capacity,
             position: None,
             generation: 0,
+            cache_revision: next_cache_revision()?,
         })
     }
 
     fn reset_state(&mut self, ctx: &CudaContext, state: &mut Self::State) -> Result<()> {
         validate_state_storage(ctx, state, self.geometry)?;
+        let generation = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| invalid("Qwen3.5 MTP state generation overflow"))?;
+        state.cache_revision = next_cache_revision()?;
+        state.position = None;
+        self.pending_draft = None;
+        self.synced_draft_prefix = None;
         CudaBuffer::from_tensor(&state.key)
             .map_err(Error::Cuda)?
             .zero_async(ctx.stream())
@@ -279,12 +375,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             .map_err(Error::Cuda)?
             .zero_async(ctx.stream())
             .map_err(Error::Cuda)?;
-        state.position = None;
-        state.generation = state
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| invalid("Qwen3.5 MTP state generation overflow"))?;
-        self.pending_draft = None;
+        state.generation = generation;
         Ok(())
     }
 
@@ -294,51 +385,8 @@ impl MtpBackend for Qwen35MtpRuntime {
         source: &Self::State,
         destination: &mut Self::State,
     ) -> Result<()> {
-        validate_state_storage(ctx, source, self.geometry)?;
-        validate_state_storage(ctx, destination, self.geometry)?;
-        if let Some(position) = source.position {
-            position.validate(source.capacity)?;
-            if position.cache_rows > destination.capacity {
-                return Err(invalid(
-                    "Qwen3.5 MTP destination cache cannot hold the source prefix",
-                ));
-            }
-            if position.cache_rows > 0 {
-                let source_key = cache_prefix_view(
-                    &source.key,
-                    position.cache_rows,
-                    self.geometry.kv_heads,
-                    self.geometry.head_dim,
-                )?;
-                let destination_key = cache_prefix_view(
-                    &destination.key,
-                    position.cache_rows,
-                    self.geometry.kv_heads,
-                    self.geometry.head_dim,
-                )?;
-                let source_value = cache_prefix_view(
-                    &source.value,
-                    position.cache_rows,
-                    self.geometry.kv_heads,
-                    self.geometry.head_dim,
-                )?;
-                let destination_value = cache_prefix_view(
-                    &destination.value,
-                    position.cache_rows,
-                    self.geometry.kv_heads,
-                    self.geometry.head_dim,
-                )?;
-                transfers::copy_cuda_to_cuda(ctx, &source_key, &destination_key)?;
-                transfers::copy_cuda_to_cuda(ctx, &source_value, &destination_value)?;
-            }
-        }
-        destination.position = source.position;
-        destination.generation = source
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| invalid("Qwen3.5 MTP shadow generation overflow"))?;
-        self.pending_draft = None;
-        Ok(())
+        self.synced_draft_prefix = None;
+        self.copy_state_rows(ctx, source, destination, 0)
     }
 
     fn prepare_prefill(
@@ -533,6 +581,7 @@ impl MtpBackend for Qwen35MtpRuntime {
         std::mem::swap(committed, shadow);
         committed.position = Some(prepared.position);
         self.pending_draft = None;
+        self.synced_draft_prefix = None;
     }
 
     fn draft(
@@ -546,6 +595,8 @@ impl MtpBackend for Qwen35MtpRuntime {
         target_hidden: &Tensor,
         draft_steps: usize,
     ) -> Result<MtpDraft> {
+        // Reestablish the watermark only after a successful dual publication.
+        let synced_prefix = self.synced_draft_prefix.take();
         if !(1..=QWEN35_MTP_DRAFT_STEPS).contains(&draft_steps) {
             return Err(invalid(format!(
                 "Qwen3.5 MTP draft depth must be in 1..={QWEN35_MTP_DRAFT_STEPS}, got {draft_steps}"
@@ -573,10 +624,17 @@ impl MtpBackend for Qwen35MtpRuntime {
             .cache_rows
             .checked_add(draft_steps)
             .ok_or_else(|| invalid("Qwen3.5 MTP draft capacity overflow"))?;
-        if required_rows > committed.capacity {
+        if required_rows > committed.capacity || required_rows > shadow.capacity {
             return Err(invalid("Qwen3.5 MTP draft exceeds FP8 KV capacity"));
         }
-        self.copy_state(ctx, committed, shadow)?;
+        let first_row = synced_prefix.map_or(0, |prefix| {
+            prefix.reusable_rows(
+                committed.cache_revision,
+                shadow.cache_revision,
+                start.cache_rows,
+            )
+        });
+        self.copy_state_rows(ctx, committed, shadow, first_row)?;
 
         let geometry = self.geometry;
         let eps = self.rms_norm_eps;
@@ -646,6 +704,8 @@ impl MtpBackend for Qwen35MtpRuntime {
         )?;
         self.pending_draft = Some(PendingDraft {
             shadow_generation: shadow.generation,
+            committed_cache_revision: committed.cache_revision,
+            shadow_cache_revision: shadow.cache_revision,
             start,
             draft_steps,
         });
@@ -675,6 +735,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             .checked_add(expected_verified_rows)
             .ok_or_else(|| invalid("Qwen3.5 MTP verified range overflow"))?;
         if pending.shadow_generation != shadow.generation
+            || pending.shadow_cache_revision != shadow.cache_revision
             || contract.cache_range.start != pending.start.logical_position
             || contract.cache_range.verified_end != expected_verified_end
             || contract.cache_range.committed_end < contract.cache_range.start
@@ -704,6 +765,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             if materialize_row >= shadow.capacity {
                 return Err(invalid("Qwen3.5 MTP final materialization exceeds cache"));
             }
+            shadow.cache_revision = next_cache_revision()?;
             let geometry = self.geometry;
             let eps = self.rms_norm_eps;
             let theta = self.rope_theta;
@@ -752,6 +814,9 @@ impl MtpBackend for Qwen35MtpRuntime {
         Ok(PreparedMtpCommit {
             generation: shadow.generation,
             position,
+            committed_cache_revision: pending.committed_cache_revision,
+            shadow_cache_revision: shadow.cache_revision,
+            preserved_rows: pending.start.cache_rows,
         })
     }
 
@@ -763,6 +828,19 @@ impl MtpBackend for Qwen35MtpRuntime {
     ) {
         debug_assert_eq!(shadow.generation, prepared.generation);
         debug_assert_eq!(shadow.position, Some(prepared.position));
+        // Draft and final materialization write only at or beyond the old
+        // physical endpoint. After swapping, that old prefix still matches.
+        self.synced_draft_prefix = (self.draft_kv_suffix_sync
+            && committed.cache_revision == prepared.committed_cache_revision
+            && shadow.cache_revision == prepared.shadow_cache_revision
+            && committed.position.map(|position| position.cache_rows)
+                == Some(prepared.preserved_rows)
+            && shadow.position == Some(prepared.position))
+        .then_some(DraftKvPrefix {
+            source_revision: shadow.cache_revision,
+            destination_revision: committed.cache_revision,
+            rows: prepared.preserved_rows,
+        });
         std::mem::swap(committed, shadow);
         committed.position = Some(prepared.position);
         self.pending_draft = None;
@@ -2402,20 +2480,6 @@ fn cache_rows_view(
         .map_err(Error::Cuda)
 }
 
-fn cache_prefix_view(cache: &Tensor, rows: usize, heads: usize, head_dim: usize) -> Result<Tensor> {
-    let bytes = rows
-        .checked_mul(heads)
-        .and_then(|n| n.checked_mul(head_dim))
-        .and_then(|n| n.checked_mul(cache.dtype().size_in_bytes()))
-        .ok_or_else(|| invalid("Qwen3.5 MTP cache prefix overflow"))?;
-    CudaBuffer::from_tensor(cache)
-        .map_err(Error::Cuda)?
-        .view(0, bytes)
-        .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(vec![1, rows, heads, head_dim]), cache.dtype())
-        .map_err(Error::Cuda)
-}
-
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
 }
@@ -2427,6 +2491,28 @@ fn schedule_error(error: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_kv_prefix_requires_both_bank_revisions_and_a_valid_row_count() {
+        let prefix = DraftKvPrefix {
+            source_revision: next_cache_revision().unwrap(),
+            destination_revision: next_cache_revision().unwrap(),
+            rows: 127,
+        };
+        let source = prefix.source_revision;
+        let destination = prefix.destination_revision;
+        assert_eq!(prefix.reusable_rows(source, destination, 131), 127);
+        assert_eq!(prefix.reusable_rows(source, destination, 126), 0);
+        assert_eq!(prefix.reusable_rows(destination, source, 131), 0);
+        assert_eq!(
+            prefix.reusable_rows(next_cache_revision().unwrap(), destination, 131),
+            0
+        );
+        assert_eq!(
+            prefix.reusable_rows(source, next_cache_revision().unwrap(), 131),
+            0
+        );
+    }
 
     #[test]
     fn prompt_shift_keeps_logical_and_physical_positions_distinct() {
@@ -2717,6 +2803,80 @@ pub(super) mod gpu_raw_protocol {
                 same("commit publish exact physical swap",&committed,&after_prepare)?;same("old physical bank unchanged",&shadow,&old)?;
                 assert_eq!(committed.position,Some(expected_position));assert_eq!(committed.generation,generation);
                 same("MTP snapshot deepfreeze",&snapshot,&frozen)?;assert_eq!((snapshot.position,snapshot.generation),frozen_meta);
+                if runtime.draft_kv_suffix_sync && depth == 3 && full {
+                    let prefix = runtime.synced_draft_prefix.expect("published draft prefix");
+                    let new_rows = expected_position.cache_rows;
+                    assert_eq!(
+                        prefix.reusable_rows(
+                            committed.cache_revision,
+                            shadow.cache_revision,
+                            new_rows,
+                        ),
+                        rows,
+                    );
+                    for tensor in [&shadow.key, &shadow.value] {
+                        fill_rows(&f.ctx, tensor, rows, shadow.capacity, shadow.capacity, 0x5a)?;
+                    }
+                    // This fails after the suffix copy and before a proposal is
+                    // written. The pending transaction and reuse watermark must
+                    // both be absent, so the next attempt copies the full prefix.
+                    assert!(runtime
+                        .draft(
+                            &f.ctx,
+                            &f.weights,
+                            &committed,
+                            &mut shadow,
+                            u32::MAX,
+                            expected_position.logical_position,
+                            &last_hidden,
+                            depth,
+                        )
+                        .is_err());
+                    f.ctx.synchronize().map_err(Error::Cuda)?;
+                    assert!(runtime.synced_draft_prefix.is_none());
+                    assert!(runtime.pending_draft.is_none());
+                    let failed = image(&shadow)?;
+                    for (actual, expected) in [
+                        (&failed.0, &after_prepare.0),
+                        (&failed.1, &after_prepare.1),
+                    ] {
+                        exact(
+                            "draft suffix copy",
+                            &actual[..new_rows * row_bytes],
+                            &expected[..new_rows * row_bytes],
+                        );
+                        assert!(actual[new_rows * row_bytes..]
+                            .iter()
+                            .all(|byte| *byte == 0x5a));
+                    }
+
+                    for tensor in [&shadow.key, &shadow.value] {
+                        fill_rows(&f.ctx, tensor, 0, 1, shadow.capacity, 0x5a)?;
+                    }
+                    runtime.draft(
+                        &f.ctx,
+                        &f.weights,
+                        &committed,
+                        &mut shadow,
+                        pending,
+                        expected_position.logical_position,
+                        &last_hidden,
+                        depth,
+                    )?;
+                    f.ctx.synchronize().map_err(Error::Cuda)?;
+                    let retry = image(&shadow)?;
+                    for (actual, expected) in [
+                        (&retry.0, &after_prepare.0),
+                        (&retry.1, &after_prepare.1),
+                    ] {
+                        exact(
+                            "draft retry copies full prefix",
+                            &actual[..new_rows * row_bytes],
+                            &expected[..new_rows * row_bytes],
+                        );
+                    }
+                    same("draft retry committed bank readonly", &committed, &after_prepare)?;
+                }
                 check_copy(f,&mut runtime,&snapshot,&mut committed)?; // Short restore must preserve unreachable tails.
                 println!("{}",serde_json::json!({"schema":"apxinf.qwen35.draft_raw_bank.v1","depth":depth,"keep":keep,
                     "logical_position":expected_position.logical_position,"physical_cache_rows":expected_position.cache_rows,
