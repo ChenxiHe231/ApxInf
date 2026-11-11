@@ -311,10 +311,9 @@ fn real_checkpoint_edge_fixed_routing_repeat_probe() -> Result<(), Box<dyn std::
     Ok(())
 }
 
-// Experimental arithmetic-policy gate; safe production operator only.
+// Ordered reduction checks using the safe production operator.
 mod edge_ordered_reduce_tests {
     use super::*;
-    const POLICY_ENV: &str = "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE";
     #[derive(Debug)]
     struct DiagnosticWorkspaceRegion {
         name: &'static str,
@@ -341,7 +340,7 @@ mod edge_ordered_reduce_tests {
     // Diagnostic partition only: mirrors runner.cu WorkspaceLayout, not an
     // independent mathematical reference or a new native/public workspace ABI.
     fn diagnostic_workspace_layout(
-        tokens: usize, top_k: usize, hidden: usize, intermediate: usize, experts: usize, enabled: bool,
+        tokens: usize, top_k: usize, hidden: usize, intermediate: usize, experts: usize,
     ) -> DiagnosticWorkspaceLayout {
         assert!(tokens > 0 && top_k > 0 && experts > 0);
         assert_eq!(hidden % 128, 0);
@@ -368,12 +367,21 @@ mod edge_ordered_reduce_tests {
             regions.push(DiagnosticWorkspaceRegion { name, offset: cursor, bytes });
             cursor = diagnostic_align_up(cursor.checked_add(bytes).unwrap(), 256);
         }
-        let old_total = cursor.checked_add(256).unwrap();
-        if enabled {
-            let bytes = routes.checked_mul(hidden).unwrap().checked_mul(2).unwrap();
-            regions.push(DiagnosticWorkspaceRegion { name: "expanded_bf16", offset: cursor, bytes });
-            cursor = diagnostic_align_up(cursor.checked_add(bytes).unwrap(), 256);
+        if (5..=8192).contains(&tokens) {
+            let blocks = routes.div_ceil(1024);
+            for (name, bytes) in [
+                ("route_block_counts", blocks * experts * 4),
+                ("route_ranks", routes * 4),
+                ("route_offsets", experts * 4),
+            ] {
+                regions.push(DiagnosticWorkspaceRegion { name, offset: cursor, bytes });
+                cursor = diagnostic_align_up(cursor.checked_add(bytes).unwrap(), 256);
+            }
         }
+        let old_total = cursor.checked_add(256).unwrap();
+        let bytes = routes.checked_mul(hidden).unwrap().checked_mul(2).unwrap();
+        regions.push(DiagnosticWorkspaceRegion { name: "expanded_bf16", offset: cursor, bytes });
+        cursor = diagnostic_align_up(cursor.checked_add(bytes).unwrap(), 256);
         let total = cursor.checked_add(256).unwrap();
         DiagnosticWorkspaceLayout { old_total, routes, permuted_m, tile_entries, padded_inter_sf, total, regions }
     }
@@ -458,35 +466,17 @@ mod edge_ordered_reduce_tests {
         }
     }
 
-    /// Process-isolated workspace query gate. No GPU allocation or context.
-    /// Run separately with ENV unset/0/1/invalid; never mutate it in-process.
+    /// Check workspace accounting without allocating GPU memory.
     #[test]
-    #[ignore = "experimental native workspace-policy query; separate processes for unset/0/1/invalid"]
+    #[ignore = "native Thor SM101 workspace query"]
     fn edge_ordered_reduce_workspace_policy_gate() -> Result<(), Box<dyn std::error::Error>> {
         assert!(ops::edge_nvfp4_moe_available());
-        let requested = std::env::var(POLICY_ENV).ok();
-        let enabled = requested.as_deref() == Some("1");
-        let valid = matches!(requested.as_deref(), None | Some("0") | Some("1"));
-        for tokens in [1usize, 4, 2048, 4096, 8192, 16384, 49152] {
-            let layout = diagnostic_workspace_layout(tokens, 8, 2048, 512, 256, enabled);
-            let result = ops::edge_nvfp4_moe_workspace_size(RoutedMoeConfig::new(256, 8), tokens, 2048, 512);
-            if valid {
-                let actual = result?;
-                println!("{}", serde_json::json!({
-                    "schema": "apxinf.qwen35.ordered_reduce.workspace_policy.v1", "tokens": tokens,
-                    "requested_policy": requested, "enabled": enabled, "old_workspace_bytes": layout.old_total,
-                    "expected_workspace_bytes": layout.total, "actual_workspace_bytes": actual,
-                    "regions": layout.regions.iter().map(|r| serde_json::json!({"name": r.name, "offset": r.offset, "bytes": r.bytes})).collect::<Vec<_>>(),
-                    "mirror_is_diagnostic_not_math_reference": true,
-                }));
-                assert_eq!(actual, layout.total);
-            } else {
-                assert!(result.is_err(), "invalid native policy value was silently accepted");
-                println!("{}", serde_json::json!({
-                    "schema": "apxinf.qwen35.ordered_reduce.workspace_policy.v1", "tokens": tokens,
-                    "requested_policy": requested, "invalid_value_rejected": true, "error": result.err().map(|error| error.to_string()),
-                }));
-            }
+        for tokens in [1usize, 4, 5, 2048, 4096, 8192, 8193, 16384, 49152] {
+            let layout = diagnostic_workspace_layout(tokens, 8, 2048, 512, 256);
+            let actual = ops::edge_nvfp4_moe_workspace_size(
+                RoutedMoeConfig::new(256, 8), tokens, 2048, 512,
+            )?;
+            assert_eq!(actual, layout.total, "workspace size for {tokens} tokens");
         }
         Ok(())
     }
@@ -496,7 +486,6 @@ mod edge_ordered_reduce_tests {
     #[test]
     #[ignore = "experimental ordered-route accumulation; real checkpoint, full-output CPU reference and repeated guards/readonly"]
     fn real_checkpoint_edge_ordered_reduce_integration_gate() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(std::env::var(POLICY_ENV).ok().as_deref(), Some("1"), "integration gate requires explicit native policy=1");
         assert!(ops::edge_nvfp4_moe_available());
         let checkpoint = checkpoint();
         let config_path = checkpoint.join("config.json");
@@ -534,7 +523,7 @@ mod edge_ordered_reduce_tests {
             let input = transfers::to_cuda(&Tensor::from_bf16(vec![tokens, edge.hidden], &values)?, device)?;
             let expert_ids = transfers::to_cuda(&Tensor::from_i32(vec![tokens, 8], &ids)?, device)?;
             let expert_weights = transfers::to_cuda(&Tensor::from_f32(vec![tokens, 8], &weights)?, device)?;
-            let layout = diagnostic_workspace_layout(tokens, 8, edge.hidden, edge.intermediate, 256, true);
+            let layout = diagnostic_workspace_layout(tokens, 8, edge.hidden, edge.intermediate, 256);
             let capi_size = ops::edge_nvfp4_moe_workspace_size(route_config, tokens, edge.hidden, edge.intermediate)?;
             assert_eq!(layout.total, capi_size);
             assert_eq!(layout.regions.len(), 9);
@@ -652,10 +641,9 @@ mod edge_ordered_reduce_tests {
     }
 }
 
-// Experimental arithmetic-policy gate; safe production operator only.
+// Ordered reduction checks using the safe production operator.
 mod edge_ordered_reduce_capture_tests {
     use super::*;
-    const POLICY_ENV: &str = "APXINF_EDGE_NVFP4_MOE_ORDERED_REDUCE";
     #[derive(Debug)]
     struct DiagnosticWorkspaceRegion {
         name: &'static str,
@@ -682,7 +670,7 @@ mod edge_ordered_reduce_capture_tests {
     // Diagnostic partition only: mirrors runner.cu WorkspaceLayout, not an
     // independent mathematical reference or a new native/public workspace ABI.
     fn diagnostic_workspace_layout(
-        tokens: usize, top_k: usize, hidden: usize, intermediate: usize, experts: usize, enabled: bool,
+        tokens: usize, top_k: usize, hidden: usize, intermediate: usize, experts: usize,
     ) -> DiagnosticWorkspaceLayout {
         assert!(tokens > 0 && top_k > 0 && experts > 0);
         assert_eq!(hidden % 128, 0);
@@ -709,12 +697,21 @@ mod edge_ordered_reduce_capture_tests {
             regions.push(DiagnosticWorkspaceRegion { name, offset: cursor, bytes });
             cursor = diagnostic_align_up(cursor.checked_add(bytes).unwrap(), 256);
         }
-        let old_total = cursor.checked_add(256).unwrap();
-        if enabled {
-            let bytes = routes.checked_mul(hidden).unwrap().checked_mul(2).unwrap();
-            regions.push(DiagnosticWorkspaceRegion { name: "expanded_bf16", offset: cursor, bytes });
-            cursor = diagnostic_align_up(cursor.checked_add(bytes).unwrap(), 256);
+        if (5..=8192).contains(&tokens) {
+            let blocks = routes.div_ceil(1024);
+            for (name, bytes) in [
+                ("route_block_counts", blocks * experts * 4),
+                ("route_ranks", routes * 4),
+                ("route_offsets", experts * 4),
+            ] {
+                regions.push(DiagnosticWorkspaceRegion { name, offset: cursor, bytes });
+                cursor = diagnostic_align_up(cursor.checked_add(bytes).unwrap(), 256);
+            }
         }
+        let old_total = cursor.checked_add(256).unwrap();
+        let bytes = routes.checked_mul(hidden).unwrap().checked_mul(2).unwrap();
+        regions.push(DiagnosticWorkspaceRegion { name: "expanded_bf16", offset: cursor, bytes });
+        cursor = diagnostic_align_up(cursor.checked_add(bytes).unwrap(), 256);
         let total = cursor.checked_add(256).unwrap();
         DiagnosticWorkspaceLayout { old_total, routes, permuted_m, tile_entries, padded_inter_sf, total, regions }
     }
@@ -805,7 +802,6 @@ mod edge_ordered_reduce_capture_tests {
     #[test]
     #[ignore = "experimental ordered-route graph/eager equivalence with full reference/internal canary"]
     fn real_checkpoint_edge_ordered_reduce_capture_eager_gate() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(std::env::var(POLICY_ENV).ok().as_deref(), Some("1"), "integration gate requires explicit native policy=1");
         assert!(ops::edge_nvfp4_moe_available());
         let checkpoint = checkpoint();
         let config_path = checkpoint.join("config.json");
@@ -843,7 +839,7 @@ mod edge_ordered_reduce_capture_tests {
             let input = transfers::to_cuda(&Tensor::from_bf16(vec![tokens, edge.hidden], &values)?, device)?;
             let expert_ids = transfers::to_cuda(&Tensor::from_i32(vec![tokens, 8], &ids)?, device)?;
             let expert_weights = transfers::to_cuda(&Tensor::from_f32(vec![tokens, 8], &weights)?, device)?;
-            let layout = diagnostic_workspace_layout(tokens, 8, edge.hidden, edge.intermediate, 256, true);
+            let layout = diagnostic_workspace_layout(tokens, 8, edge.hidden, edge.intermediate, 256);
             let capi_size = ops::edge_nvfp4_moe_workspace_size(route_config, tokens, edge.hidden, edge.intermediate)?;
             assert_eq!(layout.total, capi_size);
             assert_eq!(layout.regions.len(), 9);

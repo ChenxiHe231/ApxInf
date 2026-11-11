@@ -420,9 +420,10 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             epoch: 0,
             shadow_generation: 0,
         };
-        let cuda_graphs = std::env::var("APXINF_QWEN35_CUDA_GRAPHS").as_deref() == Ok("1");
-        let eager_verify_sessions =
-            std::env::var("APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS").as_deref() == Ok("1");
+        let cuda_graphs = decoder.thor_dynamic_fp8_decode()
+            || std::env::var("APXINF_QWEN35_CUDA_GRAPHS").as_deref() == Ok("1");
+        let eager_verify_sessions = !cuda_graphs
+            && std::env::var("APXINF_QWEN35_VERIFY_EXECUTION_SESSIONS").as_deref() == Ok("1");
         if cuda_graphs {
             session.committed_decode_phases = Some(decoder.capture_decode_phases(
                 ctx,

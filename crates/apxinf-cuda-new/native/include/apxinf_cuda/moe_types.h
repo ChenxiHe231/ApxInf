@@ -106,8 +106,8 @@ typedef struct {
 } apxinf_moe_nvfp4_experts_bindings_t;
 
 // TensorRT-Edge-LLM CuTeDSL NVFP4 routed-MoE contract.  Unlike the
-// correctness candidate above, FC2 applies the token-major routing weights
-// and reduces directly into `output` [tokens, hidden].
+// correctness candidate above, FC2 applies the token-major routing weights.
+// An ordered reduction writes `output` [tokens, hidden].
 typedef struct {
   uint32_t version;
   uint32_t dtype;

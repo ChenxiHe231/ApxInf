@@ -104,6 +104,18 @@ pub struct Qwen35ExecutionOptions {
     pub kv_cache: Qwen35KvCacheDType,
 }
 
+impl Qwen35ExecutionOptions {
+    /// The fixed Thor profile requires the CUDA 12 Edge NVFP4 kernels and
+    /// enough room for the largest captured verifier shape.
+    pub fn uses_thor_dynamic_fp8_decode(self, device: usize, capacity: usize) -> bool {
+        apxinf_cuda_new::edge_nvfp4_moe_available()
+            && device == 0
+            && capacity >= super::mtp_schedule::QWEN35_MTP_VERIFY_ROWS
+            && self.moe_activation == Qwen35MoeActivation::Nvfp4
+            && self.kv_cache == Qwen35KvCacheDType::Fp8Dynamic
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

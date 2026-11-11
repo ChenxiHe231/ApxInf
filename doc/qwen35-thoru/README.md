@@ -251,6 +251,15 @@ Use only a supported row from the table above.
 
 ## 6. OpenAI-compatible server
 
+On the Thor CUDA 12 SM101 build, choose `--qwen35-kv-cache fp8_dynamic`
+with NVFP4 Edge experts for the fixed long-context Decode configuration. The
+model enables CUDA Graphs with full GDN capture and uses three drafts per MTP
+round for eligible greedy requests. The Thor LM head selects Stage All for
+one row and tile-128 WMMA for four rows at `2048 → 248320`. Edge NVFP4 MoE
+uses ordered reduction. The fast path needs no performance environment
+variables. Select `--enable-context-reuse` to retain request prefixes and pass
+the recipe directory for the chosen KV mode.
+
 Build and start the server without enabling the legacy CUDA runtime:
 
 ```bash

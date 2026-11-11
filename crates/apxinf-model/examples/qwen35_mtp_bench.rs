@@ -588,13 +588,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .checked_add(max_new_tokens)
         .and_then(|value| value.checked_add(MTP_LOOKAHEAD))
         .ok_or("KV capacity overflow")?;
-    let fixed_depth = std::env::var("APXINF_QWEN35_MTP_FIXED_DEPTH")
+    let execution = apxinf_model::qwen35moe::Qwen35ExecutionOptions {
+        moe_activation,
+        kv_cache,
+    };
+    let requested_depth = std::env::var("APXINF_QWEN35_MTP_FIXED_DEPTH")
         .ok()
         .map(|value| value.parse::<usize>())
         .transpose()?;
-    if fixed_depth.is_some_and(|depth| !(1..=MTP_LOOKAHEAD).contains(&depth)) {
+    if requested_depth.is_some_and(|depth| !(1..=MTP_LOOKAHEAD).contains(&depth)) {
         return Err("APXINF_QWEN35_MTP_FIXED_DEPTH must be within supported draft depth".into());
     }
+    let fixed_depth = if execution.uses_thor_dynamic_fp8_decode(device, capacity) {
+        if requested_depth.is_some_and(|depth| depth != MTP_LOOKAHEAD) {
+            return Err("Thor dynamic FP8 Decode uses fixed MTP depth 3".into());
+        }
+        Some(MTP_LOOKAHEAD)
+    } else {
+        requested_depth
+    };
     let options = LoadOptions {
         text_kv_capacity: Some(capacity),
         qwen35_moe_activation: Some(moe_activation),

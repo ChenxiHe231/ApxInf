@@ -720,6 +720,9 @@ fn main() {
         if nvfp4_gemm_swiglu {
             command.arg("-DAPXINF_NVFP4_GEMM_SWIGLU=1");
         }
+        if edge_nvfp4_moe && stem == "nvfp4_a16_blackwell_gemv" {
+            command.arg("-DAPXINF_THOR_NVFP4_LM_HEAD=1");
+        }
         if has_cutlass_sm89 {
             command.arg("-DAPXINF_GEMM_CUTLASS_SM89=1");
         }
