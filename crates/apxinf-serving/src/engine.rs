@@ -166,6 +166,8 @@ impl ChatEngine for ApxInfChatEngine {
         request: EngineRequest,
         on_text: &mut dyn FnMut(&str) -> bool,
     ) -> Result<EngineOutput, ApiError> {
+        let timing = (std::env::var("APXINF_AIOS_TIMELINE").as_deref() == Ok("1"))
+            .then(std::time::Instant::now);
         let mut messages = to_template_messages(&request.messages)?;
         apply_tool_choice_instruction(&mut messages, &request.tool_choice);
         let mut options = request.chat_template_kwargs;
@@ -355,6 +357,7 @@ impl ChatEngine for ApxInfChatEngine {
         let mut decoder = IncrementalTextDecoder::new(&self.tokenizer);
         let mut decode_error = None;
         let mut consumer_connected = true;
+        let generation_started = timing.map(|_| std::time::Instant::now());
         let output = self
             .model
             .generate_streaming_with_options(
@@ -377,6 +380,7 @@ impl ChatEngine for ApxInfChatEngine {
                 },
             )
             .map_err(|error| ApiError::internal(format!("generation failed: {error}")))?;
+        let generation_finished = timing.map(|_| std::time::Instant::now());
         if let Some(error) = decode_error {
             return Err(ApiError::internal(format!(
                 "incremental decode failed: {error}"
@@ -401,6 +405,17 @@ impl ChatEngine for ApxInfChatEngine {
             }
         }
         let completion_tokens = output.profile.output_tokens();
+        if let (Some(start), Some(generation_start), Some(generation_end)) =
+            (timing, generation_started, generation_finished)
+        {
+            eprintln!(
+                "aios engine timing: prepare_ms={:.6} generation_wall_ms={:.6} decode_loop_ms={:?} postprocess_ms={:.6}",
+                (generation_start - start).as_secs_f64() * 1_000.0,
+                (generation_end - generation_start).as_secs_f64() * 1_000.0,
+                output.profile.decode_loop_ms(),
+                generation_end.elapsed().as_secs_f64() * 1_000.0,
+            );
+        }
         if let Ok(Some(stats)) = self.model.speculative_generation_stats() {
             eprintln!(
                 "MTP profile: draft_steps={} rounds={} zero_accept={} partial_accept={} full_accept={} proposed={} accepted={} emitted={} rolled_back_rows={} accepted_by_depth={:?}",

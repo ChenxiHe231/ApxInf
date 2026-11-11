@@ -1126,6 +1126,7 @@ impl Qwen35Moe {
                 profile.run_unprofiled(|| on_token(token));
             }
         }
+        profile.record_decode_end();
         if scalar_fallback {
             // The target advanced without maintaining proposer KV. Keep the
             // static prefix snapshots, but do not advertise the live endpoint
