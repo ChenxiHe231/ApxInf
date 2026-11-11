@@ -16,6 +16,12 @@ apxinf_status_t apxinf_new_rms_norm_bf16(const void* input, const void* weight,
                                      apxinf_cuda_stream_t stream);
 
 /* SwiGLU over a fused [rows, 2*width] gate/up projection, gate first. */
+// Matrices are BF16 [4096, 2048] and checkpoint weight deltas are BF16 [2048].
+// Both outputs must be disjoint from each other and the two read-only inputs.
+apxinf_status_t apxinf_new_add_rms_norm_bf16(
+    const void* addend, void* residual, const void* weight, void* normalized,
+    float epsilon, apxinf_cuda_stream_t stream);
+
 apxinf_status_t apxinf_swiglu_bf16(const void* fused_gate_up, void* output,
                                    int64_t rows, int64_t width,
                                    apxinf_cuda_stream_t stream);

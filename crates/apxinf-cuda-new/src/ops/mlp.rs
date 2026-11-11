@@ -43,6 +43,35 @@ pub fn rms_norm(
         ))
     }
 }
+/// Round the sum into the BF16 residual, then normalize that rounded row.
+/// The candidate supports the 4096-token, hidden=2048 prefill shape.
+pub fn add_rms_norm_prefill(
+    ctx: &CudaContext,
+    addend: &Tensor,
+    residual: &Tensor,
+    weight: &Tensor,
+    normalized: &Tensor,
+    epsilon: f32,
+) -> Result<()> {
+    let dims = [4096, 2048];
+    let addend = tensor_storage(ctx, addend, DType::BF16, &dims)?;
+    let residual = tensor_storage(ctx, residual, DType::BF16, &dims)?;
+    let weight = tensor_storage(ctx, weight, DType::BF16, &[dims[1]])?;
+    let normalized = tensor_storage(ctx, normalized, DType::BF16, &dims)?;
+    let stream = ctx.stream().handle();
+    crate::workspace::validate_capture_target(ctx.device_id(), stream as usize)?;
+    unsafe {
+        status::check(abi::apxinf_new_add_rms_norm_bf16(
+            addend.ptr(),
+            residual.ptr(),
+            weight.ptr(),
+            normalized.ptr(),
+            epsilon,
+            stream,
+        ))
+    }
+}
+
 /// `y[r,c] = silu(fused[r,c]) * fused[r,width+c]`
 ///
 /// `fused` is `[rows, 2*width]` with gate first, the layout one fused gate/up

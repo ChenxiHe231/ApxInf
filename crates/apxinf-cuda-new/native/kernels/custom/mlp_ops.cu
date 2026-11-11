@@ -64,6 +64,115 @@ __global__ void rms_norm_kernel(const __nv_bfloat16* __restrict__ input,
   }
 }
 
+constexpr int kResidualNormRows = 4096;
+constexpr int kResidualNormWidth = 2048;
+constexpr int kResidualNormThreads = 128;
+constexpr int kResidualNormPartials = 32;
+static_assert(kResidualNormThreads * 16 == kResidualNormWidth);
+
+__device__ __forceinline__ float unpack_residual_bf16(uint32_t word, int half) {
+  return __bfloat162float(__ushort_as_bfloat16(
+      static_cast<unsigned short>(word >> (half * 16))));
+}
+
+__device__ __forceinline__ uint32_t pack_residual_bf16(float value) {
+  return __bfloat16_as_ushort(__float2bfloat16_rn(value));
+}
+
+__device__ __forceinline__ float residual_norm_warp_sum(float value) {
+  for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
+    value = __fadd_rn(value, __shfl_down_sync(0xffffffffu, value, offset));
+  }
+  return value;
+}
+
+// FIB/001's fused residual/RMSNorm, adapted to preserve ApxInf's BF16
+// residual writeback and FP32 (1 + weight) affine. Four physical lanes
+// carry 32 virtual lanes of the original RMSNorm reduction tree.
+__global__ void add_rms_norm_kernel(
+    const __nv_bfloat16* __restrict__ input,
+    __nv_bfloat16* __restrict__ residual,
+    const __nv_bfloat16* __restrict__ weight,
+    __nv_bfloat16* __restrict__ output, float epsilon) {
+  __shared__ float partials[kResidualNormPartials + 1];
+  const int tid = threadIdx.x;
+  const int64_t row_offset = static_cast<int64_t>(blockIdx.x) * kResidualNormWidth;
+  input += row_offset;
+  residual += row_offset;
+  output += row_offset;
+  const auto* input_vectors = reinterpret_cast<const uint4*>(input);
+  const uint4 a0 = input_vectors[tid];
+  const uint4 a1 = input_vectors[tid + kResidualNormThreads];
+  uint32_t low[4] = {a0.x, a0.y, a0.z, a0.w};
+  uint32_t high[4] = {a1.x, a1.y, a1.z, a1.w};
+  auto* residual_vectors = reinterpret_cast<uint4*>(residual);
+  const uint4 b0 = residual_vectors[tid];
+  const uint4 b1 = residual_vectors[tid + kResidualNormThreads];
+  const uint32_t old_low[4] = {b0.x, b0.y, b0.z, b0.w};
+  const uint32_t old_high[4] = {b1.x, b1.y, b1.z, b1.w};
+#pragma unroll
+  for (int word = 0; word < 4; ++word) {
+    const auto add_pair = [](uint32_t old, uint32_t next) {
+      const auto lo = pack_residual_bf16(__fadd_rn(unpack_residual_bf16(old, 0), unpack_residual_bf16(next, 0)));
+      const auto hi = pack_residual_bf16(__fadd_rn(unpack_residual_bf16(old, 1), unpack_residual_bf16(next, 1)));
+      return lo | (hi << 16);
+    };
+    low[word] = add_pair(old_low[word], low[word]);
+    high[word] = add_pair(old_high[word], high[word]);
+  }
+  residual_vectors[tid] = make_uint4(low[0], low[1], low[2], low[3]);
+  residual_vectors[tid + kResidualNormThreads] = make_uint4(high[0], high[1], high[2], high[3]);
+
+  float squares[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    const float a = unpack_residual_bf16(low[i / 2], i % 2);
+    const float b = unpack_residual_bf16(high[i / 2], i % 2);
+    float sum = __fmaf_rn(b, b, __fmul_rn(a, a));
+    sum = __fadd_rn(sum, __shfl_down_sync(0xffffffffu, sum, 2, 4));
+    squares[i] = __fadd_rn(sum, __shfl_down_sync(0xffffffffu, sum, 1, 4));
+  }
+  if (tid % 4 == 0) {
+    const float even = __fadd_rn(__fadd_rn(squares[0], squares[4]),
+                                 __fadd_rn(squares[2], squares[6]));
+    const float odd = __fadd_rn(__fadd_rn(squares[1], squares[5]),
+                                __fadd_rn(squares[3], squares[7]));
+    partials[tid / 4] = __fadd_rn(even, odd);
+  }
+  __syncthreads();
+  if (tid < kWarpSize) {
+    const float total = residual_norm_warp_sum(partials[tid]);
+    if (tid == 0) {
+      const float mean = __fmul_rn(total, 1.0f / static_cast<float>(kResidualNormWidth));
+      partials[kResidualNormPartials] = rsqrtf(__fadd_rn(mean, epsilon));
+    }
+  }
+  __syncthreads();
+
+  const float scale = partials[kResidualNormPartials];
+  const auto* weight_vectors = reinterpret_cast<const uint4*>(weight);
+  const uint4 w0 = weight_vectors[tid];
+  const uint4 w1 = weight_vectors[tid + kResidualNormThreads];
+  const uint32_t weight_low[4] = {w0.x, w0.y, w0.z, w0.w};
+  const uint32_t weight_high[4] = {w1.x, w1.y, w1.z, w1.w};
+#pragma unroll
+  for (int word = 0; word < 4; ++word) {
+    const auto normalize_pair = [scale](uint32_t values, uint32_t weights) {
+      const auto normalize = [&](int half) {
+        const float scaled = __fmul_rn(unpack_residual_bf16(values, half), scale);
+        const float gain = __fadd_rn(1.0f, unpack_residual_bf16(weights, half));
+        return pack_residual_bf16(__fmul_rn(scaled, gain));
+      };
+      return normalize(0) | (normalize(1) << 16);
+    };
+    low[word] = normalize_pair(low[word], weight_low[word]);
+    high[word] = normalize_pair(high[word], weight_high[word]);
+  }
+  auto* output_vectors = reinterpret_cast<uint4*>(output);
+  output_vectors[tid] = make_uint4(low[0], low[1], low[2], low[3]);
+  output_vectors[tid + kResidualNormThreads] = make_uint4(high[0], high[1], high[2], high[3]);
+}
+
 __device__ __forceinline__ float silu(float value) {
   return value / (1.0f + __expf(-value));
 }
@@ -642,6 +751,16 @@ int rms_norm_bf16(const void* input, const void* weight, void* output,
       static_cast<const __nv_bfloat16*>(weight),
       static_cast<__nv_bfloat16*>(output), rows, width, epsilon);
   return cudaGetLastError() == cudaSuccess ? 0 : -2;
+}
+
+int add_rms_norm_bf16(const void* addend, void* residual, const void* weight,
+                      void* normalized, float epsilon, cudaStream_t stream) {
+  add_rms_norm_kernel<<<kResidualNormRows, kResidualNormThreads, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(addend),
+      static_cast<__nv_bfloat16*>(residual),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(normalized), epsilon);
+  return static_cast<int>(cudaGetLastError());
 }
 
 int swiglu_bf16(const void* fused_gate_up, void* output, int rows, int width,

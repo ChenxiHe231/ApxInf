@@ -12,6 +12,10 @@ namespace apxinf::cuda_new::mlp_ops {
 int rms_norm_bf16(const void* input, const void* weight, void* output,
                   int rows, int width, float epsilon, cudaStream_t stream);
 
+// Fixed [4096, 2048] BF16 residual addition followed by zero-centered RMSNorm.
+int add_rms_norm_bf16(const void* addend, void* residual, const void* weight,
+                      void* normalized, float epsilon, cudaStream_t stream);
+
 // y[r,c] = silu(fused[r,c]) * fused[r,width+c]
 //
 // `fused_gate_up` is [rows, 2*width] with gate first, which is what one fused

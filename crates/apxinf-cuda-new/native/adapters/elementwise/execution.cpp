@@ -9,6 +9,7 @@
 #include "../../framework/runtime_internal.h"
 #include "../../kernels/custom/mlp_ops.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -77,6 +78,38 @@ extern "C" apxinf_status_t apxinf_new_rms_norm_bf16(const void* input,
               static_cast<int>(width), epsilon,
               static_cast<cudaStream_t>(stream)),
           "RMSNorm");
+  });
+}
+
+extern "C" apxinf_status_t apxinf_new_add_rms_norm_bf16(
+    const void* addend, void* residual, const void* weight, void* normalized,
+    float epsilon, apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    const auto aligned = [](const void* ptr) {
+      return ptr != nullptr && reinterpret_cast<uintptr_t>(ptr) % 16 == 0;
+    };
+    if (!aligned(addend) || !aligned(residual) || !aligned(weight) ||
+        !aligned(normalized) || !std::isfinite(epsilon) || epsilon < 0.0f) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid fused BF16 residual RMSNorm binding");
+    }
+    constexpr size_t weight_bytes = 2048 * sizeof(uint16_t);
+    constexpr size_t matrix_bytes = 4096 * weight_bytes;
+    const auto overlaps = [](const void* a, size_t a_bytes, const void* b, size_t b_bytes) {
+      const auto first = reinterpret_cast<uintptr_t>(a);
+      const auto second = reinterpret_cast<uintptr_t>(b);
+      return first < second ? second - first < a_bytes : first - second < b_bytes;
+    };
+    if (overlaps(residual, matrix_bytes, normalized, matrix_bytes) ||
+        overlaps(residual, matrix_bytes, addend, matrix_bytes) ||
+        overlaps(residual, matrix_bytes, weight, weight_bytes) ||
+        overlaps(normalized, matrix_bytes, addend, matrix_bytes) ||
+        overlaps(normalized, matrix_bytes, weight, weight_bytes)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "fused BF16 residual RMSNorm buffers overlap");
+    }
+    check(apxinf::cuda_new::mlp_ops::add_rms_norm_bf16(
+              addend, residual, weight, normalized, epsilon,
+              static_cast<cudaStream_t>(stream)),
+          "fused BF16 residual RMSNorm");
   });
 }
 
