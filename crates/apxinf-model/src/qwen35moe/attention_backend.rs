@@ -921,12 +921,21 @@ fn run_dynamic_fp8_attention(
             ],
             DType::BF16,
         )?;
-        let mut args = ops::KvCacheAttentionArgs::new(&query, &key_bf16, &value_bf16, &mut output);
-        args.valid_key_tokens = valid;
-        args.query_start = request.start_position;
-        args.scale = 1.0 / (ops::QWEN35_ATTENTION_HEAD_DIM as f32).sqrt();
-        args.policy.allow_fallback = true;
-        ops::kv_cache_attention(ctx, args)?;
+        if request.phase == DecoderPhase::Prefill
+            && ops::QWEN35_SUFFIX_FMHA_AVAILABLE
+            && ctx.device_id() == 0
+        {
+            let _range = crate::profiling::trace::range("qwen35_suffix_fmha");
+            ops::qwen35_suffix_fmha(ctx, &query, &key_bf16, &value_bf16, &mut output)?;
+        } else {
+            let mut args =
+                ops::KvCacheAttentionArgs::new(&query, &key_bf16, &value_bf16, &mut output);
+            args.valid_key_tokens = valid;
+            args.query_start = request.start_position;
+            args.scale = 1.0 / (ops::QWEN35_ATTENTION_HEAD_DIM as f32).sqrt();
+            args.policy.allow_fallback = true;
+            ops::kv_cache_attention(ctx, args)?;
+        }
         let gate = view(
             &scratch.gate,
             vec![

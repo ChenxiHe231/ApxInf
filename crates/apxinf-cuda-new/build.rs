@@ -261,6 +261,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(apxinf_edge_nvfp4_moe)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_edge_bf16_moe)");
     println!("cargo:rustc-check-cfg=cfg(apxinf_fa2_decode)");
+    println!("cargo:rustc-check-cfg=cfg(apxinf_qwen35_suffix_fmha)");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=APXINF_CUDA_ARCH");
@@ -339,6 +340,7 @@ fn main() {
         cpu_arch == "aarch64" && selection.targets.len() == 1 && selection.targets[0].sm() == 101;
     if edge_nvfp4_moe {
         println!("cargo:rustc-cfg=apxinf_edge_nvfp4_moe");
+        println!("cargo:rustc-cfg=apxinf_qwen35_suffix_fmha");
     }
     let edge_bf16_root = native.join("kernels/edge_bf16_moe");
     let edge_bf16_header = edge_bf16_root
@@ -501,6 +503,9 @@ fn main() {
             ]);
         }
         cutlass_sources.push(adapters.join("attention/providers/cutlass.cu"));
+        if edge_nvfp4_moe {
+            cutlass_sources.push(adapters.join("qwen35_suffix_fmha.cu"));
+        }
         // Vendored FlashInfer Cake GDN prefill: plain CUDA C++, but it needs
         // the same compute_110a codegen as the CUTLASS group because it emits
         // tcgen05 and TMA. See native/kernels/flashinfer_gdn/README.md.
@@ -750,9 +755,8 @@ fn main() {
                 command.arg("-DAPXINF_BF16_DUAL_GEGLU_PRODUCTION=1");
             }
             let file_name = source.file_name().and_then(|name| name.to_str());
+            const D256_APPROX_EXP: &[&str] = &["-DAPXINF_EX2_APPROX=1", "-DAPXINF_EX2_FTZ=1"];
             const D256_COMMON: &[&str] = &[
-                "-DAPXINF_EX2_APPROX=1",
-                "-DAPXINF_EX2_FTZ=1",
                 "-DAPXINF_DEBUG_SHOW_SO=0",
                 "-DAPXINF_FUSE_ROWSUM=1",
                 "-DAPXINF_P_FLUSH_HALF=1",
@@ -760,7 +764,7 @@ fn main() {
                 "-DAPXINF_LOAD_SHAPE_PER_MODE=1",
             ];
             if file_name == Some("fmha_d256_causal_sm110.cu") {
-                command.args(D256_COMMON).args([
+                command.args(D256_APPROX_EXP).args(D256_COMMON).args([
                     "-DAPXINF_EX2_EMU_FREQ=14",
                     "-DAPXINF_EX2_EMU_RES=6",
                     "-DAPXINF_EX2_EMU_START_FRG=0",
@@ -773,8 +777,21 @@ fn main() {
                     "-DAPXINF_S_PIPE_STAGES=2",
                 ]);
             }
-            if file_name == Some("fmha_d256_split_batch_sm110.cu") {
+            if file_name == Some("qwen35_suffix_fmha.cu") {
                 command.args(D256_COMMON).args([
+                    "-DAPXINF_EX2_APPROX=0",
+                    "-DAPXINF_EX2_EMU_RES=0",
+                    "-DAPXINF_RESCALE_THRESHOLD=0.0f",
+                    "-DAPXINF_KV_DESCENDING=1",
+                    "-DAPXINF_ROWSUM_QUARTERS=1",
+                    "-DAPXINF_ACC_SCALE_HALF=1",
+                    "-DAPXINF_ROWSUM_RESCALE_RN=1",
+                    "-DAPXINF_FINAL_NORM=3",
+                    "-DAPXINF_S_PIPE_STAGES=2",
+                ]);
+            }
+            if file_name == Some("fmha_d256_split_batch_sm110.cu") {
+                command.args(D256_APPROX_EXP).args(D256_COMMON).args([
                     "-DAPXINF_EX2_EMU_RES=0",
                     "-DAPXINF_RESCALE_THRESHOLD=8.0f",
                     "-DAPXINF_KV_DESCENDING=1",

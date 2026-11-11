@@ -37,11 +37,17 @@ apxinf_status_t apxinf_qwen35_dynamic_decode_attention(
     apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_decode_spec_t* spec,
     const apxinf_qwen35_dynamic_decode_bindings_t* bindings);
 
-/* Prefill compatibility path: expand only the valid dynamic FP8 prefix into
-   caller-owned BF16 buffers for the existing FA2 context kernel. */
+/* Expand the valid dynamic FP8 prefix into caller-owned BF16 buffers for
+   prefill attention. */
 apxinf_status_t apxinf_qwen35_dynamic_kv_dequant(
     apxinf_runtime_t runtime, const apxinf_qwen35_dynamic_dequant_spec_t* spec,
     const apxinf_qwen35_dynamic_dequant_bindings_t* bindings);
+
+/* Exact-live BF16 suffix-causal attention for the Thor prefill path.
+   The caller applies the Qwen output gate to the BF16 result separately. */
+apxinf_status_t apxinf_qwen35_suffix_fmha(
+    apxinf_runtime_t runtime, const apxinf_qwen35_suffix_fmha_spec_t* spec,
+    const apxinf_qwen35_suffix_fmha_bindings_t* bindings);
 
 #ifdef __cplusplus
 }
