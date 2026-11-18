@@ -73,11 +73,13 @@ fn quant_dequant_block(value: f32, global_scale: f32) -> f32 {
 
 #[test]
 fn qwen35_edge_nvfp4_synthetic_matches_quantized_constant_reference() {
-    if !fused_routed_moe_available() {
-        eprintln!("skipping SM110-only Edge NVFP4 MoE test");
+    let ctx = CudaContext::new(0).unwrap();
+    if matches!(ctx.caps().sm, 101 | 110) {
+        assert!(fused_routed_moe_available(), "Thor must expose the validated fused NVFP4 provider");
+    } else if !fused_routed_moe_available() {
+        eprintln!("skipping Thor-only Edge NVFP4 MoE test");
         return;
     }
-    let ctx = CudaContext::new(0).unwrap();
     let tokens = std::env::var("APXINF_EDGE_MOE_TOKENS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())

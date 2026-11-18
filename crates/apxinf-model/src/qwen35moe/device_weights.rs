@@ -523,6 +523,9 @@ fn upload_nvfp4_moe(
     weights: RoutedMoeWeights<Tensor, Nvfp4LinearWeights<Tensor>>,
     activation: Qwen35MoeActivation,
 ) -> Result<DeviceNvfp4Moe> {
+    if activation == Qwen35MoeActivation::Nvfp4 && !fused_routed_moe_available() {
+        return Err(invalid("NVFP4 activation requires the validated Thor fused MoE provider; use BF16 activation (W4A16) on other targets"));
+    }
     let RoutedMoeWeights {
         router,
         experts,

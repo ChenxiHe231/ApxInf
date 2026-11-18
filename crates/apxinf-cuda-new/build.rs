@@ -41,9 +41,11 @@ fn migrate_sibling_object_cache(
     let Some(build_root) = out.parent().and_then(Path::parent) else {
         return false;
     };
-    let Ok(entries) = std::fs::read_dir(build_root) else {
-        return false;
-    };
+    // Native commands are identical across Cargo profiles (-O3 is explicit).
+    // Reuse only through the same full argv and dependency validation below.
+    let target_root = build_root.parent().and_then(Path::parent).unwrap_or(build_root);
+    let roots = [build_root.to_path_buf(), target_root.join("debug/build"), target_root.join("release/build")];
+    let entries = roots.into_iter().filter_map(|root| std::fs::read_dir(root).ok()).flatten();
     let Some(object_name) = object.file_name() else {
         return false;
     };
@@ -382,11 +384,11 @@ fn main() {
     if native_sm110 {
         println!("cargo:rustc-cfg=apxinf_segmented_attention_sm110");
     }
-    // CUDA 12 reports Thor as SM101 and aliases CuTeDSL's SM110a path to
-    // SM101a. Keep the selection exact; CUDA 13 reports the same hardware as
-    // SM110 and requires a separately generated archive.
+    // CUDA 13 renamed Thor SM101 to SM110. The checked-in compatibility
+    // archive is validated on both runtime spellings; keep the target exact
+    // so unrelated Blackwell devices do not select these Thor-only kernels.
     let edge_nvfp4_moe =
-        cpu_arch == "aarch64" && selection.targets.len() == 1 && selection.targets[0].sm() == 101;
+        cpu_arch == "aarch64" && selection.targets.len() == 1 && matches!(selection.targets[0].sm(), 101 | 110);
     if edge_nvfp4_moe {
         println!("cargo:rustc-cfg=apxinf_edge_nvfp4_moe");
         println!("cargo:rustc-cfg=apxinf_qwen35_suffix_fmha");

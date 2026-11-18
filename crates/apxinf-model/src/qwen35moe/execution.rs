@@ -105,7 +105,7 @@ pub struct Qwen35ExecutionOptions {
 }
 
 impl Qwen35ExecutionOptions {
-    /// The fixed Thor profile requires the CUDA 12 Edge NVFP4 kernels and
+    /// The fixed Thor profile requires the validated Edge NVFP4 kernels and
     /// enough room for the largest captured verifier shape.
     pub fn uses_thor_dynamic_fp8_decode(self, device: usize, capacity: usize) -> bool {
         #[cfg(not(any(feature = "cuda", feature = "qwen35-cuda")))]

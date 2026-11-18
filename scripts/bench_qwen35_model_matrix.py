@@ -1080,7 +1080,7 @@ def main():
     parser.add_argument("--mtp-depth",type=int,choices=(1,2,3),default=3)
     parser.add_argument("--mtp-strategy",choices=("fixed","adaptive"),default="fixed")
     parser.add_argument("--scalar-calibration",type=Path,help="Validated scalar formal-stage summary.json under the same strict/diagnostic policy, with sibling metadata.json and hashed raw case logs; required for adaptive")
-    parser.add_argument("--kv-cache",choices=("bf16","fp8"),default="bf16")
+    parser.add_argument("--kv-cache",choices=("bf16","fp8","fp8_dynamic"),default="bf16")
     parser.add_argument("--moe-activation",choices=("nvfp4","bf16"),default="nvfp4")
     parser.add_argument("--warmups",type=int,default=2)
     parser.add_argument("--repeats",type=int,default=5)

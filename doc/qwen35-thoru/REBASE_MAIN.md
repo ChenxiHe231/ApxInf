@@ -1,5 +1,9 @@
 # Final branch on current main
 
+This records the initial `f534b034` rebase. The later
+[CUDA 13 repair](CUDA13_ACCEPTANCE.md) updates its Thor admission and baseline
+registry behavior; historical validation claims below retain their original scope.
+
 The accepted source snapshot is `68b12f23be337d7334d9d7431598274aedfb7e5e`.
 `Final` replays its 102 non-merge commits on upstream
 `50d283e41abf1c081b2535194900aedbea0e33c6` (2026-11-18).

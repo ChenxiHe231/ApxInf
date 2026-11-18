@@ -45,9 +45,12 @@ The archive also contains CuTeDSL's matching CUDA-12 dialect runtime shim, so
 consumers only need the normal CUDA runtime/driver libraries at link time and
 do not depend on the generation virtual environment.
 
-The CUDA-12 build enables this provider only for a single `aarch64` `sm_101`
-target, which is the capability returned by `cudaGetDeviceProperties` here.
-All other targets compile a stable unsupported stub.
+The provider is enabled for a single `aarch64` Thor target: `sm_101` on
+CUDA 12 or its renamed `sm_110` on CUDA 13. The same compatibility archive
+has passed independent numerical checks and full-model smoke generation on
+Thor-3 / CUDA 13.2, including CUDA Graph. Its bytes and SHA-256 are unchanged.
+All unrelated targets compile a stable unsupported stub. See
+[CUDA 13 validation](../../../../../doc/qwen35-thoru/CUDA13_ACCEPTANCE.md).
 
 ## Thor validation
 

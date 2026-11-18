@@ -578,7 +578,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        cutlass_nvfp4_resource_requirements, cutlass_nvfp4_configurations,
        prepare_cutlass_nvfp4, launch_cutlass_nvfp4, destroy_cutlass},
       {kProviderCutlass, 5, 1, "cutlass-nvfp4-baseline",
-       WeightLayout::NK, kDeviceFeatureCutlassSm100, true, true, true,
+       WeightLayout::NK, kDeviceFeatureCutlassSm100, true, true, false,
        supports_cutlass_nvfp4_baseline, cutlass_nvfp4_alignment,
        cutlass_nvfp4_resource_requirements, cutlass_nvfp4_baseline_configuration,
        prepare_cutlass_nvfp4, launch_cutlass_nvfp4, destroy_cutlass},
@@ -698,11 +698,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
       [](const Implementation& implementation) {
         return implementation.fallback;
       });
-  const auto expected_fallbacks =
-#ifdef APXINF_GEMM_CUTLASS
-      semantic == APXINF_GEMM_SEMANTIC_GEMM ? 3 :
-#endif
-      1;
+  const auto expected_fallbacks = 1;
   if (fallback_count != expected_fallbacks) {
     throw Failure(APXINF_STATUS_INTERNAL_ERROR,
                   "GEMM semantic has an invalid baseline registry");

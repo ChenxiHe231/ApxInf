@@ -386,9 +386,9 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
   cudaDeviceProp properties{};
   apxinf::framework::check_cuda(cudaGetDeviceProperties(&properties, runtime->device));
   const int sm = properties.major * 10 + properties.minor;
-  if (sm != 101) {
+  if (sm != 101 && sm != 110) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
-                  "Edge NVFP4 MoE CUDA-12 artifact requires Thor SM101 compatibility encoding, got SM" +
+                  "Edge NVFP4 MoE requires Thor SM101/SM110, got SM" +
                       std::to_string(sm));
   }
   if (bindings.input == nullptr || bindings.expert_ids == nullptr ||
