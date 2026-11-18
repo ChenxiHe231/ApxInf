@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cublas_v2.h>
+#include <utility>
 
 #ifndef APXINF_ATTENTION_BUILD_ID
 #define APXINF_ATTENTION_BUILD_ID "attention-development"
@@ -102,7 +103,16 @@ TuningKeys tuning_keys(const Spec& spec,
   // A new provider/layout must never inherit the ordinary split-KV recipe.
   if (fa2_packed_gqa_requested(spec)) key << "|packed-gqa-q1to4-v1";
 #endif
-  return {key.str()};
+  std::string exact = key.str();
+#ifdef APXINF_ATTENTION_LEGACY_BUILD_ID
+  std::string compatible = exact;
+  constexpr size_t kBuildStart = sizeof("attention-recipe-v5|ns|") - 1;
+  compatible.replace(kBuildStart, std::string(APXINF_ATTENTION_BUILD_ID).size(),
+                     APXINF_ATTENTION_LEGACY_BUILD_ID);
+  return {std::move(exact), std::move(compatible)};
+#else
+  return {std::move(exact), {}};
+#endif
 }
 
 }  // namespace apxinf::attention

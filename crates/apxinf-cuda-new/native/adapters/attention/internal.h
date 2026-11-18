@@ -60,6 +60,7 @@ using ImplementationRegistry = apxinf::framework::Registry<Implementation>;
 
 struct TuningKeys {
   std::string key;
+  std::string legacy_key;
 };
 
 struct Execution {

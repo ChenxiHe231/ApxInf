@@ -10,7 +10,7 @@ use apxinf_core::{DType, Shape, Tensor};
 use half::{bf16, f16};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 unsafe extern "C" {
@@ -67,6 +67,33 @@ impl Drop for FrameworkTestDirectory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+fn rewrite_single_recipe_build_id(directory: &Path, legacy_id: &str) {
+    let mut files = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("recipe"));
+    let exact_path = files.next().unwrap();
+    assert!(files.next().is_none());
+    let original = std::fs::read_to_string(&exact_path).unwrap();
+    let mut lines = original.lines();
+    let key = lines.next().unwrap();
+    let recipe = lines.next().unwrap();
+    let build_start = key.find("|ns|").unwrap() + 4;
+    let build_end = build_start + key[build_start..].find('|').unwrap();
+    let compatible_key = format!("{}{}{}", &key[..build_start], legacy_id, &key[build_end..]);
+    let hash = compatible_key
+        .bytes()
+        .fold(14695981039346656037u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(1099511628211)
+        });
+    std::fs::write(
+        directory.join(format!("{hash:x}.recipe")),
+        format!("{compatible_key}\n{recipe}\n"),
+    )
+    .unwrap();
+    std::fs::remove_file(exact_path).unwrap();
 }
 
 #[test]
@@ -1047,6 +1074,461 @@ fn gpu_e2e_default_cache_and_autotune_switches() {
         }
         previous = current;
     }
+}
+
+#[test]
+fn gpu_e2e_fp8_recipe_range_prepares_actual_odd_m() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../devlocal/prefill-range/tests")
+        .join(format!(
+            "range-recipe-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    std::fs::create_dir_all(&path).unwrap();
+    let directory = FrameworkTestDirectory(path);
+    let cache = directory.0.to_string_lossy().into_owned();
+    let ctx = CudaContext::new_with_options(0, false, Some(directory.0.as_path())).unwrap();
+    // E4M3 1.0 is 0x38, so every output must equal K=256 exactly in F16.
+    let weight = bytes_tensor(0, vec![256, 256], DType::F8E4M3, &vec![0x38; 256 * 256]);
+    let donor_input = bytes_tensor(0, vec![128, 256], DType::F8E4M3, &vec![0x38; 128 * 256]);
+    let mut donor_output = zeros_tensor(0, vec![128, 256], DType::F16);
+    let mut donor = GemmArgs::new(&donor_input, &weight, &mut donor_output);
+    donor.quantization = GemmQuantization::Fp8UnitScale;
+    donor.policy.online_tune = false;
+    donor.policy.cache_dir = Some(cache.clone());
+    let donor = super::contracts::normalize(&ctx, donor, super::contracts::Semantic::Gemm, None)
+        .unwrap();
+    // The donor configuration is a real CUTLASS FP8 implementation, but the
+    // requested M=129 has no exact recipe. It must prepare for its own shape.
+    super::execution::seed_recipe(&ctx, &donor, 3, 1, 1, 0).unwrap();
+
+    let input = bytes_tensor(0, vec![129, 256], DType::F8E4M3, &vec![0x38; 129 * 256]);
+    let mut output = zeros_tensor(0, vec![129, 256], DType::F16);
+    let read_bytes = |tensor: &Tensor| {
+        let buffer = CudaBuffer::from_tensor(tensor).unwrap();
+        let mut bytes = vec![0; buffer.len()];
+        buffer.copy_to_host(&mut bytes).unwrap();
+        bytes
+    };
+    let input_before = read_bytes(&input);
+    let weight_before = read_bytes(&weight);
+    let mut args = GemmArgs::new(&input, &weight, &mut output);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.policy.online_tune = false;
+    args.policy.cache_dir = Some(cache);
+    let execution = prepare_test_gemm(&ctx, args).unwrap();
+    assert!(
+        execution.summary().contains("source=range-recipe:M=128"),
+        "{}",
+        execution.summary()
+    );
+    execution.enqueue().unwrap();
+    let graph = crate::capture(&ctx, || execution.enqueue()).unwrap();
+    graph.replay().unwrap();
+    ctx.synchronize().unwrap();
+    assert!(f16_values(&output).iter().all(|&value| value == 256.0));
+    assert_eq!(read_bytes(&input), input_before, "range prepare modified input");
+    assert_eq!(read_bytes(&weight), weight_before, "range prepare modified weight");
+}
+
+#[test]
+fn gpu_e2e_fp8_recipe_range_handles_reported_gdn_shape() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../devlocal/prefill-range/tests")
+        .join(format!(
+            "gdn-9999-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    std::fs::create_dir_all(&path).unwrap();
+    let directory = FrameworkTestDirectory(path);
+    let cache = directory.0.to_string_lossy().into_owned();
+    let ctx = CudaContext::new_with_options(0, false, Some(directory.0.as_path())).unwrap();
+    let (donor_m, k, n) = (10668, 2048, 8192);
+    let weight = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
+    let donor_input = bytes_tensor(
+        0,
+        vec![donor_m, k],
+        DType::F8E4M3,
+        &vec![0x38; donor_m * k],
+    );
+    let mut donor_output = zeros_tensor(0, vec![donor_m, n], DType::BF16);
+    let mut donor = GemmArgs::new(&donor_input, &weight, &mut donor_output);
+    donor.quantization = GemmQuantization::Fp8UnitScale;
+    donor.policy.online_tune = false;
+    donor.policy.cache_dir = Some(cache.clone());
+    let donor = super::contracts::normalize(&ctx, donor, super::contracts::Semantic::Gemm, None)
+        .unwrap();
+    // This is the closest M and native FP8 heuristic rank in the formal
+    // Thor-U bundle. Thor-3 uses its own toolkit-specific tuning key.
+    super::execution::seed_recipe(&ctx, &donor, 2, 2, 1, 0).unwrap();
+
+    for actual_m in [9999, 10000] {
+        let input = bytes_tensor(
+            0,
+            vec![actual_m, k],
+            DType::F8E4M3,
+            &vec![0x38; actual_m * k],
+        );
+        let mut output = zeros_tensor(0, vec![actual_m, n], DType::BF16);
+        let mut args = GemmArgs::new(&input, &weight, &mut output);
+        args.quantization = GemmQuantization::Fp8UnitScale;
+        args.policy.online_tune = false;
+        args.policy.cache_dir = Some(cache.clone());
+        let execution = prepare_test_gemm(&ctx, args).unwrap();
+        assert!(
+            execution.summary().contains("source=range-recipe:M=10668"),
+            "M={actual_m}: {}",
+            execution.summary()
+        );
+        eprintln!("GDN_RANGE M={actual_m} {}", execution.summary());
+        execution.enqueue().unwrap();
+        ctx.synchronize().unwrap();
+        assert!(
+            values(&output).iter().all(|&value| value == k as f32),
+            "M={actual_m}: range FP8 output differs"
+        );
+    }
+}
+
+#[test]
+fn gpu_e2e_fp8_serving_fallback_covers_length_boundaries() {
+    let directory = FrameworkTestDirectory::new();
+    let cache = directory.0.to_string_lossy().into_owned();
+    let ctx = CudaContext::new_with_options(0, false, Some(directory.0.as_path())).unwrap();
+    let (k, n) = (2048, 8192);
+    let weight = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
+    for m in [1, 20_000] {
+        let input = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
+        let mut output = zeros_tensor(0, vec![m, n], DType::BF16);
+        let mut args = GemmArgs::new(&input, &weight, &mut output);
+        args.quantization = GemmQuantization::Fp8UnitScale;
+        args.policy.online_tune = false;
+        args.policy.cache_dir = Some(cache.clone());
+        let execution = prepare_test_gemm(&ctx, args).unwrap();
+        assert!(
+            execution.summary().contains("source=fallback"),
+            "M={m}: {}",
+            execution.summary()
+        );
+        execution.enqueue().unwrap();
+        ctx.synchronize().unwrap();
+        assert!(
+            values(&output).iter().all(|&value| value == k as f32),
+            "M={m}: fallback FP8 output differs"
+        );
+    }
+}
+
+#[test]
+fn gpu_e2e_fp8_strict_mode_rejects_range_recipe() {
+    const CHILD: &str = "APXINF_FP8_STRICT_RANGE_CHILD";
+    if let Ok(cache) = std::env::var(CHILD) {
+        let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+        let input = zeros_tensor(0, vec![129, 256], DType::F8E4M3);
+        let weight = zeros_tensor(0, vec![256, 256], DType::F8E4M3);
+        let mut output = zeros_tensor(0, vec![129, 256], DType::F16);
+        let mut args = GemmArgs::new(&input, &weight, &mut output);
+        args.quantization = GemmQuantization::Fp8UnitScale;
+        args.policy.online_tune = false;
+        args.policy.cache_dir = Some(cache);
+        let error = prepare_test_gemm(&ctx, args).err().unwrap().to_string();
+        assert!(error.contains("strict recipe mode"), "{error}");
+        assert!(f16_values(&output).iter().all(|&value| value == 0.0));
+        return;
+    }
+
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../devlocal/prefill-range/tests")
+        .join(format!("strict-range-{}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    let directory = FrameworkTestDirectory(path);
+    let cache = directory.0.to_string_lossy().into_owned();
+    let ctx = CudaContext::new_with_options(0, false, Some(directory.0.as_path())).unwrap();
+    let input = zeros_tensor(0, vec![128, 256], DType::F8E4M3);
+    let weight = zeros_tensor(0, vec![256, 256], DType::F8E4M3);
+    let mut output = zeros_tensor(0, vec![128, 256], DType::F16);
+    let mut args = GemmArgs::new(&input, &weight, &mut output);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.policy.cache_dir = Some(cache.clone());
+    let normalized =
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+    super::execution::seed_recipe(&ctx, &normalized, 3, 1, 1, 0).unwrap();
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "ops::tests::framework::gpu_e2e_fp8_strict_mode_rejects_range_recipe",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, cache)
+        .env("APXINF_REQUIRE_RECIPES", "1")
+        .status()
+        .unwrap();
+    assert!(child.success(), "strict range child failed");
+}
+
+#[test]
+fn gpu_e2e_source_verified_legacy_recipe_restores_exact_shape() {
+    let Some(legacy_id) = option_env!("APXINF_GEMM_LEGACY_RECIPE_ID") else {
+        return;
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../devlocal/prefill-range/tests")
+        .join(format!("legacy-recipe-{}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    let directory = FrameworkTestDirectory(path);
+    let cache = directory.0.to_string_lossy().into_owned();
+    let ctx = CudaContext::new_with_options(0, false, Some(directory.0.as_path())).unwrap();
+    let (m, k, n) = (129, 256, 256);
+    let input = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
+    let weight = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
+    let mut output = zeros_tensor(0, vec![m, n], DType::F16);
+    let mut args = GemmArgs::new(&input, &weight, &mut output);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.policy.cache_dir = Some(cache.clone());
+    let normalized =
+        super::contracts::normalize(&ctx, args, super::contracts::Semantic::Gemm, None).unwrap();
+    super::execution::seed_recipe(&ctx, &normalized, 3, 1, 1, 0).unwrap();
+    drop(normalized);
+
+    rewrite_single_recipe_build_id(&directory.0, legacy_id);
+
+    let mut args = GemmArgs::new(&input, &weight, &mut output);
+    args.quantization = GemmQuantization::Fp8UnitScale;
+    args.policy.online_tune = false;
+    args.policy.cache_dir = Some(cache);
+    let execution = prepare_test_gemm(&ctx, args).unwrap();
+    assert!(
+        execution.summary().contains("source=compatible-exact-recipe"),
+        "{}",
+        execution.summary()
+    );
+    execution.enqueue().unwrap();
+    ctx.synchronize().unwrap();
+    assert!(f16_values(&output).iter().all(|&value| value == k as f32));
+}
+
+#[test]
+fn gpu_e2e_source_verified_legacy_attention_recipe_restores_exact_shape() {
+    let Some(legacy_id) = option_env!("APXINF_ATTENTION_LEGACY_RECIPE_ID") else {
+        return;
+    };
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../devlocal/prefill-range/tests")
+        .join(format!("legacy-attention-{}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
+    let directory = FrameworkTestDirectory(path);
+    let cache = directory.0.to_string_lossy().into_owned();
+
+    let tuning = CudaContext::new_with_options(0, true, Some(directory.0.as_path())).unwrap();
+    let query = tensor(0, vec![1, 4, 1, 32], &[0.5; 128]);
+    let key = tensor(0, vec![1, 4, 1, 32], &[0.25; 128]);
+    let value = tensor(0, vec![1, 4, 1, 32], &[0.75; 128]);
+    let mut output = tensor(0, vec![1, 4, 1, 32], &[0.0; 128]);
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut output);
+    args.policy.cache_dir = Some(cache.clone());
+    args.policy.allow_fallback = false;
+    let normalized = crate::ops::attention::contracts::normalize(&tuning, args).unwrap();
+    let execution = crate::ops::attention::execution::prepare(&tuning, normalized).unwrap();
+    assert!(execution.summary().contains("source=tuned"), "{}", execution.summary());
+    drop(execution);
+    rewrite_single_recipe_build_id(&directory.0, legacy_id);
+
+    let ctx = CudaContext::new_with_options(0, false, Some(directory.0.as_path())).unwrap();
+    let query = tensor(0, vec![1, 4, 1, 32], &[0.5; 128]);
+    let key = tensor(0, vec![1, 4, 1, 32], &[0.25; 128]);
+    let value = tensor(0, vec![1, 4, 1, 32], &[0.75; 128]);
+    let mut output = tensor(0, vec![1, 4, 1, 32], &[0.0; 128]);
+    let mut args = AttentionArgs::new(&query, &key, &value, &mut output);
+    args.policy.cache_dir = Some(cache);
+    args.policy.online_tune = false;
+    let normalized = crate::ops::attention::contracts::normalize(&ctx, args).unwrap();
+    let execution = crate::ops::attention::execution::prepare(&ctx, normalized).unwrap();
+    assert!(
+        execution.summary().contains("source=compatible-exact-recipe"),
+        "{}",
+        execution.summary()
+    );
+    execution.enqueue_for_test().unwrap();
+    ctx.synchronize().unwrap();
+    assert!(values(&output).iter().all(|&value| (value - 0.75).abs() < 0.01));
+}
+
+#[test]
+fn gpu_e2e_attention_prefill_range_reprepares_for_actual_q_and_k() {
+    for (donor_q, donor_k, actual_q, actual_k) in
+        [(128, 128, 129, 129), (128, 256, 129, 258)]
+    {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../devlocal/prefill-range/tests")
+            .join(format!(
+                "attention-range-{}-{donor_q}-{donor_k}",
+                std::process::id()
+            ));
+        std::fs::create_dir_all(&path).unwrap();
+        let directory = FrameworkTestDirectory(path);
+        let cache = directory.0.to_string_lossy().into_owned();
+        let elements = |tokens| tokens * 2 * 64;
+
+        let tuning = CudaContext::new_with_options(0, true, Some(directory.0.as_path())).unwrap();
+        let donor_query = tensor(0, vec![1, donor_q, 2, 64], &vec![0.5; elements(donor_q)]);
+        let donor_key = tensor(0, vec![1, donor_k, 2, 64], &vec![0.25; elements(donor_k)]);
+        let donor_value = tensor(0, vec![1, donor_k, 2, 64], &vec![0.75; elements(donor_k)]);
+        let mut donor_output = zeros_tensor(0, vec![1, donor_q, 2, 64], DType::BF16);
+        let mut args = KvCacheAttentionArgs::new(
+            &donor_query,
+            &donor_key,
+            &donor_value,
+            &mut donor_output,
+        );
+        args.policy.cache_dir = Some(cache.clone());
+        args.policy.allow_fallback = false;
+        let normalized = crate::ops::attention::normalize_kv_cache_attention(&tuning, args)
+            .unwrap();
+        let donor = crate::ops::attention::execution::prepare(&tuning, normalized).unwrap();
+        assert!(donor.summary().contains("source=tuned"), "{}", donor.summary());
+        drop(donor);
+        drop(tuning);
+        if donor_k != donor_q {
+            let legacy_id = option_env!("APXINF_ATTENTION_LEGACY_RECIPE_ID")
+                .expect("source-compatible aarch64 build must expose old Attention key");
+            rewrite_single_recipe_build_id(&directory.0, legacy_id);
+        }
+
+        let ctx = CudaContext::new_with_options(0, false, Some(directory.0.as_path())).unwrap();
+        let query = tensor(0, vec![1, actual_q, 2, 64], &vec![0.0; elements(actual_q)]);
+        let key = tensor(0, vec![1, actual_k, 2, 64], &vec![0.25; elements(actual_k)]);
+        let prefix = actual_k - actual_q;
+        let value_values: Vec<f32> = (0..actual_k)
+            .flat_map(|token| {
+                let value = if prefix == 0 {
+                    f32::from(token % 2 == 1)
+                } else {
+                    f32::from(token >= prefix)
+                };
+                std::iter::repeat_n(value, 128)
+            })
+            .collect();
+        let value = tensor(0, vec![1, actual_k, 2, 64], &value_values);
+        let mut output = zeros_tensor(0, vec![1, actual_q, 2, 64], DType::BF16);
+        let mut args = KvCacheAttentionArgs::new(&query, &key, &value, &mut output);
+        args.policy.cache_dir = Some(cache);
+        args.policy.online_tune = false;
+        let normalized = crate::ops::attention::normalize_kv_cache_attention(&ctx, args).unwrap();
+        let execution = crate::ops::attention::execution::prepare(&ctx, normalized).unwrap();
+        assert!(
+            execution.summary().contains("source=range-recipe:Q="),
+            "{}",
+            execution.summary()
+        );
+        execution.enqueue_for_test().unwrap();
+        let graph = crate::capture(&ctx, || execution.enqueue_for_test()).unwrap();
+        graph.replay().unwrap();
+        ctx.synchronize().unwrap();
+        for (query_index, row) in values(&output).chunks_exact(128).enumerate() {
+            let expected = if prefix == 0 {
+                ((query_index + 1) / 2) as f32 / (query_index + 1) as f32
+            } else {
+                (query_index + 1) as f32 / (prefix + query_index + 1) as f32
+            };
+            assert!(
+                row.iter().all(|&value| value.is_finite() && (value - expected).abs() < 0.015),
+                "Q={actual_q} K={actual_k} row={query_index} expected={expected} got={}",
+                row[0]
+            );
+        }
+        assert!(values(&query).iter().all(|&value| value == 0.0));
+        assert!(values(&key).iter().all(|&value| value == 0.25));
+        assert_eq!(values(&value), value_values);
+    }
+}
+
+#[test]
+fn gpu_e2e_attention_strict_mode_rejects_range_recipe() {
+    const CHILD: &str = "APXINF_ATTENTION_STRICT_RANGE_CHILD";
+    if let Ok(cache) = std::env::var(CHILD) {
+        let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+        let query = tensor(0, vec![1, 5, 1, 32], &[0.5; 160]);
+        let key = tensor(0, vec![1, 5, 1, 32], &[0.25; 160]);
+        let value = tensor(0, vec![1, 5, 1, 32], &[0.75; 160]);
+        let mut output = zeros_tensor(0, vec![1, 5, 1, 32], DType::BF16);
+        let mut args = KvCacheAttentionArgs::new(&query, &key, &value, &mut output);
+        args.policy.cache_dir = Some(cache);
+        args.policy.online_tune = false;
+        let normalized = crate::ops::attention::normalize_kv_cache_attention(&ctx, args).unwrap();
+        let error = crate::ops::attention::execution::prepare(&ctx, normalized)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("strict recipe mode"), "{error}");
+        return;
+    }
+
+    let directory = FrameworkTestDirectory::new();
+    let cache = directory.0.to_string_lossy().into_owned();
+    let ctx = CudaContext::new_with_options(0, true, Some(directory.0.as_path())).unwrap();
+    let query = tensor(0, vec![1, 4, 1, 32], &[0.5; 128]);
+    let key = tensor(0, vec![1, 4, 1, 32], &[0.25; 128]);
+    let value = tensor(0, vec![1, 4, 1, 32], &[0.75; 128]);
+    let mut output = zeros_tensor(0, vec![1, 4, 1, 32], DType::BF16);
+    let mut args = KvCacheAttentionArgs::new(&query, &key, &value, &mut output);
+    args.policy.cache_dir = Some(cache.clone());
+    args.policy.allow_fallback = false;
+    let normalized = crate::ops::attention::normalize_kv_cache_attention(&ctx, args).unwrap();
+    let execution = crate::ops::attention::execution::prepare(&ctx, normalized).unwrap();
+    assert!(execution.summary().contains("source=tuned"));
+    drop(execution);
+    drop(ctx);
+
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "ops::tests::framework::gpu_e2e_attention_strict_mode_rejects_range_recipe",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CHILD, cache)
+        .env("APXINF_REQUIRE_RECIPES", "1")
+        .status()
+        .unwrap();
+    assert!(child.success());
+}
+
+#[test]
+fn gpu_e2e_kv_suffix_causal_mask_matches_production_gqa_geometry() {
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    let (queries, keys, query_heads, kv_heads, dim) = (128, 256, 16, 2, 256);
+    let query = tensor(0, vec![1, queries, query_heads, dim], &vec![0.0; queries * query_heads * dim]);
+    let key = tensor(0, vec![1, keys, kv_heads, dim], &vec![0.0; keys * kv_heads * dim]);
+    let value_values: Vec<f32> = (0..keys)
+        .flat_map(|token| std::iter::repeat_n(f32::from(token >= keys - queries), kv_heads * dim))
+        .collect();
+    let value = tensor(0, vec![1, keys, kv_heads, dim], &value_values);
+    let mut output = zeros_tensor(0, vec![1, queries, query_heads, dim], DType::BF16);
+    let mut args = KvCacheAttentionArgs::new(&query, &key, &value, &mut output);
+    args.policy.online_tune = false;
+    let normalized = crate::ops::attention::normalize_kv_cache_attention(&ctx, args).unwrap();
+    let execution = crate::ops::attention::execution::prepare(&ctx, normalized).unwrap();
+    eprintln!("production GQA suffix: {}", execution.summary());
+    execution.enqueue_for_test().unwrap();
+    ctx.synchronize().unwrap();
+    for (query_index, row) in values(&output).chunks_exact(query_heads * dim).enumerate() {
+        let expected = (query_index + 1) as f32 / (keys - queries + query_index + 1) as f32;
+        assert!(
+            row.iter().all(|&actual| actual.is_finite() && (actual - expected).abs() < 0.015),
+            "row={query_index} expected={expected} actual={}",
+            row[0]
+        );
+    }
+    assert_eq!(values(&value), value_values);
 }
 
 #[test]

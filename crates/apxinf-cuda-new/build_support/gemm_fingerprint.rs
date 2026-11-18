@@ -101,3 +101,29 @@ pub fn build_id<'a>(
     }
     format!("gemm-kb1-{hash:032x}")
 }
+
+/// A narrow guard for reusing the frozen Thor-U GEMM recipes after changing
+/// only execution-side recipe selection and runtime bookkeeping. Every source
+/// that can alter a provider, configuration, kernel, or ABI remains covered.
+pub fn recipe_compat_source_id(native: &Path) -> String {
+    let mut hash = FNV1A_128_OFFSET;
+    hash_bytes(&mut hash, b"apxinf-gemm-recipe-compat-v1");
+    hash_bytes(&mut hash, &[0]);
+    for path in gemm_inputs(native) {
+        let relative = path.strip_prefix(native).unwrap_or(&path);
+        if relative == Path::new("adapters/gemm/execution.cpp")
+            || relative == Path::new("framework/runtime_internal.h")
+        {
+            continue;
+        }
+        hash_bytes(&mut hash, relative.to_string_lossy().as_bytes());
+        hash_bytes(&mut hash, &[0]);
+        hash_bytes(
+            &mut hash,
+            &std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+        );
+        hash_bytes(&mut hash, &[0xff]);
+    }
+    format!("{hash:032x}")
+}

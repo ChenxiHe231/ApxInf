@@ -19,6 +19,8 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace apxinf::framework {
 
@@ -83,8 +85,23 @@ struct apxinf_runtime {
   int multiprocessor_count = 0;
   std::mutex gemm_mutex;
   std::map<std::string, apxinf::framework::Recipe> gemm_recipes;
+  // Indexed lazily on the first non-strict FP8 GEMM recipe miss. The outer key
+  // is the cache directory; the inner key is the exact tuning key without M.
+  std::map<std::string,
+           std::map<std::string, std::vector<std::pair<int64_t, std::string>>>>
+      gemm_range_recipes;
   std::mutex attention_mutex;
   std::map<std::string, apxinf::framework::Recipe> attention_recipes;
+  struct AttentionRangeEntry {
+    int64_t query_tokens;
+    int64_t key_tokens;
+    std::string key;
+  };
+  // Indexed lazily on an eligible serving Prefill miss. Exact recipes still
+  // take precedence; donors are restored and prepared against the actual Spec.
+  std::map<std::string,
+           std::map<std::string, std::vector<AttentionRangeEntry>>>
+      attention_range_recipes;
   std::string default_cache_dir;
   bool allow_online_tune = true;
 };

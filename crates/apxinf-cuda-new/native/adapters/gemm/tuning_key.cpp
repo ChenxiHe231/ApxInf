@@ -48,9 +48,10 @@ std::string common_key(const Spec& spec,
                        const apxinf_gemm_policy_t& policy,
                        int runtime_version,
                        int driver_version,
-                       const cudaDeviceProp& properties) {
+                       const cudaDeviceProp& properties,
+                       const char* build_id) {
   std::ostringstream key;
-  key << "gemm-recipe-v11|ns|" << APXINF_GEMM_BUILD_ID << '|'
+  key << "gemm-recipe-v11|ns|" << build_id << '|'
       << "toolkit=" << CUDART_VERSION << '|'
       << "cc=" << properties.major * 10 + properties.minor
       << "|sms=" << properties.multiProcessorCount
@@ -96,8 +97,16 @@ TuningKeys tuning_keys(const Spec& spec,
   check_cuda(cudaDriverGetVersion(&driver_version));
 
   const std::string common =
-      common_key(spec, policy, runtime_version, driver_version, properties);
-  return {common};
+      common_key(spec, policy, runtime_version, driver_version, properties,
+                 APXINF_GEMM_BUILD_ID);
+#ifdef APXINF_GEMM_LEGACY_BUILD_ID
+  const std::string compatible =
+      common_key(spec, policy, runtime_version, driver_version, properties,
+                 APXINF_GEMM_LEGACY_BUILD_ID);
+  return {common, compatible};
+#else
+  return {common, {}};
+#endif
 }
 
 }  // namespace apxinf::gemm

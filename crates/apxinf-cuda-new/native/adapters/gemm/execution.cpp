@@ -6,9 +6,12 @@
 #include "../../kernels/cutlass/ops/gemm/gemm_nvfp4_sm100.h"
 #endif
 
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 
 namespace {
@@ -304,6 +307,127 @@ const apxinf::gemm::Implementation* find_implementation(const Recipe& recipe,
   return nullptr;
 }
 
+// Exact recipes retain precedence. On a serving miss, only the M field may
+// vary: the rest of the key still pins the build, hardware, dtypes, geometry,
+// alignment and execution policy. The donor file is re-read through the normal
+// hash/key validation before its configuration is tried on the actual M.
+bool range_family(const std::string& key, std::string& family, int64_t& m) {
+  if (key.rfind("gemm-recipe-v11|", 0) != 0) return false;
+  const auto op = key.find("|op|");
+  if (op == std::string::npos) return false;
+  auto cursor = op + 4;
+  for (int field = 0; field != 2; ++field) {
+    cursor = key.find('|', cursor);
+    if (cursor == std::string::npos) return false;
+    ++cursor;
+  }
+  const auto end = key.find('|', cursor);
+  if (end == std::string::npos || end == cursor) return false;
+  const auto parsed = std::from_chars(key.data() + cursor, key.data() + end, m);
+  if (parsed.ec != std::errc{} || parsed.ptr != key.data() + end || m <= 0)
+    return false;
+  family = key.substr(0, cursor) + key.substr(end);
+  return true;
+}
+
+bool parse_recipe(const std::string& serialized, Recipe& recipe) {
+  std::istringstream input(serialized);
+  if (!(input >> recipe.provider_id >> recipe.implementation_id >>
+        recipe.implementation_version >> recipe.configuration))
+    return false;
+  input >> std::ws;
+  return input.eof();
+}
+
+void index_range_recipes(apxinf_runtime* runtime, const std::string& directory) {
+  if (directory.empty() || runtime->gemm_range_recipes.count(directory) != 0)
+    return;
+  std::error_code error;
+  if (!std::filesystem::is_directory(directory, error) || error) return;
+  auto& index = runtime->gemm_range_recipes[directory];
+  const auto add_key = [&index](std::string donor_key) {
+    std::string family;
+    int64_t donor_m = 0;
+    if (range_family(donor_key, family, donor_m))
+      index[family].emplace_back(donor_m, std::move(donor_key));
+  };
+  // Bundles may ship a sequential index so the first unusual prompt does not
+  // have to open thousands of tiny files. Each chosen key is still validated
+  // against its hashed recipe file before use.
+  std::ifstream manifest(directory + "/gemm-range-index-v1.txt");
+  if (manifest) {
+    std::string donor_key;
+    while (std::getline(manifest, donor_key)) add_key(std::move(donor_key));
+    return;
+  }
+  std::filesystem::directory_iterator files(directory, error);
+  if (error) return;
+  for (auto it = files; it != std::filesystem::directory_iterator{};
+       it.increment(error)) {
+    if (error) break;
+    const auto& file = *it;
+    if (!file.is_regular_file(error) || error ||
+        file.path().extension() != ".recipe") {
+      error.clear();
+      continue;
+    }
+    std::ifstream input(file.path());
+    std::string donor_key;
+    if (std::getline(input, donor_key)) add_key(std::move(donor_key));
+  }
+}
+
+bool try_range_recipe(apxinf_runtime* runtime, const std::string& directory,
+                      const std::string& key, const apxinf::gemm::Spec& spec,
+                      const apxinf_gemm_policy_t& policy,
+                      const apxinf_gemm_bindings_t& bindings, Recipe& selected,
+                      std::unique_ptr<Execution>& execution,
+                      std::string& source) {
+  std::string family;
+  int64_t requested_m = 0;
+  if (!range_family(key, family, requested_m)) return false;
+  index_range_recipes(runtime, directory);
+  const auto directory_it = runtime->gemm_range_recipes.find(directory);
+  if (directory_it == runtime->gemm_range_recipes.end()) return false;
+  const auto family_it = directory_it->second.find(family);
+  if (family_it == directory_it->second.end()) return false;
+
+  std::vector<std::pair<int64_t, std::string>> donors = family_it->second;
+  std::sort(donors.begin(), donors.end(), [requested_m](const auto& a,
+                                                       const auto& b) {
+    const auto da = std::llabs(a.first - requested_m);
+    const auto db = std::llabs(b.first - requested_m);
+    return da == db ? a.first < b.first : da < db;
+  });
+  const auto limit = std::max<int64_t>(256, requested_m / 8);
+  size_t attempts = 0;
+  for (const auto& [donor_m, donor_key] : donors) {
+    if (donor_m == requested_m ||
+        std::llabs(donor_m - requested_m) > limit || attempts++ >= 16)
+      continue;
+    const std::string serialized = apxinf::gemm::read_recipe(directory, donor_key);
+    Recipe candidate{};
+    if (!parse_recipe(serialized, candidate)) continue;
+    const auto* implementation =
+        find_implementation(candidate, spec, runtime->device);
+    if (implementation == nullptr) continue;
+    try {
+      execution = apxinf::gemm::prepare(*implementation,
+                                        candidate.configuration, spec, policy,
+                                        bindings, runtime->device);
+    } catch (const Failure&) {
+      execution.reset();
+      cudaGetLastError();
+    }
+    if (execution != nullptr) {
+      selected = candidate;
+      source = "range-recipe:M=" + std::to_string(donor_m);
+      return true;
+    }
+  }
+  return false;
+}
+
 std::unique_ptr<Execution> fallback(
     const apxinf::gemm::Spec& spec, const apxinf_gemm_policy_t& policy,
     const apxinf_gemm_bindings_t& bindings, int device, bool select_layout) {
@@ -442,14 +566,7 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
     } else {
       const std::string serialized = apxinf::gemm::read_recipe(
           cache_dir, key);
-      std::istringstream input(serialized);
-    recipe_found = static_cast<bool>(
-        input >> recipe.provider_id >> recipe.implementation_id >>
-        recipe.implementation_version >> recipe.configuration);
-    if (recipe_found) {
-      input >> std::ws;
-      recipe_found = input.eof();
-    }
+      recipe_found = parse_recipe(serialized, recipe);
     }
 
     // Bind the selected layout, but do not modify model bytes until selection
@@ -490,7 +607,44 @@ extern "C" apxinf_status_t apxinf_gemm_prepare(
       }
     }
 
+    if (execution == nullptr && !keys.legacy_key.empty()) {
+      Recipe compatible{};
+      if (parse_recipe(apxinf::gemm::read_recipe(cache_dir, keys.legacy_key),
+                       compatible)) {
+        if (const auto* implementation =
+                find_implementation(compatible, normalized_spec,
+                                    runtime->device)) {
+          try {
+            execution = apxinf::gemm::prepare(
+                *implementation, compatible.configuration, normalized_spec,
+                *policy, *bindings, runtime->device);
+          } catch (const Failure&) {
+            execution.reset();
+            cudaGetLastError();
+          }
+          if (execution != nullptr) {
+            recipe = compatible;
+            source = "compatible-exact-recipe";
+            runtime->gemm_recipes[key] = recipe;
+          }
+        }
+      }
+    }
+
     bool persist_recipe = false;
+    if (execution == nullptr && !apxinf::framework::require_recipes() &&
+        !runtime->allow_online_tune && policy->allow_fallback &&
+        normalized_spec.quantization == APXINF_GEMM_QUANT_FP8_UNIT_SCALE) {
+      // A borrowed configuration is not an exact recipe. Recheck the cache
+      // on the next prepare so a newly installed exact recipe keeps priority,
+      // and a later strict request cannot consume the borrowed configuration.
+      if (!try_range_recipe(runtime, cache_dir, key, normalized_spec, *policy,
+                            *bindings, recipe, execution, source) &&
+          !keys.legacy_key.empty()) {
+        try_range_recipe(runtime, cache_dir, keys.legacy_key, normalized_spec,
+                         *policy, *bindings, recipe, execution, source);
+      }
+    }
     if (execution == nullptr) {
       if (apxinf::framework::require_recipes()) {
         throw Failure(APXINF_STATUS_CACHE_MISS,

@@ -109,3 +109,44 @@ pub fn build_id<'a>(
     }
     format!("attention-kb1-{hash:032x}")
 }
+
+/// Guard the frozen Thor-U attention recipe identity when only adapter
+/// selection and shared runtime bookkeeping have changed.
+pub fn recipe_compat_source_id(native: &Path) -> String {
+    let mut hash = FNV1A_128_OFFSET;
+    hash_bytes(&mut hash, b"apxinf-attention-recipe-compat-v1");
+    hash_bytes(&mut hash, &[0]);
+    for define in FA2_FIXED_FEATURE_DEFINES {
+        hash_bytes(&mut hash, define.as_bytes());
+        hash_bytes(&mut hash, &[0]);
+    }
+    let mut files = Vec::new();
+    for tree in INPUT_TREES {
+        collect_tree(&native.join(tree), &mut files);
+    }
+    files.extend(
+        INPUT_FILES
+            .iter()
+            .map(|relative| native.join(relative))
+            .filter(|path| path.is_file()),
+    );
+    files.sort_unstable();
+    files.dedup();
+    for path in files {
+        let relative = path.strip_prefix(native).unwrap_or(&path);
+        if relative == Path::new("adapters/attention/execution.cpp")
+            || relative == Path::new("framework/runtime_internal.h")
+        {
+            continue;
+        }
+        hash_bytes(&mut hash, relative.to_string_lossy().as_bytes());
+        hash_bytes(&mut hash, &[0]);
+        hash_bytes(
+            &mut hash,
+            &std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+        );
+        hash_bytes(&mut hash, &[0xff]);
+    }
+    format!("{hash:032x}")
+}

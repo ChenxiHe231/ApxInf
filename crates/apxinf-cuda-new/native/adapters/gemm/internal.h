@@ -146,6 +146,8 @@ using Recipe = apxinf::framework::Recipe;
 struct TuningKeys {
   // A recipe under this key is fully tuned for one exact equivalence class.
   std::string key;
+  // Present only for a source-verified compatible Thor-U provider build.
+  std::string legacy_key;
 };
 
 struct AccuracyMetrics {

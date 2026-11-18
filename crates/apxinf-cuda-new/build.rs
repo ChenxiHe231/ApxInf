@@ -412,6 +412,7 @@ fn main() {
         println!("cargo:rustc-cfg=apxinf_edge_bf16_moe");
     }
 
+    let build_id_overridden = env::var_os("APXINF_KERNEL_BUILD_ID").is_some();
     let id = env::var("APXINF_KERNEL_BUILD_ID").unwrap_or_else(|_| {
         gemm_fingerprint::build_id(
             &native,
@@ -430,6 +431,18 @@ fn main() {
             .iter()
             .map(|arch| (arch.nvcc_arch.as_str(), arch.cutlass_arch.as_str())),
     );
+    // The 68b12f23 Thor-U package was built with this GEMM key. Changing only
+    // recipe selection changes the whole-tree build ID, even though the tuned
+    // providers and kernels are identical. Expose the old key only while the
+    // provider/kernel/ABI source fingerprint still matches that package.
+    let legacy_gemm_id = (!build_id_overridden
+        && target == "aarch64-unknown-linux-gnu"
+        && gemm_fingerprint::recipe_compat_source_id(&native)
+            == "1a22226531e8e96121e95345ab5304a9")
+        .then_some("gemm-kb1-cd9800c2b6bc6d05b55c19c4ea36d605");
+    if let Some(legacy_id) = legacy_gemm_id {
+        println!("cargo:rustc-env=APXINF_GEMM_LEGACY_RECIPE_ID={legacy_id}");
+    }
     let attention_id = attention_fingerprint::build_id(
         &native,
         &target,
@@ -438,6 +451,16 @@ fn main() {
             .iter()
             .map(|arch| (arch.nvcc_arch.as_str(), arch.cutlass_arch.as_str())),
     );
+    // Shared runtime bookkeeping also changes Attention's whole-tree ID.
+    // Keep the frozen binary's exact recipes usable only while all provider,
+    // kernel and ABI sources still match the reviewed compatibility set.
+    let legacy_attention_id = (target == "aarch64-unknown-linux-gnu"
+        && attention_fingerprint::recipe_compat_source_id(&native)
+            == "7df0ba17376aca6a0a2c38e5512f92c8")
+        .then_some("attention-kb1-1be98f5387acae8edc0852a681e9a973");
+    if let Some(legacy_id) = legacy_attention_id {
+        println!("cargo:rustc-env=APXINF_ATTENTION_LEGACY_RECIPE_ID={legacy_id}");
+    }
     assert!(
         !id.chars()
             .any(|character| matches!(character, '\n' | '\r' | '"')),
@@ -824,8 +847,16 @@ fn main() {
         {
             if source.to_string_lossy().contains("/gemm/") {
                 command.arg(format!("-DAPXINF_GEMM_BUILD_ID=\"{id}\""));
+                if let Some(legacy_id) = legacy_gemm_id {
+                    command.arg(format!("-DAPXINF_GEMM_LEGACY_BUILD_ID=\"{legacy_id}\""));
+                }
             } else {
                 command.arg(format!("-DAPXINF_ATTENTION_BUILD_ID=\"{attention_id}\""));
+                if let Some(legacy_id) = legacy_attention_id {
+                    command.arg(format!(
+                        "-DAPXINF_ATTENTION_LEGACY_BUILD_ID=\"{legacy_id}\""
+                    ));
+                }
             }
         }
         if source.file_name().is_some_and(|name| name == "conv3d.cu") {

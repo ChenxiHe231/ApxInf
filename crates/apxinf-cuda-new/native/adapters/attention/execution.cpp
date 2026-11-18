@@ -5,9 +5,12 @@
 #include <cuda_fp8.h>
 
 #include <cmath>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 
 #if defined(APXINF_ATTENTION_FA2)
 namespace apxinf::cuda_new::cutlass_ops {
@@ -202,6 +205,163 @@ const apxinf::attention::Implementation* find_implementation(
                    recipe.configuration) != configurations.end()
              ? implementation
              : nullptr;
+}
+
+bool parse(const std::string& value, Recipe& recipe);
+
+// Only static causal KV Prefill is eligible. The four varying fields are
+// query length, valid key length, key capacity and query start. All remaining
+// key fields (build, GPU, toolkit, dtype, heads, alignment and policy) must
+// match exactly; the donor configuration is prepared for the actual Spec.
+bool prefill_range_family(const std::string& key, std::string& family,
+                          int64_t& query_tokens, int64_t& key_tokens) {
+  const bool stable = key.rfind("attention-recipe-v8|", 0) == 0;
+  if (!stable && key.rfind("attention-recipe-v7|", 0) != 0)
+    return false;
+  std::vector<std::string> fields;
+  size_t begin = 0;
+  for (;;) {
+    const size_t end = key.find('|', begin);
+    fields.emplace_back(key.substr(begin, end - begin));
+    if (end == std::string::npos) break;
+    begin = end + 1;
+  }
+  const auto op = std::find(fields.begin(), fields.end(), "op");
+  if (op == fields.end()) return false;
+  const size_t first = static_cast<size_t>(op - fields.begin()) + 1;
+  const size_t query_start_field = first + (stable ? 15 : 14);
+  if (fields.size() <= query_start_field || fields[first + 1] != "1" ||
+      fields[first + 5] != "1" || fields[first + 6] != "1" ||
+      fields[first + 13] != "0")
+    return false;
+  const auto parse_int = [](const std::string& value, int64_t& result) {
+    const auto parsed =
+        std::from_chars(value.data(), value.data() + value.size(), result);
+    return parsed.ec == std::errc{} &&
+           parsed.ptr == value.data() + value.size();
+  };
+  int64_t capacity = 0;
+  int64_t query_start = 0;
+  if (!parse_int(fields[first + 7], query_tokens) ||
+      !parse_int(fields[first + 8], key_tokens) ||
+      !parse_int(fields[first + 9], capacity) ||
+      !parse_int(fields[query_start_field], query_start) || query_tokens <= 1 ||
+      key_tokens < query_tokens || capacity != key_tokens ||
+      query_start != key_tokens - query_tokens)
+    return false;
+  fields[first + 7] = "*";
+  fields[first + 8] = "*";
+  fields[first + 9] = "*";
+  fields[query_start_field] = "*";
+  family.clear();
+  for (const auto& field : fields) {
+    if (!family.empty()) family += '|';
+    family += field;
+  }
+  return true;
+}
+
+void index_prefill_range_recipes(apxinf_runtime* runtime,
+                                 const std::string& directory) {
+  if (directory.empty() ||
+      runtime->attention_range_recipes.count(directory) != 0)
+    return;
+  std::error_code error;
+  if (!std::filesystem::is_directory(directory, error) || error) return;
+  auto& index = runtime->attention_range_recipes[directory];
+  const auto add_key = [&index](std::string donor_key) {
+    std::string family;
+    int64_t query_tokens = 0;
+    int64_t key_tokens = 0;
+    if (prefill_range_family(donor_key, family, query_tokens, key_tokens))
+      index[family].push_back(
+          {query_tokens, key_tokens, std::move(donor_key)});
+  };
+  std::ifstream manifest(directory + "/attention-range-index-v1.txt");
+  if (manifest) {
+    std::string donor_key;
+    while (std::getline(manifest, donor_key)) add_key(std::move(donor_key));
+    return;
+  }
+  std::filesystem::directory_iterator files(directory, error);
+  if (error) return;
+  for (auto it = files; it != std::filesystem::directory_iterator{};
+       it.increment(error)) {
+    if (error) break;
+    const auto& file = *it;
+    if (!file.is_regular_file(error) || error ||
+        file.path().extension() != ".recipe") {
+      error.clear();
+      continue;
+    }
+    std::ifstream input(file.path());
+    std::string donor_key;
+    if (std::getline(input, donor_key)) add_key(std::move(donor_key));
+  }
+}
+
+bool try_prefill_range_recipe(apxinf_runtime* runtime,
+                              const std::string& directory,
+                              const std::string& key, const Spec& spec,
+                              const apxinf_attention_policy_t& policy,
+                              const apxinf_attention_bindings_t& bindings,
+                              Recipe& selected,
+                              std::unique_ptr<Execution>& execution,
+                              std::string& source) {
+  std::string family;
+  int64_t requested_q = 0;
+  int64_t requested_k = 0;
+  if (!prefill_range_family(key, family, requested_q, requested_k))
+    return false;
+  index_prefill_range_recipes(runtime, directory);
+  const auto directory_it = runtime->attention_range_recipes.find(directory);
+  if (directory_it == runtime->attention_range_recipes.end()) return false;
+  const auto family_it = directory_it->second.find(family);
+  if (family_it == directory_it->second.end()) return false;
+  auto donors = family_it->second;
+  std::sort(donors.begin(), donors.end(), [requested_q, requested_k](
+                                                  const auto& a, const auto& b) {
+    const auto distance = [requested_q, requested_k](const auto& entry) {
+      return std::llabs(entry.query_tokens - requested_q) +
+             std::llabs(entry.key_tokens - requested_k);
+    };
+    const auto a_distance = distance(a);
+    const auto b_distance = distance(b);
+    return a_distance == b_distance ? a.query_tokens < b.query_tokens
+                                    : a_distance < b_distance;
+  });
+  const auto q_limit = std::max<int64_t>(256, requested_q / 8);
+  const auto k_limit = std::max<int64_t>(256, requested_k / 8);
+  size_t attempts = 0;
+  for (const auto& donor : donors) {
+    if ((donor.query_tokens == requested_q &&
+         donor.key_tokens == requested_k) ||
+        std::llabs(donor.query_tokens - requested_q) > q_limit ||
+        std::llabs(donor.key_tokens - requested_k) > k_limit ||
+        attempts++ >= 16)
+      continue;
+    Recipe candidate{};
+    if (!parse(apxinf::framework::read_recipe(directory, donor.key), candidate))
+      continue;
+    const auto* implementation =
+        find_implementation(candidate, spec, runtime->device);
+    if (implementation == nullptr) continue;
+    try {
+      execution = apxinf::attention::prepare(
+          *implementation, candidate.configuration, spec, policy, bindings,
+          runtime->device);
+    } catch (const Failure&) {
+      execution.reset();
+      cudaGetLastError();
+    }
+    if (execution != nullptr) {
+      selected = candidate;
+      source = "range-recipe:Q=" + std::to_string(donor.query_tokens) +
+               ",K=" + std::to_string(donor.key_tokens);
+      return true;
+    }
+  }
+  return false;
 }
 
 std::unique_ptr<Execution> fallback(
@@ -425,6 +585,44 @@ extern "C" apxinf_status_t apxinf_attention_prepare(
         if (execution != nullptr) {
           runtime->attention_recipes[key] = recipe;
         }
+      }
+    }
+
+    if (execution == nullptr && !keys.legacy_key.empty()) {
+      Recipe compatible{};
+      if (parse(apxinf::framework::read_recipe(cache_dir, keys.legacy_key),
+                compatible)) {
+        if (const auto* implementation =
+                find_implementation(compatible, normalized, runtime->device)) {
+          try {
+            execution = apxinf::attention::prepare(
+                *implementation, compatible.configuration, normalized, *policy,
+                *bindings, runtime->device);
+          } catch (const Failure&) {
+            execution.reset();
+            cudaGetLastError();
+          }
+          if (execution != nullptr) {
+            recipe = compatible;
+            source = "compatible-exact-recipe";
+            runtime->attention_recipes[key] = recipe;
+          }
+        }
+      }
+    }
+
+    if (execution == nullptr && !apxinf::framework::require_recipes() &&
+        !runtime->allow_online_tune && policy->allow_fallback) {
+      // Do not cache a borrowed configuration as an exact recipe. A later
+      // strict request must still miss, and a newly installed exact recipe
+      // must take precedence on the next prepare.
+      if (!try_prefill_range_recipe(runtime, cache_dir, key, normalized,
+                                    *policy, *bindings, recipe, execution,
+                                    source) &&
+          !keys.legacy_key.empty()) {
+        try_prefill_range_recipe(runtime, cache_dir, keys.legacy_key,
+                                 normalized, *policy, *bindings, recipe,
+                                 execution, source);
       }
     }
 
