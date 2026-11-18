@@ -1205,7 +1205,9 @@ fn gpu_e2e_fp8_serving_fallback_covers_length_boundaries() {
     let ctx = CudaContext::new_with_options(0, false, Some(directory.0.as_path())).unwrap();
     let (k, n) = (2048, 8192);
     let weight = bytes_tensor(0, vec![k, n], DType::F8E4M3, &vec![0x38; k * n]);
-    for m in [1, 20_000] {
+    // The service fallback must cover shape gaps at a chunk boundary and at
+    // the top of the declared 1..=20_000 input-length domain.
+    for m in [1, 4095, 4096, 4097, 19_999, 20_000] {
         let input = bytes_tensor(0, vec![m, k], DType::F8E4M3, &vec![0x38; m * k]);
         let mut output = zeros_tensor(0, vec![m, n], DType::BF16);
         let mut args = GemmArgs::new(&input, &weight, &mut output);
@@ -1529,6 +1531,78 @@ fn gpu_e2e_kv_suffix_causal_mask_matches_production_gqa_geometry() {
         );
     }
     assert_eq!(values(&value), value_values);
+}
+
+/// Diagnostic: keep Q/K/V identical and vary only whole-vs-suffix Attention
+/// geometry. This separates the Attention core's shape sensitivity from the
+/// model's FP8 projections, dynamic KV quantization and MoE.
+#[test]
+fn gpu_diagnostic_attention_whole_vs_suffix_shape_effect() {
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    let (tokens, suffix, query_heads, kv_heads, dim) = (1024usize, 512usize, 16usize, 2usize, 256usize);
+    let query_values: Vec<f32> = (0..tokens * query_heads * dim)
+        .map(|index| ((index * 37 % 257) as f32 - 128.0) / 128.0)
+        .collect();
+    let key_values: Vec<f32> = (0..tokens * kv_heads * dim)
+        .map(|index| ((index * 29 % 251) as f32 - 125.0) / 128.0)
+        .collect();
+    let value_values: Vec<f32> = (0..tokens * kv_heads * dim)
+        .map(|index| ((index * 53 % 263) as f32 - 131.0) / 64.0)
+        .collect();
+    let query = tensor(0, vec![1, tokens, query_heads, dim], &query_values);
+    let key = tensor(0, vec![1, tokens, kv_heads, dim], &key_values);
+    let value = tensor(0, vec![1, tokens, kv_heads, dim], &value_values);
+    let mut whole_output = zeros_tensor(0, vec![1, tokens, query_heads, dim], DType::BF16);
+    let mut whole = KvCacheAttentionArgs::new(&query, &key, &value, &mut whole_output);
+    whole.valid_key_tokens = tokens;
+    whole.query_start = 0;
+    whole.policy.online_tune = false;
+    whole.policy.cache_dir = Some(String::new());
+    let normalized = crate::ops::attention::normalize_kv_cache_attention(&ctx, whole).unwrap();
+    let execution = crate::ops::attention::execution::prepare(&ctx, normalized).unwrap();
+    eprintln!("ATTENTION_WHOLE {}", execution.summary());
+    execution.enqueue_for_test().unwrap();
+
+    let row_bytes = query_heads * dim * DType::BF16.size_in_bytes();
+    let query_suffix = CudaBuffer::from_tensor(&query)
+        .unwrap()
+        .view((tokens - suffix) * row_bytes, suffix * row_bytes)
+        .unwrap()
+        .as_tensor(Shape::new(vec![1, suffix, query_heads, dim]), DType::BF16)
+        .unwrap();
+    let mut suffix_output = zeros_tensor(0, vec![1, suffix, query_heads, dim], DType::BF16);
+    let mut split = KvCacheAttentionArgs::new(&query_suffix, &key, &value, &mut suffix_output);
+    split.valid_key_tokens = tokens;
+    split.query_start = tokens - suffix;
+    split.policy.online_tune = false;
+    split.policy.cache_dir = Some(String::new());
+    let normalized = crate::ops::attention::normalize_kv_cache_attention(&ctx, split).unwrap();
+    let execution = crate::ops::attention::execution::prepare(&ctx, normalized).unwrap();
+    eprintln!("ATTENTION_SUFFIX {}", execution.summary());
+    execution.enqueue_for_test().unwrap();
+    ctx.synchronize().unwrap();
+
+    let whole = values(&whole_output);
+    let split = values(&suffix_output);
+    let whole = &whole[(tokens - suffix) * query_heads * dim..];
+    let mut changed = 0usize;
+    let mut max_abs = 0.0f32;
+    let mut error = 0.0f64;
+    let mut signal = 0.0f64;
+    for (&a, &b) in whole.iter().zip(&split) {
+        let difference = (a - b).abs();
+        assert!(difference.is_finite());
+        changed += usize::from(a.to_bits() != b.to_bits());
+        max_abs = max_abs.max(difference);
+        error += f64::from(difference).powi(2);
+        signal += f64::from(a).powi(2);
+    }
+    let rel_l2 = (error / signal).sqrt();
+    eprintln!("ATTENTION_SHAPE_DIAGNOSTIC changed={changed}/{} max_abs={max_abs} rel_l2={rel_l2}", whole.len());
+    assert!(rel_l2 < 0.05, "whole/suffix Attention drift exceeded the diagnostic safety bound");
+    assert_eq!(values(&query), query_values.iter().map(|x| half::bf16::from_f32(*x).to_f32()).collect::<Vec<_>>());
+    assert_eq!(values(&key), key_values.iter().map(|x| half::bf16::from_f32(*x).to_f32()).collect::<Vec<_>>());
+    assert_eq!(values(&value), value_values.iter().map(|x| half::bf16::from_f32(*x).to_f32()).collect::<Vec<_>>());
 }
 
 #[test]
