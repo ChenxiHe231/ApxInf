@@ -275,6 +275,21 @@ def holder(fd):
                 return {'pid':int(columns[index+3]),'record':line}
     except (OSError,ValueError,IndexError):pass
     return None
+clock_restore=None
+clock_path=pathlib.Path('/sys/class/devfreq/gpu-gpc-0/min_freq')
+def write_clock(value):
+    blocked=signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGTERM,signal.SIGINT,signal.SIGHUP})
+    try:
+        subprocess.run(['sudo','-n','/usr/bin/tee',str(clock_path)],input=value+'\n',text=True,capture_output=True,check=True)
+        if clock_path.read_text().strip()!=value:raise RuntimeError('GPU clock write readback mismatch')
+    finally:signal.pthread_sigmask(signal.SIG_SETMASK,blocked)
+def restore_clock():
+    global clock_restore
+    if clock_restore is None:return
+    original=clock_restore
+    write_clock(original)
+    clock_restore=None
+    print('APXINF_MATRIX_CLOCK_RESTORED '+json.dumps({'min_freq':original}),flush=True)
 lock=open(p['lock_path'],'a+');acquired=False;proc=None
 started=time.monotonic();prior_holder=None;last_notice=-30.0
 def terminate_owned_child():
@@ -288,6 +303,10 @@ def terminate_owned_child():
         try:proc.wait(timeout=10)
         except subprocess.TimeoutExpired:return False
     return proc.poll() is not None
+def interrupted(signum,frame):
+    terminate_owned_child()
+    raise SystemExit(128+signum)
+signal.signal(signal.SIGTERM,interrupted);signal.signal(signal.SIGINT,interrupted);signal.signal(signal.SIGHUP,interrupted)
 try:
     while True:
         try:
@@ -303,6 +322,12 @@ try:
             if elapsed-last_notice>=30:
                 print('APXINF_MATRIX_LOCK_WAIT '+json.dumps({'path':p['lock_path'],'wait_ms':elapsed*1000,'holder':prior_holder}),flush=True);last_notice=elapsed
             time.sleep(min(0.1,max(0.001,p['lock_timeout']-elapsed)))
+    if p.get('pin_gpu_clock',False):
+        clock_restore=clock_path.read_text().strip()
+        maximum=clock_path.with_name('max_freq').read_text().strip()
+        if not maximum.isdecimal() or int(maximum)<=0:raise RuntimeError('invalid GPU max frequency')
+        write_clock(maximum)
+        print('APXINF_MATRIX_CLOCK_PINNED '+json.dumps({'original_min_freq':clock_restore,'min_max_freq':maximum}),flush=True)
     print('APXINF_MATRIX_LOCK '+json.dumps({'path':p['lock_path'],'acquired':True,'wait_ms':(time.monotonic()-started)*1000,'prior_holder':prior_holder,'owner_pid':os.getpid(),'recipes_before':inventory(),'hardware_before':hardware(),'target_binary_sha256':digest(p['benchmark_binary'])}),flush=True)
     profile_output=None
     if p['profile']:
@@ -326,10 +351,6 @@ try:
     # the lock after abrupt worker loss. A profiler may close inherited FDs in
     # descendants: only the live worker/launcher lifetime is guaranteed there.
     proc=subprocess.Popen(p['argv'],cwd=p['cwd'],env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True,pass_fds=(lock.fileno(),))
-    def interrupted(signum,frame):
-        terminate_owned_child()
-        raise SystemExit(128+signum)
-    signal.signal(signal.SIGTERM,interrupted);signal.signal(signal.SIGINT,interrupted)
     identity={'pid':proc.pid,'kind':'profiler_launcher' if p['profile'] else 'benchmark','direct_child_inherits_gpu_lock':not p['profile'],
               'effective_mtp_environment':{key:env.get(key) for key in ('APXINF_QWEN35_MTP_FIXED_DEPTH','APXINF_QWEN35_SCALAR_TPOT_MS')},
               'effective_attention_environment':{'APXINF_FA2_PACKED_GQA':env.get('APXINF_FA2_PACKED_GQA')}}
@@ -346,10 +367,12 @@ try:
         terminate_owned_child()
         raw,_=proc.communicate()
     sys.stdout.buffer.write(raw);sys.stdout.flush()
+    restore_clock()
     print('\nAPXINF_MATRIX_EXIT '+json.dumps({'returncode':proc.returncode,'timed_out':timed_out,'child_reaped':proc.poll() is not None,'lock_held_until_reaped':True,'backend_task_may_be_live':bool(p['profile'] and timed_out),'recipes_after':inventory(),'hardware_after':hardware(),'target_binary_sha256':digest(p['benchmark_binary'])}),flush=True)
     sys.exit(124 if timed_out else proc.returncode)
 finally:
     reaped=terminate_owned_child()
+    if acquired and reaped:restore_clock()
     # LOCK_UN affects the shared open-file-description, including a live child.
     # If reaping is unproven, close only this descriptor; do not release its lock.
     if acquired and reaped:fcntl.flock(lock.fileno(),fcntl.LOCK_UN)
@@ -453,6 +476,7 @@ class Transport:
         target_binary = self.args.decode_binary if "--prompt-tokens" in argv else self.args.context_binary
         profile_output = _profile_output_for_command(argv, self.args.profile_dir) if profile else None
         payload = json.dumps(dict(argv=argv, environment=env, cwd=self.args.workdir, timeout=self.args.timeout_sec, profile=profile, profile_output=profile_output,
+                                  pin_gpu_clock=getattr(self.args,"pin_gpu_clock",False),
                                   lock_path=GPU_LOCK_PATH, lock_timeout=self.args.lock_timeout_sec, tuning_dir=self.args.tuning_dir, benchmark_binary=target_binary))
         started = time.monotonic()
         with log.open("wb") as stream:
@@ -1086,6 +1110,7 @@ def main():
     parser.add_argument("--repeats",type=int,default=5)
     parser.add_argument("--timeout-sec",type=int,default=1800)
     parser.add_argument("--lock-timeout-sec",type=int,default=3600,help="Separate wait for shared /tmp/apxinf-gpu.lock; benchmark timeout begins after acquisition")
+    parser.add_argument("--pin-gpu-clock",action="store_true",help="Thor: pin GPU min=max only while owning the shared lock, and restore before unlock")
     parser.add_argument("--env",action="append",default=[])
     parser.add_argument("--nsys",default="nsys")
     parser.add_argument("--profile-dir",help="Absolute directory on benchmark host for nsys reports")
