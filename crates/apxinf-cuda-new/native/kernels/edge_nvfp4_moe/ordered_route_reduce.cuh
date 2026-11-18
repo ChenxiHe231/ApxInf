@@ -52,4 +52,3 @@ static __global__ void ordered_route_reduce_kernel(
   if (fp32_bits != nullptr) fp32_bits[index] = __float_as_uint(value);
 }
 }  // namespace apxinf::experimental::ordered_route_reduce
-

@@ -67,4 +67,3 @@ apxinf_status_t apxinf_qwen35_suffix_fmha(
 #ifdef __cplusplus
 }
 #endif
-

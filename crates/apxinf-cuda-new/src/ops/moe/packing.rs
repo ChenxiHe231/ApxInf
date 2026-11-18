@@ -1,6 +1,6 @@
 use apxinf_core::{Error, Result};
 
-use crate::ops::qwen35_attention::{decode_e4m3, encode_e4m3};
+use crate::ops::qwen35_attention::{decode_cache_element, encode_cache_element};
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
@@ -9,7 +9,7 @@ fn invalid(message: impl Into<String>) -> Error {
 /// Interleave checkpoint FC1 bytes in the TensorRT-Edge-LLM 64-row layout.
 ///
 /// The returned order is `up[0:64], gate[0:64], up[64:128], ...`.
-pub fn edge_nvfp4_interleave_fc1(
+pub fn prepare_expert_fc1(
     gate: &[u8],
     up: &[u8],
     intermediate: usize,
@@ -44,7 +44,7 @@ pub fn edge_nvfp4_interleave_fc1(
 /// Swizzle linear `[rows, scale_columns]` E4M3 bytes to CuTe's 128x4 MMA
 /// layout. The returned physical shape is
 /// `[ceil(rows/128), ceil(scale_columns/4), 32, 4, 4]`.
-pub fn edge_nvfp4_swizzle_scales(
+pub fn prepare_expert_scales(
     linear: &[u8],
     rows: usize,
     scale_columns: usize,
@@ -83,7 +83,7 @@ pub fn edge_nvfp4_swizzle_scales(
 
 /// Re-express E4M3 block scales under a larger shared FC1 alpha.
 /// `factor` is `projection_alpha / shared_alpha` and must be in `(0, 1]`.
-pub fn edge_nvfp4_rescale_e4m3(scales: &[u8], factor: f32) -> Result<Vec<u8>> {
+pub fn rescale_expert_weights(scales: &[u8], factor: f32) -> Result<Vec<u8>> {
     if !factor.is_finite() || factor <= 0.0 || factor > 1.0 {
         return Err(invalid(
             "Edge NVFP4 E4M3 rescale factor must be finite and in (0, 1]",
@@ -94,7 +94,7 @@ pub fn edge_nvfp4_rescale_e4m3(scales: &[u8], factor: f32) -> Result<Vec<u8>> {
     }
     Ok(scales
         .iter()
-        .map(|&scale| encode_e4m3(decode_e4m3(scale) * factor))
+        .map(|&scale| encode_cache_element(decode_cache_element(scale) * factor))
         .collect())
 }
 
@@ -106,7 +106,7 @@ mod tests {
     fn fc1_interleave_is_up_then_gate_in_64_row_chunks() {
         let gate = (0..128u8).collect::<Vec<_>>();
         let up = (128..=255u8).collect::<Vec<_>>();
-        let packed = edge_nvfp4_interleave_fc1(&gate, &up, 128, 1).unwrap();
+        let packed = prepare_expert_fc1(&gate, &up, 128, 1).unwrap();
         assert_eq!(&packed[0..64], &up[0..64]);
         assert_eq!(&packed[64..128], &gate[0..64]);
         assert_eq!(&packed[128..192], &up[64..128]);
@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn scale_swizzle_matches_cute_128x4_coordinates() {
         let linear = (0..128 * 4).map(|value| value as u8).collect::<Vec<_>>();
-        let (swizzled, shape) = edge_nvfp4_swizzle_scales(&linear, 128, 4).unwrap();
+        let (swizzled, shape) = prepare_expert_scales(&linear, 128, 4).unwrap();
         assert_eq!(shape, [1, 1, 32, 4, 4]);
         for row in 0..128 {
             let inner_m = row / 32;
@@ -130,9 +130,9 @@ mod tests {
 
     #[test]
     fn shared_alpha_rescale_rounds_back_to_e4m3() {
-        let one = encode_e4m3(1.0);
-        let half = edge_nvfp4_rescale_e4m3(&[one], 0.5).unwrap();
-        assert_eq!(decode_e4m3(half[0]), 0.5);
-        assert_eq!(edge_nvfp4_rescale_e4m3(&[one], 1.0).unwrap(), [one]);
+        let one = encode_cache_element(1.0);
+        let half = rescale_expert_weights(&[one], 0.5).unwrap();
+        assert_eq!(decode_cache_element(half[0]), 0.5);
+        assert_eq!(rescale_expert_weights(&[one], 1.0).unwrap(), [one]);
     }
 }

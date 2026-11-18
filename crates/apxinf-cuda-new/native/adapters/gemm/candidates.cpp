@@ -578,7 +578,7 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        cutlass_nvfp4_resource_requirements, cutlass_nvfp4_configurations,
        prepare_cutlass_nvfp4, launch_cutlass_nvfp4, destroy_cutlass},
       {kProviderCutlass, 5, 1, "cutlass-nvfp4-baseline",
-       kDeviceFeatureCutlassSm100, true, true, true,
+       WeightLayout::NK, kDeviceFeatureCutlassSm100, true, true, true,
        supports_cutlass_nvfp4_baseline, cutlass_nvfp4_alignment,
        cutlass_nvfp4_resource_requirements, cutlass_nvfp4_baseline_configuration,
        prepare_cutlass_nvfp4, launch_cutlass_nvfp4, destroy_cutlass},

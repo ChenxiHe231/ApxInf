@@ -59,4 +59,3 @@ cp "$runtime_archive" "$archive"
 ar rcs "$archive" "$output_root/module/edge_bf16_moe_sm110_grouped.o"
 sha256sum "$archive" | tee "$archive.sha256"
 sync "$output_root"
-

@@ -399,7 +399,7 @@ impl DecoderOutput {
         for row in 0..self.rows {
             let logits = row_view(&self.logits, row, vocab)?;
             let index = element_view(indices, offset + row)?;
-            ops::argmax(ctx, &logits, &index)?;
+            ops::argmax(ctx, ops::ArgmaxArgs::new(&logits, &index))?;
         }
         Ok(())
     }
@@ -1404,7 +1404,9 @@ impl Qwen35Decoder {
                                 &scratch.normalized,
                                 self.rms_norm_eps,
                             )
-                            .map_err(|error| layer_error(layer.index, "GDN residual RMSNorm", error))?;
+                            .map_err(|error| {
+                                layer_error(layer.index, "GDN residual RMSNorm", error)
+                            })?;
                         } else {
                             ops::add_into(ctx, scratch.gdn.output(), &scratch.hidden)
                                 .map_err(|error| layer_error(layer.index, "GDN residual", error))?;
@@ -1455,10 +1457,13 @@ impl Qwen35Decoder {
                             &scratch.normalized,
                             self.rms_norm_eps,
                         )
-                        .map_err(|error| layer_error(layer.index, "attention residual RMSNorm", error))?;
+                        .map_err(|error| {
+                            layer_error(layer.index, "attention residual RMSNorm", error)
+                        })?;
                     } else {
-                        ops::add_into(ctx, &scratch.mixer_output, &scratch.hidden)
-                            .map_err(|error| layer_error(layer.index, "attention residual", error))?;
+                        ops::add_into(ctx, &scratch.mixer_output, &scratch.hidden).map_err(
+                            |error| layer_error(layer.index, "attention residual", error),
+                        )?;
                     }
                     if let Some(phases) = decode_phases.filter(|_| graph_attention_moe) {
                         phases[layer_offset].replay().map_err(|error| {
@@ -1908,10 +1913,12 @@ fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
             bytes.checked_mul(*dimension)
         })
         .ok_or_else(|| invalid("Qwen3.5 CUDA allocation size overflow"))?;
-    Ok(CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
-        .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(shape), dtype)
-        .map_err(Error::Cuda)?)
+    Ok(
+        CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
+            .map_err(Error::Cuda)?
+            .as_tensor(Shape::new(shape), dtype)
+            .map_err(Error::Cuda)?,
+    )
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -1929,9 +1936,18 @@ mod tests {
     #[test]
     fn verifier_execution_policy_defaults_off_and_keeps_graph_precedence() {
         assert_eq!(VerifyPhaseMode::from_flags(false, false), None);
-        assert_eq!(VerifyPhaseMode::from_flags(false, true), Some(VerifyPhaseMode::Eager));
-        assert_eq!(VerifyPhaseMode::from_flags(true, false), Some(VerifyPhaseMode::Graph));
-        assert_eq!(VerifyPhaseMode::from_flags(true, true), Some(VerifyPhaseMode::Graph));
+        assert_eq!(
+            VerifyPhaseMode::from_flags(false, true),
+            Some(VerifyPhaseMode::Eager)
+        );
+        assert_eq!(
+            VerifyPhaseMode::from_flags(true, false),
+            Some(VerifyPhaseMode::Graph)
+        );
+        assert_eq!(
+            VerifyPhaseMode::from_flags(true, true),
+            Some(VerifyPhaseMode::Graph)
+        );
     }
 
     #[test]

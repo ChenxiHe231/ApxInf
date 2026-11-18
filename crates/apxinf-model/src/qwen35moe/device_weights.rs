@@ -10,8 +10,8 @@ use std::path::Path;
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 use apxinf_cuda_new::{
-    edge_bf16_decode_moe_available, edge_nvfp4_interleave_fc1, edge_nvfp4_moe_available,
-    edge_nvfp4_rescale_e4m3, edge_nvfp4_swizzle_scales, ops, transfers, CudaBuffer, CudaContext,
+    fused_routed_moe_available, ops, prepare_expert_fc1, prepare_expert_scales,
+    rescale_expert_weights, small_routed_moe_available, transfers, CudaBuffer, CudaContext,
 };
 
 use super::architecture::{MixerKind, Qwen35MoeArchitecture};
@@ -540,7 +540,8 @@ fn upload_nvfp4_moe(
         up.push(expert.up_proj);
         down.push(expert.down_proj);
     }
-    let routed_experts = if activation == Qwen35MoeActivation::Nvfp4 && edge_nvfp4_moe_available() {
+    let routed_experts = if activation == Qwen35MoeActivation::Nvfp4 && fused_routed_moe_available()
+    {
         DeviceNvfp4RoutedExperts::Edge(pack_and_upload_edge_nvfp4_experts(ctx, gate, up, down)?)
     } else {
         DeviceNvfp4RoutedExperts::Reference {
@@ -567,7 +568,7 @@ fn upload_dense_moe(ctx: &CudaContext, weights: DenseMoeWeights<Tensor>) -> Resu
         shared_expert,
         shared_expert_gate,
     } = weights;
-    if !edge_bf16_decode_moe_available() {
+    if !small_routed_moe_available() {
         return Err(invalid(
             "Qwen3.6 packed MTP experts require the Edge BF16 MoE provider",
         ));
@@ -642,7 +643,7 @@ fn pack_and_upload_edge_bf16_experts(
             &[hidden, intermediate],
             "Edge BF16 expert down",
         )?;
-        let packed = edge_nvfp4_interleave_fc1(
+        let packed = prepare_expert_fc1(
             cpu_bytes(&gate.weight, "Edge BF16 expert gate")?,
             cpu_bytes(&up.weight, "Edge BF16 expert up")?,
             intermediate,
@@ -705,7 +706,7 @@ fn pack_and_upload_fused_edge_bf16_experts(
         let base = expert * expert_bytes;
         let gate = &source[base..base + projection_bytes];
         let up = &source[base + projection_bytes..base + expert_bytes];
-        fc1.extend_from_slice(&edge_nvfp4_interleave_fc1(
+        fc1.extend_from_slice(&prepare_expert_fc1(
             gate,
             up,
             intermediate,
@@ -807,8 +808,8 @@ fn upload_nvfp4(
     let weight_scale_2_value = weights.weight_scale_2;
     let packed_weight = upload_unchanged(ctx, weights.packed_weight)?;
     let block_scales = upload_unchanged(ctx, weights.block_scales)?;
-    let gemm_block_scales = if edge_nvfp4_moe_available() {
-        let bytes = ops::nvfp4_scale_buffer_bytes(
+    let gemm_block_scales = if fused_routed_moe_available() {
+        let bytes = ops::block_scale_buffer_bytes(
             weights.output_features,
             weights.input_features,
             NVFP4_BLOCK_SIZE as u32,
@@ -817,13 +818,15 @@ fn upload_nvfp4(
             .map_err(Error::Cuda)?
             .as_tensor(Shape::new(vec![bytes]), DType::F8E4M3)
             .map_err(Error::Cuda)?;
-        ops::nvfp4_pack_block_scales(
+        ops::pack_block_scales(
             ctx,
-            &block_scales,
-            &tensor,
-            weights.output_features,
-            weights.input_features,
-            NVFP4_BLOCK_SIZE as u32,
+            ops::PackBlockScalesArgs {
+                source: &block_scales,
+                output: &tensor,
+                rows: weights.output_features,
+                k: weights.input_features,
+                block_size: NVFP4_BLOCK_SIZE as u32,
+            },
         )?;
         Some(tensor)
     } else {
@@ -913,25 +916,25 @@ fn pack_and_upload_edge_nvfp4_experts(
         }
 
         let shared_alpha = gate.weight_scale_2.max(up.weight_scale_2);
-        let gate_scales = edge_nvfp4_rescale_e4m3(
+        let gate_scales = rescale_expert_weights(
             cpu_bytes(&gate.block_scales, "Edge expert gate scales")?,
             gate.weight_scale_2 / shared_alpha,
         )?;
-        let up_scales = edge_nvfp4_rescale_e4m3(
+        let up_scales = rescale_expert_weights(
             cpu_bytes(&up.block_scales, "Edge expert up scales")?,
             up.weight_scale_2 / shared_alpha,
         )?;
-        let interleaved_weight = edge_nvfp4_interleave_fc1(
+        let interleaved_weight = prepare_expert_fc1(
             cpu_bytes(&gate.packed_weight, "Edge expert gate weight")?,
             cpu_bytes(&up.packed_weight, "Edge expert up weight")?,
             intermediate,
             hidden / 2,
         )?;
         let interleaved_scales =
-            edge_nvfp4_interleave_fc1(&gate_scales, &up_scales, intermediate, fc1_scale_columns)?;
+            prepare_expert_fc1(&gate_scales, &up_scales, intermediate, fc1_scale_columns)?;
         let (swizzled_fc1, _) =
-            edge_nvfp4_swizzle_scales(&interleaved_scales, 2 * intermediate, fc1_scale_columns)?;
-        let (swizzled_fc2, _) = edge_nvfp4_swizzle_scales(
+            prepare_expert_scales(&interleaved_scales, 2 * intermediate, fc1_scale_columns)?;
+        let (swizzled_fc2, _) = prepare_expert_scales(
             cpu_bytes(&down.block_scales, "Edge expert down scales")?,
             hidden,
             fc2_scale_columns,
@@ -1259,7 +1262,7 @@ fn quantize_and_upload_nvfp4_a16(
                                 let scale_code =
                                     encode_e4m3_fast(block_amax / (6.0 * global_scale));
                                 scale_row[group] = scale_code;
-                                let step = ops::decode_e4m3(scale_code) * global_scale;
+                                let step = ops::decode_cache_element(scale_code) * global_scale;
                                 for pair in 0..8 {
                                     let low = quantize_e2m1(values[pair * 2].to_f32(), step);
                                     let high = quantize_e2m1(values[pair * 2 + 1].to_f32(), step);
@@ -1497,12 +1500,12 @@ mod tests {
     #[test]
     fn fast_e4m3_encoder_matches_cuda_reference_encoder() {
         for code in 0u8..=0x7e {
-            let value = ops::decode_e4m3(code);
-            assert_eq!(encode_e4m3_fast(value), ops::encode_e4m3(value));
-            let next = ops::decode_e4m3(code.saturating_add(1).min(0x7e));
+            let value = ops::decode_cache_element(code);
+            assert_eq!(encode_e4m3_fast(value), ops::encode_cache_element(value));
+            let next = ops::decode_cache_element(code.saturating_add(1).min(0x7e));
             for fraction in [0.25f32, 0.5, 0.75] {
                 let sample = value + (next - value) * fraction;
-                assert_eq!(encode_e4m3_fast(sample), ops::encode_e4m3(sample));
+                assert_eq!(encode_e4m3_fast(sample), ops::encode_cache_element(sample));
             }
         }
     }

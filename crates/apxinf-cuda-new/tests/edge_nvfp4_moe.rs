@@ -4,9 +4,9 @@ use std::time::Instant;
 
 use apxinf_core::{DType, Shape, Tensor};
 use apxinf_cuda_new::{
-    edge_nvfp4_moe, edge_nvfp4_moe_available, edge_nvfp4_moe_workspace_size,
-    edge_nvfp4_swizzle_scales, encode_e4m3, transfers, CudaBuffer, CudaContext, EdgeNvfp4MoeArgs,
-    EdgeNvfp4MoeWeights, RoutedMoeConfig,
+    encode_cache_element, fused_routed_moe, fused_routed_moe_available,
+    fused_routed_moe_workspace_size, prepare_expert_scales, transfers, CudaBuffer, CudaContext,
+    EdgeNvfp4MoeArgs, EdgeNvfp4MoeWeights, RoutedMoeConfig,
 };
 use half::bf16;
 
@@ -37,7 +37,7 @@ fn repeated_expert_tensor(
     buffer.as_tensor(Shape::new(shape), dtype).unwrap()
 }
 
-fn decode_e4m3(code: u8) -> f32 {
+fn decode_cache_element(code: u8) -> f32 {
     let code = code & 0x7f;
     let exponent = (code >> 3) & 0x0f;
     let fraction = (code & 7) as f32;
@@ -63,7 +63,7 @@ fn nearest_e2m1(value: f32) -> f32 {
 }
 
 fn quant_dequant_block(value: f32, global_scale: f32) -> f32 {
-    let sf = decode_e4m3(encode_e4m3(value.abs() / (6.0 * global_scale)));
+    let sf = decode_cache_element(encode_cache_element(value.abs() / (6.0 * global_scale)));
     if sf == 0.0 {
         0.0
     } else {
@@ -73,7 +73,7 @@ fn quant_dequant_block(value: f32, global_scale: f32) -> f32 {
 
 #[test]
 fn qwen35_edge_nvfp4_synthetic_matches_quantized_constant_reference() {
-    if !edge_nvfp4_moe_available() {
+    if !fused_routed_moe_available() {
         eprintln!("skipping SM110-only Edge NVFP4 MoE test");
         return;
     }
@@ -109,14 +109,14 @@ fn qwen35_edge_nvfp4_synthetic_matches_quantized_constant_reference() {
     // Both E2M1 nibbles are 0.5. The small E4M3 block scale keeps the
     // constant-reference accumulation away from saturation.
     let weight_scale = 1.0 / 256.0;
-    let scale_code = encode_e4m3(weight_scale);
+    let scale_code = encode_cache_element(weight_scale);
     let fc1_weight = repeated_expert_tensor(
         &ctx,
         &vec![0x11; 2 * INTERMEDIATE * HIDDEN / 2],
         vec![EXPERTS, 2 * INTERMEDIATE, HIDDEN / 2],
         DType::E2M1Pair,
     );
-    let (fc1_scale_one, _) = edge_nvfp4_swizzle_scales(
+    let (fc1_scale_one, _) = prepare_expert_scales(
         &vec![scale_code; 2 * INTERMEDIATE * HIDDEN / BLOCK],
         2 * INTERMEDIATE,
         HIDDEN / BLOCK,
@@ -141,7 +141,7 @@ fn qwen35_edge_nvfp4_synthetic_matches_quantized_constant_reference() {
         vec![EXPERTS, HIDDEN, INTERMEDIATE / 2],
         DType::E2M1Pair,
     );
-    let (fc2_scale_one, _) = edge_nvfp4_swizzle_scales(
+    let (fc2_scale_one, _) = prepare_expert_scales(
         &vec![scale_code; HIDDEN * INTERMEDIATE / BLOCK],
         HIDDEN,
         INTERMEDIATE / BLOCK,
@@ -165,7 +165,7 @@ fn qwen35_edge_nvfp4_synthetic_matches_quantized_constant_reference() {
         &Tensor::from_f32(vec![EXPERTS], &vec![1.0; EXPERTS]).unwrap(),
     );
     let workspace = CudaBuffer::alloc(
-        edge_nvfp4_moe_workspace_size(config, tokens, HIDDEN, INTERMEDIATE).unwrap(),
+        fused_routed_moe_workspace_size(config, tokens, HIDDEN, INTERMEDIATE).unwrap(),
         ctx.device_id(),
     )
     .unwrap();
@@ -178,7 +178,7 @@ fn qwen35_edge_nvfp4_synthetic_matches_quantized_constant_reference() {
     .unwrap();
 
     let mut run = || {
-        edge_nvfp4_moe(
+        fused_routed_moe(
             &ctx,
             EdgeNvfp4MoeArgs {
                 config,
@@ -221,7 +221,7 @@ fn qwen35_edge_nvfp4_synthetic_matches_quantized_constant_reference() {
     );
 
     let effective_input = quant_dequant_block(1.0, 1.0);
-    let projection_weight = 0.5 * decode_e4m3(scale_code);
+    let projection_weight = 0.5 * decode_cache_element(scale_code);
     let gate = bf16::from_f32(HIDDEN as f32 * effective_input * projection_weight).to_f32();
     let activated = (gate / (1.0 + (-gate).exp())) * gate;
     let effective_intermediate = quant_dequant_block(activated, 1.0);

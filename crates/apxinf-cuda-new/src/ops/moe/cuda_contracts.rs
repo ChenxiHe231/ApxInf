@@ -3,7 +3,7 @@ use apxinf_core::{DType, Result, Tensor};
 use super::contracts::RoutedMoeConfig;
 use crate::ffi::abi::{moe as abi, status};
 use crate::ops::gemm::contracts::{dtype, invalid, tensor_storage};
-use crate::ops::gemm::ScaleLayout;
+use crate::ops::ScaleLayout;
 use crate::{CudaBuffer, CudaContext};
 
 pub struct RoutedMoeRouteArgs<'a> {

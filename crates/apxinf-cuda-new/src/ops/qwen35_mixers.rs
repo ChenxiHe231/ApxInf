@@ -18,7 +18,7 @@ use apxinf_core::{DType, Error, Result, Shape, Tensor};
 use crate::ops::gemm::contracts::tensor_storage;
 use crate::{transfers, CudaBuffer, CudaContext};
 
-use super::{
+use super::qwen35_gdn_compat::{
     gdn_causal_conv_step, gdn_causal_conv_verify, gdn_conv_prepare, gdn_decay_and_beta,
     gdn_decay_and_beta_seq, gdn_gated_norm, gdn_gated_norm_seq, gdn_gated_norm_seq_f16,
     gdn_l2_normalize_heads, gdn_l2_normalize_heads_seq, gdn_prefill, gdn_recurrent_step,
@@ -284,9 +284,7 @@ pub fn qwen35_gdn_prefill(
         );
     }
 
-    let exact_start = if let (Some(cake), None) =
-        (args.cake.as_ref(), args.checkpoints.as_ref())
-    {
+    let exact_start = if let (Some(cake), None) = (args.cake.as_ref(), args.checkpoints.as_ref()) {
         // Cake consumes complete 64-token scan chunks.  A variable-length
         // prompt used to send the *entire* sequence through the scalar
         // recurrent fallback whenever it had a partial final chunk (AIOS
@@ -344,21 +342,13 @@ pub fn qwen35_gdn_prefill(
             let v16 = element_view(
                 cake.v16,
                 0,
-                vec![
-                    cake_tokens,
-                    QWEN35_GDN_VALUE_HEADS,
-                    QWEN35_GDN_HEAD_DIM,
-                ],
+                vec![cake_tokens, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_HEAD_DIM],
                 DType::F16,
             )?;
             let out16 = element_view(
                 cake.out16,
                 0,
-                vec![
-                    cake_tokens,
-                    QWEN35_GDN_VALUE_HEADS,
-                    QWEN35_GDN_HEAD_DIM,
-                ],
+                vec![cake_tokens, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_HEAD_DIM],
                 DType::F16,
             )?;
             let alpha = element_view(
@@ -424,21 +414,13 @@ pub fn qwen35_gdn_prefill(
             let z = element_view(
                 args.z,
                 0,
-                vec![
-                    cake_tokens,
-                    QWEN35_GDN_VALUE_HEADS,
-                    QWEN35_GDN_HEAD_DIM,
-                ],
+                vec![cake_tokens, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_HEAD_DIM],
                 DType::BF16,
             )?;
             let gated_output = element_view(
                 args.scratch.gated_output,
                 0,
-                vec![
-                    cake_tokens,
-                    QWEN35_GDN_VALUE_HEADS,
-                    QWEN35_GDN_HEAD_DIM,
-                ],
+                vec![cake_tokens, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_HEAD_DIM],
                 DType::BF16,
             )?;
             gdn_gated_norm_seq_f16(
@@ -681,7 +663,9 @@ fn validate_prefill(
     args: &Qwen35GdnPrefillArgs<'_>,
 ) -> Result<()> {
     if tokens == 0 || tokens > i32::MAX as usize {
-        return Err(invalid("Qwen3.5 GDN prefill requires a positive i32 token count"));
+        return Err(invalid(
+            "Qwen3.5 GDN prefill requires a positive i32 token count",
+        ));
     }
     validate_common(
         ctx,
@@ -736,7 +720,11 @@ fn validate_prefill(
             (cake.k16, DType::F16, &key_dims[..]),
             (cake.v16, DType::F16, &value_dims[..]),
             (cake.out16, DType::F16, &value_dims[..]),
-            (cake.alpha, DType::F32, &[tokens, QWEN35_GDN_VALUE_HEADS][..]),
+            (
+                cake.alpha,
+                DType::F32,
+                &[tokens, QWEN35_GDN_VALUE_HEADS][..],
+            ),
             (cake.cu_seqlens, DType::I32, &[2][..]),
         ] {
             tensor_storage(ctx, tensor, dtype, shape)?;
@@ -785,11 +773,19 @@ fn validate_common(
         (weights.a_log, DType::BF16, &[QWEN35_GDN_VALUE_HEADS]),
         (weights.dt_bias, DType::BF16, &[QWEN35_GDN_VALUE_HEADS]),
         (weights.norm, DType::BF16, &[QWEN35_GDN_HEAD_DIM]),
-        (state.conv, DType::F32, &[QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_CONV_WIDTH]),
+        (
+            state.conv,
+            DType::F32,
+            &[QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_CONV_WIDTH],
+        ),
         (
             state.recurrent,
             DType::F32,
-            &[QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_HEAD_DIM, QWEN35_GDN_HEAD_DIM],
+            &[
+                QWEN35_GDN_VALUE_HEADS,
+                QWEN35_GDN_HEAD_DIM,
+                QWEN35_GDN_HEAD_DIM,
+            ],
         ),
         (convolved_qkv, DType::BF16, convolved_qkv_shape),
         (decay, DType::F32, decay_shape),
@@ -846,4 +842,3 @@ fn element_view(
 fn invalid(message: impl Into<String>) -> Error {
     Error::Other(message.into())
 }
-

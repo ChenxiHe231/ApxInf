@@ -1,5 +1,7 @@
 # Qwen3.6-35B-A3B-NVFP4 on Thor-U
 
+
+Current-main integration and validation limits: [Final branch rebase](REBASE_MAIN.md).
 This guide covers the `Qwen3.6-35B-A3B-NVFP4` checkpoint installed on Thor-U.
 Its Hugging Face architecture metadata remains `qwen3_5_moe`, so the internal
 Rust module and registry name continue to use `qwen35`; that name must not be

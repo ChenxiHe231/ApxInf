@@ -105,7 +105,7 @@ pub struct Qwen35Fp8AttentionArgs<'a> {
 /// `tokens > 1` is prompt prefill or chunk verification; `tokens == 1` is
 /// decode.  Within a chunk, token `i` can attend through
 /// `cache_offset + i`, so prefill and decode have identical update semantics.
-pub fn qwen35_attention_fp8(
+pub fn qwen35_attention_static_cache(
     ctx: &CudaContext,
     tokens: usize,
     args: Qwen35Fp8AttentionArgs<'_>,
@@ -129,7 +129,7 @@ pub fn qwen35_draft_attention_workspace_elements(physical_capacity: usize) -> Re
 
 /// Append one row and evaluate split-KV attention with unit-scale E4M3 draft KV.
 /// The caller retains the workspace through execution on this CUDA stream.
-pub fn qwen35_attention_fp8_draft(
+pub fn qwen35_attention_draft_cache(
     ctx: &CudaContext,
     args: Qwen35Fp8AttentionArgs<'_>,
     workspace: &Tensor,
@@ -138,7 +138,9 @@ pub fn qwen35_attention_fp8_draft(
         return Err(invalid("Qwen3.5 draft split-KV attention requires Thor"));
     }
     if args.scales.key != 1.0 || args.scales.value != 1.0 {
-        return Err(invalid("Qwen3.5 draft split-KV attention requires unit K/V scales"));
+        return Err(invalid(
+            "Qwen3.5 draft split-KV attention requires unit K/V scales",
+        ));
     }
     attention_fp8(ctx, 1, args, Some(workspace))
 }
@@ -161,11 +163,23 @@ pub fn qwen35_static_kv_append(
     tokens: usize,
     args: Qwen35StaticFp8KvAppendArgs<'_>,
 ) -> Result<()> {
-    let spec = static_fp8_spec(tokens, &args.cache, args.cache_offset, args.scales, args.rope_theta)?;
+    let spec = static_fp8_spec(
+        tokens,
+        &args.cache,
+        args.cache_offset,
+        args.scales,
+        args.rope_theta,
+    )?;
     let projection_shape = [tokens, QWEN35_ATTENTION_KV_WIDTH];
     let projected_key = tensor_storage(ctx, args.projected_key, DType::BF16, &projection_shape)?;
-    let projected_value = tensor_storage(ctx, args.projected_value, DType::BF16, &projection_shape)?;
-    let key_norm = tensor_storage(ctx, args.key_norm, DType::BF16, &[QWEN35_ATTENTION_HEAD_DIM])?;
+    let projected_value =
+        tensor_storage(ctx, args.projected_value, DType::BF16, &projection_shape)?;
+    let key_norm = tensor_storage(
+        ctx,
+        args.key_norm,
+        DType::BF16,
+        &[QWEN35_ATTENTION_HEAD_DIM],
+    )?;
     let positions = tensor_storage(ctx, args.positions, DType::I32, &[3, tokens])?;
     let cache_shape = args.cache.key.shape().dims();
     let key_cache = tensor_storage(ctx, args.cache.key, DType::F8E4M3, cache_shape)?;
@@ -185,7 +199,11 @@ pub fn qwen35_static_kv_append(
     };
     crate::workspace::validate_capture_target(ctx.device_id(), bindings.stream as usize)?;
     unsafe {
-        status::check(abi::apxinf_qwen35_static_kv_append(ctx.runtime(), &spec, &bindings))
+        status::check(abi::apxinf_qwen35_static_kv_append(
+            ctx.runtime(),
+            &spec,
+            &bindings,
+        ))
     }
 }
 
@@ -242,7 +260,13 @@ fn attention_fp8(
     args: Qwen35Fp8AttentionArgs<'_>,
     draft_workspace: Option<&Tensor>,
 ) -> Result<()> {
-    let spec = static_fp8_spec(tokens, &args.cache, args.cache_offset, args.scales, args.rope_theta)?;
+    let spec = static_fp8_spec(
+        tokens,
+        &args.cache,
+        args.cache_offset,
+        args.scales,
+        args.rope_theta,
+    )?;
     let cache_shape = args.cache.key.shape().dims();
     let capacity = spec.cache_capacity as usize;
 
@@ -338,7 +362,9 @@ fn attention_fp8(
         .map(|workspace| {
             let elements = qwen35_draft_attention_workspace_elements(capacity)?;
             if key_cache.ptr() as usize % 16 != 0 || value_cache.ptr() as usize % 16 != 0 {
-                return Err(invalid("Qwen3.5 draft split-KV cache must be 16-byte aligned"));
+                return Err(invalid(
+                    "Qwen3.5 draft split-KV cache must be 16-byte aligned",
+                ));
             }
             let storage = tensor_storage(ctx, workspace, DType::F32, &[elements])?;
             Ok((storage, elements))
@@ -908,7 +934,9 @@ pub fn qwen35_suffix_fmha(
     _value: &Tensor,
     _output: &mut Tensor,
 ) -> Result<()> {
-    Err(invalid("Qwen3.5 suffix FMHA was not compiled for this target"))
+    Err(invalid(
+        "Qwen3.5 suffix FMHA was not compiled for this target",
+    ))
 }
 
 fn validate_disjoint(inputs: &[&CudaBuffer], outputs: &[&CudaBuffer]) -> Result<()> {
@@ -1008,9 +1036,9 @@ pub fn qwen35_attention_reference(
                 args.rope_theta,
             );
             for dim in 0..QWEN35_ATTENTION_HEAD_DIM {
-                args.key_cache[cache + dim] = encode_e4m3(normalized[dim] / key_scale);
+                args.key_cache[cache + dim] = encode_cache_element(normalized[dim] / key_scale);
                 args.value_cache[cache + dim] =
-                    encode_e4m3(args.projected_value[source + dim] / value_scale);
+                    encode_cache_element(args.projected_value[source + dim] / value_scale);
             }
         }
     }
@@ -1027,7 +1055,9 @@ pub fn qwen35_attention_reference(
                     (position * QWEN35_ATTENTION_KV_HEADS + kv_head) * QWEN35_ATTENTION_HEAD_DIM;
                 let dot = (0..QWEN35_ATTENTION_HEAD_DIM)
                     .map(|dim| {
-                        query[q_base + dim] * decode_e4m3(args.key_cache[cache + dim]) * key_scale
+                        query[q_base + dim]
+                            * decode_cache_element(args.key_cache[cache + dim])
+                            * key_scale
                     })
                     .sum::<f32>();
                 scores.push(dot / (QWEN35_ATTENTION_HEAD_DIM as f32).sqrt());
@@ -1045,7 +1075,7 @@ pub fn qwen35_attention_reference(
                         let cache = (position * QWEN35_ATTENTION_KV_HEADS + kv_head)
                             * QWEN35_ATTENTION_HEAD_DIM;
                         ((*score - maximum).exp() / denominator)
-                            * decode_e4m3(args.value_cache[cache + dim])
+                            * decode_cache_element(args.value_cache[cache + dim])
                             * value_scale
                     })
                     .sum::<f32>();
@@ -1154,7 +1184,7 @@ fn round_bf16(value: f32) -> f32 {
 }
 
 /// Decode the CUDA-compatible finite E4M3 byte representation.
-pub fn decode_e4m3(code: u8) -> f32 {
+pub fn decode_cache_element(code: u8) -> f32 {
     let sign = if code & 0x80 == 0 { 1.0 } else { -1.0 };
     let magnitude = code & 0x7f;
     let exponent = (magnitude >> 3) & 0x0f;
@@ -1169,7 +1199,7 @@ pub fn decode_e4m3(code: u8) -> f32 {
 }
 
 /// Round to nearest finite E4M3, ties to an even code, with saturation.
-pub fn encode_e4m3(value: f32) -> u8 {
+pub fn encode_cache_element(value: f32) -> u8 {
     if value.is_nan() {
         return 0x7f;
     }
@@ -1178,7 +1208,7 @@ pub fn encode_e4m3(value: f32) -> u8 {
     let mut best_code = 0u8;
     let mut best_error = f32::INFINITY;
     for code in 0u8..=0x7e {
-        let error = (decode_e4m3(code) - magnitude).abs();
+        let error = (decode_cache_element(code) - magnitude).abs();
         if error < best_error || (error == best_error && code & 1 == 0 && best_code & 1 != 0) {
             best_error = error;
             best_code = code;
@@ -1207,13 +1237,13 @@ mod tests {
 
     #[test]
     fn e4m3_contract_has_cuda_range_and_ties_to_even() {
-        assert_eq!(decode_e4m3(0x38), 1.0);
-        assert_eq!(decode_e4m3(0x7e), 448.0);
-        assert_eq!(encode_e4m3(1.0), 0x38);
-        assert_eq!(encode_e4m3(1000.0), 0x7e);
-        assert_eq!(encode_e4m3(-1000.0), 0xfe);
+        assert_eq!(decode_cache_element(0x38), 1.0);
+        assert_eq!(decode_cache_element(0x7e), 448.0);
+        assert_eq!(encode_cache_element(1.0), 0x38);
+        assert_eq!(encode_cache_element(1000.0), 0x7e);
+        assert_eq!(encode_cache_element(-1000.0), 0xfe);
         // Midpoint between 1.0 (0x38, even) and 1.125 (0x39, odd).
-        assert_eq!(encode_e4m3(1.0625), 0x38);
+        assert_eq!(encode_cache_element(1.0625), 0x38);
     }
 
     #[test]
@@ -1223,7 +1253,10 @@ mod tests {
             value: 0.25,
         };
         assert_eq!((scales.key, scales.value), (0.5, 0.25));
-        assert_eq!(decode_e4m3(encode_e4m3(2.0 / 0.5)) * 0.5, 2.0);
+        assert_eq!(
+            decode_cache_element(encode_cache_element(2.0 / 0.5)) * 0.5,
+            2.0
+        );
     }
 
     #[test]

@@ -464,7 +464,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             let scales = cache.scales.ok_or_else(|| {
                 invalid("Qwen3.6 FP8 KV cache requested without static dequant scales")
             })?;
-            ops::qwen35_attention_fp8(
+            ops::qwen35_attention_static_cache(
                 ctx,
                 tokens,
                 ops::Qwen35Fp8AttentionArgs {
@@ -784,7 +784,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             ],
             DType::BF16,
         )?;
-        ops::apply_output_gate(ctx, &output_2d, &gate_2d)?;
+        ops::apply_output_gate(ctx, ops::OutputGateArgs::new(&output_2d, &gate_2d))?;
 
         // ---- o_proj GEMM ----
         let attention_output = view(
@@ -951,7 +951,7 @@ fn run_dynamic_fp8_attention(
             ],
             DType::BF16,
         )?;
-        ops::apply_output_gate(ctx, &output, &gate)?;
+        ops::apply_output_gate(ctx, ops::OutputGateArgs::new(&output, &gate))?;
     }
 
     let attention_output = view(
@@ -1055,28 +1055,28 @@ impl AttentionScratch {
         } else {
             (None, None)
         };
-        let (dynamic_partial_max, dynamic_partial_sum, dynamic_partial_output) =
-            if cache_dtype == Qwen35KvCacheDType::Fp8Dynamic
-                && tokens <= ops::QWEN35_MTP_DRAFT_STEPS + 1
-            {
-                let max_splits = ops::qwen35_dynamic_decode_max_splits(physical_cache_capacity)?;
-                let stats_shape = vec![tokens * ops::QWEN35_ATTENTION_Q_HEADS, max_splits];
-                (
-                    Some(zeros(ctx, stats_shape.clone(), DType::F32)?),
-                    Some(zeros(ctx, stats_shape, DType::F32)?),
-                    Some(zeros(
-                        ctx,
-                        vec![
-                            tokens * ops::QWEN35_ATTENTION_Q_HEADS,
-                            max_splits,
-                            ops::QWEN35_ATTENTION_HEAD_DIM,
-                        ],
-                        DType::F32,
-                    )?),
-                )
-            } else {
-                (None, None, None)
-            };
+        let (dynamic_partial_max, dynamic_partial_sum, dynamic_partial_output) = if cache_dtype
+            == Qwen35KvCacheDType::Fp8Dynamic
+            && tokens <= ops::QWEN35_MTP_DRAFT_STEPS + 1
+        {
+            let max_splits = ops::qwen35_dynamic_decode_max_splits(physical_cache_capacity)?;
+            let stats_shape = vec![tokens * ops::QWEN35_ATTENTION_Q_HEADS, max_splits];
+            (
+                Some(zeros(ctx, stats_shape.clone(), DType::F32)?),
+                Some(zeros(ctx, stats_shape, DType::F32)?),
+                Some(zeros(
+                    ctx,
+                    vec![
+                        tokens * ops::QWEN35_ATTENTION_Q_HEADS,
+                        max_splits,
+                        ops::QWEN35_ATTENTION_HEAD_DIM,
+                    ],
+                    DType::F32,
+                )?),
+            )
+        } else {
+            (None, None, None)
+        };
         let static_fp8_capacity = if cache_dtype == Qwen35KvCacheDType::Fp8Dynamic {
             1
         } else {
@@ -1576,10 +1576,12 @@ fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
             bytes.checked_mul(*dimension)
         })
         .ok_or_else(|| invalid("Qwen3.5 attention CUDA allocation size overflow"))?;
-    Ok(CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
-        .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(shape), dtype)
-        .map_err(Error::Cuda)?)
+    Ok(
+        CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
+            .map_err(Error::Cuda)?
+            .as_tensor(Shape::new(shape), dtype)
+            .map_err(Error::Cuda)?,
+    )
 }
 
 fn view(tensor: &Tensor, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
@@ -1757,7 +1759,7 @@ mod tests {
             for t in [&weight, &transposed] {
                 CudaBuffer::from_tensor(t)
                     .unwrap()
-                    .memset_async(0x38, ctx.stream())
+                    .fill_async(0x38, ctx.stream())
                     .unwrap();
             }
             DeviceStaticFp8Linear {
@@ -1786,7 +1788,7 @@ mod tests {
             let input = zeros(&ctx, vec![tokens, 2048], DType::BF16).unwrap();
             CudaBuffer::from_tensor(&input)
                 .unwrap()
-                .memset_async(0x3b, ctx.stream())
+                .fill_async(0x3b, ctx.stream())
                 .unwrap();
             let output = zeros(&ctx, vec![tokens, 2048], DType::BF16).unwrap();
             backend

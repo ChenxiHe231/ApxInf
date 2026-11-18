@@ -162,7 +162,7 @@ pub(crate) fn project_lm_head(
             "Qwen3.5 lm_head W4A16 row count must be one of 1,2,3,4,8,16",
         ));
     }
-    ops::nvfp4_a16_blackwell_gemv(
+    ops::block_quantized_weight_gemv(
         ctx,
         input,
         &weight.qweight,
@@ -178,7 +178,7 @@ pub(crate) fn quantize_static_fp8(
     quantized: &Tensor,
     scale: f32,
 ) -> Result<()> {
-    ops::quantize_fp8_per_tensor(ctx, input, quantized, scale)
+    ops::quantize_activation_per_tensor(ctx, input, quantized, scale)
 }
 
 pub(crate) fn project_static_fp8_prequantized(
@@ -189,7 +189,7 @@ pub(crate) fn project_static_fp8_prequantized(
     rows: usize,
 ) -> Result<()> {
     if rows == 1 {
-        ops::fp8_gemv(ctx, &weight.weight, quantized, output, weight.alpha)
+        ops::scaled_gemv(ctx, &weight.weight, quantized, output, weight.alpha)
     } else {
         let mut args = ops::GemmArgs::new(quantized, &weight.transposed, output);
         args.quantization = ops::GemmQuantization::Fp8UnitScale;
@@ -278,12 +278,12 @@ impl BaseMoeScratch {
         // Qwen3.5 policy selects which one runs; process-global environment
         // variables must not override the CLI contract.
         let nvfp4_ok = true;
-        let edge_ok = ops::edge_nvfp4_moe_available();
+        let edge_ok = ops::fused_routed_moe_available();
         let quant_rows = if nvfp4_ok { routes } else { tokens };
         let edge_workspace = edge_ok
             .then(|| {
                 let bytes =
-                    ops::edge_nvfp4_moe_workspace_size(config, tokens, hidden, intermediate)?;
+                    ops::fused_routed_moe_workspace_size(config, tokens, hidden, intermediate)?;
                 CudaBuffer::alloc(bytes, ctx.device_id()).map_err(Error::Cuda)
             })
             .transpose()?;
@@ -310,7 +310,7 @@ impl BaseMoeScratch {
                 .then(|| zeros(ctx, vec![quant_rows, hidden / 2], DType::E2M1Pair))
                 .transpose()?,
             act_scales: if edge_ok {
-                let bytes = ops::nvfp4_scale_buffer_bytes(tokens, hidden, NVFP4_BLOCK_SIZE)?;
+                let bytes = ops::block_scale_buffer_bytes(tokens, hidden, NVFP4_BLOCK_SIZE)?;
                 Some(zeros(ctx, vec![bytes], DType::F8E4M3)?)
             } else {
                 nvfp4_ok
@@ -321,7 +321,7 @@ impl BaseMoeScratch {
                 .then(|| zeros(ctx, vec![quant_rows, intermediate / 2], DType::E2M1Pair))
                 .transpose()?,
             inter_scales: if edge_ok {
-                let bytes = ops::nvfp4_scale_buffer_bytes(tokens, intermediate, NVFP4_BLOCK_SIZE)?;
+                let bytes = ops::block_scale_buffer_bytes(tokens, intermediate, NVFP4_BLOCK_SIZE)?;
                 Some(zeros(ctx, vec![bytes], DType::F8E4M3)?)
             } else {
                 nvfp4_ok
@@ -401,7 +401,7 @@ impl BaseMoeScratch {
                 .and_then(|value| value.parse::<u8>().ok())
             {
                 workspace
-                    .memset_async(byte, ctx.stream())
+                    .fill_async(byte, ctx.stream())
                     .map_err(Error::Cuda)?;
             }
             let mut routed_output = CudaBuffer::from_tensor(&self.assignment_output)
@@ -410,7 +410,7 @@ impl BaseMoeScratch {
                 .map_err(Error::Cuda)?
                 .as_tensor(Shape::new(vec![self.tokens, self.hidden]), DType::BF16)
                 .map_err(Error::Cuda)?;
-            ops::edge_nvfp4_moe(
+            ops::fused_routed_moe(
                 ctx,
                 EdgeNvfp4MoeArgs {
                     config,
@@ -496,7 +496,8 @@ impl BaseMoeScratch {
                 alpha: f32,
                 out: &mut Tensor,
             ) -> Result<()> {
-                let args = ops::GemmArgs::nvfp4(a, a_s, b, b_s, NVFP4_BLOCK_SIZE, alpha, out);
+                let args =
+                    ops::GemmArgs::block_quantized(a, a_s, b, b_s, NVFP4_BLOCK_SIZE, alpha, out);
                 ops::gemm(ctx, args)
             }
 
@@ -536,14 +537,16 @@ impl BaseMoeScratch {
                     vec![expert_tokens, self.hidden / 16],
                     DType::F8E4M3,
                 )?;
-                ops::nvfp4_quantize_activation(
+                ops::block_quantize(
                     ctx,
-                    &gather_out,
-                    &packed_view,
-                    &scales_view,
-                    input_scales[e],
-                    NVFP4_BLOCK_SIZE,
-                    ops::ScaleLayout::RowMajor,
+                    ops::BlockQuantizationArgs::activation(
+                        &gather_out,
+                        &packed_view,
+                        &scales_view,
+                        input_scales[e],
+                        NVFP4_BLOCK_SIZE,
+                        ops::ScaleLayout::RowMajor,
+                    ),
                 )?;
 
                 let gw = expert_weight_view(
@@ -644,14 +647,16 @@ impl BaseMoeScratch {
                     vec![expert_tokens, self.intermediate / 16],
                     DType::F8E4M3,
                 )?;
-                ops::nvfp4_quantize_activation(
+                ops::block_quantize(
                     ctx,
-                    &inter_out,
-                    &inter_p,
-                    &inter_s,
-                    1.0,
-                    NVFP4_BLOCK_SIZE,
-                    ops::ScaleLayout::RowMajor,
+                    ops::BlockQuantizationArgs::activation(
+                        &inter_out,
+                        &inter_p,
+                        &inter_s,
+                        1.0,
+                        NVFP4_BLOCK_SIZE,
+                        ops::ScaleLayout::RowMajor,
+                    ),
                 )?;
 
                 let mut down_out = CudaBuffer::from_tensor(&self.assignment_output)
@@ -686,14 +691,16 @@ impl BaseMoeScratch {
                 vec![self.tokens, self.hidden / 16],
                 DType::F8E4M3,
             )?;
-            ops::nvfp4_quantize_activation(
+            ops::block_quantize(
                 ctx,
-                input,
-                &s_packed,
-                &s_scales,
-                s_alpha_gate,
-                NVFP4_BLOCK_SIZE,
-                ops::ScaleLayout::RowMajor,
+                ops::BlockQuantizationArgs::activation(
+                    input,
+                    &s_packed,
+                    &s_scales,
+                    s_alpha_gate,
+                    NVFP4_BLOCK_SIZE,
+                    ops::ScaleLayout::RowMajor,
+                ),
             )?;
 
             let mut s_gate = view(
@@ -745,14 +752,16 @@ impl BaseMoeScratch {
                 vec![self.tokens, self.intermediate / 16],
                 DType::F8E4M3,
             )?;
-            ops::nvfp4_quantize_activation(
+            ops::block_quantize(
                 ctx,
-                &self.shared_intermediate,
-                &s_inter_p,
-                &s_inter_s,
-                1.0,
-                NVFP4_BLOCK_SIZE,
-                ops::ScaleLayout::RowMajor,
+                ops::BlockQuantizationArgs::activation(
+                    &self.shared_intermediate,
+                    &s_inter_p,
+                    &s_inter_s,
+                    1.0,
+                    NVFP4_BLOCK_SIZE,
+                    ops::ScaleLayout::RowMajor,
+                ),
             )?;
 
             nvfp4_gemm_expert(
@@ -766,7 +775,7 @@ impl BaseMoeScratch {
             )?;
         } else {
             // --- original correctness-first warp kernel ---
-            ops::routed_moe_nvfp4_experts(
+            ops::routed_moe_quantized_experts(
                 ctx,
                 RoutedMoeNvfp4ExpertsArgs {
                     config,
@@ -870,8 +879,15 @@ impl BaseMoeScratch {
                           alpha: f32,
                           output: &mut Tensor|
          -> Result<()> {
-            let args =
-                ops::GemmArgs::nvfp4(a, a_scales, b, b_scales, NVFP4_BLOCK_SIZE, alpha, output);
+            let args = ops::GemmArgs::block_quantized(
+                a,
+                a_scales,
+                b,
+                b_scales,
+                NVFP4_BLOCK_SIZE,
+                alpha,
+                output,
+            );
             ops::gemm(ctx, args)
         };
 
@@ -891,14 +907,16 @@ impl BaseMoeScratch {
                 DType::BF16,
             )
             .map_err(Error::Cuda)?;
-        ops::nvfp4_quantize_activation(
+        ops::block_quantize(
             ctx,
-            input,
-            &packed,
-            &scales,
-            weights.shared_gate.input_scale,
-            NVFP4_BLOCK_SIZE,
-            ops::ScaleLayout::GemmAtom,
+            ops::BlockQuantizationArgs::activation(
+                input,
+                &packed,
+                &scales,
+                weights.shared_gate.input_scale,
+                NVFP4_BLOCK_SIZE,
+                ops::ScaleLayout::GemmAtom,
+            ),
         )?;
         let gate_weight_scales = weights
             .shared_gate
@@ -927,14 +945,16 @@ impl BaseMoeScratch {
                 DType::BF16,
             )
             .map_err(Error::Cuda)?;
-        ops::nvfp4_quantize_activation(
+        ops::block_quantize(
             ctx,
-            input,
-            &packed,
-            &scales,
-            weights.shared_up.input_scale,
-            NVFP4_BLOCK_SIZE,
-            ops::ScaleLayout::GemmAtom,
+            ops::BlockQuantizationArgs::activation(
+                input,
+                &packed,
+                &scales,
+                weights.shared_up.input_scale,
+                NVFP4_BLOCK_SIZE,
+                ops::ScaleLayout::GemmAtom,
+            ),
         )?;
         let up_weight_scales = weights
             .shared_up
@@ -956,14 +976,16 @@ impl BaseMoeScratch {
             vec![self.tokens, self.intermediate / 2],
             DType::E2M1Pair,
         )?;
-        ops::nvfp4_quantize_activation(
+        ops::block_quantize(
             ctx,
-            &self.shared_intermediate,
-            &inter_packed,
-            inter_scales,
-            weights.shared_down.input_scale,
-            NVFP4_BLOCK_SIZE,
-            ops::ScaleLayout::GemmAtom,
+            ops::BlockQuantizationArgs::activation(
+                &self.shared_intermediate,
+                &inter_packed,
+                inter_scales,
+                weights.shared_down.input_scale,
+                NVFP4_BLOCK_SIZE,
+                ops::ScaleLayout::GemmAtom,
+            ),
         )?;
         let down_weight_scales = weights
             .shared_down
@@ -1739,10 +1761,12 @@ fn zeros(ctx: &CudaContext, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {
             bytes.checked_mul(*dimension)
         })
         .ok_or_else(|| invalid("Qwen3.5 CUDA allocation size overflow"))?;
-    Ok(CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
-        .map_err(Error::Cuda)?
-        .as_tensor(Shape::new(shape), dtype)
-        .map_err(Error::Cuda)?)
+    Ok(
+        CudaBuffer::alloc_zeros_async(bytes, ctx.device_id(), ctx.stream())
+            .map_err(Error::Cuda)?
+            .as_tensor(Shape::new(shape), dtype)
+            .map_err(Error::Cuda)?,
+    )
 }
 
 fn view(tensor: &Tensor, shape: Vec<usize>, dtype: DType) -> Result<Tensor> {

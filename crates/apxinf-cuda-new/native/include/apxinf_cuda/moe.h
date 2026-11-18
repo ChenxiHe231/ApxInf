@@ -44,4 +44,3 @@ apxinf_status_t apxinf_moe_edge_bf16_decode(
 #ifdef __cplusplus
 }
 #endif
-

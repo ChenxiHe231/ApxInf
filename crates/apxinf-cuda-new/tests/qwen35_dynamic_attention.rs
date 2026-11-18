@@ -39,7 +39,9 @@ fn dynamic_quantized(values: &[bf16]) -> (f32, Vec<f32>) {
     let scale = (absmax / ops::FP8_E4M3_MAX_FINITE).max(1.0e-12);
     let decoded = values
         .iter()
-        .map(|value| ops::decode_e4m3(ops::encode_e4m3(value.to_f32() / scale)) * scale)
+        .map(|value| {
+            ops::decode_cache_element(ops::encode_cache_element(value.to_f32() / scale)) * scale
+        })
         .collect();
     (scale, decoded)
 }
@@ -398,8 +400,7 @@ fn fused_query_prepare_matches_separate_norm_rope_exactly() {
         host[..256].fill(bf16::ZERO);
         host[1024] = bf16::from_f32(8192.0);
         let projected =
-            ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 16, 512], &host).unwrap(), 0)
-                .unwrap();
+            ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 16, 512], &host).unwrap(), 0).unwrap();
         let norm = ordered_to_cuda(
             &Tensor::from_bf16(vec![256], &patterned_bf16(256, 7, 97, 173.0)).unwrap(),
             0,
@@ -473,10 +474,8 @@ fn dynamic_decode_negative_scores_and_large_merge() {
     let vh: Vec<_> = (0..tokens * 512)
         .map(|i| bf16::from_f32(if (i / 256) % 2 == 0 { 2.0 } else { -3.0 }))
         .collect();
-    let key =
-        ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
-    let value =
-        ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
+    let key = ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
+    let value = ordered_to_cuda(&Tensor::from_bf16(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
     let query = ordered_to_cuda(
         &Tensor::from_bf16(vec![1, 16, 256], &vec![bf16::from_f32(-10.0); 4096]).unwrap(),
         0,
@@ -548,10 +547,8 @@ fn dynamic_decode_long_tail_matches_f64_with_tiny_query_and_weights() {
     let vsh: Vec<_> = (0..tokens * 2)
         .map(|i| 0.015625 * (1u32 << ((i * 3) % 7)) as f32)
         .collect();
-    let kc =
-        ordered_to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
-    let vc =
-        ordered_to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
+    let kc = ordered_to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &kh).unwrap(), 0).unwrap();
+    let vc = ordered_to_cuda(&Tensor::from_f8_e4m3(vec![tokens, 2, 256], &vh).unwrap(), 0).unwrap();
     let ks = ordered_to_cuda(&Tensor::from_f32(vec![tokens, 2], &ksh).unwrap(), 0).unwrap();
     let vs = ordered_to_cuda(&Tensor::from_f32(vec![tokens, 2], &vsh).unwrap(), 0).unwrap();
     let cache = || ops::Qwen35DynamicFp8KvCache {
@@ -574,8 +571,7 @@ fn dynamic_decode_long_tail_matches_f64_with_tiny_query_and_weights() {
         if subnormal {
             qh[256..512].fill(bf16::from_f32(1.0e-39));
         }
-        let query =
-            ordered_to_cuda(&Tensor::from_bf16(vec![1, 16, 256], &qh).unwrap(), 0).unwrap();
+        let query = ordered_to_cuda(&Tensor::from_bf16(vec![1, 16, 256], &qh).unwrap(), 0).unwrap();
         ops::qwen35_dynamic_decode_attention(
             &ctx,
             valid,
@@ -603,7 +599,7 @@ fn dynamic_decode_long_tail_matches_f64_with_tiny_query_and_weights() {
                 let dot: f64 = (0..256)
                     .map(|d| {
                         f64::from(qh[head * 256 + d].to_f32())
-                            * f64::from(ops::decode_e4m3(kh[row * 256 + d]))
+                            * f64::from(ops::decode_cache_element(kh[row * 256 + d]))
                     })
                     .sum();
                 *score = dot * f64::from(ksh[row]) * 0.0625;
@@ -621,7 +617,8 @@ fn dynamic_decode_long_tail_matches_f64_with_tiny_query_and_weights() {
                     .enumerate()
                     .map(|(t, w)| {
                         let row = t * 2 + kv_head;
-                        w * f64::from(vsh[row]) * f64::from(ops::decode_e4m3(vh[row * 256 + d]))
+                        w * f64::from(vsh[row])
+                            * f64::from(ops::decode_cache_element(vh[row * 256 + d]))
                     })
                     .sum::<f64>()
                     / denominator;
@@ -701,7 +698,10 @@ fn dynamic_decode_preserves_tiny_value_scale() {
         .unwrap();
         ctx.synchronize().unwrap();
         for got in transfers::to_cpu(&out).unwrap().as_bf16().unwrap() {
-            assert!((got.to_f32() / (scale * ops::decode_e4m3(value_code)) - 1.0).abs() < 0.004);
+            assert!(
+                (got.to_f32() / (scale * ops::decode_cache_element(value_code)) - 1.0).abs()
+                    < 0.004
+            );
         }
     }
 }

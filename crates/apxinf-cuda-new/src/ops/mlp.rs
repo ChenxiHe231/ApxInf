@@ -173,7 +173,7 @@ pub fn add_into(ctx: &CudaContext, addend: &Tensor, accumulator: &Tensor) -> Res
 ///
 /// The fixed per-column reduction order makes this path bitwise stable across
 /// eager execution and CUDA Graph replay.
-pub fn bf16_gemv(
+pub fn dense_gemv(
     ctx: &CudaContext,
     activation: &Tensor,
     weight: &Tensor,
@@ -214,7 +214,7 @@ pub fn bf16_gemv(
 /// expects. Quantizing here against `input_scale` lets the projection run as
 /// `Fp8UnitScale` with `alpha = weight_scale * input_scale`, so attention and
 /// GDN need no new quantization contract.
-pub fn quantize_fp8_per_tensor(
+pub fn quantize_activation_per_tensor(
     ctx: &CudaContext,
     input: &Tensor,
     output: &Tensor,
@@ -251,7 +251,7 @@ pub fn quantize_fp8_per_tensor(
 /// here, so a vectorized GEMV (16-byte loads, one warp per row, several rows
 /// per block) should beat both; this one does not, and callers should prefer
 /// the GEMM until that exists.
-pub fn fp8_gemv(
+pub fn scaled_gemv(
     ctx: &CudaContext,
     weight: &Tensor,
     activation: &Tensor,
@@ -293,7 +293,7 @@ pub fn fp8_gemv(
 /// The CUTLASS atom layout exists for the tcgen05 MMA; a GEMV indexes scales
 /// directly, so a decode-only path needs no relayout.
 #[allow(clippy::too_many_arguments)]
-pub fn nvfp4_gemv(
+pub fn block_quantized_gemv(
     ctx: &CudaContext,
     weight: &Tensor,
     weight_scales: &Tensor,
@@ -356,7 +356,7 @@ pub fn nvfp4_gemv(
 /// `qweights` and `block_scales` use `BLACKWELL_N128_K64_V1` storage:
 /// `[N/128, K/64, 128, 32]` packed FP4 bytes and
 /// `[N/128, K/64, 128, 4]` raw E4M3 bytes. `global_scale` is one F32 value.
-pub fn nvfp4_a16_blackwell_gemv(
+pub fn block_quantized_weight_gemv(
     ctx: &CudaContext,
     activation: &Tensor,
     qweights: &Tensor,
@@ -368,9 +368,13 @@ pub fn nvfp4_a16_blackwell_gemv(
     if q_dims.len() != 4 || q_dims[2..] != [128, 32] {
         return Err(invalid("NVFP4-A16 qweights must be [N/128, K/64, 128, 32]"));
     }
-    let n = q_dims[0].checked_mul(128).filter(|n| *n > 0 && i32::try_from(*n).is_ok())
+    let n = q_dims[0]
+        .checked_mul(128)
+        .filter(|n| *n > 0 && i32::try_from(*n).is_ok())
         .ok_or_else(|| invalid("NVFP4-A16 N extent overflow"))?;
-    let k = q_dims[1].checked_mul(64).filter(|k| *k > 0 && i32::try_from(*k).is_ok())
+    let k = q_dims[1]
+        .checked_mul(64)
+        .filter(|k| *k > 0 && i32::try_from(*k).is_ok())
         .ok_or_else(|| invalid("NVFP4-A16 K extent overflow"))?;
     let scale_dims = block_scales.shape().dims().to_vec();
     if scale_dims != [q_dims[0], q_dims[1], 128, 4] {
@@ -395,10 +399,17 @@ pub fn nvfp4_a16_blackwell_gemv(
     let output_buffer = tensor_storage(ctx, output, DType::BF16, &output_dims)?;
     let output_start = output_buffer.ptr() as usize;
     let output_end = output_start.saturating_add(output_buffer.len());
-    for source in [&activation_buffer,&qweight_buffer,&scale_buffer,&global_buffer] {
+    for source in [
+        &activation_buffer,
+        &qweight_buffer,
+        &scale_buffer,
+        &global_buffer,
+    ] {
         let start = source.ptr() as usize;
         if output_start < start.saturating_add(source.len()) && start < output_end {
-            return Err(invalid("NVFP4-A16 output must not overlap any input binding"));
+            return Err(invalid(
+                "NVFP4-A16 output must not overlap any input binding",
+            ));
         }
     }
     unsafe {

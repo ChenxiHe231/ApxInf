@@ -230,6 +230,9 @@ impl LoadedModel {
     /// expose speculative diagnostics.
     pub fn speculative_generation_stats(&self) -> Result<Option<SpeculativeGenerationStats>> {
         match self {
+            Self::Image(_) | Self::Speech(_) => Err(Error::Other(
+                "loaded model does not expose text statistics".into(),
+            )),
             Self::Text { model, .. } => Ok(model.speculative_generation_stats()),
             Self::Vla(_) => Err(Error::Other("loaded model is VLA, not text".into())),
             Self::Decision(_) => Err(Error::Other(
@@ -435,20 +438,6 @@ impl LoadedModel {
 /// and dispatches by model name with an explicit Metal prefix or CUDA suffix.
 pub struct AutoModel;
 
-fn create_model_backend(model_name: &str, device: Device) -> Result<Arc<dyn Backend>> {
-    // The Qwen3.5 runtime owns its CUDA context and overrides the sampler hook.
-    // In a Qwen-only build the registry still requires a backend-shaped handle,
-    // but no operation is dispatched through it. Full `cuda` builds retain the
-    // legacy backend for compatibility with callers that inspect `backend()`.
-    #[cfg(all(feature = "qwen35-cuda", not(feature = "cuda")))]
-    if matches!(model_name, "qwen3_5_moe" | "qwen3_5_moe_text") && matches!(device, Device::Cuda(_))
-    {
-        return Ok(Arc::new(apxinf_core::CpuBackend));
-    }
-    let _ = model_name;
-    create_backend(device)
-}
-
 impl AutoModel {
     /// Read a Hugging Face `model_type` and return its registry name.
     pub fn detect_model_name(path: impl AsRef<Path>) -> Result<String> {
@@ -630,7 +619,18 @@ impl AutoModel {
             create_backend_with_recipe_options(device, recipe.online_tune, recipe.cache_dir)?
         };
         #[cfg(not(feature = "cuda"))]
-        let backend = create_backend_with_recipe_options(device, options.autotune, None)?;
+        let backend = {
+            #[cfg(feature = "qwen35-cuda")]
+            if matches!(model_name, "qwen3_5_moe" | "qwen3_5_moe_text")
+                && matches!(device, Device::Cuda(_))
+            {
+                Arc::new(apxinf_cpu::CpuBackend) as Arc<dyn Backend>
+            } else {
+                create_backend_with_recipe_options(device, options.autotune, None)?
+            }
+            #[cfg(not(feature = "qwen35-cuda"))]
+            create_backend_with_recipe_options(device, options.autotune, None)?
+        };
         let mut loaded = factory(path, device, backend, options)?;
         if let LoadedModel::Text {
             generation_defaults,

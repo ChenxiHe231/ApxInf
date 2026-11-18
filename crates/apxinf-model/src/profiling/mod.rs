@@ -214,6 +214,7 @@ mod tests {
             start_time: start,
             first_token_time: Some(start + Duration::from_millis(10)),
             end_time: Some(start + Duration::from_millis(100)),
+            decode_end: None,
             excluded_time: Duration::from_millis(20),
             input_tokens: 8,
             output_tokens: 3,

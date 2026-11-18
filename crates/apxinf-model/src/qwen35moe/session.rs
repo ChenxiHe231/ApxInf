@@ -1504,7 +1504,7 @@ pub(super) mod gpu_raw_protocol {
                 }
                 for state in &target.committed_gdn {
                     let (a,b)=state.gpu_test_tensors();
-                    for t in [a,b] { CudaBuffer::from_tensor(t).map_err(Error::Cuda)?.memset_async(0x6a,f.ctx.stream()).map_err(Error::Cuda)?; }
+                    for t in [a,b] { CudaBuffer::from_tensor(t).map_err(Error::Cuda)?.fill_async(0x6a,f.ctx.stream()).map_err(Error::Cuda)?; }
                 }
                 let before_restore=caches(&target.committed_attention)?;
                 let shadow_before_restore=caches(&target.shadow_attention)?;let shadow_gdn_before_restore=gdn(&target.shadow_gdn)?;

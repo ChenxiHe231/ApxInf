@@ -1,7 +1,7 @@
 //! TensorRT-Edge-LLM BLACKWELL_N128_K64_V1 synthetic parity.
 
 use apxinf_core::{DType, Shape, Tensor};
-use apxinf_cuda_new::{encode_e4m3, ops, transfers, CudaBuffer, CudaContext};
+use apxinf_cuda_new::{encode_cache_element, ops, transfers, CudaBuffer, CudaContext};
 use half::bf16;
 
 fn upload(ctx: &CudaContext, tensor: &Tensor) -> Tensor {
@@ -21,7 +21,11 @@ fn constant_weight_matches_bf16_reference_for_every_supported_row_count() {
     );
     let block_scales = upload(
         &ctx,
-        &Tensor::from_f8_e4m3(vec![1, 1, 128, 4], &vec![encode_e4m3(1.0); N * K / 16]).unwrap(),
+        &Tensor::from_f8_e4m3(
+            vec![1, 1, 128, 4],
+            &vec![encode_cache_element(1.0); N * K / 16],
+        )
+        .unwrap(),
     );
     let global_scale = upload(&ctx, &Tensor::from_f32(vec![1], &[1.0]).unwrap());
     for rows in [1, 2, 3, 4, 8, 16] {
@@ -35,7 +39,7 @@ fn constant_weight_matches_bf16_reference_for_every_supported_row_count() {
                 .as_tensor(Shape::new(vec![rows, N]), DType::BF16)
                 .unwrap();
 
-        ops::nvfp4_a16_blackwell_gemv(
+        ops::block_quantized_weight_gemv(
             &ctx,
             &activation,
             &qweight,

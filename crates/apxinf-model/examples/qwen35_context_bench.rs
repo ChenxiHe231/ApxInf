@@ -4,7 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use apxinf_core::{Backend, CpuBackend, Device};
+use apxinf_core::{Backend, Device};
+use apxinf_cpu::CpuBackend;
 use apxinf_model::qwen35moe::{
     load_trt_fp8_kv_cache_scales, Qwen35ExecutionOptions, Qwen35KvCacheDType, Qwen35Moe,
     Qwen35MoeActivation, Qwen35MoeConfig,

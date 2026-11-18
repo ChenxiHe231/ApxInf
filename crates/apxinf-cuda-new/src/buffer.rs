@@ -105,7 +105,7 @@ impl CudaBuffer {
     /// Stream-ordered on purpose: a plain `cudaMemset` runs on the legacy
     /// default stream and would race the compute stream of the model,
     /// manufacturing exactly the kind of nondeterminism this is meant to find.
-    pub fn memset_async(&self, byte: u8, stream: &crate::CudaStream) -> Result<(), String> {
+    pub fn fill_async(&self, byte: u8, stream: &crate::CudaStream) -> Result<(), String> {
         unsafe {
             ffi::check_cuda(ffi::cudaMemsetAsync(
                 self.ptr,

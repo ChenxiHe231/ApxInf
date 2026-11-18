@@ -1,12 +1,14 @@
 //! Semantic CUDA APIs with selection and native state behind L1.
 
 pub mod attention;
+mod attn_ops;
 pub mod cache;
 pub mod elementwise;
 pub mod embedding;
 pub mod gather;
 pub mod gdn;
 pub mod gemm;
+pub mod mlp;
 pub mod norm;
 pub mod pillow_bicubic;
 pub mod pointwise;
@@ -16,11 +18,11 @@ pub mod rope;
 pub mod sampling;
 pub(crate) mod validation;
 mod volume;
-pub mod mlp;
-mod attn_ops;
+pub use attn_ops::head_rms_norm;
 mod model;
 mod moe;
 mod qwen35_attention;
+mod qwen35_gdn_compat;
 mod qwen35_mixers;
 mod qwen35_mtp;
 
@@ -56,12 +58,12 @@ pub use gather::{
     PatchGeometry as GatherPatchGeometry,
 };
 pub use gdn::{
-    gdn_causal_conv_forward, gdn_causal_conv_step, gdn_chunk_scan, gdn_continue, gdn_conv_prepare,
-    gdn_decay_and_beta, gdn_first_prefill, gdn_gated_norm, gdn_l2_normalize_heads, gdn_prefill,
-    gdn_prefill_workspace_bytes, gdn_prepare_prefill, gdn_recurrent_step, gdn_state_elements,
+    gdn_causal_conv_forward, gdn_causal_conv_step, gdn_causal_conv_verify, gdn_chunk_scan,
+    gdn_continue, gdn_conv_prepare, gdn_decay_and_beta, gdn_first_prefill, gdn_gated_norm,
+    gdn_l2_normalize_heads, gdn_l2_normalize_heads_seq, gdn_prefill, gdn_prefill_workspace_bytes,
+    gdn_prepare_prefill, gdn_recurrent_step, gdn_recurrent_verify, gdn_state_elements,
     GdnChunkScanArgs, GdnChunkScanInput, GdnContinuationArgs, GdnDecayAndBetaArgs,
     GdnFirstPrefillArgs, GdnGate, GdnGatedNormArgs, GdnQuantizedOutput,
-    gdn_causal_conv_verify, gdn_recurrent_verify, gdn_l2_normalize_heads_seq,
 };
 pub use gemm::{
     gemm, gemm_bias, gemm_bias_gelu, gemm_bias_residual, gemm_geglu, gemm_gelu_exact, gemm_swiglu,
@@ -70,18 +72,21 @@ pub use gemm::{
     GemmQuantization, GemmSwiGluArgs, GemmWeightLayout, GemvArgs, GemvBiasArgs, GemvBlockScales,
     RepackedWeight, WeightVersion,
 };
-pub use mlp::{fp8_gemv, nvfp4_gemv, quantize_fp8_per_tensor, swiglu, swiglu_round_product, rms_norm};
-pub use mlp::{bf16_gemv, nvfp4_a16_blackwell_gemv, swiglu_split};
+pub use mlp::{
+    block_quantized_gemv, quantize_activation_per_tensor, rms_norm, scaled_gemv, swiglu,
+    swiglu_round_product,
+};
+pub use mlp::{block_quantized_weight_gemv, dense_gemv, swiglu_split};
 pub use moe::{
-    combine_reference as routed_moe_combine_reference, edge_bf16_decode_moe,
-    edge_bf16_decode_moe_available, edge_bf16_decode_moe_workspace_size, edge_nvfp4_interleave_fc1,
-    edge_nvfp4_moe, edge_nvfp4_moe_available, edge_nvfp4_moe_workspace_size,
-    edge_nvfp4_rescale_e4m3, edge_nvfp4_swizzle_scales, route_topk_reference,
-    routed_moe_add_shared, routed_moe_combine, routed_moe_nvfp4_experts, routed_moe_route,
-    routed_moe_route_topk, EdgeBf16DecodeMoeArgs, EdgeBf16DecodeMoeWeights, EdgeNvfp4MoeArgs,
-    EdgeNvfp4MoeWeights, ExpertAssignment, Nvfp4ExpertProjection, RoutePlan,
-    RoutedMoeAddSharedArgs, RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs,
-    RoutedMoeRouteArgs, RoutedMoeRouteTopkArgs, RoutedMoeSemantic, SharedExpertOutput,
+    combine_reference as routed_moe_combine_reference, fused_routed_moe,
+    fused_routed_moe_available, fused_routed_moe_workspace_size, prepare_expert_fc1,
+    prepare_expert_scales, rescale_expert_weights, route_topk_reference, routed_moe_add_shared,
+    routed_moe_combine, routed_moe_quantized_experts, routed_moe_route, routed_moe_route_topk,
+    small_routed_moe, small_routed_moe_available, small_routed_moe_workspace_size,
+    EdgeBf16DecodeMoeArgs, EdgeBf16DecodeMoeWeights, EdgeNvfp4MoeArgs, EdgeNvfp4MoeWeights,
+    ExpertAssignment, Nvfp4ExpertProjection, RoutePlan, RoutedMoeAddSharedArgs,
+    RoutedMoeCombineArgs, RoutedMoeConfig, RoutedMoeNvfp4ExpertsArgs, RoutedMoeRouteArgs,
+    RoutedMoeRouteTopkArgs, RoutedMoeSemantic, SharedExpertOutput,
 };
 pub use norm::{
     channel_l2_norm, channel_l2_norm_silu, fused_add_channel_l2_norm_silu, fused_add_norm,
@@ -97,21 +102,20 @@ pub use quantization::{
     BlockQuantizationArgs, BlockQuantizationSemantic, PackBlockScalesArgs, QuantizationArgs,
     QuantizationSemantic, ScaleLayout,
 };
-pub use rope::apply_vision_2d as rope_apply_vision_2d;
 pub use qwen35_attention::{
-    decode_e4m3, encode_e4m3, qwen35_attention_fp8, qwen35_attention_fp8_draft,
-    qwen35_attention_reference, qwen35_draft_attention_workspace_elements,
-    qwen35_dynamic_decode_attention, qwen35_dynamic_decode_attention_gated,
-    qwen35_dynamic_decode_max_splits, qwen35_dynamic_kv_append, qwen35_dynamic_kv_dequant,
-    qwen35_dynamic_kv_prepare, qwen35_query_prepare, qwen35_static_kv_append, qwen35_suffix_fmha,
-    Qwen35AttentionReferenceArgs,
-    Qwen35AttentionReferenceOutput, Qwen35AttentionScratch, Qwen35DynamicDecodeScratch,
-    Qwen35DynamicFp8KvCache, Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache, Qwen35KvCacheScales,
-    Qwen35StaticFp8KvAppendArgs,
-    FP8_E4M3_MAX_FINITE, QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS,
-    QWEN35_ATTENTION_KV_WIDTH, QWEN35_ATTENTION_MAX_SPLITS, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_Q_PROJECTION_WIDTH,
-    QWEN35_ATTENTION_RMS_EPSILON, QWEN35_ATTENTION_ROTARY_DIM, QWEN35_KV_CACHE_BLOCK_TOKENS, QWEN35_DECODE_SPLIT_TOKENS,
-    QWEN35_SUFFIX_FMHA_AVAILABLE,
+    decode_cache_element, encode_cache_element, qwen35_attention_draft_cache,
+    qwen35_attention_reference, qwen35_attention_static_cache,
+    qwen35_draft_attention_workspace_elements, qwen35_dynamic_decode_attention,
+    qwen35_dynamic_decode_attention_gated, qwen35_dynamic_decode_max_splits,
+    qwen35_dynamic_kv_append, qwen35_dynamic_kv_dequant, qwen35_dynamic_kv_prepare,
+    qwen35_query_prepare, qwen35_static_kv_append, qwen35_suffix_fmha,
+    Qwen35AttentionReferenceArgs, Qwen35AttentionReferenceOutput, Qwen35AttentionScratch,
+    Qwen35DynamicDecodeScratch, Qwen35DynamicFp8KvCache, Qwen35Fp8AttentionArgs, Qwen35Fp8KvCache,
+    Qwen35KvCacheScales, Qwen35StaticFp8KvAppendArgs, FP8_E4M3_MAX_FINITE,
+    QWEN35_ATTENTION_HEAD_DIM, QWEN35_ATTENTION_KV_HEADS, QWEN35_ATTENTION_KV_WIDTH,
+    QWEN35_ATTENTION_MAX_SPLITS, QWEN35_ATTENTION_Q_HEADS, QWEN35_ATTENTION_Q_PROJECTION_WIDTH,
+    QWEN35_ATTENTION_RMS_EPSILON, QWEN35_ATTENTION_ROTARY_DIM, QWEN35_DECODE_SPLIT_TOKENS,
+    QWEN35_KV_CACHE_BLOCK_TOKENS, QWEN35_SUFFIX_FMHA_AVAILABLE,
 };
 pub use qwen35_mixers::{
     qwen35_gdn_decode, qwen35_gdn_prefill, Qwen35GdnCakeScratch, Qwen35GdnCoreWeights,
@@ -127,6 +131,7 @@ pub use qwen35_mtp::{
     QWEN35_MTP_DRAFT_STEPS, QWEN35_MTP_EXPERTS, QWEN35_MTP_HIDDEN, QWEN35_MTP_INTERMEDIATE,
     QWEN35_MTP_LAYERS, QWEN35_MTP_TOP_K, QWEN35_MTP_VOCAB_SIZE,
 };
+pub use rope::apply_vision_2d as rope_apply_vision_2d;
 pub use rope::{
     decode_rope, decode_rotation, execute_batched as rope_apply_batched,
     execute_mrope as rope_apply_mrope, multimodal_rope, partial_rope, rms_norm_apply_precomputed,

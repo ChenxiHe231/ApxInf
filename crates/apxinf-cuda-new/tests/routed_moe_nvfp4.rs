@@ -120,7 +120,7 @@ fn decode_e2m1(code: u8) -> f32 {
     }
 }
 
-fn decode_e4m3(code: u8) -> f32 {
+fn decode_cache_element(code: u8) -> f32 {
     let code = code & 0x7f;
     let exponent = (code >> 3) & 0x0f;
     let fraction = (code & 7) as f32;
@@ -140,7 +140,7 @@ fn constant_projection(
 ) -> Vec<f32> {
     let mut result = vec![0.0f32; outputs];
     for (row, output) in result.iter_mut().enumerate() {
-        let weight = decode_e2m1(code(row)) * decode_e4m3(scale) * alpha;
+        let weight = decode_e2m1(code(row)) * decode_cache_element(scale) * alpha;
         for activation in input {
             *output += activation * weight;
         }
@@ -366,7 +366,7 @@ fn qwen35_decode_top8_nvfp4_experts_match_cpu_dequant_reference() {
     let mut assignment_output = zeros(&ctx, vec![routes, HIDDEN], DType::BF16);
     let mut shared_output = zeros(&ctx, vec![tokens, HIDDEN], DType::BF16);
     let mut run_experts = || {
-        ops::routed_moe_nvfp4_experts(
+        ops::routed_moe_quantized_experts(
             &ctx,
             RoutedMoeNvfp4ExpertsArgs {
                 config,

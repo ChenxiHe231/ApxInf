@@ -26,7 +26,7 @@ impl Guarded{
  fn payload(&self)->Vec<u8>{let b=raw(&self.whole);b[GUARD..b.len()-GUARD].to_vec()}
  fn readonly(&self){assert_eq!(raw(&self.whole),self.initial,"read-only tensor/padding/outerguard changed");}
  fn guards(&self){let b=raw(&self.whole);assert_eq!(&b[..GUARD],&self.initial[..GUARD]);assert_eq!(&b[b.len()-GUARD..],&self.initial[self.initial.len()-GUARD..]);}
- fn poison(&self,ctx:&CudaContext){CudaBuffer::from_tensor(&self.t).unwrap().memset_async(0xff,ctx.stream()).unwrap();}
+ fn poison(&self,ctx:&CudaContext){CudaBuffer::from_tensor(&self.t).unwrap().fill_async(0xff,ctx.stream()).unwrap();}
 }
 struct Fixture{p:usize,t:usize,cap:usize,q:Vec<f32>,k:Vec<f32>,v:Vec<f32>,expected:Vec<f32>,kind:&'static str}
 impl Fixture{

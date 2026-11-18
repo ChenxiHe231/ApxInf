@@ -148,7 +148,7 @@ fn run_attention(
         ],
         DType::F32,
     );
-    ops::qwen35_attention_fp8(
+    ops::qwen35_attention_static_cache(
         ctx,
         tokens,
         ops::Qwen35Fp8AttentionArgs {
@@ -278,7 +278,7 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
         value: 8.0 / ops::FP8_E4M3_MAX_FINITE,
     };
 
-    ops::qwen35_attention_fp8(
+    ops::qwen35_attention_static_cache(
         &ctx,
         tokens,
         ops::Qwen35Fp8AttentionArgs {
@@ -354,7 +354,7 @@ fn qwen35_prefill_writes_fp8_cache_and_matches_scalar_attention() {
     // public contract must reject it rather than silently doubling memory and
     // bypassing the checkpoint's FP8 calibration.
     let fake_bf16_key_cache = zeros(&ctx, fp8_cache_shape(capacity), DType::BF16);
-    assert!(ops::qwen35_attention_fp8(
+    assert!(ops::qwen35_attention_static_cache(
         &ctx,
         tokens,
         ops::Qwen35Fp8AttentionArgs {
@@ -524,7 +524,7 @@ fn qwen35_decode_is_bit_exact_across_critical_kv_lengths() {
         }
     }
 }
-// Append to crates/apxinf-cuda-new/tests/qwen35_attention_fp8.rs.
+// Append to crates/apxinf-cuda-new/tests/qwen35_attention_static_cache.rs.
 // Uses that test module's bf16_fixture, positions, fp8_bytes and bf16_bits helpers.
 #[test]
 #[ignore = "Thor GPU correctness gate; run under the shared GPU lock"]
@@ -537,7 +537,10 @@ fn qwen35_draft_attention_append_and_graph_contract() {
     let head_dim = ops::QWEN35_ATTENTION_HEAD_DIM;
     let kv_width = ops::QWEN35_ATTENTION_KV_WIDTH;
     let page = ops::QWEN35_KV_CACHE_BLOCK_TOKENS;
-    let unit = ops::Qwen35KvCacheScales { key: 1.0, value: 1.0 };
+    let unit = ops::Qwen35KvCacheScales {
+        key: 1.0,
+        value: 1.0,
+    };
 
     let upload = |host| transfers::to_cuda_on_stream(&ctx, host).unwrap();
     let zero = |shape: Vec<usize>, dtype: DType| {
@@ -584,11 +587,10 @@ fn qwen35_draft_attention_append_and_graph_contract() {
         let scores = zero(vec![1, q_heads, capacity], DType::F32);
         let splits = ops::QWEN35_ATTENTION_MAX_SPLITS;
         let partial_output = zero(
-            vec![1, kv_heads, splits, q_heads / kv_heads, head_dim], DType::F32,
+            vec![1, kv_heads, splits, q_heads / kv_heads, head_dim],
+            DType::F32,
         );
-        let partial_stats = zero(
-            vec![1, kv_heads, splits, q_heads / kv_heads, 2], DType::F32,
-        );
+        let partial_stats = zero(vec![1, kv_heads, splits, q_heads / kv_heads, 2], DType::F32);
         let workspace_elements = ops::qwen35_draft_attention_workspace_elements(capacity).unwrap();
         let workspace = zero(vec![workspace_elements], DType::F32);
 
@@ -599,10 +601,17 @@ fn qwen35_draft_attention_append_and_graph_contract() {
             query_norm: &norm,
             key_norm: &norm,
             positions: &positions,
-            cache: ops::Qwen35Fp8KvCache { key: &key_cache[arm], value: &value_cache[arm] },
+            cache: ops::Qwen35Fp8KvCache {
+                key: &key_cache[arm],
+                value: &value_cache[arm],
+            },
             scratch: ops::Qwen35AttentionScratch {
-                query: &query, gate: &gate, output: &output, scores: &scores,
-                partial_output: &partial_output, partial_stats: &partial_stats,
+                query: &query,
+                gate: &gate,
+                output: &output,
+                scores: &scores,
+                partial_output: &partial_output,
+                partial_stats: &partial_stats,
             },
             cache_offset,
             scales,
@@ -611,20 +620,32 @@ fn qwen35_draft_attention_append_and_graph_contract() {
 
         if offset == 128 {
             let undersized = zero(vec![workspace_elements - 1], DType::F32);
-            let non_unit = ops::Qwen35KvCacheScales { key: 0.5, value: 1.0 };
+            let non_unit = ops::Qwen35KvCacheScales {
+                key: 0.5,
+                value: 1.0,
+            };
             for (invalid_offset, invalid_scale, invalid_workspace) in [
                 (offset, unit, &undersized),
                 (capacity, unit, &workspace),
                 (offset, non_unit, &workspace),
             ] {
-                assert!(
-                    ops::qwen35_attention_fp8_draft(
-                        &ctx, args(1, invalid_offset, invalid_scale), invalid_workspace,
-                    ).is_err()
-                );
+                assert!(ops::qwen35_attention_draft_cache(
+                    &ctx,
+                    args(1, invalid_offset, invalid_scale),
+                    invalid_workspace,
+                )
+                .is_err());
                 ctx.synchronize().unwrap();
-                assert_eq!(fp8_bytes(&key_cache[1]), key_seed, "rejected call changed K");
-                assert_eq!(fp8_bytes(&value_cache[1]), value_seed, "rejected call changed V");
+                assert_eq!(
+                    fp8_bytes(&key_cache[1]),
+                    key_seed,
+                    "rejected call changed K"
+                );
+                assert_eq!(
+                    fp8_bytes(&value_cache[1]),
+                    value_seed,
+                    "rejected call changed V"
+                );
             }
 
             let misaligned_key = CudaBuffer::alloc(key_seed.len() + 1, ctx.device_id())
@@ -637,18 +658,22 @@ fn qwen35_draft_attention_append_and_graph_contract() {
                 &ctx,
                 Tensor::from_f8_e4m3(shape.clone(), &key_seed).unwrap(),
                 &misaligned_key,
-            ).unwrap();
+            )
+            .unwrap();
             let invalid = ops::Qwen35Fp8AttentionArgs {
-                cache: ops::Qwen35Fp8KvCache { key: &misaligned_key, value: &value_cache[1] },
+                cache: ops::Qwen35Fp8KvCache {
+                    key: &misaligned_key,
+                    value: &value_cache[1],
+                },
                 ..args(1, offset, unit)
             };
-            assert!(ops::qwen35_attention_fp8_draft(&ctx, invalid, &workspace).is_err());
+            assert!(ops::qwen35_attention_draft_cache(&ctx, invalid, &workspace).is_err());
             ctx.synchronize().unwrap();
             assert_eq!(fp8_bytes(&misaligned_key), key_seed);
             assert_eq!(fp8_bytes(&value_cache[1]), value_seed);
         }
 
-        ops::qwen35_attention_fp8(&ctx, 1, args(0, offset, unit)).unwrap();
+        ops::qwen35_attention_static_cache(&ctx, 1, args(0, offset, unit)).unwrap();
         ctx.synchronize().unwrap();
         let expected_key = fp8_bytes(&key_cache[0]);
         let expected_value = fp8_bytes(&value_cache[0]);
@@ -656,39 +681,62 @@ fn qwen35_draft_attention_append_and_graph_contract() {
         let expected_gate = bf16_bits(&gate);
         let expected_output = bf16_bits(&output);
 
-        let launch = || ops::qwen35_attention_fp8_draft(&ctx, args(1, offset, unit), &workspace);
+        let launch = || ops::qwen35_attention_draft_cache(&ctx, args(1, offset, unit), &workspace);
         launch().unwrap();
         ctx.synchronize().unwrap();
         let actual_output = bf16_bits(&output);
         for (&actual, expected) in actual_output.iter().zip(expected_output) {
             let actual = bf16::from_bits(actual).to_f32();
             let expected = bf16::from_bits(expected).to_f32();
-            assert!(actual.is_finite() && (actual - expected).abs() <= 0.004 * expected.abs() + 5e-4,
-                    "offset {offset}: {actual} vs {expected}");
+            assert!(
+                actual.is_finite() && (actual - expected).abs() <= 0.004 * expected.abs() + 5e-4,
+                "offset {offset}: {actual} vs {expected}"
+            );
         }
         assert_eq!(bf16_bits(&query), expected_query);
         assert_eq!(bf16_bits(&gate), expected_gate);
 
         let graph = apxinf_cuda_new::capture(&ctx, launch).unwrap();
         for cache in [&key_cache[1], &value_cache[1]] {
-            CudaBuffer::from_tensor(cache).unwrap().view(row, kv_width).unwrap()
-                .memset_async(0x7e, ctx.stream()).unwrap();
+            CudaBuffer::from_tensor(cache)
+                .unwrap()
+                .view(row, kv_width)
+                .unwrap()
+                .fill_async(0x7e, ctx.stream())
+                .unwrap();
         }
-        CudaBuffer::from_tensor(&output).unwrap().memset_async(0xff, ctx.stream()).unwrap();
+        CudaBuffer::from_tensor(&output)
+            .unwrap()
+            .fill_async(0xff, ctx.stream())
+            .unwrap();
         graph.replay().unwrap();
         ctx.synchronize().unwrap();
 
-        assert_eq!(bf16_bits(&output), actual_output, "offset {offset}: graph/eager");
+        assert_eq!(
+            bf16_bits(&output),
+            actual_output,
+            "offset {offset}: graph/eager"
+        );
         for (cache, baseline, original) in [
             (&key_cache[1], &expected_key, &key_seed),
             (&value_cache[1], &expected_value, &value_seed),
         ] {
             let actual = fp8_bytes(cache);
-            assert_eq!(&actual[..row], &original[..row], "offset {offset}: prefix changed");
-            assert_eq!(&actual[row..row + kv_width], &baseline[row..row + kv_width],
-                       "offset {offset}: appended FP8 bytes");
-            assert_eq!(&actual[row + kv_width..], &original[row + kv_width..],
-                       "offset {offset}: tail changed");
+            assert_eq!(
+                &actual[..row],
+                &original[..row],
+                "offset {offset}: prefix changed"
+            );
+            assert_eq!(
+                &actual[row..row + kv_width],
+                &baseline[row..row + kv_width],
+                "offset {offset}: appended FP8 bytes"
+            );
+            assert_eq!(
+                &actual[row + kv_width..],
+                &original[row + kv_width..],
+                "offset {offset}: tail changed"
+            );
         }
     }
 }
@@ -703,9 +751,13 @@ fn qwen35_static_kv_append_matches_full_attention_cache_bytes() {
     let value = patterned_bf16(width, 19, 79, 29.0);
     let norm = patterned_bf16(head_dim, 11, 29, 112.0);
     let key_gpu = transfers::to_cuda_on_stream(&ctx, bf16_tensor(&key, vec![1, width])).unwrap();
-    let value_gpu = transfers::to_cuda_on_stream(&ctx, bf16_tensor(&value, vec![1, width])).unwrap();
+    let value_gpu =
+        transfers::to_cuda_on_stream(&ctx, bf16_tensor(&value, vec![1, width])).unwrap();
     let norm_gpu = transfers::to_cuda_on_stream(&ctx, bf16_tensor(&norm, vec![head_dim])).unwrap();
-    let unit = ops::Qwen35KvCacheScales { key: 1.0, value: 1.0 };
+    let unit = ops::Qwen35KvCacheScales {
+        key: 1.0,
+        value: 1.0,
+    };
 
     for offset in [127, 128] {
         let shape = fp8_cache_shape(offset + 2);
@@ -733,13 +785,19 @@ fn qwen35_static_kv_append_matches_full_attention_cache_bytes() {
             projected_value: &value_gpu,
             key_norm: &norm_gpu,
             positions: &position,
-            cache: ops::Qwen35Fp8KvCache { key: &append_key, value: &append_value },
+            cache: ops::Qwen35Fp8KvCache {
+                key: &append_key,
+                value: &append_value,
+            },
             cache_offset,
             scales: unit,
             rope_theta: 10_000_000.0,
         };
         let overlap = ops::Qwen35StaticFp8KvAppendArgs {
-            cache: ops::Qwen35Fp8KvCache { key: &append_key, value: &append_key },
+            cache: ops::Qwen35Fp8KvCache {
+                key: &append_key,
+                value: &append_key,
+            },
             ..args(offset)
         };
         assert!(ops::qwen35_static_kv_append(&ctx, 1, overlap).is_err());
@@ -749,13 +807,27 @@ fn qwen35_static_kv_append_matches_full_attention_cache_bytes() {
         assert_eq!(fp8_bytes(&append_value), seed);
 
         run_attention(
-            &ctx, 1, offset, &qkv, &key, &value, &norm, &norm, &position_values,
-            &legacy_key, &legacy_value, unit,
+            &ctx,
+            1,
+            offset,
+            &qkv,
+            &key,
+            &value,
+            &norm,
+            &norm,
+            &position_values,
+            &legacy_key,
+            &legacy_value,
+            unit,
         );
         let expected_key = fp8_bytes(&legacy_key);
         let expected_value = fp8_bytes(&legacy_value);
         assert_ne!(&expected_key[row..row + width], &seed[row..row + width]);
-        let value_bytes: Vec<_> = value.iter().copied().map(ops::encode_e4m3).collect();
+        let value_bytes: Vec<_> = value
+            .iter()
+            .copied()
+            .map(ops::encode_cache_element)
+            .collect();
         assert_eq!(&expected_value[row..row + width], value_bytes.as_slice());
         for cache in [&expected_key, &expected_value] {
             assert_eq!(&cache[..row], &seed[..row]);
@@ -773,7 +845,7 @@ fn qwen35_static_kv_append_matches_full_attention_cache_bytes() {
                 .unwrap()
                 .view(row, width)
                 .unwrap()
-                .memset_async(0x7e, ctx.stream())
+                .fill_async(0x7e, ctx.stream())
                 .unwrap();
         }
         graph.replay().unwrap();

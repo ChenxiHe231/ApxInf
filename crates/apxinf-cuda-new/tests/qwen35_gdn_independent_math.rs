@@ -57,7 +57,7 @@ impl Fixture{
             beta:zero(ctx,vec![rows,VH],DType::F32),core:zero(ctx,vec![rows,VW],DType::BF16),
             gated:zero(ctx,vec![rows,VW],DType::BF16),cake,
         };
-        for t in [&f.gated,&f.convolved,&f.core] {CudaBuffer::from_tensor(t).unwrap().memset_async(0xff,ctx.stream()).unwrap();}
+        for t in [&f.gated,&f.convolved,&f.core] {CudaBuffer::from_tensor(t).unwrap().fill_async(0xff,ctx.stream()).unwrap();}
         f
     }
     fn weights(&self)->ops::Qwen35GdnCoreWeights<'_>{

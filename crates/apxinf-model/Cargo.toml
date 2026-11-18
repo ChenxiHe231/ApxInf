@@ -30,7 +30,7 @@ sha2 = "0.10"
 default = []
 openblas = ["apxinf-cpu/openblas"]
 # Full NVIDIA CUDA inference on the apxinf-cuda-new runtime.
-cuda = ["dep:apxinf-cuda-new"]
+cuda = ["dep:apxinf-cuda-new", "qwen35-cuda"]
 mlx = ["dep:apxinf-mlx", "apxinf-mlx/native", "dep:sha2", "dep:apxinf-tokenizer"]
 # Core ML (Apple Neural Engine) stages in Metal families; implies `mlx`.
 coreml = ["mlx", "dep:apxinf-coreml", "apxinf-coreml/native"]

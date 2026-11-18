@@ -36,18 +36,18 @@ pub fn routed_moe_add_shared(ctx: &CudaContext, args: RoutedMoeAddSharedArgs<'_>
 ///
 /// This fixed correctness candidate reads checkpoint-native row-major block
 /// scales and writes BF16 outputs for [`routed_moe_combine`](super::routed_moe_combine).
-pub fn routed_moe_nvfp4_experts(
+pub fn routed_moe_quantized_experts(
     ctx: &CudaContext,
     args: RoutedMoeNvfp4ExpertsArgs<'_>,
 ) -> Result<()> {
     launch::nvfp4_experts(ctx, normalize_nvfp4_experts(ctx, args)?)
 }
 
-pub const fn edge_nvfp4_moe_available() -> bool {
+pub const fn fused_routed_moe_available() -> bool {
     cfg!(apxinf_edge_nvfp4_moe)
 }
 
-pub fn edge_nvfp4_moe_workspace_size(
+pub fn fused_routed_moe_workspace_size(
     config: RoutedMoeConfig,
     tokens: usize,
     hidden: usize,
@@ -60,15 +60,15 @@ pub fn edge_nvfp4_moe_workspace_size(
 ///
 /// The result already includes top-k routing weights and is token-major. The
 /// caller remains responsible for adding the gated shared expert.
-pub fn edge_nvfp4_moe(ctx: &CudaContext, args: EdgeNvfp4MoeArgs<'_>) -> Result<()> {
+pub fn fused_routed_moe(ctx: &CudaContext, args: EdgeNvfp4MoeArgs<'_>) -> Result<()> {
     launch::edge_nvfp4(ctx, normalize_edge_nvfp4(ctx, args)?)
 }
 
-pub const fn edge_bf16_decode_moe_available() -> bool {
+pub const fn small_routed_moe_available() -> bool {
     cfg!(apxinf_edge_bf16_moe)
 }
 
-pub fn edge_bf16_decode_moe_workspace_size(
+pub fn small_routed_moe_workspace_size(
     config: RoutedMoeConfig,
     hidden: usize,
     intermediate: usize,
@@ -79,6 +79,6 @@ pub fn edge_bf16_decode_moe_workspace_size(
 /// Execute one BF16 decode row through TensorRT-Edge-LLM's grouped Tensor
 /// Core FC1/SwiGLU/FC2 path. The output contains only the weighted routed
 /// contribution; the caller adds the gated shared expert.
-pub fn edge_bf16_decode_moe(ctx: &CudaContext, args: EdgeBf16DecodeMoeArgs<'_>) -> Result<()> {
+pub fn small_routed_moe(ctx: &CudaContext, args: EdgeBf16DecodeMoeArgs<'_>) -> Result<()> {
     launch::edge_bf16_decode(ctx, normalize_edge_bf16_decode(ctx, args)?)
 }

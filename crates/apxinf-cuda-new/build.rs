@@ -420,8 +420,14 @@ fn main() {
                 .map(|arch| (arch.nvcc_arch.as_str(), arch.cutlass_arch.as_str())),
         )
     });
-    let conv3d_id = conv3d_fingerprint::build_id(&native, &target,
-        selection.targets.iter().map(|arch| (arch.nvcc_arch.as_str(), arch.cutlass_arch.as_str())));
+    let conv3d_id = conv3d_fingerprint::build_id(
+        &native,
+        &target,
+        selection
+            .targets
+            .iter()
+            .map(|arch| (arch.nvcc_arch.as_str(), arch.cutlass_arch.as_str())),
+    );
     let attention_id = attention_fingerprint::build_id(
         &native,
         &target,
@@ -508,10 +514,16 @@ fn main() {
         "recurrence.cu",
         "reduction.cu",
         "attn_helpers/execution.cpp",
+        "../kernels/custom/attn_ops.cu",
+        "../kernels/custom/mlp_ops.cu",
+        "../kernels/custom/model_ops.cu",
         "elementwise/execution.cpp",
         "moe.cu",
+        "../kernels/qwen35/moe.cu",
         "qwen35_attention.cu",
+        "../kernels/qwen35/qwen35_attention.cu",
         "qwen35_mtp.cu",
+        "../kernels/qwen35/qwen35_mtp.cu",
     ]
     .map(|source| adapters.join(source))
     .to_vec();
