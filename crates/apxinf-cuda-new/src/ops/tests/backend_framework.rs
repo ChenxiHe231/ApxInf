@@ -1399,12 +1399,6 @@ fn gpu_e2e_attention_prefill_range_reprepares_for_actual_q_and_k() {
         assert!(donor.summary().contains("source=tuned"), "{}", donor.summary());
         drop(donor);
         drop(tuning);
-        if donor_k != donor_q {
-            let legacy_id = option_env!("APXINF_ATTENTION_LEGACY_RECIPE_ID")
-                .expect("source-compatible aarch64 build must expose old Attention key");
-            rewrite_single_recipe_build_id(&directory.0, legacy_id);
-        }
-
         let ctx = CudaContext::new_with_options(0, false, Some(directory.0.as_path())).unwrap();
         let query = tensor(0, vec![1, actual_q, 2, 64], &vec![0.0; elements(actual_q)]);
         let key = tensor(0, vec![1, actual_k, 2, 64], &vec![0.25; elements(actual_k)]);
