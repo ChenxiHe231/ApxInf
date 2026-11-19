@@ -35,6 +35,13 @@ export APXINF_QWEN35_GDN_SEGMENT_LONG_PREFILL=0
 export APXINF_QWEN35_GDN_PROJECTION_CHUNKS=0
 export APXINF_REQUIRE_RECIPES=0
 
+extra_args=()
+case "${AUTOTUNE:-0}" in
+  0) ;;
+  1) extra_args+=(--autotune) ;;
+  *) echo "AUTOTUNE must be 0 or 1" >&2; exit 2 ;;
+esac
+
 # Hold the shared GPU lock for the lifetime of the service.
 exec 9>/tmp/apxinf-gpu.lock
 flock -n 9 || { echo "GPU busy; retry after the current test finishes" >&2; exit 75; }
@@ -45,4 +52,4 @@ exec "$server" serve --model "$model" --model-name qwen3_5_moe \
   --host "${HOST_IP:-0.0.0.0}" --port "${PORT:-48119}" --queue-capacity 16 \
   --max-input-tokens "${MAX_INPUT_TOKENS:-20000}" \
   --max-output-tokens "${MAX_OUTPUT_TOKENS:-4096}" \
-  --enable-context-reuse --tuning-dir "$recipes"
+  --enable-context-reuse --tuning-dir "$recipes" "${extra_args[@]}"
