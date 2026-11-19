@@ -43,9 +43,19 @@ fn migrate_sibling_object_cache(
     };
     // Native commands are identical across Cargo profiles (-O3 is explicit).
     // Reuse only through the same full argv and dependency validation below.
-    let target_root = build_root.parent().and_then(Path::parent).unwrap_or(build_root);
-    let roots = [build_root.to_path_buf(), target_root.join("debug/build"), target_root.join("release/build")];
-    let entries = roots.into_iter().filter_map(|root| std::fs::read_dir(root).ok()).flatten();
+    let target_root = build_root
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(build_root);
+    let roots = [
+        build_root.to_path_buf(),
+        target_root.join("debug/build"),
+        target_root.join("release/build"),
+    ];
+    let entries = roots
+        .into_iter()
+        .filter_map(|root| std::fs::read_dir(root).ok())
+        .flatten();
     let Some(object_name) = object.file_name() else {
         return false;
     };
@@ -387,8 +397,9 @@ fn main() {
     // CUDA 13 renamed Thor SM101 to SM110. The checked-in compatibility
     // archive is validated on both runtime spellings; keep the target exact
     // so unrelated Blackwell devices do not select these Thor-only kernels.
-    let edge_nvfp4_moe =
-        cpu_arch == "aarch64" && selection.targets.len() == 1 && matches!(selection.targets[0].sm(), 101 | 110);
+    let edge_nvfp4_moe = cpu_arch == "aarch64"
+        && selection.targets.len() == 1
+        && matches!(selection.targets[0].sm(), 101 | 110);
     if edge_nvfp4_moe {
         println!("cargo:rustc-cfg=apxinf_edge_nvfp4_moe");
         println!("cargo:rustc-cfg=apxinf_qwen35_suffix_fmha");
@@ -435,11 +446,27 @@ fn main() {
     // recipe selection changes the whole-tree build ID, even though the tuned
     // providers and kernels are identical. Expose the old key only while the
     // provider/kernel/ABI source fingerprint still matches that package.
-    let legacy_gemm_id = (!build_id_overridden
-        && target == "aarch64-unknown-linux-gnu"
-        && gemm_fingerprint::recipe_compat_source_id(&native)
-            == "1a22226531e8e96121e95345ab5304a9")
-        .then_some("gemm-kb1-cd9800c2b6bc6d05b55c19c4ea36d605");
+    // Range lookup changes selection code but not the Final providers. Accept
+    // Final's previous v11 recipes only for these exact reviewed native trees;
+    // any later native edit changes the fingerprint and disables the alias.
+    let final_gemm_legacy_id = (!build_id_overridden && target == "aarch64-unknown-linux-gnu")
+        .then(|| match id.as_str() {
+            "gemm-kb1-f51573015db23175e0203f8d2c760a8a" => {
+                Some("gemm-kb1-2e8db09abe093fa5281a6de21dc887c4")
+            } // SM101
+            "gemm-kb1-3ec7033ec00ca910f439d895a641f55e" => {
+                Some("gemm-kb1-1964cfa192b3b0571161d31159656308")
+            } // SM110
+            _ => None,
+        })
+        .flatten();
+    let legacy_gemm_id = final_gemm_legacy_id.or_else(|| {
+        (!build_id_overridden
+            && target == "aarch64-unknown-linux-gnu"
+            && gemm_fingerprint::recipe_compat_source_id(&native)
+                == "1a22226531e8e96121e95345ab5304a9")
+            .then_some("gemm-kb1-cd9800c2b6bc6d05b55c19c4ea36d605")
+    });
     if let Some(legacy_id) = legacy_gemm_id {
         println!("cargo:rustc-env=APXINF_GEMM_LEGACY_RECIPE_ID={legacy_id}");
     }
@@ -454,10 +481,23 @@ fn main() {
     // Shared runtime bookkeeping also changes Attention's whole-tree ID.
     // Keep the frozen binary's exact recipes usable only while all provider,
     // kernel and ABI sources still match the reviewed compatibility set.
-    let legacy_attention_id = (target == "aarch64-unknown-linux-gnu"
-        && attention_fingerprint::recipe_compat_source_id(&native)
-            == "7df0ba17376aca6a0a2c38e5512f92c8")
-        .then_some("attention-kb1-1be98f5387acae8edc0852a681e9a973");
+    let final_attention_legacy_id = (target == "aarch64-unknown-linux-gnu")
+        .then(|| match attention_id.as_str() {
+            "attention-kb1-903fed08507ff8f69806467232cc8870" => {
+                Some("attention-kb1-add4d4e6cc5d7a3ad958a70ba5557c12")
+            } // SM101
+            "attention-kb1-278218e6abe897d91d706c1fa37b18dc" => {
+                Some("attention-kb1-e471128a0b8a14f0abc3abb7bd1b399e")
+            } // SM110
+            _ => None,
+        })
+        .flatten();
+    let legacy_attention_id = final_attention_legacy_id.or_else(|| {
+        (target == "aarch64-unknown-linux-gnu"
+            && attention_fingerprint::recipe_compat_source_id(&native)
+                == "7df0ba17376aca6a0a2c38e5512f92c8")
+            .then_some("attention-kb1-1be98f5387acae8edc0852a681e9a973")
+    });
     if let Some(legacy_id) = legacy_attention_id {
         println!("cargo:rustc-env=APXINF_ATTENTION_LEGACY_RECIPE_ID={legacy_id}");
     }
