@@ -203,7 +203,9 @@ fn nvfp4_reference_for_rows(m: usize, fallback_only: bool) {
         ).unwrap();
         let error = super::execution::prepare(&ctx, normalized).err().unwrap();
         assert!(error.to_string().contains("GEMM recipe miss"));
-        let mut args = GemmArgs::nvfp4(&a, &a_scales, &b, &b_scales, block_size, alpha, &mut out);
+        let mut args = GemmArgs::block_quantized(
+            &a, &a_scales, &b, &b_scales, block_size, alpha, &mut out,
+        );
         args.policy.cache_dir = Some(String::new());
         args.policy.online_tune = false;
         let normalized = super::contracts::normalize(
