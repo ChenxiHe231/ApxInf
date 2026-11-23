@@ -414,9 +414,12 @@ same prefix and join before the next consumer. The caller must prove disjoint
 writable tensors and native workspace; shared readonly inputs are allowed.
 It does not allocate device buffers, add kernels, create sessions or nest capture.
 
-The private host shim uses the CUDA12.8+ versioned seven-argument
-GetCaptureInfo_v3/five-argument UpdateCaptureDependencies_v2 ABI, verified
-against the installed Thor-U headers. It owns copied frontiers,
+The private host shim uses the seven-argument GetCaptureInfo and five-argument
+UpdateCaptureDependencies ABI with edge data. CUDA12.8 uses the explicit
+GetCaptureInfo_v3/UpdateCaptureDependencies_v2 names verified on Thor-U;
+CUDA13 uses their promoted unversioned names. Graph edge queries select the
+corresponding SDK spelling too. See the [CUDA13 runtime reference](https://docs.nvidia.com/cuda/archive/13.0.3/cuda-runtime-api/group__CUDART__STREAM.html).
+It owns copied frontiers,
 checks capture graph/id/stream/device/thread, and rejects non-default edge data.
 Older SDK builds keep a default-off-compatible unsupported stub. An error, ignored
 error, panic or unfinished scope poisons the enclosing capture; it is aborted

@@ -8,6 +8,18 @@
 #include <thread>
 #include <vector>
 
+// CUDA 13 promotes the edge-data APIs to their unversioned names. CUDA 12.8
+// still requires the explicit versions to select the same signatures.
+#if CUDART_VERSION >= 13000
+#define APXINF_FRONTIER_CAPTURE_INFO cudaStreamGetCaptureInfo
+#define APXINF_FRONTIER_UPDATE_DEPENDENCIES cudaStreamUpdateCaptureDependencies
+#define APXINF_FRONTIER_GET_EDGES cudaGraphGetEdges
+#elif CUDART_VERSION >= 12080
+#define APXINF_FRONTIER_CAPTURE_INFO cudaStreamGetCaptureInfo_v3
+#define APXINF_FRONTIER_UPDATE_DEPENDENCIES cudaStreamUpdateCaptureDependencies_v2
+#define APXINF_FRONTIER_GET_EDGES cudaGraphGetEdges_v2
+#endif
+
 #if CUDART_VERSION >= 12080
 namespace {
 thread_local bool inject_nondefault_edge = false; // Internal unit-test injection, never set by model code.
@@ -34,7 +46,7 @@ cudaError_t snapshot(cudaStream_t stream, Snapshot& out) {
   const cudaGraphNode_t* nodes = nullptr;
   const cudaGraphEdgeData* edges = nullptr;
   size_t count = 0;
-  auto e = cudaStreamGetCaptureInfo_v3(stream, &status, &out.id, &out.graph,
+  auto e = APXINF_FRONTIER_CAPTURE_INFO(stream, &status, &out.id, &out.graph,
                                     &nodes, &edges, &count);
   if (e != cudaSuccess) return e;
   if (status != cudaStreamCaptureStatusActive || !out.graph)
@@ -62,7 +74,7 @@ cudaError_t validate(Scope& s, Snapshot& current) {
   return cudaSuccess;
 }
 cudaError_t set(Scope& s, std::vector<cudaGraphNode_t> nodes) {
-  return cudaStreamUpdateCaptureDependencies_v2(s.stream,
+  return APXINF_FRONTIER_UPDATE_DEPENDENCIES(s.stream,
       nodes.empty() ? nullptr : nodes.data(), nullptr, nodes.size(),
       cudaStreamSetCaptureDependencies);
 }
@@ -156,11 +168,11 @@ extern "C" int apxinf_capture_frontier_test_topology(void* raw, size_t* out) noe
     auto graph = static_cast<cudaGraph_t>(raw);
     size_t n = 0, edges = 0;
     auto e = cudaGraphGetNodes(graph, nullptr, &n); if (e) return e;
-    e = cudaGraphGetEdges_v2(graph, nullptr, nullptr, nullptr, &edges); if (e) return e;
+    e = APXINF_FRONTIER_GET_EDGES(graph, nullptr, nullptr, nullptr, &edges); if (e) return e;
     std::vector<cudaGraphNode_t> nodes(n), from(edges), to(edges);
     std::vector<cudaGraphEdgeData> data(edges);
     e = cudaGraphGetNodes(graph, nodes.data(), &n); if (e) return e;
-    e = cudaGraphGetEdges_v2(graph, from.data(), to.data(), data.data(), &edges); if (e) return e;
+    e = APXINF_FRONTIER_GET_EDGES(graph, from.data(), to.data(), data.data(), &edges); if (e) return e;
     out[0]=n;out[1]=edges;out[2]=out[3]=out[4]=0;
     for (auto node:nodes) {
       size_t in=std::count(to.begin(),to.end(),node), degree=std::count(from.begin(),from.end(),node);
@@ -172,6 +184,10 @@ extern "C" int apxinf_capture_frontier_test_topology(void* raw, size_t* out) noe
   return cudaErrorNotSupported;
 #endif
 }
+
+#undef APXINF_FRONTIER_CAPTURE_INFO
+#undef APXINF_FRONTIER_UPDATE_DEPENDENCIES
+#undef APXINF_FRONTIER_GET_EDGES
 
 extern "C" int apxinf_capture_frontier_test_inject(void* raw,int kind) noexcept {
 #if CUDART_VERSION >= 12080
