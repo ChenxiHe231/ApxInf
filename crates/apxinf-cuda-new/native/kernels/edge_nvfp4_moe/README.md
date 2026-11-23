@@ -19,22 +19,18 @@ Upstream source: `NVIDIA/TensorRT-Edge-LLM`, commit
 The project root `LICENSE` is Apache-2.0. Adapted source files retain NVIDIA's
 copyright and SPDX notice.
 
-## Decode metadata prefix candidate
+## Decode metadata prefix
 
-`APXINF_MOE_SETUP_PREFIX=1` opts into an integer metadata prefix in the
-small-batch setup kernel, default off. Initial support is BF16 input,256 experts,
-H2048,I512,top8 and exactly1 or4 tokens on this existing Thor provider. Other
-shapes and flag values retain the original path. The original setup kernel,
-quantize_row, checkpoint scales/layout, FC1/FC2 AOT and persistent caps are
+The integer warp-prefix setup kernel is the default production path for BF16
+input, 256 experts, H2048, I512, top8 and exactly 1 or 4 tokens on this Thor
+provider. Other shapes retain the original compatibility path. There is no
+runtime switch or environment override. The original setup kernel,
+`quantize_row`, checkpoint scales/layout, FC1/FC2 AOT and persistent caps are
 unchanged. The new kernel shares the original quantization function; it only
 replaces the serial expert-offset/tile scan with integer ballot/popcount/prefix.
 Within-expert atomic scatter keeps its existing unordered physical-row contract.
 
-Set the flag before model/Graph creation in a fresh worker. Captured Graph nodes
-retain the selected kernel after environment changes. The aligned benchmark
-worker admits this flag and echoes its effective boolean in `ready`; benchmark
-controllers that clear `APXINF_` environment must explicitly restore0/1 before
-launch. The product L3 comparison passed72 exact numerical records. On Thor2,
+The product L3 comparison passed72 exact numerical records. On Thor2,
 two public short-input cases (62/63 tokens,max-output512,warmup10,three repeats)
 showed positive same-ELF off/on results in both pair directions: pooled model
 end-to-end throughput +2.89% Vanilla and +1.22% MTP, with exact original-V4 output

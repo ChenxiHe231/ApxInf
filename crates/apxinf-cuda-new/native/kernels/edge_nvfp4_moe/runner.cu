@@ -17,8 +17,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -49,16 +47,10 @@ constexpr int kMaxResidentThreadsPerSm = 2048;
 constexpr float kSfScaleEpsilon = 1.0e-20f;
 constexpr size_t kAlignment = 256;
 
-// Opt-in backend scheduling variant only. Graph capture freezes this choice;
-// launch a fresh worker/model for A/B rather than changing env after capture.
-bool uses_decode_setup_prefix(const apxinf_moe_edge_nvfp4_spec_t& spec) {
-  if (spec.dtype != APXINF_DTYPE_BF16 || spec.experts != 256 ||
-      spec.top_k != 8 || spec.hidden != 2048 || spec.intermediate != 512 ||
-      (spec.tokens != 1 && spec.tokens != 4)) {
-    return false;
-  }
-  const char* enabled = std::getenv("APXINF_MOE_SETUP_PREFIX");
-  return enabled != nullptr && std::strcmp(enabled, "1") == 0;
+bool supports_decode_setup_prefix(const apxinf_moe_edge_nvfp4_spec_t& spec) {
+  return spec.dtype == APXINF_DTYPE_BF16 && spec.experts == 256 &&
+         spec.top_k == 8 && spec.hidden == 2048 && spec.intermediate == 512 &&
+         (spec.tokens == 1 || spec.tokens == 4);
 }
 
 bool uses_parallel_layout(int tokens) {
@@ -509,7 +501,7 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
 
   if (spec.tokens <= 4) {
     const int quant_blocks = std::min<int>(routes, properties.multiProcessorCount * 4);
-    if (uses_decode_setup_prefix(spec)) {
+    if (supports_decode_setup_prefix(spec)) {
       small_batch_setup_prefix_kernel<<<quant_blocks + 1, kThreads, 0, stream>>>(
           spec.tokens, spec.top_k, spec.hidden, spec.experts,
           static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
