@@ -26,3 +26,5 @@ pub(crate) mod volume;
 pub(crate) mod recurrence;
 
 pub(crate) mod reduction;
+
+pub(crate) mod graph_capture;

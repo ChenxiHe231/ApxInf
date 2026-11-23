@@ -403,3 +403,22 @@ Other legal sizes and alignments use the staged pointwise update followed by the
 existing channel normalization kernel. No scratch allocation or persistent
 state is required. CUDA Graph callers retain all bound storage through replay.
 The Norm Spec version is 10; its layout and the GEMM recipe contract are unchanged.
+
+## Scoped independent capture branches
+
+The execution helper capture_independent changes only CUDA Graph dependencies.
+It returns false without calling either branch when disabled or outside capture;
+the caller must execute its original serial traversal then. A true result means
+both host closures ran in order, while their captured GPU subgraphs fork from the
+same prefix and join before the next consumer. The caller must prove disjoint
+writable tensors and native workspace; shared readonly inputs are allowed.
+It does not allocate device buffers, add kernels, create sessions or nest capture.
+
+The private host shim uses the CUDA12.8+ versioned seven-argument
+GetCaptureInfo_v3/five-argument UpdateCaptureDependencies_v2 ABI, verified
+against the installed Thor-U headers. It owns copied frontiers,
+checks capture graph/id/stream/device/thread, and rejects non-default edge data.
+Older SDK builds keep a default-off-compatible unsupported stub. An error, ignored
+error, panic or unfinished scope poisons the enclosing capture; it is aborted
+before graph instantiation. No raw graph/dependency token is public. Default-off
+success and existing Session/Graph resource retention remain unchanged.

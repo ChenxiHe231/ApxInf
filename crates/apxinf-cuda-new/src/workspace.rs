@@ -244,6 +244,9 @@ pub struct ExecutionSession {
 }
 
 impl ExecutionSession {
+    #[cfg(test)]
+    pub(crate) fn prepared_ids_for_test(&self) -> Vec<usize> { self.inner.prepared_sequence.borrow().clone() }
+
     pub fn new(workspace: GraphWorkspace) -> Self {
         Self {
             inner: Rc::new(ExecutionSessionInner {
@@ -292,6 +295,7 @@ impl ExecutionSession {
 thread_local! {
     static ACTIVE_SESSION: Cell<*const ExecutionSessionInner> = const { Cell::new(std::ptr::null()) };
     static PREPARING: Cell<bool> = const { Cell::new(false) };
+    static CAPTURE_FAILURE: RefCell<Option<String>> = const { RefCell::new(None) };
     static CAPTURE_ACTIVE: Cell<bool> = const { Cell::new(false) };
     static CAPTURE_TARGET: Cell<Option<CaptureTarget>> = const { Cell::new(None) };
     static CAPTURED_RESOURCES: RefCell<Vec<Rc<dyn Any>>> = const { RefCell::new(Vec::new()) };
@@ -377,15 +381,30 @@ pub(crate) fn has_active_session() -> bool {
 }
 
 pub(crate) fn begin_capture_retention(device: usize, stream: usize) {
+    CAPTURE_FAILURE.with(|failure| failure.borrow_mut().take());
     CAPTURED_RESOURCES.with(|resources| resources.borrow_mut().clear());
     CAPTURE_TARGET.with(|target| target.set(Some(CaptureTarget { device, stream })));
     CAPTURE_ACTIVE.with(|active| active.set(true));
 }
 
 pub(crate) fn end_capture_retention() -> Vec<Rc<dyn Any>> {
+    CAPTURE_FAILURE.with(|failure| failure.borrow_mut().take());
     CAPTURE_ACTIVE.with(|active| active.set(false));
     CAPTURE_TARGET.with(|target| target.set(None));
     CAPTURED_RESOURCES.with(|resources| std::mem::take(&mut *resources.borrow_mut()))
+}
+
+/// First failure wins; caught errors must never publish a partially rewired graph.
+pub(crate) fn poison_capture(message: &str) {
+    if is_capturing() {
+        CAPTURE_FAILURE.with(|failure| {
+            let mut failure = failure.borrow_mut();
+            if failure.is_none() { *failure = Some(message.to_owned()); }
+        });
+    }
+}
+pub(crate) fn capture_failure() -> Option<String> {
+    CAPTURE_FAILURE.with(|failure| failure.borrow().clone())
 }
 
 pub(crate) fn is_capturing() -> bool {

@@ -244,6 +244,8 @@ pub struct BaseMoeScratch {
     inter_scales: Option<Tensor>,
     /// CuTeDSL scratch required by the SM110 TensorRT-Edge-LLM provider.
     edge_workspace: Option<CudaBuffer>,
+    /// Experimental graph topology; frozen at allocation, only verified M1/M4.
+    ffn_fork: bool,
     tokens: usize,
     hidden: usize,
     experts: usize,
@@ -329,6 +331,8 @@ impl BaseMoeScratch {
                     .transpose()?
             },
             edge_workspace,
+            ffn_fork: matches!(tokens, 1 | 4)
+                && std::env::var("APXINF_QWEN35_FFN_FORK").as_deref() == Ok("1"),
             tokens,
             hidden,
             experts,
@@ -353,6 +357,11 @@ impl BaseMoeScratch {
             ctx,
             ops::GemmArgs::new(input, &weights.router.weight, &mut self.router_logits),
         )?;
+        if self.ffn_fork {
+            if let DeviceNvfp4RoutedExperts::Edge(edge) = &weights.routed_experts {
+                if self.run_edge_capture_fork(ctx, weights, edge, input)? { return Ok(()); }
+            }
+        }
         if matches!(&weights.routed_experts, DeviceNvfp4RoutedExperts::Edge(_)) {
             ops::routed_moe_route_topk(
                 ctx,
@@ -843,6 +852,87 @@ impl BaseMoeScratch {
                 output: &mut self.output,
             },
         )
+    }
+
+    /// Same operators/bindings as the original Edge path, same host order.
+    /// Only capture dependency frontiers change; eager/prepare remain serial.
+    fn run_edge_capture_fork(
+        &mut self, ctx: &CudaContext, weights: &DeviceNvfp4Moe,
+        edge: &super::device_weights::DeviceEdgeNvfp4Experts, input: &Tensor,
+    ) -> Result<bool> {
+        let config = RoutedMoeConfig::new(self.experts, self.top_k);
+            let mut routed_output = CudaBuffer::from_tensor(&self.assignment_output)
+                .map_err(Error::Cuda)?
+                .view(0, self.tokens * self.hidden * DType::BF16.size_in_bytes())
+                .map_err(Error::Cuda)?
+                .as_tensor(Shape::new(vec![self.tokens, self.hidden]), DType::BF16)
+                .map_err(Error::Cuda)?;
+        let captured = apxinf_cuda_new::capture_independent(ctx, true, self,
+            |state| {
+                ops::routed_moe_route_topk(ctx, RoutedMoeRouteTopkArgs {
+                    config, logits: &state.router_logits,
+                    expert_ids: &mut state.expert_ids, expert_weights: &mut state.expert_weights,
+                })?;
+            let workspace = state
+                .edge_workspace
+                .as_ref()
+                .ok_or_else(|| invalid("SM110 Edge NVFP4 workspace is unavailable"))?;
+            // Diagnostic only, default off. The decode layout kernel
+            // (`small_batch_setup_kernel`, tokens <= 4) writes only the live
+            // `tokens * top_k` permutation slots and leaves the padded
+            // remainder of `permuted_m` untouched, unlike the prefill
+            // `build_layout_kernel` which fills padding with -1 behind a
+            // barrier. `permuted_m` is 32,640 for a single decode token, so
+            // 32,632 slots carry whatever the previous call left behind.
+            // Setting APXINF_QWEN35_MOE_WS_POISON=<byte> fills the whole
+            // workspace before every MoE call; if two runs with different
+            // poison bytes produce different tokens, the generated FC1/FC2
+            // kernels are reading past `tile_limit`.
+            if let Some(byte) = std::env::var("APXINF_QWEN35_MOE_WS_POISON")
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+            {
+                workspace
+                    .fill_async(byte, ctx.stream())
+                    .map_err(Error::Cuda)?;
+            }
+            ops::fused_routed_moe(
+                ctx,
+                EdgeNvfp4MoeArgs {
+                    config,
+                    intermediate: state.intermediate,
+                    input,
+                    expert_ids: &state.expert_ids,
+                    expert_weights: &state.expert_weights,
+                    weights: EdgeNvfp4MoeWeights {
+                        fc1_weight: &edge.fc1_weight,
+                        fc1_scales: &edge.fc1_scales,
+                        fc1_alpha: &edge.fc1_alpha,
+                        input_global_scale: &edge.input_global_scale,
+                        fc2_weight: &edge.fc2_weight,
+                        fc2_scales: &edge.fc2_scales,
+                        fc2_alpha: &edge.fc2_alpha,
+                        down_input_scale: &edge.down_input_scale,
+                    },
+                    workspace,
+                    output: &mut routed_output,
+                },
+            )?;
+                Ok(())
+            },
+            |state| {
+                state.run_shared_nvfp4(ctx, weights, input)?;
+                ops::gemm(ctx, ops::GemmArgs::new(input, &weights.shared_expert_gate.weight,
+                    &mut state.shared_gate_logits))
+            },
+        )?;
+        if !captured { return Ok(false); }
+        let shared_gate_logits = view(&self.shared_gate_logits, vec![self.tokens], DType::BF16)?;
+        ops::routed_moe_add_shared(ctx, RoutedMoeAddSharedArgs {
+            routed_output: &routed_output, shared_output: &self.shared_output,
+            shared_gate_logits: &shared_gate_logits, output: &mut self.output,
+        })?;
+        Ok(true)
     }
 
     fn run_shared_nvfp4(
@@ -1935,3 +2025,7 @@ impl GdnStateCheckpoints {
         (&self.conv, &self.recurrent)
     }
 }
+
+#[cfg(test)]
+#[path = "forward_ffn_fork_tests.rs"]
+mod ffn_fork_tests;

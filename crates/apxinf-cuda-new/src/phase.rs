@@ -65,6 +65,13 @@ impl PreparedPhase {
         self.graph.replay()
     }
 
+    /// Drain this phase's owning stream before releasing external fixed-op
+    /// storage. Fixed-only graphs need not retain a native Execution whose
+    /// destructor would otherwise supply that lifetime boundary.
+    pub fn synchronize(&self) -> Result<()> {
+        self.graph.synchronize()
+    }
+
     /// Execute the phase eagerly with the same prepared resources used by the
     /// captured graph. This is primarily useful for eager/captured parity
     /// checks without changing selected operator recipes.

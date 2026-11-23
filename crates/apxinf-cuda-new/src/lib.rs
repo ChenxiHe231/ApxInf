@@ -5,6 +5,7 @@ pub mod cublas;
 pub mod device_caps;
 mod ffi;
 mod graph;
+mod graph_fork;
 mod kv_cache;
 pub mod nvtx;
 pub mod phase;
@@ -24,6 +25,7 @@ pub use context::CudaContext;
 pub use cublas::{CublasHandle, CublasTranspose};
 pub use device_caps::{CudaArchFamily, CudaDeviceCaps};
 pub use graph::{capture, CapturedGraph};
+pub use graph_fork::capture_independent;
 pub use kv_cache::CudaKvCache;
 pub use ops::norm::norm;
 pub use ops::{

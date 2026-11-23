@@ -512,6 +512,7 @@ fn main() {
     let adapters = native.join("adapters");
     let mut generic_sources = [
         "runtime.cpp",
+        "graph/frontier.cpp",
         "gemm/candidates.cpp",
         "gemm/tuning_key.cpp",
         "../framework/tuning_db.cpp",

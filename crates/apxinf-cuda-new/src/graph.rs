@@ -16,6 +16,13 @@ pub struct CapturedGraph {
 }
 
 impl CapturedGraph {
+    pub(crate) fn synchronize(&self) -> Result<()> {
+        self.stream.synchronize().map_err(Error::Cuda)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn graph_for_test(&self) -> *mut std::ffi::c_void { self.graph }
+
     pub fn replay(&self) -> Result<()> {
         self.stream
             .with_current_device(|| unsafe {
@@ -53,6 +60,11 @@ pub(crate) fn begin(ctx: &CudaContext) -> std::result::Result<(), String> {
 }
 
 pub(crate) fn end(ctx: &CudaContext) -> std::result::Result<CapturedGraph, String> {
+    // Also protect Backend::capture_end, which does not call the closure wrapper.
+    if let Some(error) = crate::workspace::capture_failure() {
+        abort(ctx);
+        return Err(error);
+    }
     let device_status = ctx.stream().set_current_device();
     let stream = ctx.stream().handle();
     let mut graph: ffi::cudaGraph_t = std::ptr::null_mut();
@@ -119,15 +131,20 @@ pub fn capture(ctx: &CudaContext, operation: impl FnOnce() -> Result<()>) -> Res
     }
     begin(ctx).map_err(Error::Cuda)?;
     let operation_result = catch_unwind(AssertUnwindSafe(operation));
-    let graph_result = end(ctx).map_err(Error::Cuda);
     match operation_result {
-        Ok(Ok(())) => graph_result,
+        Ok(Ok(())) => {
+            if let Some(error) = crate::workspace::capture_failure() {
+                abort(ctx);
+                return Err(Error::Other(error));
+            }
+            end(ctx).map_err(Error::Cuda)
+        }
         Ok(Err(error)) => {
-            drop(graph_result);
+            abort(ctx);
             Err(error)
         }
         Err(payload) => {
-            drop(graph_result);
+            abort(ctx);
             resume_unwind(payload)
         }
     }
