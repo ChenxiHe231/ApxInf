@@ -865,7 +865,7 @@ impl BaseMoeScratch {
                 .map_err(Error::Cuda)?
                 .as_tensor(Shape::new(vec![self.tokens, self.hidden]), DType::BF16)
                 .map_err(Error::Cuda)?;
-        let captured = apxinf_cuda_new::capture_independent(ctx, true, self,
+        let captured = apxinf_cuda_new::capture_independent(ctx, self,
             |state| {
                 ops::routed_moe_route_topk(ctx, RoutedMoeRouteTopkArgs {
                     config, logits: &state.router_logits,

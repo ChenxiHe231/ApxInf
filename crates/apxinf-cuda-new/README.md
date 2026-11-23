@@ -407,7 +407,7 @@ The Norm Spec version is 10; its layout and the GEMM recipe contract are unchang
 ## Scoped independent capture branches
 
 The execution helper capture_independent changes only CUDA Graph dependencies.
-It returns false without calling either branch when disabled or outside capture;
+It returns false without calling either branch outside capture;
 the caller must execute its original serial traversal then. A true result means
 both host closures ran in order, while their captured GPU subgraphs fork from the
 same prefix and join before the next consumer. The caller must prove disjoint
@@ -421,10 +421,9 @@ CUDA13 uses their promoted unversioned names. Graph edge queries select the
 corresponding SDK spelling too. See the [CUDA13 runtime reference](https://docs.nvidia.com/cuda/archive/13.0.3/cuda-runtime-api/group__CUDART__STREAM.html).
 It owns copied frontiers,
 checks capture graph/id/stream/device/thread, and rejects non-default edge data.
-Older SDK builds keep a default-off-compatible unsupported stub. An error, ignored
+Older SDK builds keep an unsupported stub. An error, ignored
 error, panic or unfinished scope poisons the enclosing capture; it is aborted
-before graph instantiation. No raw graph/dependency token is public. Default-off
-success and existing Session/Graph resource retention remain unchanged.
+before graph instantiation. No raw graph/dependency token is public. Existing Session/Graph resource retention remains unchanged.
 
 ## Qwen GDN target verification storage
 

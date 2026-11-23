@@ -30,7 +30,7 @@ impl Drop for Scope {
 
 /// Capture two independent GPU branches in one graph, keeping host operation order.
 ///
-/// Returns false without executing either closure outside capture or when disabled;
+/// Returns false without executing either closure outside capture;
 /// the caller then executes its original serial path. Returns true after a joined
 /// capture. This keeps preparation/eager operator traversals exactly unchanged.
 /// Caller must supply branches whose writable GPU buffers and provider workspaces
@@ -41,12 +41,11 @@ impl Drop for Scope {
 /// Rust closure captures. No raw graph/frontier token is public or can escape.
 pub fn capture_independent<T>(
     ctx: &CudaContext,
-    enabled: bool,
     state: &mut T,
     first: impl FnOnce(&mut T) -> Result<()>,
     second: impl FnOnce(&mut T) -> Result<()>,
 ) -> Result<bool> {
-    if !enabled || !workspace::is_capturing() {
+    if !workspace::is_capturing() {
         return Ok(false);
     }
     if let Err(error) = workspace::validate_capture_target(ctx.device_id(), ctx.stream().handle() as usize) {
@@ -119,7 +118,7 @@ mod tests {
     fn second(ctx:&CudaContext,b:&mut Bank)->Result<()> {ops::gemm(ctx,ops::GemmArgs::new(&b.input,&b.weight,&mut b.b))}
     fn forward(ctx:&CudaContext,b:&mut Bank,fork:bool)->Result<()> {
         b.prefix.fill_async(0x12,ctx.stream()).map_err(Error::Cuda)?;
-        if !capture_independent(ctx,fork,b,|s|first(ctx,s),|s|second(ctx,s))? {first(ctx,b)?;second(ctx,b)?;}
+        if !fork || !capture_independent(ctx,b,|s|first(ctx,s),|s|second(ctx,s))? {first(ctx,b)?;second(ctx,b)?;}
         ops::elementwise::add(ctx,&b.a,&b.b,&b.out)
     }
     #[test]
@@ -168,24 +167,24 @@ mod tests {
             INJECT.with(|f|f.set(Some(fault)));
             let result=capture(&ctx,||{
                 buffer.fill_async(0,ctx.stream()).map_err(Error::Cuda)?;
-                let _ignored=capture_independent(&ctx,true,&mut(),|_|buffer.fill_async(1,ctx.stream()).map_err(Error::Cuda),|_|other.fill_async(2,ctx.stream()).map_err(Error::Cuda));
+                let _ignored=capture_independent(&ctx,&mut(),|_|buffer.fill_async(1,ctx.stream()).map_err(Error::Cuda),|_|other.fill_async(2,ctx.stream()).map_err(Error::Cuda));
                 Ok(())
             });assert!(result.is_err());recovered(&ctx,&buffer);
         }
         // The backend trait's split begin/end entry point must fail closed too.
         crate::graph::begin(&ctx).unwrap();
         INJECT.with(|f|f.set(Some(Fault::AfterFirst)));
-        let _ignored=capture_independent(&ctx,true,&mut(),|_|buffer.fill_async(1,ctx.stream()).map_err(Error::Cuda),|_|other.fill_async(2,ctx.stream()).map_err(Error::Cuda));
+        let _ignored=capture_independent(&ctx,&mut(),|_|buffer.fill_async(1,ctx.stream()).map_err(Error::Cuda),|_|other.fill_async(2,ctx.stream()).map_err(Error::Cuda));
         assert!(crate::graph::end(&ctx).is_err());recovered(&ctx,&buffer);
         let result=capture(&ctx,||{
-            let panic=catch_unwind(AssertUnwindSafe(||capture_independent(&ctx,true,&mut(),|_|buffer.fill_async(1,ctx.stream()).map_err(Error::Cuda),|_|panic!("injected shared panic"))));
+            let panic=catch_unwind(AssertUnwindSafe(||capture_independent(&ctx,&mut(),|_|buffer.fill_async(1,ctx.stream()).map_err(Error::Cuda),|_|panic!("injected shared panic"))));
             assert!(panic.is_err());Ok(())
         });assert!(result.is_err());recovered(&ctx,&buffer);
-        let outer=catch_unwind(AssertUnwindSafe(||capture(&ctx,||{capture_independent(&ctx,true,&mut(),|_|Ok(()),|_|panic!("uncaught shared panic"))?;Ok(())})));assert!(outer.is_err());recovered(&ctx,&buffer);
+        let outer=catch_unwind(AssertUnwindSafe(||capture(&ctx,||{capture_independent(&ctx,&mut(),|_|Ok(()),|_|panic!("uncaught shared panic"))?;Ok(())})));assert!(outer.is_err());recovered(&ctx,&buffer);
         let mut edge_bytes=0;
         for offset in 0..64 {let zero=unsafe{apxinf_capture_frontier_test_edge(offset,0)};if zero<0{break}assert_eq!(zero,1);assert_eq!(unsafe{apxinf_capture_frontier_test_edge(offset,1)},0);edge_bytes+=1;}assert!(edge_bytes>0&&edge_bytes<64);
         let second=CudaContext::new_with_autotune(0,false).unwrap();
-        assert!(capture(&ctx,||{let _ignored=capture_independent(&second,true,&mut(),|_|Ok(()),|_|Ok(()));Ok(())}).is_err());recovered(&ctx,&buffer);
-        let mut calls=0;assert!(!capture_independent(&ctx,true,&mut calls,|s|{*s+=1;Ok(())},|s|{*s+=1;Ok(())}).unwrap());assert_eq!(calls,0);
+        assert!(capture(&ctx,||{let _ignored=capture_independent(&second,&mut(),|_|Ok(()),|_|Ok(()));Ok(())}).is_err());recovered(&ctx,&buffer);
+        let mut calls=0;assert!(!capture_independent(&ctx,&mut calls,|s|{*s+=1;Ok(())},|s|{*s+=1;Ok(())}).unwrap());assert_eq!(calls,0);
     }
 }
