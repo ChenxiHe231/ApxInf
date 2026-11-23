@@ -244,8 +244,6 @@ pub struct BaseMoeScratch {
     inter_scales: Option<Tensor>,
     /// CuTeDSL scratch required by the SM110 TensorRT-Edge-LLM provider.
     edge_workspace: Option<CudaBuffer>,
-    /// Experimental graph topology; frozen at allocation, only verified M1/M4.
-    ffn_fork: bool,
     tokens: usize,
     hidden: usize,
     experts: usize,
@@ -331,8 +329,6 @@ impl BaseMoeScratch {
                     .transpose()?
             },
             edge_workspace,
-            ffn_fork: matches!(tokens, 1 | 4)
-                && std::env::var("APXINF_QWEN35_FFN_FORK").as_deref() == Ok("1"),
             tokens,
             hidden,
             experts,
@@ -357,7 +353,9 @@ impl BaseMoeScratch {
             ctx,
             ops::GemmArgs::new(input, &weights.router.weight, &mut self.router_logits),
         )?;
-        if self.ffn_fork {
+        // M1/M4 are the verified production shapes for the independent
+        // routed/shared FFN capture. Eager and prepare execution remain serial.
+        if matches!(self.tokens, 1 | 4) {
             if let DeviceNvfp4RoutedExperts::Edge(edge) = &weights.routed_experts {
                 if self.run_edge_capture_fork(ctx, weights, edge, input)? { return Ok(()); }
             }

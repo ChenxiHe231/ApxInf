@@ -8,7 +8,7 @@ use std::{path::PathBuf,ffi::OsString};
 struct Env(Vec<(&'static str,Option<OsString>)>);
 impl Env {
     fn baseline()->Self {
-        let values=[("APXINF_QWEN35_FFN_FORK","1"),("APXINF_QWEN35_SHARED_SWIGLU_QUANT","0"),("APXINF_QWEN35_SHARED_GATE_UP","0"),("APXINF_MOE_SETUP_PREFIX","0")];
+        let values=[("APXINF_QWEN35_SHARED_SWIGLU_QUANT","0"),("APXINF_QWEN35_SHARED_GATE_UP","0")];
         let mut saved=values.iter().map(|(k,_)|(*k,std::env::var_os(k))).collect::<Vec<_>>();
         saved.push(("APXINF_QWEN35_MOE_WS_POISON",std::env::var_os("APXINF_QWEN35_MOE_WS_POISON")));
         std::env::remove_var("APXINF_QWEN35_MOE_WS_POISON");
@@ -56,7 +56,7 @@ fn weights(m:&DeviceNvfp4Moe)->Vec<&Tensor>{
 }
 #[test]
 #[ignore="root-owned real checkpoint CUDA13.2 exact/resource gate, no performance result"]
-fn actual_layer_same_session_ffn_fork_exact_guards_and_serial_boundaries(){
+fn actual_layer_same_session_default_ffn_graph_exact_guards_and_serial_boundaries(){
     let _env=Env::baseline();
     let ctx=CudaContext::new_with_recipe_options(0,false,std::env::var("APXINF_RECIPE_CACHE_DIR").ok()).unwrap();
     let before_load=ctx.memory_info().unwrap();
@@ -65,7 +65,7 @@ fn actual_layer_same_session_ffn_fork_exact_guards_and_serial_boundaries(){
     let moe=super::super::device_weights::load_qwen35_moe_layer_from_path(&ctx,&config,&path,27).unwrap();ctx.synchronize().unwrap();
     let source_before=weights(&moe).into_iter().map(hash).collect::<Vec<_>>();
     for m in [1,4,2,3]{
-        let mut s=BaseMoeScratch::new(&ctx,m,2048,256,8,512).unwrap();let eligible=matches!(m,1|4);assert_eq!(s.ffn_fork,eligible);
+        let mut s=BaseMoeScratch::new(&ctx,m,2048,256,8,512).unwrap();let eligible=matches!(m,1|4);
         let mut guards=guard_scratch(&ctx,&mut s);
         let mut input=zeros(&ctx,vec![m,2048],DType::BF16).unwrap();guard_tensor(&ctx,&mut input,&mut guards);
         let ranges=snapshot_ranges(&s);
@@ -73,10 +73,7 @@ fn actual_layer_same_session_ffn_fork_exact_guards_and_serial_boundaries(){
         s.edge_workspace.as_ref().unwrap().fill_async(0,ctx.stream()).unwrap();
         let session=ExecutionSession::with_capacity(32*1024*1024,0).unwrap();
         ops::prepare_with_session(&session,||s.run(&ctx,&moe,&input)).unwrap();ctx.synchronize().unwrap();let arena_prepared=session.used();
-        s.ffn_fork=false;
-        let flat=ops::with_session(&session,||capture(&ctx,||s.run(&ctx,&moe,&input))).unwrap();
-        s.ffn_fork=eligible;
-        let fork=ops::with_session(&session,||capture(&ctx,||s.run(&ctx,&moe,&input))).unwrap();
+        let graph=ops::with_session(&session,||capture(&ctx,||s.run(&ctx,&moe,&input))).unwrap();
         let bound_before=ctx.memory_info().unwrap();assert!(before_load.0.saturating_sub(bound_before.0)<2*1024*1024*1024,"exact gate exceeds2GiB device delta");
         let mut first=None;let mut distinct=None;
         for(pass,pattern)in [0usize,1,0,2].into_iter().enumerate(){
@@ -87,17 +84,15 @@ fn actual_layer_same_session_ffn_fork_exact_guards_and_serial_boundaries(){
             poison(&ctx,&s,if pass%2==0{0}else{255});
             ops::with_session(&session,||s.run(&ctx,&moe,&input)).unwrap();ctx.synchronize().unwrap();let expected=state(&s);
             assert!(expected.0.chunks_exact(2).all(|x|bf16::from_bits(u16::from_le_bytes([x[0],x[1]])).to_f32().is_finite()));
-            poison(&ctx,&s,255);
-            flat.replay().unwrap();ctx.synchronize().unwrap();assert_eq!(state(&s),expected,"flat/eager exact");
             poison(&ctx,&s,0);
-            fork.replay().unwrap();ctx.synchronize().unwrap();assert_eq!(state(&s),expected,"fork/eager output/IDs/weights/packed/SF exact");
+            graph.replay().unwrap();ctx.synchronize().unwrap();assert_eq!(state(&s),expected,"default graph/eager output/IDs/weights/packed/SF exact");
             assert_eq!(bytes(&input),data,"input readonly");for g in &guards{g.check(&ctx)}
             assert_eq!(weights(&moe).into_iter().map(hash).collect::<Vec<_>>(),source_before,"W/SF/scalars readonly");
             if pass==0{first=Some(expected.clone())}if pass==1{distinct=Some(expected.1.clone())}if pass==2{assert_eq!(first.as_ref().unwrap(),&expected,"0->1->0 restore");assert_ne!(distinct.as_ref().unwrap(),&expected.1,"route distribution must change")}
         }
         let bound_after=ctx.memory_info().unwrap();assert!(arena_prepared<=session.capacity());
-        eprintln!("FFN_SAME_SESSION_GATE M={m} fork={eligible} ranges={ranges:?} guarded_payload={} arena={arena_prepared}/{} mem_before={bound_before:?} mem_after={bound_after:?}",guards.iter().map(|g|g.size).sum::<usize>(),session.capacity());
+        eprintln!("FFN_SAME_SESSION_GATE M={m} default_fork={eligible} ranges={ranges:?} guarded_payload={} arena={arena_prepared}/{} mem_before={bound_before:?} mem_after={bound_after:?}",guards.iter().map(|g|g.size).sum::<usize>(),session.capacity());
         // Graphs are destroyed before their explicit fixed-op scratch owners.
-        fork.replay().unwrap();drop(fork);ctx.synchronize().unwrap();drop(flat);for g in &guards{g.check(&ctx)}
+        graph.replay().unwrap();drop(graph);ctx.synchronize().unwrap();for g in &guards{g.check(&ctx)}
     }
 }
