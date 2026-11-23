@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <mutex>
 #include <string>
@@ -46,6 +48,18 @@ constexpr int kMaxDecodeExperts = 512;
 constexpr int kMaxResidentThreadsPerSm = 2048;
 constexpr float kSfScaleEpsilon = 1.0e-20f;
 constexpr size_t kAlignment = 256;
+
+// Opt-in backend scheduling variant only. Graph capture freezes this choice;
+// launch a fresh worker/model for A/B rather than changing env after capture.
+bool uses_decode_setup_prefix(const apxinf_moe_edge_nvfp4_spec_t& spec) {
+  if (spec.dtype != APXINF_DTYPE_BF16 || spec.experts != 256 ||
+      spec.top_k != 8 || spec.hidden != 2048 || spec.intermediate != 512 ||
+      (spec.tokens != 1 && spec.tokens != 4)) {
+    return false;
+  }
+  const char* enabled = std::getenv("APXINF_MOE_SETUP_PREFIX");
+  return enabled != nullptr && std::strcmp(enabled, "1") == 0;
+}
 
 bool uses_parallel_layout(int tokens) {
   // Only use sizes covered by the prefill operator screen. Small batches
@@ -363,6 +377,68 @@ __global__ __launch_bounds__(512, 4) void small_batch_setup_kernel(
   }
 }
 
+// Integer metadata only; quantize_row and the original kernel stay unchanged.
+__global__ __launch_bounds__(512, 4) void small_batch_setup_prefix_kernel(
+    int tokens, int top_k, int hidden, int experts, const __nv_bfloat16* input,
+    const int32_t* expert_ids, const float* expert_scales,
+    int32_t* permuted_idx, int32_t* tile_group, int32_t* tile_limit,
+    int32_t* num_tiles, uint32_t* output_fp4, uint8_t* output_sf) {
+  __shared__ int32_t counts[kMaxDecodeExperts];
+  __shared__ int32_t offsets[kMaxDecodeExperts];
+  __shared__ int32_t scatter[kMaxDecodeExperts];
+  __shared__ int32_t warp_prefix[16];
+  const int tid = threadIdx.x;
+  const int routes = tokens * top_k;
+  if (blockIdx.x == 0) {
+    for (int e = tid; e < experts; e += blockDim.x) counts[e] = scatter[e] = 0;
+    __syncthreads();
+    for (int row = tid; row < routes; row += blockDim.x)
+      atomicAdd_block(&counts[expert_ids[row]], 1);
+    __syncthreads();
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+    const bool active = tid < experts && counts[tid] > 0;
+    const unsigned mask = __ballot_sync(0xffffffffu, active);
+    if (lane == 0) warp_prefix[warp] = __popc(mask);
+    __syncthreads();
+    if (warp == 0) {
+      const int value = lane < 16 ? warp_prefix[lane] : 0;
+      int sum = value;
+#pragma unroll
+      for (int delta = 1; delta < 16; delta <<= 1) {
+        const int previous = __shfl_up_sync(0xffffffffu, sum, delta);
+        if (lane >= delta) sum += previous;
+      }
+      if (lane < 16) warp_prefix[lane] = sum - value;
+      if (lane == 15) num_tiles[0] = sum;
+    }
+    __syncthreads();
+    if (tid < experts) {
+      const unsigned lower = (1u << lane) - 1u;
+      const int rank = warp_prefix[warp] + __popc(mask & lower);
+      offsets[tid] = rank * kRowTile;
+      if (active) {
+        tile_group[rank] = tid;
+        tile_limit[rank] = rank * kRowTile + counts[tid];
+      }
+    }
+    __syncthreads();
+    for (int row = tid; row < routes; row += blockDim.x) {
+      const int expert = expert_ids[row];
+      permuted_idx[offsets[expert] + atomicAdd_block(&scatter[expert], 1)] = row;
+    }
+    return;
+  }
+  const int quant_blocks = gridDim.x - 1;
+  for (int row = blockIdx.x - 1; row < routes; row += quant_blocks) {
+    const int token = row / top_k;
+    quantize_row(input + static_cast<int64_t>(token) * hidden, hidden,
+                 expert_scales[expert_ids[row]],
+                 output_fp4 + static_cast<int64_t>(row) * hidden / 8,
+                 output_sf + static_cast<int64_t>(row) * hidden / kSfVecSize);
+  }
+}
+
 std::once_flag modules_once;
 nvfp4_moe_sm110_fc1_swiglu_n128_Kernel_Module_t fc1_module{};
 nvfp4_moe_sm110_fc2_n128_bf16_Kernel_Module_t fc2_module{};
@@ -433,11 +509,19 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
 
   if (spec.tokens <= 4) {
     const int quant_blocks = std::min<int>(routes, properties.multiProcessorCount * 4);
-    small_batch_setup_kernel<<<quant_blocks + 1, kThreads, 0, stream>>>(
-        spec.tokens, spec.top_k, spec.hidden, spec.experts,
-        static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
-        bindings.input_global_scale, permutation, tile_group, tile_limit,
-        num_tiles, input_fp4, input_sf);
+    if (uses_decode_setup_prefix(spec)) {
+      small_batch_setup_prefix_kernel<<<quant_blocks + 1, kThreads, 0, stream>>>(
+          spec.tokens, spec.top_k, spec.hidden, spec.experts,
+          static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
+          bindings.input_global_scale, permutation, tile_group, tile_limit,
+          num_tiles, input_fp4, input_sf);
+    } else {
+      small_batch_setup_kernel<<<quant_blocks + 1, kThreads, 0, stream>>>(
+          spec.tokens, spec.top_k, spec.hidden, spec.experts,
+          static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
+          bindings.input_global_scale, permutation, tile_group, tile_limit,
+          num_tiles, input_fp4, input_sf);
+    }
   } else {
     if (uses_parallel_layout(spec.tokens)) {
       apxinf::experimental::parallel_moe_layout::launch(
