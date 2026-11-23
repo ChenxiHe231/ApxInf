@@ -61,7 +61,7 @@ pub use gdn::{
     gdn_causal_conv_forward, gdn_causal_conv_step, gdn_causal_conv_verify, gdn_chunk_scan,
     gdn_continue, gdn_conv_prepare, gdn_decay_and_beta, gdn_first_prefill, gdn_gated_norm,
     gdn_l2_normalize_heads, gdn_l2_normalize_heads_seq, gdn_prefill, gdn_prefill_workspace_bytes,
-    gdn_prepare_prefill, gdn_recurrent_step, gdn_recurrent_verify, gdn_state_elements,
+    gdn_prepare_prefill, gdn_recurrent_step, gdn_recurrent_verify, gdn_recurrent_verify_from_source, gdn_state_elements,
     GdnChunkScanArgs, GdnChunkScanInput, GdnContinuationArgs, GdnDecayAndBetaArgs,
     GdnFirstPrefillArgs, GdnGate, GdnGatedNormArgs, GdnQuantizedOutput,
 };
@@ -118,7 +118,7 @@ pub use qwen35_attention::{
     QWEN35_KV_CACHE_BLOCK_TOKENS, QWEN35_SUFFIX_FMHA_AVAILABLE,
 };
 pub use qwen35_mixers::{
-    qwen35_gdn_decode, qwen35_gdn_prefill, Qwen35GdnCakeScratch, Qwen35GdnCoreWeights,
+    qwen35_gdn_decode, qwen35_gdn_prefill, qwen35_gdn_verify_from_source, Qwen35GdnCakeScratch, Qwen35GdnCoreWeights,
     Qwen35GdnDecodeArgs, Qwen35GdnDecodeScratch, Qwen35GdnPrefillArgs, Qwen35GdnPrefillScratch,
     Qwen35GdnState, Qwen35GdnStateCheckpoints, QWEN35_GDN_CONV_WIDTH, QWEN35_GDN_EPSILON,
     QWEN35_GDN_HEAD_DIM, QWEN35_GDN_KEY_HEADS, QWEN35_GDN_QKV_WIDTH, QWEN35_GDN_Q_WIDTH,

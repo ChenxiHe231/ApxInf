@@ -425,3 +425,18 @@ Older SDK builds keep a default-off-compatible unsupported stub. An error, ignor
 error, panic or unfinished scope poisons the enclosing capture; it is aborted
 before graph instantiation. No raw graph/dependency token is public. Default-off
 success and existing Session/Graph resource retention remain unchanged.
+
+## Qwen GDN target verification storage
+
+Target verification reads the committed recurrent state as immutable input and
+writes the opposite physical bank directly. It saves only the first T-1 recurrent
+checkpoints; full acceptance uses the live final state, and partial acceptance
+uses the retained prefix. Convolution state and checkpoints retain their full
+semantics. Each bank binds the opposite bank before Graph capture, and captured
+operations retain all referenced allocations across replay and bank swaps.
+
+This is the default Qwen target-verification path. There is no environment
+variable, enable flag, or selectable storage policy. The source-based verifier
+API requires a disjoint readonly source and validates geometry, bounds and
+alignment before launch. The full-checkpoint in-place primitive remains a
+separate semantic for callers requiring every checkpoint and for reference tests.

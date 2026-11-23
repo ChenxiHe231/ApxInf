@@ -478,6 +478,26 @@ extern "C" {
         v_row_stride: i64,
         stream: CudaStream,
     ) -> i32;
+    pub(crate) fn apxinf_gdn_recurrent_verify_from_source(
+        state: *mut c_void,
+        source: *const c_void,
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        decay: *const c_void,
+        beta: *const c_void,
+        output: *mut c_void,
+        checkpoints: *mut c_void,
+        tokens: i64,
+        v_heads: i64,
+        k_heads: i64,
+        v_dim: i64,
+        k_dim: i64,
+        q_row_stride: i64,
+        k_row_stride: i64,
+        v_row_stride: i64,
+        stream: CudaStream,
+    ) -> i32;
     pub(crate) fn apxinf_gdn_gated_norm(
         input: *const c_void,
         gate: *const c_void,

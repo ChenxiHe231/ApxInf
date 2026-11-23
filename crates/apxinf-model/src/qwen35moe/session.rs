@@ -381,6 +381,11 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             }
         }
 
+        for (committed, shadow) in committed_gdn.iter_mut().zip(shadow_gdn.iter_mut()) {
+            committed.bind_verify_source_from(shadow);
+            shadow.bind_verify_source_from(committed);
+        }
+
         let gdn_layers = architecture.gdn_layers().count();
         let mut verify_profiles = Vec::with_capacity(QWEN35_MTP_VERIFY_ROWS - 1);
         for rows in 2..=QWEN35_MTP_VERIFY_ROWS {
@@ -922,7 +927,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         let start_position = self.position;
         self.validate_capacity(start_position, input_rows)?;
         self.bump_shadow_generation()?;
-        self.prepare_shadow_from_committed(ctx)?;
+        self.prepare_shadow_from_committed_impl(ctx, true)?;
         let profile_index = input_rows - 2;
         let profile = self
             .verify_profiles
@@ -1149,8 +1154,13 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
     }
 
     fn prepare_shadow_from_committed(&mut self, ctx: &CudaContext) -> Result<()> {
+        self.prepare_shadow_from_committed_impl(ctx, false)
+    }
+
+    fn prepare_shadow_from_committed_impl(&mut self, ctx: &CudaContext, verifier: bool) -> Result<()> {
         for (committed, shadow) in self.committed_gdn.iter().zip(&self.shadow_gdn) {
-            shadow.copy_from(ctx, committed)?;
+            if verifier { shadow.copy_for_verify_from(ctx, committed)?; }
+            else { shadow.copy_from(ctx, committed)?; }
         }
         if self.shadow_attention_valid > self.position {
             return Err(invalid(
@@ -1466,10 +1476,11 @@ pub(super) mod gpu_raw_protocol {
                 let checkpoint_bytes:Vec<Pair>=checkpoints.iter().map(|x| {
                     let (a,b)=x.gpu_test_tensors();Ok((raw(a)?,raw(b)?))
                 }).collect::<Result<_>>()?;
-                let selected:Vec<Pair>=checkpoint_bytes.iter().zip(&committed_gdn).map(|(cp,state)| {
+                let verified_gdn=gdn(&target.shadow_gdn)?;
+                let selected:Vec<Pair>=checkpoint_bytes.iter().zip(&committed_gdn).zip(&verified_gdn).map(|((cp,state),live)| {
                     assert_eq!(cp.0.len(),(depth+1)*state.0.len());assert_eq!(cp.1.len(),(depth+1)*state.1.len());
                     (checkpoint_row(&cp.0,state.0.len(),depth+1,keep),
-                     checkpoint_row(&cp.1,state.1.len(),depth+1,keep))
+                     if keep == depth+1 { live.1.clone() } else { checkpoint_row(&cp.1,state.1.len(),depth+1,keep) })
                 }).collect();
                 let prepared=target.prepare_target_commit(&f.ctx,&f.decoder,&f.weights,verified,keep)?;
                 f.ctx.synchronize().map_err(Error::Cuda)?;
@@ -1496,6 +1507,26 @@ pub(super) mod gpu_raw_protocol {
                 same("old A GDN remains unchanged",&gdn(&target.shadow_gdn)?,&committed_gdn);
                 same("snapshot KV deepfreeze",&caches(&snapshot.attention)?,&frozen_snapshot_kv);
                 same("snapshot GDN deepfreeze",&gdn(&snapshot.gdn)?,&frozen_snapshot_gdn);
+                {
+                    // A second round now writes the opposite physical bank and
+                    // replays the other captured verifier graph set.
+                    let prior_gdn=gdn(&target.committed_gdn)?;
+                    let next=target.verify_target_chunk_device(&f.ctx,&f.decoder,&f.weights,&input)?;
+                    f.ctx.synchronize().map_err(Error::Cuda)?;
+                    same("second round committed GDN readonly",&gdn(&target.committed_gdn)?,&prior_gdn);
+                    let cps=&target.verify_profiles[depth-1].gdn_checkpoints;
+                    let next_selected:Vec<Pair>=cps.iter().zip(&prior_gdn).map(|(cp,old)| {
+                        let (a,b)=cp.gpu_test_tensors();
+                        Ok((checkpoint_row(&raw(a)?,old.0.len(),depth+1,1),
+                            checkpoint_row(&raw(b)?,old.1.len(),depth+1,1)))
+                    }).collect::<Result<_>>()?;
+                    let prepared=target.prepare_target_commit(&f.ctx,&f.decoder,&f.weights,next,1)?;
+                    f.ctx.synchronize().map_err(Error::Cuda)?;
+                    same("second-bank partial accept GDN",&gdn(&target.shadow_gdn)?,&next_selected);
+                    target.publish_target_commit(prepared)?;
+                    same("second-bank published GDN",&gdn(&target.committed_gdn)?,&next_selected);
+                    same("second-bank old committed GDN readonly",&gdn(&target.shadow_gdn)?,&prior_gdn);
+                }
                 // Destroy only destination-valid bytes before restore so an
                 // accidental omitted copy cannot pass because prefix matched.
                 for cache in &target.committed_attention {

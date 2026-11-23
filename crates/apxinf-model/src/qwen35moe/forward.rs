@@ -1180,6 +1180,8 @@ impl BaseMoeScratch {
 pub struct GdnState {
     conv: Tensor,
     recurrent: Tensor,
+    // Physical-bank binding, retained across committed/shadow vector swaps.
+    verify_source: Option<Tensor>,
 }
 
 /// Four-row target verification checkpoints for one GDN layer.
@@ -1257,6 +1259,7 @@ impl GdnStateCheckpoints {
 impl GdnState {
     pub fn new(ctx: &CudaContext) -> Result<Self> {
         Ok(Self {
+            verify_source: None,
             conv: zeros(
                 ctx,
                 vec![ops::QWEN35_GDN_QKV_WIDTH, ops::QWEN35_GDN_CONV_WIDTH],
@@ -1292,6 +1295,21 @@ impl GdnState {
     pub fn copy_from(&self, ctx: &CudaContext, source: &Self) -> Result<()> {
         transfers::copy_cuda_to_cuda(ctx, &source.conv, &self.conv)?;
         transfers::copy_cuda_to_cuda(ctx, &source.recurrent, &self.recurrent)
+    }
+
+    /// Fixed source for the opposite bank's verifier graphs. Tensor clones
+    /// retain storage without owning the other state object (no reference cycle).
+    pub(super) fn bind_verify_source_from(&mut self, source: &Self) {
+        self.verify_source = Some(source.recurrent.clone());
+    }
+
+    pub(super) fn copy_for_verify_from(&self, ctx: &CudaContext, source: &Self) -> Result<()> {
+        // The verifier reads the immutable opposite bank directly. Its source
+        // binding is installed before either bank's graphs are captured.
+        if self.verify_source.is_none() {
+            return Err(invalid("GDN verifier requires a bound committed state"));
+        }
+        transfers::copy_cuda_to_cuda(ctx, &source.conv, &self.conv)
     }
 
     pub(super) fn first_mismatch(
@@ -1442,10 +1460,7 @@ impl GdnScratch {
             vec![self.tokens, ops::QWEN35_GDN_VALUE_WIDTH],
             DType::BF16,
         )?;
-        ops::qwen35_gdn_prefill(
-            ctx,
-            self.tokens,
-            &ops::Qwen35GdnPrefillArgs {
+        let args = ops::Qwen35GdnPrefillArgs {
                 projected_qkv: &self.projected_qkv,
                 z: &z,
                 a: &self.a,
@@ -1461,8 +1476,14 @@ impl GdnScratch {
                     gated_output: &self.gated_output,
                 },
                 cake: self.cake_scratch(),
-            },
-        )?;
+            };
+        if checkpoints.is_some() {
+            let source = state.verify_source.as_ref()
+                .ok_or_else(|| invalid("GDN verifier requires a bound committed state"))?;
+            ops::qwen35_gdn_verify_from_source(ctx, self.tokens, &args, source)?;
+        } else {
+            ops::qwen35_gdn_prefill(ctx, self.tokens, &args)?;
+        }
         self.output_projection(ctx, weights)
     }
 

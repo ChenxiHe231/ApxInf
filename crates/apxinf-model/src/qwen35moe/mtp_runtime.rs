@@ -3306,6 +3306,24 @@ pub(super) mod gpu_raw_protocol {
         draft_gate(&f)?;
         Ok(())
     }
+    #[test]
+    #[ignore = "exclusive GPU; target-only GDN storage/partial-full commit/snapshot/bank gate"]
+    fn real_checkpoint_target_gdn_storage_bank_protocol() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let f = Fixture::load()?;
+        super::super::session::gpu_raw_protocol::target_gate(&f)?;
+        Ok(())
+    }
+    #[test]
+    #[ignore = "preparation only: fills target-only storage gate recipe cache; never a performance result"]
+    fn prepare_target_gdn_storage_recipes() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let argv: Vec<String> = std::env::args().collect();
+        assert!(argv.iter().any(|s| s == "--exact") && argv.iter().any(|s| s == "--ignored")
+            && argv.iter().any(|s| s == "qwen35moe::mtp_runtime::gpu_raw_protocol::prepare_target_gdn_storage_recipes")
+            && argv.iter().any(|s| s == "--test-threads=1"));
+        let f = Fixture::load_with_autotune(true)?;
+        super::super::session::gpu_raw_protocol::target_gate(&f)?;
+        Ok(())
+    }
     // Recipe preparation is an explicit different ignored test and process.
     // It executes actual target/MTP operations; it is not a protocol/quality gate.
     fn prep_command(

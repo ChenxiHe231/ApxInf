@@ -79,6 +79,33 @@ extern "C" apxinf_status_t apxinf_gdn_recurrent_verify(
   });
 }
 
+extern "C" apxinf_status_t apxinf_gdn_recurrent_verify_from_source(
+    void* state, const void* source, const void* q, const void* k, const void* v,
+    const void* decay, const void* beta, void* output, void* checkpoints,
+    int64_t tokens, int64_t v_heads, int64_t k_heads, int64_t v_dim,
+    int64_t k_dim, int64_t q_row_stride, int64_t k_row_stride,
+    int64_t v_row_stride, apxinf_cuda_stream_t stream) {
+  return abi_boundary([&] {
+    if (source == nullptr || source == state || state == nullptr || q == nullptr || k == nullptr || v == nullptr ||
+        decay == nullptr || beta == nullptr || output == nullptr ||
+        checkpoints == nullptr || !extent(tokens) || !extent(v_heads) ||
+        !extent(k_heads) || !extent(v_dim) || !extent(k_dim) ||
+        !extent(q_row_stride) || !extent(k_row_stride) ||
+        !extent(v_row_stride)) {
+      throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
+                    "invalid GDN recurrent verify arguments");
+    }
+    check(apxinf::cuda_new::gdn_ops::gdn_recurrent_verify_from_source(
+              state, source, q, k, v, decay, beta, output, checkpoints,
+              static_cast<int>(tokens), static_cast<int>(v_heads),
+              static_cast<int>(k_heads), static_cast<int>(v_dim),
+              static_cast<int>(k_dim), static_cast<int>(q_row_stride),
+              static_cast<int>(k_row_stride), static_cast<int>(v_row_stride),
+              static_cast<cudaStream_t>(stream)),
+          "GDN recurrent verify");
+  });
+}
+
 extern "C" apxinf_status_t apxinf_gdn_gated_norm(
     const void* input, const void* gate, const void* weight, void* output,
     int64_t heads, int64_t head_dim, float epsilon,

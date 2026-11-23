@@ -31,6 +31,15 @@ int gdn_recurrent_verify(void* state, const void* q, const void* k,
                          int q_row_stride, int k_row_stride,
                          int v_row_stride, cudaStream_t stream);
 
+// Readonly source supplies the initial recurrent state. Only the first T-1
+// checkpoints are written; the final live state remains authoritative.
+int gdn_recurrent_verify_from_source(void* state, const void* source,
+                         const void* q, const void* k, const void* v,
+                         const void* decay, const void* beta, void* output,
+                         void* checkpoints, int tokens, int v_heads, int k_heads,
+                         int v_dim, int k_dim, int q_row_stride, int k_row_stride,
+                         int v_row_stride, cudaStream_t stream);
+
 // Per-head RMSNorm followed by the swish output gate.
 //
 // Qwen3.5 sets `output_gate_type: swish`, so the gate is silu(z); a

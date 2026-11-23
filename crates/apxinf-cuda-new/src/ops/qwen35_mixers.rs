@@ -190,7 +190,34 @@ pub fn qwen35_gdn_prefill(
     tokens: usize,
     args: &Qwen35GdnPrefillArgs<'_>,
 ) -> Result<()> {
+    qwen35_gdn_prefill_impl(ctx, tokens, args, None)
+}
+
+/// Target verification reads immutable committed recurrent state and saves
+/// only the partial-accept prefixes. All checks precede convolution writes.
+pub fn qwen35_gdn_verify_from_source(
+    ctx: &CudaContext, tokens: usize, args: &Qwen35GdnPrefillArgs<'_>, source: &Tensor,
+) -> Result<()> {
+    qwen35_gdn_prefill_impl(ctx, tokens, args, Some(source))
+}
+
+fn qwen35_gdn_prefill_impl(
+    ctx: &CudaContext, tokens: usize, args: &Qwen35GdnPrefillArgs<'_>, source: Option<&Tensor>,
+) -> Result<()> {
     validate_prefill(ctx, tokens, args)?;
+
+    if let Some(source) = source {
+        let checkpoints = args.checkpoints.as_ref().ok_or_else(|| invalid("GDN storage policy requires verifier checkpoints"))?;
+        if !(2..=4).contains(&tokens) { return Err(invalid("GDN verifier storage policy requires2..4 rows")); }
+        super::gdn::validate_verify_storage_alignment(args.state.recurrent, checkpoints.recurrent)?;
+        {
+            super::gdn::validate_verify_source(ctx, source, args.state.recurrent, &[
+                args.state.conv, args.state.recurrent, args.scratch.convolved_qkv,
+                args.scratch.decay, args.scratch.beta, args.scratch.core_output,
+                args.scratch.gated_output, checkpoints.conv, checkpoints.recurrent,
+            ])?;
+        }
+    }
 
     if let Some(checkpoints) = args.checkpoints.as_ref() {
         // Target verification is only four rows, but the old path launched
@@ -245,6 +272,23 @@ pub fn qwen35_gdn_prefill(
             vec![tokens, QWEN35_GDN_VALUE_HEADS, QWEN35_GDN_HEAD_DIM],
             DType::BF16,
         )?;
+        if let Some(source) = source {
+            super::gdn::gdn_recurrent_verify_from_source(
+            ctx,
+            args.state.recurrent,
+            args.scratch.convolved_qkv,
+            args.scratch.decay,
+            args.scratch.beta,
+            &core_output,
+            checkpoints.recurrent,
+            tokens,
+            QWEN35_GDN_VALUE_HEADS,
+            QWEN35_GDN_KEY_HEADS,
+            [0, QWEN35_GDN_Q_WIDTH, 2 * QWEN35_GDN_Q_WIDTH],
+            QWEN35_GDN_QKV_WIDTH,
+            source,
+        )?;
+        } else {
         gdn_recurrent_verify(
             ctx,
             args.state.recurrent,
@@ -259,6 +303,7 @@ pub fn qwen35_gdn_prefill(
             [0, QWEN35_GDN_Q_WIDTH, 2 * QWEN35_GDN_Q_WIDTH],
             QWEN35_GDN_QKV_WIDTH,
         )?;
+        }
         let z = element_view(
             args.z,
             0,

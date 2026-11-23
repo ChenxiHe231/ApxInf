@@ -124,8 +124,10 @@ __global__ void recurrent_step_kernel(
 // Verification advances a short, fixed token sequence. Keeping the complete
 // 128-float state row resident across that sequence removes three redundant
 // state reads while still materializing every rollback checkpoint.
+template <bool PrefixOnly = false, bool SeparateSource = false>
 __global__ void recurrent_verify_kernel(
-    float* __restrict__ state, const __nv_bfloat16* __restrict__ q,
+    float* __restrict__ state, const float* __restrict__ initial_state,
+    const __nv_bfloat16* __restrict__ q,
     const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
     const float* __restrict__ decay, const float* __restrict__ beta,
     __nv_bfloat16* __restrict__ output, float* __restrict__ checkpoints,
@@ -145,7 +147,13 @@ __global__ void recurrent_verify_kernel(
 
   float4* row = reinterpret_cast<float4*>(
       state + (long long)global_row * k_dim);
-  float4 s = row[lane];
+  float4 s;
+  if constexpr (SeparateSource) {
+    s = reinterpret_cast<const float4*>(
+        initial_state + (long long)global_row * k_dim)[lane];
+  } else {
+    s = row[lane];
+  }
   const float q_scale = rsqrtf(static_cast<float>(k_dim));
 
   for (int token = 0; token < tokens; ++token) {
@@ -181,9 +189,11 @@ __global__ void recurrent_verify_kernel(
     s.z += delta * k2;
     s.w += delta * k3;
 
-    float4* checkpoint = reinterpret_cast<float4*>(
-        checkpoints + (((long long)token * total_rows + global_row) * k_dim));
-    checkpoint[lane] = s;
+    if (!PrefixOnly || token + 1 < tokens) {
+      float4* checkpoint = reinterpret_cast<float4*>(
+          checkpoints + (((long long)token * total_rows + global_row) * k_dim));
+      checkpoint[lane] = s;
+    }
 
     float out = s.x * __bfloat162float(q_row[0]) +
                 s.y * __bfloat162float(q_row[1]) +
@@ -1139,8 +1149,35 @@ int gdn_recurrent_verify(void* state, const void* q, const void* k,
   const int threads = kRowsPerBlock * 32;
   const int blocks =
       (v_heads * v_dim + kRowsPerBlock - 1) / kRowsPerBlock;
-  recurrent_verify_kernel<<<blocks, threads, 0, stream>>>(
-      static_cast<float*>(state), static_cast<const __nv_bfloat16*>(q),
+  recurrent_verify_kernel<><<<blocks, threads, 0, stream>>>(
+      static_cast<float*>(state), nullptr, static_cast<const __nv_bfloat16*>(q),
+      static_cast<const __nv_bfloat16*>(k),
+      static_cast<const __nv_bfloat16*>(v), static_cast<const float*>(decay),
+      static_cast<const float*>(beta), static_cast<__nv_bfloat16*>(output),
+      static_cast<float*>(checkpoints), tokens, v_heads, k_heads, v_dim,
+      k_dim, q_row_stride, k_row_stride, v_row_stride);
+  return cudaGetLastError() == cudaSuccess ? 0 : -3;
+}
+
+int gdn_recurrent_verify_from_source(void* state, const void* source, const void* q, const void* k,
+                         const void* v, const void* decay, const void* beta,
+                         void* output, void* checkpoints, int tokens,
+                         int v_heads, int k_heads, int v_dim, int k_dim,
+                         int q_row_stride, int k_row_stride,
+                         int v_row_stride, cudaStream_t stream) {
+  if (tokens <= 0 || v_heads <= 0 || k_heads <= 0 || v_dim <= 0 ||
+      k_dim <= 0 || v_heads % k_heads != 0) return -1;
+  if (k_dim != 128) return -4;
+  if (tokens > 8 || v_heads > INT32_MAX / v_dim ||
+      k_heads > INT32_MAX / k_dim || q_row_stride < k_heads * k_dim ||
+      k_row_stride < k_heads * k_dim || v_row_stride < v_heads * v_dim ||
+      (source == nullptr || source == state)) return -1;
+  constexpr int kRowsPerBlock = 8;
+  const int threads = kRowsPerBlock * 32;
+  const int blocks =
+      (v_heads * v_dim + kRowsPerBlock - 1) / kRowsPerBlock;
+      recurrent_verify_kernel<true, true><<<blocks, threads, 0, stream>>>(
+      static_cast<float*>(state), static_cast<const float*>(source), static_cast<const __nv_bfloat16*>(q),
       static_cast<const __nv_bfloat16*>(k),
       static_cast<const __nv_bfloat16*>(v), static_cast<const float*>(decay),
       static_cast<const float*>(beta), static_cast<__nv_bfloat16*>(output),

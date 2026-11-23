@@ -809,9 +809,12 @@ pub fn gdn_recurrent_verify(
         return Err(invalid("invalid GDN verifier recurrence geometry"));
     }
     let [q_offset, k_offset, v_offset] = offsets;
-    if q_offset + k_heads * k_dim > row_width
-        || k_offset + k_heads * k_dim > row_width
-        || v_offset + v_heads * v_dim > row_width
+    let key_width = k_heads.checked_mul(k_dim)
+        .ok_or_else(|| invalid("GDN verifier key width overflow"))?;
+    let value_width = v_heads.checked_mul(v_dim)
+        .ok_or_else(|| invalid("GDN verifier value width overflow"))?;
+    if [(q_offset, key_width), (k_offset, key_width), (v_offset, value_width)]
+        .iter().any(|&(offset, width)| offset.checked_add(width).is_none_or(|end| end > row_width))
     {
         return Err(invalid("GDN verifier QKV offsets run past the fused row"));
     }
@@ -833,6 +836,124 @@ pub fn gdn_recurrent_verify(
     unsafe {
         status::check(abi::apxinf_gdn_recurrent_verify(
             state_buffer.ptr(),
+            base.add(q_offset * element).cast(),
+            base.add(k_offset * element).cast(),
+            base.add(v_offset * element).cast(),
+            decay_buffer.ptr(),
+            beta_buffer.ptr(),
+            output_buffer.ptr(),
+            checkpoints_buffer.ptr(),
+            tokens as i64,
+            v_heads as i64,
+            k_heads as i64,
+            v_dim as i64,
+            k_dim as i64,
+            row_width as i64,
+            row_width as i64,
+            row_width as i64,
+            ctx.stream().handle(),
+        ))
+    }
+}
+
+pub(crate) fn validate_verify_storage_alignment(state: &Tensor, checkpoints: &Tensor) -> Result<()> {
+    for tensor in [state, checkpoints] {
+        let buffer = CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?;
+        if buffer.ptr() as usize % 16 != 0 {
+            return Err(invalid("GDN verifier state/checkpoints require16-byte alignment"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_verify_source(
+    ctx: &CudaContext, source: &Tensor, state: &Tensor, written: &[&Tensor],
+) -> Result<()> {
+    let src = tensor_storage(ctx, source, DType::F32, state.shape().dims())?;
+    let start = src.ptr() as usize;
+    if start % 16 != 0 { return Err(invalid("GDN verifier source requires16-byte alignment")); }
+    let end = start.checked_add(source.numel().checked_mul(4).ok_or_else(|| invalid("GDN source size overflow"))?)
+        .ok_or_else(|| invalid("GDN source range overflow"))?;
+    for tensor in written {
+        let buffer = CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?;
+        let lo = buffer.ptr() as usize;
+        let hi = lo.checked_add(tensor.numel().checked_mul(tensor.dtype().size_in_bytes())
+            .ok_or_else(|| invalid("GDN destination size overflow"))?)
+            .ok_or_else(|| invalid("GDN destination range overflow"))?;
+        if start < hi && lo < end { return Err(invalid("GDN verifier source overlaps writable storage")); }
+    }
+    Ok(())
+}
+
+/// Verify from readonly committed state, writing only the first T-1 checkpoints.
+/// The final recurrent state is always written to `state`; the last checkpoint
+/// row is intentionally untouched. Source and every destination must be disjoint.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_recurrent_verify_from_source(
+    ctx: &CudaContext,
+    state: &Tensor,
+    fused_qkv: &Tensor,
+    decay: &Tensor,
+    beta: &Tensor,
+    output: &Tensor,
+    checkpoints: &Tensor,
+    tokens: usize,
+    v_heads: usize,
+    k_heads: usize,
+    offsets: [usize; 3],
+    row_width: usize,
+    source: &Tensor,
+) -> Result<()> {
+    let state_dims = state.shape().dims().to_vec();
+    if state_dims.len() != 3 {
+        return Err(invalid("GDN state must be [v_heads, v_dim, k_dim]"));
+    }
+    let (state_heads, v_dim, k_dim) = (state_dims[0], state_dims[1], state_dims[2]);
+    if tokens == 0 || k_heads == 0 || state_heads != v_heads || v_heads % k_heads != 0 {
+        return Err(invalid("invalid GDN verifier recurrence geometry"));
+    }
+    let [q_offset, k_offset, v_offset] = offsets;
+    let key_width = k_heads.checked_mul(k_dim)
+        .ok_or_else(|| invalid("GDN verifier key width overflow"))?;
+    let value_width = v_heads.checked_mul(v_dim)
+        .ok_or_else(|| invalid("GDN verifier value width overflow"))?;
+    if [(q_offset, key_width), (k_offset, key_width), (v_offset, value_width)]
+        .iter().any(|&(offset, width)| offset.checked_add(width).is_none_or(|end| end > row_width))
+    {
+        return Err(invalid("GDN verifier QKV offsets run past the fused row"));
+    }
+    let state_buffer = tensor_storage(ctx, state, DType::F32, &state_dims)?;
+    let fused_buffer =
+        tensor_storage(ctx, fused_qkv, DType::BF16, &[tokens, row_width])?;
+    let decay_buffer = tensor_storage(ctx, decay, DType::F32, &[tokens, v_heads])?;
+    let beta_buffer = tensor_storage(ctx, beta, DType::F32, &[tokens, v_heads])?;
+    let output_buffer =
+        tensor_storage(ctx, output, DType::BF16, &[tokens, v_heads, v_dim])?;
+    let checkpoints_buffer = tensor_storage(
+        ctx,
+        checkpoints,
+        DType::F32,
+        &[tokens, v_heads, v_dim, k_dim],
+    )?;
+    if tokens > 8 || k_dim != 128 || v_heads.checked_mul(v_dim).is_none_or(|n| n > i32::MAX as usize) {
+        return Err(invalid("unsupported GDN verifier storage-policy geometry"));
+    }
+    validate_verify_storage_alignment(state, checkpoints)?;
+    validate_verify_source(ctx, source, state, &[state, output, checkpoints])?;
+    let source_buffer = tensor_storage(ctx, source, DType::F32, &state_dims)?;
+    if crate::workspace::is_capturing() {
+        let buffers = vec![state_buffer.retained_for_execution(), fused_buffer.retained_for_execution(),
+            decay_buffer.retained_for_execution(), beta_buffer.retained_for_execution(),
+            output_buffer.retained_for_execution(), checkpoints_buffer.retained_for_execution(),
+            source_buffer.retained_for_execution()];
+        crate::workspace::retain_resource(&std::rc::Rc::new(buffers));
+    }
+    let base = fused_buffer.ptr() as *const u8;
+    let element = DType::BF16.size_in_bytes();
+    unsafe {
+        status::check(abi::apxinf_gdn_recurrent_verify_from_source(
+            state_buffer.ptr(),
+            source_buffer.ptr().cast_const(),
             base.add(q_offset * element).cast(),
             base.add(k_offset * element).cast(),
             base.add(v_offset * element).cast(),
