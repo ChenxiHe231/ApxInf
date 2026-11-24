@@ -329,9 +329,18 @@ with NVFP4 Edge experts for the fixed long-context Decode configuration. The
 model enables CUDA Graphs with full GDN capture and uses three drafts per MTP
 round for eligible greedy requests. The Thor LM head selects Stage All for
 one row and tile-128 WMMA for four rows at `2048 → 248320`. Edge NVFP4 MoE
-uses ordered reduction. The fast path needs no performance environment
-variables. Select `--enable-context-reuse` to retain request prefixes and pass
+uses ordered reduction. These Graph and MoE kernel selections are automatic;
+the real-request A/B below records the existing MTP state settings used equally
+by both versions. Select `--enable-context-reuse` to retain request prefixes and pass
 the recipe directory for the chosen KV mode.
+
+The checkpoint-native W4A16 MTP draft head automatically uses the vocabulary
+views `[0, 131072)` and `[247808, 248320)` while the prompt and committed tokens
+remain in that set. An excluded token selects the full draft head for that
+context; snapshots preserve eligibility and reset starts a new decision. The
+target verifier always uses the full vocabulary. This selection adds no
+environment switch. See the [Final real-request A/B and validated scope](APXINF4_MTP_DRAFT_SHORTLIST.md)
+for numerical, Graph, lifetime and performance evidence.
 
 Build and start the server without enabling the legacy CUDA runtime:
 

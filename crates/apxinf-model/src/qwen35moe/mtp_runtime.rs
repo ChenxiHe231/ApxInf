@@ -37,6 +37,88 @@ const MTP_DRAFT_WORKSPACE: usize = 4 * 1024 * 1024;
 pub const QWEN35_MTP_KV_DTYPE: DType = DType::F8E4M3;
 const MTP_KV_SCALE: f32 = 1.0;
 
+// Draft-only candidate vocabulary. Main verification always projects VOCAB.
+const MTP_SHORTLIST_PREFIX: usize = 131_072;
+const MTP_SHORTLIST_TAIL: usize = 512;
+
+fn mtp_shortlist_contains(token: TokenId) -> bool {
+    (token as usize) < MTP_SHORTLIST_PREFIX
+        || ((token as usize) >= VOCAB - MTP_SHORTLIST_TAIL && (token as usize) < VOCAB)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MtpHeadBinding(usize, usize, usize, usize);
+
+impl MtpHeadBinding {
+    fn new(ctx: &CudaContext, weights: &Qwen35DeviceWeights) -> Result<Self> {
+        let head = weights.lm_head.a16.as_ref()
+            .ok_or_else(|| invalid("MTP shortlist needs the checkpoint-native W4A16 head"))?;
+        let address = |tensor: &Tensor| -> Result<usize> {
+            tensor.storage().as_gpu().map(|storage| storage.ptr())
+                .ok_or_else(|| invalid("MTP shortlist head weight has no CUDA storage"))
+        };
+        Ok(Self(ctx.device_id(), address(&head.qweight)?, address(&head.block_scales)?, address(&head.global_scale)?))
+    }
+}
+
+struct MtpShortlistHead {
+    binding: MtpHeadBinding,
+    qprefix: Tensor,
+    sprefix: Tensor,
+    qtail: Tensor,
+    stail: Tensor,
+    global_scale: Tensor,
+    logits: Tensor,
+    prefix_output: Tensor,
+    tail_output: Tensor,
+    remap: Tensor,
+}
+
+impl MtpShortlistHead {
+    fn new(ctx: &CudaContext, weights: &Qwen35DeviceWeights) -> Result<Self> {
+        let binding = MtpHeadBinding::new(ctx, weights)?;
+        let head = weights.lm_head.a16.as_ref().expect("validated head");
+        if head.qweight.shape().dims() != [VOCAB / 128, HIDDEN / 64, 128, 32]
+            || head.block_scales.shape().dims() != [VOCAB / 128, HIDDEN / 64, 128, 4] {
+            return Err(invalid("MTP shortlist head does not match fixed checkpoint geometry"));
+        }
+        let slice = |tensor: &Tensor, start: usize, rows: usize, width: usize| -> Result<Tensor> {
+            let tile_bytes = HIDDEN / 64 * 128 * width * tensor.dtype().size_in_bytes();
+            CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?
+                .view(start / 128 * tile_bytes, rows / 128 * tile_bytes).map_err(Error::Cuda)?
+                .as_tensor(Shape::new(vec![rows / 128, HIDDEN / 64, 128, width]), tensor.dtype())
+                .map_err(Error::Cuda)
+        };
+        let logits = zeros(ctx, vec![1, MTP_SHORTLIST_PREFIX + MTP_SHORTLIST_TAIL], DType::BF16)?;
+        let prefix_output = rows_view(&logits, 0, 1, MTP_SHORTLIST_PREFIX)?;
+        let tail_output = reshape(&vector_view(&logits, MTP_SHORTLIST_PREFIX, MTP_SHORTLIST_TAIL)?,
+            vec![1, MTP_SHORTLIST_TAIL], DType::BF16)?;
+        let map: Vec<i32> = (0..MTP_SHORTLIST_PREFIX)
+            .chain(VOCAB - MTP_SHORTLIST_TAIL..VOCAB).map(|x| x as i32).collect();
+        let remap = transfers::to_cuda_on_stream(ctx, Tensor::from_i32(vec![map.len()], &map)?)?;
+        Ok(Self {
+            binding,
+            qprefix: slice(&head.qweight, 0, MTP_SHORTLIST_PREFIX, 32)?,
+            sprefix: slice(&head.block_scales, 0, MTP_SHORTLIST_PREFIX, 4)?,
+            qtail: slice(&head.qweight, VOCAB - MTP_SHORTLIST_TAIL, MTP_SHORTLIST_TAIL, 32)?,
+            stail: slice(&head.block_scales, VOCAB - MTP_SHORTLIST_TAIL, MTP_SHORTLIST_TAIL, 4)?,
+            global_scale: head.global_scale.clone(), logits, prefix_output, tail_output, remap,
+        })
+    }
+
+    fn project(&self, ctx: &CudaContext, hidden: &Tensor, next: &Tensor) -> Result<()> {
+        ops::block_quantized_weight_gemv(ctx, hidden, &self.qprefix, &self.sprefix,
+            &self.global_scale, &self.prefix_output)?;
+        ops::block_quantized_weight_gemv(ctx, hidden, &self.qtail, &self.stail,
+            &self.global_scale, &self.tail_output)?;
+        // This existing remapped argmax has its documented legacy tie rule;
+        // the main verifier retains the canonical lowest-index full argmax.
+        ops::argmax(ctx, ops::ArgmaxArgs::new(&self.logits, next).with_remap(&self.remap))
+    }
+}
+
+
+
 /// Logical/physical MTP position contract.
 ///
 /// The target session exposes the next committed position. After a prompt of
@@ -113,6 +195,7 @@ pub struct Qwen35MtpState {
     capacity: usize,
     position: Option<MtpPositionContract>,
     image_positions: Option<Rc<ImagePositions>>,
+    shortlist_allowed: bool,
     generation: u64,
     // Distinguishes allocations and writes even when snapshot restore reuses
     // the same position and transaction generation.
@@ -333,6 +416,9 @@ impl Qwen35MtpRuntime {
         }
         ctx.synchronize().map_err(Error::Cuda)?;
         shadow.position = Some(position);
+        shadow.shortlist_allowed = shadow.image_positions.is_none()
+            && weights.lm_head.a16.is_some()
+            && prompt_tokens.iter().copied().all(mtp_shortlist_contains);
         self.pending_draft = None;
         Ok(PreparedMtpPrefill {
             generation: shadow.generation,
@@ -415,6 +501,7 @@ impl Qwen35MtpRuntime {
         }
         destination.position = source.position;
         destination.image_positions = source.image_positions.clone();
+        destination.shortlist_allowed = source.shortlist_allowed;
         destination.generation = generation;
         Ok(())
     }
@@ -473,6 +560,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             capacity,
             position: None,
             image_positions: None,
+            shortlist_allowed: false,
             generation: 0,
             cache_revision: next_cache_revision()?,
         })
@@ -487,6 +575,7 @@ impl MtpBackend for Qwen35MtpRuntime {
         state.cache_revision = next_cache_revision()?;
         state.position = None;
         state.image_positions = None;
+        state.shortlist_allowed = false;
         self.pending_draft = None;
         self.synced_draft_prefix = None;
         CudaBuffer::from_tensor(&state.key)
@@ -626,6 +715,7 @@ impl MtpBackend for Qwen35MtpRuntime {
         }
         ctx.synchronize().map_err(Error::Cuda)?;
         shadow.position = Some(position);
+        shadow.shortlist_allowed &= chunk_tokens.iter().copied().all(mtp_shortlist_contains);
         self.pending_draft = None;
         Ok(PreparedMtpPrefill {
             generation: shadow.generation,
@@ -698,11 +788,23 @@ impl MtpBackend for Qwen35MtpRuntime {
             )
         });
         self.copy_state_rows(ctx, committed, shadow, first_row)?;
+        shadow.shortlist_allowed &= mtp_shortlist_contains(pending);
+        let shortlist_active = shadow.shortlist_allowed;
 
         let geometry = self.geometry;
         let eps = self.rms_norm_eps;
         let theta = self.rope_theta;
         let scratch = self.ensure_scratch(ctx, committed.capacity)?;
+        if shortlist_active || scratch.shortlist_head.is_some() {
+            let head_binding = MtpHeadBinding::new(ctx, weights)?;
+            if scratch.shortlist_head.as_ref().is_some_and(|head| head.binding != head_binding) {
+                scratch.shortlist_head = None;
+            }
+            if shortlist_active && scratch.shortlist_head.is_none() {
+                scratch.shortlist_head = Some(MtpShortlistHead::new(ctx, weights)?);
+            }
+        }
+        scratch.shortlist_active = shortlist_active;
         write_i32(ctx, &scratch.token, pending)?;
         let pending_slot = element_view(&scratch.verification_inputs, 0)?;
         transfers::copy_cuda_to_cuda(ctx, &scratch.token, &pending_slot)?;
@@ -1742,6 +1844,8 @@ struct MtpScratch {
     projected: Tensor,
     moe_out: Tensor,
     final_hidden: Tensor,
+    shortlist_head: Option<MtpShortlistHead>,
+    shortlist_active: bool,
     logits: Tensor,
     next_token: Tensor,
     proposals: Tensor,
@@ -1835,6 +1939,8 @@ impl MtpScratch {
             projected: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             moe_out: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
             final_hidden: zeros(ctx, vec![1, HIDDEN], DType::BF16)?,
+            shortlist_head: None,
+            shortlist_active: false,
             logits: zeros(ctx, vec![1, VOCAB], DType::BF16)?,
             next_token: zeros(ctx, vec![1], DType::I32)?,
             proposals: zeros(ctx, vec![QWEN35_MTP_DRAFT_STEPS], DType::I32)?,
@@ -2210,7 +2316,10 @@ fn forward_one(
     }
     ops::add_into(ctx, &scratch.moe_out, &scratch.hidden)?;
     ops::mlp::rms_norm(ctx, &scratch.hidden, &mtp.norm, &scratch.final_hidden, eps)?;
-    if produce_logits {
+    if produce_logits && scratch.shortlist_active {
+        scratch.shortlist_head.as_ref().expect("prepared shortlist")
+            .project(ctx, &scratch.final_hidden, &scratch.next_token)?;
+    } else if produce_logits {
         let mut logits = scratch.logits.clone();
         super::forward::project_lm_head(ctx, weights, &scratch.final_hidden, &mut logits)?;
         ops::argmax(
@@ -3077,18 +3186,19 @@ pub(super) mod gpu_raw_protocol {
         )?;
         same("copy source readonly", source, &source_before)?;
         assert_eq!(destination.position, source.position);
+        assert_eq!(destination.shortlist_allowed,source.shortlist_allowed);
         assert_eq!(destination.generation, source.generation + 1);
         assert!(runtime.pending_draft.is_none());
         Ok(())
     }
 
-    fn draft_gate(f: &Fixture) -> Result<()> {
+    fn draft_gate(f: &Fixture, pending_override: Option<u32>) -> Result<()> {
         let mut target = f.target()?;
         let prepared_target =
             target.prepare_target_prefill(&f.ctx, &f.decoder, &f.weights, &f.prompt)?;
         let hidden_rows = prepared_target.output().hidden_states.clone();
         let last_hidden = prepared_target.output().last_hidden_state()?;
-        let pending = prepared_target.output().greedy_token_ids(&f.ctx)?[0];
+        let pending = pending_override.unwrap_or(prepared_target.output().greedy_token_ids(&f.ctx)?[0]);
         target.publish_target_prefill(prepared_target)?;
         let mut runtime = Qwen35MtpRuntime::new(&f.config)?;
         let mut committed = runtime.allocate_state(&f.ctx, f.capacity)?;
@@ -3172,7 +3282,7 @@ pub(super) mod gpu_raw_protocol {
         same("prefill publication exact swap", &committed, &staged)?;
         check_copy(f, &mut runtime, &committed, &mut snapshot)?;
         let frozen = image(&snapshot)?;
-        let frozen_meta = (snapshot.position, snapshot.generation);
+        let frozen_meta = (snapshot.position, snapshot.generation, snapshot.shortlist_allowed);
         for depth in 1..=3usize {
             for keep in 1..=depth + 1 {
                 check_copy(f, &mut runtime, &snapshot, &mut committed)?;
@@ -3207,6 +3317,10 @@ pub(super) mod gpu_raw_protocol {
                     depth,
                 )?;
                 f.ctx.synchronize().map_err(Error::Cuda)?;
+                if pending_override.is_some() {
+                    assert!(runtime.scratch.as_ref().unwrap().shortlist_active);
+                    assert!(committed.shortlist_allowed && shadow.shortlist_allowed);
+                }
                 same(
                     "draft committed full physical bank readonly",
                     &committed,
@@ -3293,7 +3407,7 @@ pub(super) mod gpu_raw_protocol {
                 assert_eq!(committed.position, Some(expected_position));
                 assert_eq!(committed.generation, generation);
                 same("MTP snapshot deepfreeze", &snapshot, &frozen)?;
-                assert_eq!((snapshot.position, snapshot.generation), frozen_meta);
+                assert_eq!((snapshot.position, snapshot.generation, snapshot.shortlist_allowed), frozen_meta);
                 if runtime.draft_kv_suffix_sync && depth == 3 && full {
                     let prefix = runtime.synced_draft_prefix.expect("published draft prefix");
                     let new_rows = expected_position.cache_rows;
@@ -3447,7 +3561,7 @@ pub(super) mod gpu_raw_protocol {
             "copy_protocol_only":true,"independent_gdn_math_oracle":false,"performance_accepted":false})
         );
         super::super::session::gpu_raw_protocol::target_gate(&f)?;
-        draft_gate(&f)?;
+        draft_gate(&f,None)?;
         Ok(())
     }
     #[test]
@@ -3469,6 +3583,128 @@ pub(super) mod gpu_raw_protocol {
         super::super::session::gpu_raw_protocol::target_gate(&f)?;
         Ok(())
     }
+    fn shortlist_head_and_context_gate(f: &Fixture) -> Result<f64> {
+        let decoder=Qwen35Decoder::with_execution(&f.config,true)?;
+        let backend=Qwen35Fp8AttentionBackend::with_kv_cache(
+            &f.config,Qwen35KvCacheDType::Fp8Dynamic,None)?;
+        let target=Qwen35Session::new(&f.ctx,&decoder,&f.weights,backend,64)?;
+        let mut coordinator=Qwen35MtpCoordinator::new(&f.ctx,target,Qwen35MtpRuntime::new(&f.config)?)?;
+        let options=GenerationOptions::greedy(32,None);
+        coordinator.prefill_greedy(&f.ctx,&decoder,&f.weights,&f.prompt,&options)?;
+        assert!(coordinator.committed_mtp.shortlist_allowed);
+        // A known in-range pending token makes this a protocol test rather
+        // than an assumption about the model's chosen text continuation.
+        coordinator.pending=Some(42);
+        coordinator.run_greedy_round(&f.ctx,&decoder,&f.weights,3)?;
+        assert!(coordinator.mtp.scratch.as_ref().unwrap().shortlist_active);
+        let weights=f.weights.lm_head.a16.as_ref().unwrap();
+        let before=(raw(&weights.qweight)?,raw(&weights.block_scales)?,raw(&weights.global_scale)?);
+        let minimum={
+            let scratch=coordinator.mtp.scratch.as_ref().unwrap();
+            let shortlist=scratch.shortlist_head.as_ref().unwrap();
+            let host=transfers::to_cpu(&scratch.final_hidden)?;
+            let values=host.as_bf16()?.to_vec();
+            let input=transfers::to_cuda_on_stream(&f.ctx,Tensor::from_bf16(vec![1,HIDDEN],&values)?)?;
+            let mut full=zeros(&f.ctx,vec![1,VOCAB],DType::BF16)?;
+            let next_storage=transfers::to_cuda_on_stream(&f.ctx,Tensor::from_i32(vec![3],&[0x5a5a5a5a;3])?)?;
+            let next=element_view(&next_storage,1)?;
+            shortlist.project(&f.ctx,&input,&next)?;
+            f.ctx.synchronize().map_err(Error::Cuda)?;
+            let graph=apxinf_cuda_new::capture(&f.ctx,||shortlist.project(&f.ctx,&input,&next))?;
+            let mut minimum=1f64;
+            for data in [values.clone(),values.iter().rev().copied().collect()] {
+                transfers::copy_cpu_to_cuda_on_stream(&f.ctx,Tensor::from_bf16(vec![1,HIDDEN],&data)?,&input)?;
+                graph.replay()?;
+                super::super::forward::project_lm_head(&f.ctx,&f.weights,&input,&mut full)?;
+                f.ctx.synchronize().map_err(Error::Cuda)?;
+                let a=transfers::to_cpu(&full)?;let b=transfers::to_cpu(&shortlist.logits)?;
+                let map=transfers::to_cpu(&shortlist.remap)?;
+                let(mut dot,mut aa,mut bb)=(0f64,0f64,0f64);
+                let mut maximum=f32::NEG_INFINITY;
+                for(local,&id)in map.as_i32()?.iter().enumerate(){
+                    let(a,b)=(a.as_bf16()?[id as usize].to_f32(),b.as_bf16()?[local].to_f32());
+                    assert!(a.is_finite()&&b.is_finite());maximum=maximum.max(b);
+                    let(a,b)=(f64::from(a),f64::from(b));dot+=a*b;aa+=a*a;bb+=b*b;
+                }
+                let cosine=dot/(aa*bb).sqrt();assert!(cosine>=0.9999);minimum=minimum.min(cosine);
+                let id=transfers::to_cpu(&next)?.as_i32()?[0] as u32;
+                assert!(mtp_shortlist_contains(id));assert_eq!(a.as_bf16()?[id as usize].to_f32(),maximum);
+                assert_eq!(transfers::to_cpu(&input)?.as_bf16()?,&data);
+                let guard=transfers::to_cpu(&next_storage)?;
+                assert_eq!(guard.as_i32()?[0],0x5a5a5a5a);assert_eq!(guard.as_i32()?[2],0x5a5a5a5a);
+            }
+            minimum
+        };
+        assert_eq!(before,(raw(&weights.qweight)?,raw(&weights.block_scales)?,raw(&weights.global_scale)?));
+        let mut snapshot=coordinator.allocate_context_snapshot(&f.ctx,&decoder,&f.weights,64)?;
+        coordinator.capture_context(&f.ctx,&mut snapshot)?;
+        assert!(snapshot.mtp.shortlist_allowed);
+        coordinator.pending=Some(200000);
+        coordinator.run_greedy_round(&f.ctx,&decoder,&f.weights,3)?;
+        assert!(!coordinator.committed_mtp.shortlist_allowed);
+        assert!(!coordinator.mtp.scratch.as_ref().unwrap().shortlist_active);
+        assert!(snapshot.mtp.shortlist_allowed);
+        coordinator.reset(&f.ctx)?;
+        assert!(!coordinator.committed_mtp.shortlist_allowed && !coordinator.shadow_mtp.shortlist_allowed);
+        coordinator.restore_context(&f.ctx,&snapshot)?;
+        assert!(coordinator.committed_mtp.shortlist_allowed);
+        coordinator.append_prefill_greedy(&f.ctx,&decoder,&f.weights,&[42],&options)?;
+        assert!(coordinator.committed_mtp.shortlist_allowed);
+        coordinator.append_prefill_greedy(&f.ctx,&decoder,&f.weights,&[200000],&options)?;
+        assert!(!coordinator.committed_mtp.shortlist_allowed);
+        coordinator.reset(&f.ctx)?;
+        let mut outside=f.prompt.clone();outside[4]=200000;
+        coordinator.prefill_greedy(&f.ctx,&decoder,&f.weights,&outside,&options)?;
+        assert!(!coordinator.committed_mtp.shortlist_allowed);
+        Ok(minimum)
+    }
+
+    fn shortlist_weight_rebind_gate(f: &mut Fixture) -> Result<()> {
+        let mut runtime=Qwen35MtpRuntime::new(&f.config)?;
+        let mut committed=runtime.allocate_state(&f.ctx,64)?;
+        let mut shadow=runtime.allocate_state(&f.ctx,64)?;
+        committed.position=Some(MtpPositionContract::after_prompt(16)?);
+        committed.shortlist_allowed=true;
+        let data=vec![half::bf16::from_f32(0.5);HIDDEN];
+        let hidden=transfers::to_cuda_on_stream(&f.ctx,Tensor::from_bf16(vec![1,HIDDEN],&data)?)?;
+        runtime.draft(&f.ctx,&f.weights,&committed,&mut shadow,42,16,&hidden,3)?;
+        f.ctx.synchronize().map_err(Error::Cuda)?;
+        let old_binding=runtime.scratch.as_ref().unwrap().shortlist_head.as_ref().unwrap().binding;
+        let original=f.weights.lm_head.a16.as_ref().unwrap().global_scale.clone();
+        let replacement=zeros(&f.ctx,vec![1],DType::F32)?;
+        transfers::copy_cuda_to_cuda(&f.ctx,&original,&replacement)?;
+        f.ctx.synchronize().map_err(Error::Cuda)?;
+        assert_eq!(raw(&original)?,raw(&replacement)?);
+        f.weights.lm_head.a16.as_mut().unwrap().global_scale=replacement;
+        runtime.draft(&f.ctx,&f.weights,&committed,&mut shadow,42,16,&hidden,3)?;
+        f.ctx.synchronize().map_err(Error::Cuda)?;
+        let head=runtime.scratch.as_ref().unwrap().shortlist_head.as_ref().unwrap();
+        assert!(head.binding!=old_binding);
+        assert!(head.binding==MtpHeadBinding::new(&f.ctx,&f.weights)?);
+        f.weights.lm_head.a16.as_mut().unwrap().global_scale=original;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore="exclusive real-checkpoint shortlist head,Graph and transactional state contract"]
+    fn real_checkpoint_shortlist_head_and_state_contract()->std::result::Result<(),Box<dyn std::error::Error>> {
+        let mut f=Fixture::load()?;
+        // Fixed valid tokens; no dependency on private benchmark files or traces.
+        f.prompt=vec![248045,846,198,68111,449,21870,5640,4849,1675,883,264,3110,8151,310,26629,11];
+        assert!(f.prompt.iter().copied().all(mtp_shortlist_contains));
+        for t in [0u32,131071,247808,248319]{assert!(mtp_shortlist_contains(t));}
+        for t in [131072u32,200000,247807,248320,u32::MAX]{assert!(!mtp_shortlist_contains(t));}
+        let cosine=shortlist_head_and_context_gate(&f)?;
+        draft_gate(&f,Some(42))?;
+        shortlist_weight_rebind_gate(&mut f)?;
+        println!("{}",serde_json::json!({"schema":"apxinf.mtp.shortlist_contract.v1",
+            "same_input_min_cosine":cosine,"head_weights_and_input_readonly":true,
+            "graph_rebinding":true,"partial_commit_rows":[1,2,3,4],"failed_retry_and_snapshot_restore":true,
+            "eligibility_reset_copy_append_fallback":true,"head_weight_binding_reprepared":true,
+            "main_verification_full_vocabulary":true,"performance_result":false}));
+        Ok(())
+    }
+
 
     #[test]
     #[ignore = "real checkpoint BF16 image rowwise verifier; exclusive GPU locks and prepared strict recipes"]
@@ -3496,6 +3732,7 @@ pub(super) mod gpu_raw_protocol {
         super::super::session::gpu_raw_protocol::rowwise_target_gate(&f)?;
         Ok(())
     }
+
 
     // Recipe preparation is an explicit different ignored test and process.
     // It executes actual target/MTP operations; it is not a protocol/quality gate.
