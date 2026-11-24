@@ -21,6 +21,8 @@ const GEMM_INPUT_FILES: &[&str] = &[
     "include/apxinf_cuda/tuning_types.h",
     "include/apxinf_cuda/types.h",
     "kernels/custom/gemm.cuh",
+    "kernels/custom/gemm_pairwise_bf16.cuh",
+    "kernels/primitives/bf16_pairwise.cuh",
     "kernels/primitives/math.cuh",
     "kernels/primitives/activation.cuh",
 ];

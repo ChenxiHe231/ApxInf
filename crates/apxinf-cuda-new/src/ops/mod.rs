@@ -96,7 +96,9 @@ pub use norm::{
 pub use pointwise::{
     pointwise, swiglu_into, PointwiseActivation, PointwiseArgs, PointwiseSemantic,
 };
-pub use preprocess::{vision_position, VisionPositionArgs};
+pub use preprocess::{
+    transpose_pad_channels, vision_position, vision_position_staged, VisionPositionArgs,
+};
 pub use quantization::{
     block_quantize, block_scale_buffer_bytes, pack_block_scales, quantization, quantize_per_tensor,
     BlockQuantizationArgs, BlockQuantizationSemantic, PackBlockScalesArgs, QuantizationArgs,

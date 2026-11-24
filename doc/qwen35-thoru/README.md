@@ -251,6 +251,77 @@ Run sampling generation with the model's recommended parameters:
 
 Use only a supported row from the table above.
 
+### Image input
+
+The visual-output gate passes on Jetson Thor against the frozen Hugging Face
+CPU BF16 eager reference (finite, cosine >= 0.999, relative L2 <= 0.02).
+Red, natural photo, OCR, two non-square images and packed photo+OCR outputs
+match the reference element for element; packing preserves each image's output.
+This establishes precision for those cases, not a vision throughput claim.
+
+The Qwen3.5/3.6 MoE runtime accepts up to 16 ordered static images per request. It loads the
+checkpoint's BF16 `model.visual.*` weights on the first image, replaces image
+placeholder embeddings, and uses three-axis mRoPE in prefill and continuation.
+Neutral greedy image requests enter the native MTP schedule, including target
+Graph decode and verification phases. Shifted MTP teacher forcing consumes the
+image-replaced embeddings and multimodal positions. Image MTP verifies target
+rows using the selected one-row GPU decoder, retaining each configured KV
+precision and Graph phases. This preserves scalar arithmetic; the batched text
+verifier is numerically different on long multi-image answers. Rowwise image
+verification is a correctness path, with no claimed MTP speedup; the existing
+adaptive scheduler may finish with scalar decode. Dynamic FP8 scalar decode
+retains its native fast kernels. Sampling uses target-only generation. Image requests bypass text-prefix reuse. Text-only requests retain
+their existing paths. Segmented visual attention prevents cross-image attention.
+Up to four visual traversals are retained by their ordered grid profile;
+this does not establish image latency or whole-tower CUDA Graph acceptance.
+
+HTTP processing keeps one lazy CPU processor child per engine. Processor startup
+is paid on the first image request; subsequent requests reuse it without keeping
+image history. Invalid images return a request error. A failed child is reaped
+and recreated on the next image request. The child has a 90-second startup and
+per-request watchdog; `APXINF_PYTHON` selects the preprocessing environment.
+
+CLI input uses the existing Hugging Face processor helper:
+
+```bash
+APXINF_PYTHON=/path/to/python "$CARGO_TARGET_DIR/release/apxinf" generate \
+  --model "$QWEN35_CHECKPOINT" --model-name qwen3_5_moe --device cuda:0 \
+  --image /path/to/first.png --image /path/to/second.png \
+  --prompt "Describe these images in order." --max-tokens 64
+```
+
+The processor interpreter must have PyTorch, Transformers with Qwen3.5/Qwen3VL
+processor support, Pillow and NumPy. The server uses the same interpreter selected
+by `APXINF_PYTHON`. OpenAI chat requests accept ordered user content parts:
+
+```json
+{
+  "model": "qwen3.6-35b-a3b",
+  "messages": [{"role": "user", "content": [
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+    {"type": "text", "text": "First image. Compare with the next image."},
+    {"type": "image_url", "image_url": {"url": "https://example.com/second.png"}}
+  ]}],
+  "temperature": 0,
+  "max_tokens": 64
+}
+```
+
+`image_url.url` accepts a Base64 image data URL or a public HTTPS URL. The HTTP
+adapter limits the encoded download to 8 MiB, source resolution to 16 megapixels,
+and processor resolution to 4096 patches across all images (approximately
+1 megapixel for this checkpoint). Images preserve content-part/message order.
+Animated images, video, more than 16 images, local/private URLs, incompatible
+visual configs and mismatched
+placeholder/grid counts are rejected. Deployment `HTTPS_PROXY` settings support
+an HTTP proxy without credentials; both direct and proxy connections pin the
+validated public destination address and retain the original TLS hostname.
+Streamed and non-streamed completions use
+the same image prefill. Use nonzero temperature with `top_k`, `top_p` and `seed`
+for non-MTP sampling. Image recipes must be prepared separately from text recipes
+before a strict no-autotune deployment. Model generation metrics exclude Python
+image preprocessing; measure HTTP elapsed time for end-to-end image latency.
+
 ## 6. OpenAI-compatible server
 
 On the Thor CUDA 12 SM101 build, choose `--qwen35-kv-cache fp8_dynamic`

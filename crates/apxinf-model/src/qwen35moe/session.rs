@@ -648,6 +648,37 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         Ok(output)
     }
 
+    pub(super) fn attention_mut(&mut self) -> &mut B {
+        &mut self.attention
+    }
+
+    /// Image prefill keeps the ordinary shadow-state publication contract.
+    pub(super) fn prefill_image(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+        token_ids: &[u32],
+        embeddings: &Tensor,
+    ) -> Result<DecoderOutput> {
+        self.validate_capacity(0, token_ids.len())?;
+        self.bump_shadow_generation()?;
+        self.prepare_empty_shadow(ctx)?;
+        let output = decoder.run_image_prefill(
+            ctx,
+            weights,
+            &mut self.attention,
+            &mut self.shadow_attention,
+            &self.shadow_gdn,
+            token_ids,
+            embeddings,
+            HiddenSelection::Last,
+        )?;
+        ctx.synchronize().map_err(Error::Cuda)?;
+        self.publish_shadow(output.end_position, 0)?;
+        Ok(output)
+    }
+
     /// Append a multi-token prefill chunk to the committed sequence. Unlike
     /// `forward(start>0)`, this retains the batched prefill kernels instead of
     /// degrading the chunk into a scalar decode loop.
@@ -733,6 +764,40 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             0,
             DecoderPhase::Prefill,
             LogitsSelection::Last,
+            HiddenSelection::All,
+        )?;
+        self.epoch
+            .checked_add(1)
+            .ok_or_else(|| invalid("Qwen3.5 session epoch overflow"))?;
+        Ok(PreparedTargetPrefill {
+            epoch: self.epoch,
+            shadow_generation: self.shadow_generation,
+            start_position: 0,
+            end_position: output.end_position,
+            output,
+        })
+    }
+
+    /// Prepare image target state and all hidden rows for shifted MTP teacher forcing.
+    pub(super) fn prepare_target_image_prefill(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+        token_ids: &[u32],
+        embeddings: &Tensor,
+    ) -> Result<PreparedTargetPrefill> {
+        self.validate_capacity(0, token_ids.len())?;
+        self.bump_shadow_generation()?;
+        self.prepare_empty_shadow(ctx)?;
+        let output = decoder.run_image_prefill(
+            ctx,
+            weights,
+            &mut self.attention,
+            &mut self.shadow_attention,
+            &self.shadow_gdn,
+            token_ids,
+            embeddings,
             HiddenSelection::All,
         )?;
         self.epoch
@@ -927,7 +992,10 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         let start_position = self.position;
         self.validate_capacity(start_position, input_rows)?;
         self.bump_shadow_generation()?;
-        self.prepare_shadow_from_committed_impl(ctx, true)?;
+        let rowwise = self.attention.requires_rowwise_verification();
+        // Scalar decode updates the destination recurrent state in place. Only
+        // the batched verifier can read it directly from the committed bank.
+        self.prepare_shadow_from_committed_impl(ctx, !rowwise)?;
         let profile_index = input_rows - 2;
         let profile = self
             .verify_profiles
@@ -936,18 +1004,34 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         if profile.rows != input_rows {
             return Err(invalid("Qwen3.5 verifier profile row count changed"));
         }
-        let final_output = decoder.run_verify_reusing_device(
-            ctx,
-            weights,
-            &mut self.attention,
-            &mut self.shadow_attention,
-            &self.shadow_gdn,
-            &profile.gdn_checkpoints,
-            token_ids,
-            start_position,
-            &mut profile.scratch,
-            profile.shadow_phases.as_deref(),
-        )?;
+        let final_output = if rowwise {
+            decoder.run_verify_rows_device(
+                ctx,
+                weights,
+                &mut self.attention,
+                &mut self.shadow_attention,
+                &self.shadow_gdn,
+                &profile.gdn_checkpoints,
+                token_ids,
+                start_position,
+                &mut profile.scratch,
+                &mut self.decode_scratch,
+                self.shadow_decode_phases.as_deref(),
+            )?
+        } else {
+            decoder.run_verify_reusing_device(
+                ctx,
+                weights,
+                &mut self.attention,
+                &mut self.shadow_attention,
+                &self.shadow_gdn,
+                &profile.gdn_checkpoints,
+                token_ids,
+                start_position,
+                &mut profile.scratch,
+                profile.shadow_phases.as_deref(),
+            )?
+        };
         final_output.enqueue_greedy_token_ids(ctx, &profile.predictions, 0)?;
         Ok(TargetVerification {
             epoch: self.epoch,
@@ -1157,10 +1241,17 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         self.prepare_shadow_from_committed_impl(ctx, false)
     }
 
-    fn prepare_shadow_from_committed_impl(&mut self, ctx: &CudaContext, verifier: bool) -> Result<()> {
+    fn prepare_shadow_from_committed_impl(
+        &mut self,
+        ctx: &CudaContext,
+        verifier: bool,
+    ) -> Result<()> {
         for (committed, shadow) in self.committed_gdn.iter().zip(&self.shadow_gdn) {
-            if verifier { shadow.copy_for_verify_from(ctx, committed)?; }
-            else { shadow.copy_from(ctx, committed)?; }
+            if verifier {
+                shadow.copy_for_verify_from(ctx, committed)?;
+            } else {
+                shadow.copy_from(ctx, committed)?;
+            }
         }
         if self.shadow_attention_valid > self.position {
             return Err(invalid(
@@ -1356,212 +1447,513 @@ mod tests {
 #[cfg(test)]
 pub(super) mod gpu_raw_protocol {
     use super::*;
-    use crate::qwen35moe::attention_backend::{Qwen35AttentionCache,Qwen35Fp8AttentionBackend};
+    use crate::qwen35moe::attention_backend::{Qwen35AttentionCache, Qwen35Fp8AttentionBackend};
+    use crate::qwen35moe::mtp_runtime::gpu_raw_protocol::{
+        digest_images, exact, fill_rows, pointer, prefix_image, raw, Fixture,
+    };
     use apxinf_cuda_new::CudaBuffer;
-    use crate::qwen35moe::mtp_runtime::gpu_raw_protocol::{Fixture,raw,exact,pointer,fill_rows,prefix_image,digest_images};
-    type Pair=(Vec<u8>,Vec<u8>);
+    type Pair = (Vec<u8>, Vec<u8>);
     fn gdn(states: &[GdnState]) -> Result<Vec<Pair>> {
-        states.iter().map(|x| { let (a,b)=x.gpu_test_tensors();Ok((raw(a)?,raw(b)?)) }).collect()
+        states
+            .iter()
+            .map(|x| {
+                let (a, b) = x.gpu_test_tensors();
+                Ok((raw(a)?, raw(b)?))
+            })
+            .collect()
     }
     fn caches(states: &[Qwen35AttentionCache]) -> Result<Vec<Pair>> {
-        states.iter().map(|x|Ok((raw(x.key())?,raw(x.value())?))).collect()
+        states
+            .iter()
+            .map(|x| Ok((raw(x.key())?, raw(x.value())?)))
+            .collect()
     }
     fn same(label: &str, a: &[Pair], b: &[Pair]) {
-        assert_eq!(a.len(),b.len(),"{label}: layer count");
-        for (i,(a,b)) in a.iter().zip(b).enumerate() {
-            exact(&format!("{label} layer{i} first"),&a.0,&b.0);
-            exact(&format!("{label} layer{i} second"),&a.1,&b.1);
+        assert_eq!(a.len(), b.len(), "{label}: layer count");
+        for (i, (a, b)) in a.iter().zip(b).enumerate() {
+            exact(&format!("{label} layer{i} first"), &a.0, &b.0);
+            exact(&format!("{label} layer{i} second"), &a.1, &b.1);
         }
     }
-    fn cache_ids(states: &[Qwen35AttentionCache]) -> Vec<(usize,usize)> {
-        states.iter().map(|x|(pointer(x.key()),pointer(x.value()))).collect()
+    fn cache_ids(states: &[Qwen35AttentionCache]) -> Vec<(usize, usize)> {
+        states
+            .iter()
+            .map(|x| (pointer(x.key()), pointer(x.value())))
+            .collect()
     }
-    fn gdn_ids(states: &[GdnState]) -> Vec<(usize,usize)> {
-        states.iter().map(|x| { let (a,b)=x.gpu_test_tensors();(pointer(a),pointer(b)) }).collect()
+    fn gdn_ids(states: &[GdnState]) -> Vec<(usize, usize)> {
+        states
+            .iter()
+            .map(|x| {
+                let (a, b) = x.gpu_test_tensors();
+                (pointer(a), pointer(b))
+            })
+            .collect()
     }
-    fn prefix_expected(destination: &[Pair], source: &[Pair], states: &[Qwen35AttentionCache], count: usize) -> Vec<Pair> {
-        assert_eq!(destination.len(),source.len());
-        destination.iter().zip(source).zip(states).map(|((d,s),cache)| {
-            let physical=cache.blocks()*cache.block_tokens();assert_eq!(d.0.len()%physical,0);
-            let width=d.0.len()/physical;
-            (prefix_image(&d.0,&s.0,width,count),prefix_image(&d.1,&s.1,width,count))
-        }).collect()
+    fn prefix_expected(
+        destination: &[Pair],
+        source: &[Pair],
+        states: &[Qwen35AttentionCache],
+        count: usize,
+    ) -> Vec<Pair> {
+        assert_eq!(destination.len(), source.len());
+        destination
+            .iter()
+            .zip(source)
+            .zip(states)
+            .map(|((d, s), cache)| {
+                let physical = cache.blocks() * cache.block_tokens();
+                assert_eq!(d.0.len() % physical, 0);
+                let width = d.0.len() / physical;
+                (
+                    prefix_image(&d.0, &s.0, width, count),
+                    prefix_image(&d.1, &s.1, width, count),
+                )
+            })
+            .collect()
     }
-    fn set_tail(f: &Fixture, states: &[Qwen35AttentionCache], start: usize, byte: u8) -> Result<()> {
+    fn set_tail(
+        f: &Fixture,
+        states: &[Qwen35AttentionCache],
+        start: usize,
+        byte: u8,
+    ) -> Result<()> {
         for cache in states {
-            let physical=cache.blocks()*cache.block_tokens();
-            fill_rows(&f.ctx,cache.key(),start,physical,physical,byte)?;
-            fill_rows(&f.ctx,cache.value(),start,physical,physical,byte)?;
-        } Ok(())
+            let physical = cache.blocks() * cache.block_tokens();
+            fill_rows(&f.ctx, cache.key(), start, physical, physical, byte)?;
+            fill_rows(&f.ctx, cache.value(), start, physical, physical, byte)?;
+        }
+        Ok(())
     }
-    fn future_unchanged(label: &str, after: &[Pair], before: &[Pair], states: &[Qwen35AttentionCache], first: usize) {
-        for (i,((a,b),cache)) in after.iter().zip(before).zip(states).enumerate() {
-            let width=a.0.len()/(cache.blocks()*cache.block_tokens());
-            exact(&format!("{label} layer{i} K"),&a.0[first*width..],&b.0[first*width..]);
-            exact(&format!("{label} layer{i} V"),&a.1[first*width..],&b.1[first*width..]);
+    fn future_unchanged(
+        label: &str,
+        after: &[Pair],
+        before: &[Pair],
+        states: &[Qwen35AttentionCache],
+        first: usize,
+    ) {
+        for (i, ((a, b), cache)) in after.iter().zip(before).zip(states).enumerate() {
+            let width = a.0.len() / (cache.blocks() * cache.block_tokens());
+            exact(
+                &format!("{label} layer{i} K"),
+                &a.0[first * width..],
+                &b.0[first * width..],
+            );
+            exact(
+                &format!("{label} layer{i} V"),
+                &a.1[first * width..],
+                &b.1[first * width..],
+            );
         }
     }
 
     fn checkpoint_row(bytes: &[u8], row_bytes: usize, rows: usize, keep: usize) -> Vec<u8> {
-        assert_eq!(bytes.len(),rows*row_bytes);assert!((1..=rows).contains(&keep));
-        bytes[(keep-1)*row_bytes..keep*row_bytes].to_vec()
+        assert_eq!(bytes.len(), rows * row_bytes);
+        assert!((1..=rows).contains(&keep));
+        bytes[(keep - 1) * row_bytes..keep * row_bytes].to_vec()
     }
     #[test]
     fn cpu_checkpoint_row_ledger_uses_keep_minus_one() {
-        let distinct=[11u8,12,21,22,31,32,41,42];
-        for rows in 2..=4 { for keep in 1..=rows {
-            assert_eq!(checkpoint_row(&distinct[..rows*2],2,rows,keep),[keep as u8*10+1,keep as u8*10+2]);
-        }}
-        assert!(std::panic::catch_unwind(||checkpoint_row(&distinct,2,4,0)).is_err());
-        assert!(std::panic::catch_unwind(||checkpoint_row(&distinct,2,4,5)).is_err());
+        let distinct = [11u8, 12, 21, 22, 31, 32, 41, 42];
+        for rows in 2..=4 {
+            for keep in 1..=rows {
+                assert_eq!(
+                    checkpoint_row(&distinct[..rows * 2], 2, rows, keep),
+                    [keep as u8 * 10 + 1, keep as u8 * 10 + 2]
+                );
+            }
+        }
+        assert!(std::panic::catch_unwind(|| checkpoint_row(&distinct, 2, 4, 0)).is_err());
+        assert!(std::panic::catch_unwind(|| checkpoint_row(&distinct, 2, 4, 5)).is_err());
     }
 
     pub(in crate::qwen35moe) fn target_gate(f: &Fixture) -> Result<()> {
-        let mut target:Qwen35Session<Qwen35Fp8AttentionBackend>=f.target()?;
-        let mut snapshot=target.allocate_snapshot(&f.ctx,&f.decoder,&f.weights,f.prompt.len())?;
-        assert_eq!(target.committed_attention.len(),10);assert_eq!(target.committed_gdn.len(),30);
-        for cache in target.committed_attention.iter().chain(&target.shadow_attention) {
-            assert_eq!(cache.capacity(),f.capacity);assert_eq!(cache.block_tokens(),128);
-            assert_eq!(cache.dtype(),crate::qwen35moe::Qwen35KvCacheDType::Bf16);
-            assert_eq!(cache.key().shape().dims(),[cache.blocks(),128,ops::QWEN35_ATTENTION_KV_HEADS,ops::QWEN35_ATTENTION_HEAD_DIM]);
+        target_gate_mode(f, false)
+    }
+
+    pub(in crate::qwen35moe) fn rowwise_target_gate(f: &Fixture) -> Result<()> {
+        target_gate_mode(f, true)
+    }
+
+    fn target_gate_mode(f: &Fixture, rowwise: bool) -> Result<()> {
+        let mut target: Qwen35Session<Qwen35Fp8AttentionBackend> = f.target()?;
+        if rowwise {
+            // Identity multimodal positions isolate the image-verification
+            // transaction branch from visual encoding, tested separately.
+            target.attention.set_image_positions(Some(std::rc::Rc::new(
+                super::super::vision_input::ImagePositions {
+                    prompt: (0..f.prompt.len()).map(|i| [i as u32; 3]).collect(),
+                    delta: 0,
+                },
+            )));
+            assert!(target.attention.requires_rowwise_verification());
         }
-        let cpu_ids=[42i32,1729,19,777];
+
+        let mut snapshot =
+            target.allocate_snapshot(&f.ctx, &f.decoder, &f.weights, f.prompt.len())?;
+        assert_eq!(target.committed_attention.len(), 10);
+        assert_eq!(target.committed_gdn.len(), 30);
+        for cache in target
+            .committed_attention
+            .iter()
+            .chain(&target.shadow_attention)
+        {
+            assert_eq!(cache.capacity(), f.capacity);
+            assert_eq!(cache.block_tokens(), 128);
+            assert_eq!(cache.dtype(), crate::qwen35moe::Qwen35KvCacheDType::Bf16);
+            assert_eq!(
+                cache.key().shape().dims(),
+                [
+                    cache.blocks(),
+                    128,
+                    ops::QWEN35_ATTENTION_KV_HEADS,
+                    ops::QWEN35_ATTENTION_HEAD_DIM
+                ]
+            );
+        }
+        let cpu_ids = [42i32, 1729, 19, 777];
         for depth in 1..=3usize {
-            let input=transfers::to_cuda_on_stream(&f.ctx,Tensor::from_i32(vec![depth+1],&cpu_ids[..depth+1])?)?;
-            for keep in 1..=depth+1 {
+            let input = transfers::to_cuda_on_stream(
+                &f.ctx,
+                Tensor::from_i32(vec![depth + 1], &cpu_ids[..depth + 1])?,
+            )?;
+            for keep in 1..=depth + 1 {
                 target.reset(&f.ctx)?;
-                target.prefill(&f.ctx,&f.decoder,&f.weights,&f.prompt)?;
-                let p=f.prompt.len();let verified_end=p+depth+1;
-                assert_eq!(target.position,p);assert_eq!(target.shadow_attention_valid,0);
+                target.prefill(&f.ctx, &f.decoder, &f.weights, &f.prompt)?;
+                let p = f.prompt.len();
+                let verified_end = p + depth + 1;
+                assert_eq!(target.position, p);
+                assert_eq!(target.shadow_attention_valid, 0);
                 // Snapshot destination is physically separate and has a future
                 // canary. Capture may write only its valid prefix and all GDN.
-                set_tail(f,&snapshot.attention,0,0x4a)?;
-                let snapshot_before=caches(&snapshot.attention)?;
-                let prompt_kv=caches(&target.committed_attention)?;
-                let prompt_gdn=gdn(&target.committed_gdn)?;
-                assert_ne!(cache_ids(&snapshot.attention),cache_ids(&target.committed_attention));
-                assert_ne!(gdn_ids(&snapshot.gdn),gdn_ids(&target.committed_gdn));
-                target.capture_snapshot(&f.ctx,&mut snapshot)?;
-                same("snapshot captures CPU-ledger valid KV prefix",&caches(&snapshot.attention)?,
-                    &prefix_expected(&snapshot_before,&prompt_kv,&snapshot.attention,p));
-                same("snapshot captures full GDN",&gdn(&snapshot.gdn)?,&prompt_gdn);
+                set_tail(f, &snapshot.attention, 0, 0x4a)?;
+                let snapshot_before = caches(&snapshot.attention)?;
+                let prompt_kv = caches(&target.committed_attention)?;
+                let prompt_gdn = gdn(&target.committed_gdn)?;
+                assert_ne!(
+                    cache_ids(&snapshot.attention),
+                    cache_ids(&target.committed_attention)
+                );
+                assert_ne!(gdn_ids(&snapshot.gdn), gdn_ids(&target.committed_gdn));
+                target.capture_snapshot(&f.ctx, &mut snapshot)?;
+                same(
+                    "snapshot captures CPU-ledger valid KV prefix",
+                    &caches(&snapshot.attention)?,
+                    &prefix_expected(&snapshot_before, &prompt_kv, &snapshot.attention, p),
+                );
+                same(
+                    "snapshot captures full GDN",
+                    &gdn(&snapshot.gdn)?,
+                    &prompt_gdn,
+                );
                 drop(prompt_gdn);
-                assert_eq!(snapshot.position,p);
-                let frozen_snapshot_kv=caches(&snapshot.attention)?;let frozen_snapshot_gdn=gdn(&snapshot.gdn)?;
+                assert_eq!(snapshot.position, p);
+                let frozen_snapshot_kv = caches(&snapshot.attention)?;
+                let frozen_snapshot_gdn = gdn(&snapshot.gdn)?;
                 // Each physical bank has its own write set. Committed A is
                 // readonly during verify/prepare; shadow B may write0..end.
-                set_tail(f,&target.committed_attention,p,0x3a)?;
-                set_tail(f,&target.shadow_attention,verified_end,0x5a)?;
-                let committed_kv=caches(&target.committed_attention)?;let committed_gdn=gdn(&target.committed_gdn)?;
-                let old_committed_ids=cache_ids(&target.committed_attention);let old_committed_gdn_ids=gdn_ids(&target.committed_gdn);
-                let old_shadow_ids=cache_ids(&target.shadow_attention);let old_shadow_gdn_ids=gdn_ids(&target.shadow_gdn);
-                let shadow_before=caches(&target.shadow_attention)?;let epoch=target.epoch;let generation=target.shadow_generation;
-                let verified=target.verify_target_chunk_device(&f.ctx,&f.decoder,&f.weights,&input)?;
+                set_tail(f, &target.committed_attention, p, 0x3a)?;
+                set_tail(f, &target.shadow_attention, verified_end, 0x5a)?;
+                let committed_kv = caches(&target.committed_attention)?;
+                let committed_gdn = gdn(&target.committed_gdn)?;
+                let old_committed_ids = cache_ids(&target.committed_attention);
+                let old_committed_gdn_ids = gdn_ids(&target.committed_gdn);
+                let old_shadow_ids = cache_ids(&target.shadow_attention);
+                let old_shadow_gdn_ids = gdn_ids(&target.shadow_gdn);
+                let shadow_before = caches(&target.shadow_attention)?;
+                let epoch = target.epoch;
+                let generation = target.shadow_generation;
+                let verified =
+                    target.verify_target_chunk_device(&f.ctx, &f.decoder, &f.weights, &input)?;
                 f.ctx.synchronize().map_err(Error::Cuda)?;
-                assert_eq!((target.position,target.epoch,target.shadow_generation),(p,epoch,generation+1));
-                same("verify committed physical KV readonly",&caches(&target.committed_attention)?,&committed_kv);
-                same("verify committed GDN readonly",&gdn(&target.committed_gdn)?,&committed_gdn);
-                let shadow_after_verify=caches(&target.shadow_attention)?;
-                future_unchanged("verify B future canary",&shadow_after_verify,&shadow_before,&target.shadow_attention,verified_end);
+                assert_eq!(
+                    (target.position, target.epoch, target.shadow_generation),
+                    (p, epoch, generation + 1)
+                );
+                same(
+                    "verify committed physical KV readonly",
+                    &caches(&target.committed_attention)?,
+                    &committed_kv,
+                );
+                same(
+                    "verify committed GDN readonly",
+                    &gdn(&target.committed_gdn)?,
+                    &committed_gdn,
+                );
+                let shadow_after_verify = caches(&target.shadow_attention)?;
+                future_unchanged(
+                    "verify B future canary",
+                    &shadow_after_verify,
+                    &shadow_before,
+                    &target.shadow_attention,
+                    verified_end,
+                );
                 // Old-prefix copy equality uses the frozen actual committed
                 // source, not a second invocation of copy_cache_range.
-                for (i,(a,b)) in shadow_after_verify.iter().zip(&committed_kv).enumerate() {
-                    let physical=target.shadow_attention[i].blocks()*target.shadow_attention[i].block_tokens();let width=a.0.len()/physical;
-                    exact("verify B old K prefix",&a.0[..p*width],&b.0[..p*width]);
-                    exact("verify B old V prefix",&a.1[..p*width],&b.1[..p*width]);
+                for (i, (a, b)) in shadow_after_verify.iter().zip(&committed_kv).enumerate() {
+                    let physical = target.shadow_attention[i].blocks()
+                        * target.shadow_attention[i].block_tokens();
+                    let width = a.0.len() / physical;
+                    exact(
+                        "verify B old K prefix",
+                        &a.0[..p * width],
+                        &b.0[..p * width],
+                    );
+                    exact(
+                        "verify B old V prefix",
+                        &a.1[..p * width],
+                        &b.1[..p * width],
+                    );
                 }
                 // Freeze all real GPU checkpoint bytes, then independently
                 // slice row keep-1 on CPU; do not call copy_row_to as oracle.
-                let checkpoints=&target.verify_profiles[depth-1].gdn_checkpoints;
-                let checkpoint_bytes:Vec<Pair>=checkpoints.iter().map(|x| {
-                    let (a,b)=x.gpu_test_tensors();Ok((raw(a)?,raw(b)?))
-                }).collect::<Result<_>>()?;
-                let verified_gdn=gdn(&target.shadow_gdn)?;
-                let selected:Vec<Pair>=checkpoint_bytes.iter().zip(&committed_gdn).zip(&verified_gdn).map(|((cp,state),live)| {
-                    assert_eq!(cp.0.len(),(depth+1)*state.0.len());assert_eq!(cp.1.len(),(depth+1)*state.1.len());
-                    (checkpoint_row(&cp.0,state.0.len(),depth+1,keep),
-                     if keep == depth+1 { live.1.clone() } else { checkpoint_row(&cp.1,state.1.len(),depth+1,keep) })
-                }).collect();
-                let prepared=target.prepare_target_commit(&f.ctx,&f.decoder,&f.weights,verified,keep)?;
+                let checkpoints = &target.verify_profiles[depth - 1].gdn_checkpoints;
+                let checkpoint_bytes: Vec<Pair> = checkpoints
+                    .iter()
+                    .map(|x| {
+                        let (a, b) = x.gpu_test_tensors();
+                        Ok((raw(a)?, raw(b)?))
+                    })
+                    .collect::<Result<_>>()?;
+                let verified_gdn = gdn(&target.shadow_gdn)?;
+                let selected: Vec<Pair> = checkpoint_bytes
+                    .iter()
+                    .zip(&committed_gdn)
+                    .zip(&verified_gdn)
+                    .map(|((cp, state), live)| {
+                        assert_eq!(cp.0.len(), (depth + 1) * state.0.len());
+                        assert_eq!(cp.1.len(), (depth + 1) * state.1.len());
+                        (
+                            checkpoint_row(&cp.0, state.0.len(), depth + 1, keep),
+                            if keep == depth + 1 {
+                                live.1.clone()
+                            } else {
+                                checkpoint_row(&cp.1, state.1.len(), depth + 1, keep)
+                            },
+                        )
+                    })
+                    .collect();
+                let prepared =
+                    target.prepare_target_commit(&f.ctx, &f.decoder, &f.weights, verified, keep)?;
                 f.ctx.synchronize().map_err(Error::Cuda)?;
-                assert_eq!((target.position,target.epoch,target.shadow_generation),(p,epoch,generation+1));
-                same("prepare committed KV readonly",&caches(&target.committed_attention)?,&committed_kv);
-                same("prepare committed GDN readonly",&gdn(&target.committed_gdn)?,&committed_gdn);
-                same("prepare never rewrites KV",&caches(&target.shadow_attention)?,&shadow_after_verify);
-                same("selected checkpoint row CPU slicing",&gdn(&target.shadow_gdn)?,&selected);
-                for (i,checkpoint) in target.verify_profiles[depth-1].gdn_checkpoints.iter().enumerate() {
-                    let (a,b)=checkpoint.gpu_test_tensors();
-                    exact("checkpoint conv source readonly",&raw(a)?,&checkpoint_bytes[i].0);
-                    exact("checkpoint recurrent source readonly",&raw(b)?,&checkpoint_bytes[i].1);
+                assert_eq!(
+                    (target.position, target.epoch, target.shadow_generation),
+                    (p, epoch, generation + 1)
+                );
+                same(
+                    "prepare committed KV readonly",
+                    &caches(&target.committed_attention)?,
+                    &committed_kv,
+                );
+                same(
+                    "prepare committed GDN readonly",
+                    &gdn(&target.committed_gdn)?,
+                    &committed_gdn,
+                );
+                same(
+                    "prepare never rewrites KV",
+                    &caches(&target.shadow_attention)?,
+                    &shadow_after_verify,
+                );
+                same(
+                    "selected checkpoint row CPU slicing",
+                    &gdn(&target.shadow_gdn)?,
+                    &selected,
+                );
+                for (i, checkpoint) in target.verify_profiles[depth - 1]
+                    .gdn_checkpoints
+                    .iter()
+                    .enumerate()
+                {
+                    let (a, b) = checkpoint.gpu_test_tensors();
+                    exact(
+                        "checkpoint conv source readonly",
+                        &raw(a)?,
+                        &checkpoint_bytes[i].0,
+                    );
+                    exact(
+                        "checkpoint recurrent source readonly",
+                        &raw(b)?,
+                        &checkpoint_bytes[i].1,
+                    );
                 }
                 drop(checkpoint_bytes); // Bound host audit memory before restore/append.
                 target.publish_target_commit(prepared)?;
-                assert_eq!((target.position,target.epoch,target.shadow_attention_valid),(p+keep,epoch+1,p));
-                assert_eq!(cache_ids(&target.committed_attention),old_shadow_ids);assert_eq!(gdn_ids(&target.committed_gdn),old_shadow_gdn_ids);
-                assert_eq!(cache_ids(&target.shadow_attention),old_committed_ids);assert_eq!(gdn_ids(&target.shadow_gdn),old_committed_gdn_ids);
+                assert_eq!(
+                    (target.position, target.epoch, target.shadow_attention_valid),
+                    (p + keep, epoch + 1, p)
+                );
+                assert_eq!(cache_ids(&target.committed_attention), old_shadow_ids);
+                assert_eq!(gdn_ids(&target.committed_gdn), old_shadow_gdn_ids);
+                assert_eq!(cache_ids(&target.shadow_attention), old_committed_ids);
+                assert_eq!(gdn_ids(&target.shadow_gdn), old_committed_gdn_ids);
                 // Full physical equality is a swap assertion. Rejected verified
                 // rows may remain populated; their logical visibility endsP+keep.
-                same("commit physical KV swap",&caches(&target.committed_attention)?,&shadow_after_verify);
-                same("commit chosen GDN row",&gdn(&target.committed_gdn)?,&selected);
-                same("old A physical KV remains unchanged",&caches(&target.shadow_attention)?,&committed_kv);
-                same("old A GDN remains unchanged",&gdn(&target.shadow_gdn)?,&committed_gdn);
-                same("snapshot KV deepfreeze",&caches(&snapshot.attention)?,&frozen_snapshot_kv);
-                same("snapshot GDN deepfreeze",&gdn(&snapshot.gdn)?,&frozen_snapshot_gdn);
+                same(
+                    "commit physical KV swap",
+                    &caches(&target.committed_attention)?,
+                    &shadow_after_verify,
+                );
+                same(
+                    "commit chosen GDN row",
+                    &gdn(&target.committed_gdn)?,
+                    &selected,
+                );
+                same(
+                    "old A physical KV remains unchanged",
+                    &caches(&target.shadow_attention)?,
+                    &committed_kv,
+                );
+                same(
+                    "old A GDN remains unchanged",
+                    &gdn(&target.shadow_gdn)?,
+                    &committed_gdn,
+                );
+                same(
+                    "snapshot KV deepfreeze",
+                    &caches(&snapshot.attention)?,
+                    &frozen_snapshot_kv,
+                );
+                same(
+                    "snapshot GDN deepfreeze",
+                    &gdn(&snapshot.gdn)?,
+                    &frozen_snapshot_gdn,
+                );
                 {
                     // A second round now writes the opposite physical bank and
                     // replays the other captured verifier graph set.
-                    let prior_gdn=gdn(&target.committed_gdn)?;
-                    let next=target.verify_target_chunk_device(&f.ctx,&f.decoder,&f.weights,&input)?;
+                    let prior_gdn = gdn(&target.committed_gdn)?;
+                    let next = target
+                        .verify_target_chunk_device(&f.ctx, &f.decoder, &f.weights, &input)?;
                     f.ctx.synchronize().map_err(Error::Cuda)?;
-                    same("second round committed GDN readonly",&gdn(&target.committed_gdn)?,&prior_gdn);
-                    let cps=&target.verify_profiles[depth-1].gdn_checkpoints;
-                    let next_selected:Vec<Pair>=cps.iter().zip(&prior_gdn).map(|(cp,old)| {
-                        let (a,b)=cp.gpu_test_tensors();
-                        Ok((checkpoint_row(&raw(a)?,old.0.len(),depth+1,1),
-                            checkpoint_row(&raw(b)?,old.1.len(),depth+1,1)))
-                    }).collect::<Result<_>>()?;
-                    let prepared=target.prepare_target_commit(&f.ctx,&f.decoder,&f.weights,next,1)?;
+                    same(
+                        "second round committed GDN readonly",
+                        &gdn(&target.committed_gdn)?,
+                        &prior_gdn,
+                    );
+                    let cps = &target.verify_profiles[depth - 1].gdn_checkpoints;
+                    let next_selected: Vec<Pair> = cps
+                        .iter()
+                        .zip(&prior_gdn)
+                        .map(|(cp, old)| {
+                            let (a, b) = cp.gpu_test_tensors();
+                            Ok((
+                                checkpoint_row(&raw(a)?, old.0.len(), depth + 1, 1),
+                                checkpoint_row(&raw(b)?, old.1.len(), depth + 1, 1),
+                            ))
+                        })
+                        .collect::<Result<_>>()?;
+                    let prepared =
+                        target.prepare_target_commit(&f.ctx, &f.decoder, &f.weights, next, 1)?;
                     f.ctx.synchronize().map_err(Error::Cuda)?;
-                    same("second-bank partial accept GDN",&gdn(&target.shadow_gdn)?,&next_selected);
+                    same(
+                        "second-bank partial accept GDN",
+                        &gdn(&target.shadow_gdn)?,
+                        &next_selected,
+                    );
                     target.publish_target_commit(prepared)?;
-                    same("second-bank published GDN",&gdn(&target.committed_gdn)?,&next_selected);
-                    same("second-bank old committed GDN readonly",&gdn(&target.shadow_gdn)?,&prior_gdn);
+                    same(
+                        "second-bank published GDN",
+                        &gdn(&target.committed_gdn)?,
+                        &next_selected,
+                    );
+                    same(
+                        "second-bank old committed GDN readonly",
+                        &gdn(&target.shadow_gdn)?,
+                        &prior_gdn,
+                    );
                 }
                 // Destroy only destination-valid bytes before restore so an
                 // accidental omitted copy cannot pass because prefix matched.
                 for cache in &target.committed_attention {
-                    let physical=cache.blocks()*cache.block_tokens();
-                    fill_rows(&f.ctx,cache.key(),0,p,physical,0x6a)?;fill_rows(&f.ctx,cache.value(),0,p,physical,0x6a)?;
+                    let physical = cache.blocks() * cache.block_tokens();
+                    fill_rows(&f.ctx, cache.key(), 0, p, physical, 0x6a)?;
+                    fill_rows(&f.ctx, cache.value(), 0, p, physical, 0x6a)?;
                 }
                 for state in &target.committed_gdn {
-                    let (a,b)=state.gpu_test_tensors();
-                    for t in [a,b] { CudaBuffer::from_tensor(t).map_err(Error::Cuda)?.fill_async(0x6a,f.ctx.stream()).map_err(Error::Cuda)?; }
+                    let (a, b) = state.gpu_test_tensors();
+                    for t in [a, b] {
+                        CudaBuffer::from_tensor(t)
+                            .map_err(Error::Cuda)?
+                            .fill_async(0x6a, f.ctx.stream())
+                            .map_err(Error::Cuda)?;
+                    }
                 }
-                let before_restore=caches(&target.committed_attention)?;
-                let shadow_before_restore=caches(&target.shadow_attention)?;let shadow_gdn_before_restore=gdn(&target.shadow_gdn)?;
-                let epoch=target.epoch;
-                target.restore_snapshot(&f.ctx,&snapshot)?;
-                assert_eq!((target.position,target.epoch,target.shadow_attention_valid),(p,epoch+1,0));
-                same("restore CPU prefix ledger preserving physical tail",&caches(&target.committed_attention)?,
-                    &prefix_expected(&before_restore,&frozen_snapshot_kv,&target.committed_attention,p));
-                same("restore committed GDN",&gdn(&target.committed_gdn)?,&frozen_snapshot_gdn);
-                same("restore does not write shadow KV",&caches(&target.shadow_attention)?,&shadow_before_restore);
-                same("restore does not write shadow GDN",&gdn(&target.shadow_gdn)?,&shadow_gdn_before_restore);
-                let before_append_committed=caches(&target.committed_attention)?;let before_append_gdn=gdn(&target.committed_gdn)?;
-                let before_append_shadow=caches(&target.shadow_attention)?;
-                target.append_prefill(&f.ctx,&f.decoder,&f.weights,&[2345u32,6789])?;
-                assert_eq!(target.position,p+2);
-                future_unchanged("restored different suffix B nonwrite tail",&caches(&target.committed_attention)?,&before_append_shadow,&target.committed_attention,p+2);
-                same("append old A readonly physical bank",&caches(&target.shadow_attention)?,&before_append_committed);
-                same("append old A GDN readonly",&gdn(&target.shadow_gdn)?,&before_append_gdn);
-                same("snapshot KV still immutable",&caches(&snapshot.attention)?,&frozen_snapshot_kv);
-                same("snapshot GDN still immutable",&gdn(&snapshot.gdn)?,&frozen_snapshot_gdn);
-                println!("{}",serde_json::json!({"schema":"apxinf.qwen35.target_raw_bank.v1","depth":depth,"keep":keep,
+                let before_restore = caches(&target.committed_attention)?;
+                let shadow_before_restore = caches(&target.shadow_attention)?;
+                let shadow_gdn_before_restore = gdn(&target.shadow_gdn)?;
+                let epoch = target.epoch;
+                target.restore_snapshot(&f.ctx, &snapshot)?;
+                assert_eq!(
+                    (target.position, target.epoch, target.shadow_attention_valid),
+                    (p, epoch + 1, 0)
+                );
+                same(
+                    "restore CPU prefix ledger preserving physical tail",
+                    &caches(&target.committed_attention)?,
+                    &prefix_expected(
+                        &before_restore,
+                        &frozen_snapshot_kv,
+                        &target.committed_attention,
+                        p,
+                    ),
+                );
+                same(
+                    "restore committed GDN",
+                    &gdn(&target.committed_gdn)?,
+                    &frozen_snapshot_gdn,
+                );
+                same(
+                    "restore does not write shadow KV",
+                    &caches(&target.shadow_attention)?,
+                    &shadow_before_restore,
+                );
+                same(
+                    "restore does not write shadow GDN",
+                    &gdn(&target.shadow_gdn)?,
+                    &shadow_gdn_before_restore,
+                );
+                let before_append_committed = caches(&target.committed_attention)?;
+                let before_append_gdn = gdn(&target.committed_gdn)?;
+                let before_append_shadow = caches(&target.shadow_attention)?;
+                target.append_prefill(&f.ctx, &f.decoder, &f.weights, &[2345u32, 6789])?;
+                assert_eq!(target.position, p + 2);
+                future_unchanged(
+                    "restored different suffix B nonwrite tail",
+                    &caches(&target.committed_attention)?,
+                    &before_append_shadow,
+                    &target.committed_attention,
+                    p + 2,
+                );
+                same(
+                    "append old A readonly physical bank",
+                    &caches(&target.shadow_attention)?,
+                    &before_append_committed,
+                );
+                same(
+                    "append old A GDN readonly",
+                    &gdn(&target.shadow_gdn)?,
+                    &before_append_gdn,
+                );
+                same(
+                    "snapshot KV still immutable",
+                    &caches(&snapshot.attention)?,
+                    &frozen_snapshot_kv,
+                );
+                same(
+                    "snapshot GDN still immutable",
+                    &gdn(&snapshot.gdn)?,
+                    &frozen_snapshot_gdn,
+                );
+                println!(
+                    "{}",
+                    serde_json::json!({"schema":"apxinf.qwen35.target_raw_bank.v1","depth":depth,"keep":keep,
                     "verified_rows":depth+1,"committed_position":p+keep,"restored_position":p,"new_suffix_position":p+2,
                     "physical_write_ledger_exact":true,"selected_gdn_digest":digest_images(&selected),
                     "published_kv_source_digest":digest_images(&shadow_after_verify),"snapshot_kv_digest":digest_images(&frozen_snapshot_kv),
                     "gdn_reference":"same-round GPU checkpoint bytes independently sliced on CPU",
-                    "independent_gdn_math_oracle":false,"logical_tail_zero_required":false,"performance_accepted":false}));
+                    "independent_gdn_math_oracle":false,"logical_tail_zero_required":false,"performance_accepted":false})
+                );
             }
         }
         Ok(())

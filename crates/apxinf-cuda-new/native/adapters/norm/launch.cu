@@ -82,6 +82,8 @@ extern "C" cudaError_t apxinf_norm_add_rms_norm_plus1_bf16(
     const void* a, const void* b, const void* weight, void* sum_out,
     void* output, int rows, int cols, float eps, cudaStream_t stream);
 
+cudaError_t apxinf_layer_norm_welford4(const void*,const void*,const void*,void*,int,int,float,cudaStream_t);
+
 namespace {
 
 using apxinf::framework::Failure;
@@ -187,6 +189,13 @@ bool valid_contract(const apxinf_norm_spec_t& spec) {
 }
 
 void validate_spec(const apxinf_norm_spec_t& spec) {
+  if (spec.numerics == APXINF_NORM_NUMERICS_WELFORD4_F32 &&
+      (spec.operation != APXINF_NORM_OPERATION_NORM ||
+       spec.statistic != APXINF_NORM_STATISTIC_LAYER || spec.affine != APXINF_NORM_AFFINE_WEIGHT ||
+       spec.gate != APXINF_NORM_GATE_NONE || spec.quantization != APXINF_NORM_QUANTIZATION_NONE ||
+       spec.dtype != APXINF_DTYPE_BF16 || spec.output_dtype != APXINF_DTYPE_BF16 ||
+       spec.weight_offset || spec.has_bias || spec.cols % 8 || spec.cols > 32768))
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid four-lane Welford LayerNorm contract");
   const bool grouped = spec.style_group_rows != 0;
   const bool grouped_norm = is_contract(spec, APXINF_NORM_OPERATION_NORM,
       APXINF_NORM_STATISTIC_LAYER, APXINF_NORM_AFFINE_ADAPTIVE, APXINF_NORM_GATE_NONE);
@@ -311,7 +320,7 @@ void validate_spec(const apxinf_norm_spec_t& spec) {
   if (spec.version != APXINF_NORM_SPEC_VERSION ||
       !valid_contract(spec) ||
       spec.quantization > APXINF_NORM_QUANTIZATION_ROWWISE_I8 ||
-      spec.numerics > APXINF_NORM_NUMERICS_STAGED_BF16 ||
+      spec.numerics > APXINF_NORM_NUMERICS_WELFORD4_F32 ||
       spec.weight_offset > 1 ||
       (spec.weight_offset != 0 &&
        !weight_offset_plain && !weight_offset_fused) ||
@@ -1049,6 +1058,13 @@ extern "C" apxinf_status_t apxinf_norm_launch(
     validate_spec(*spec);
     validate_bindings(*spec, *bindings);
     apxinf::framework::check_cuda(cudaSetDevice(runtime->device));
+    if (spec->numerics == APXINF_NORM_NUMERICS_WELFORD4_F32) {
+      apxinf::framework::check_cuda(apxinf_layer_norm_welford4(bindings->input,
+          bindings->weight,bindings->norm_bias,bindings->normalized,
+          int(spec->rows),int(spec->cols),bindings->eps,
+          static_cast<cudaStream_t>(bindings->stream)));
+      return;
+    }
     apxinf::framework::check_cuda(
         spec->weight_offset != 0
             ? launch_weight_offset(*spec, *bindings)

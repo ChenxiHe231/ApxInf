@@ -244,7 +244,7 @@ cudaError_t launch_attention(const void* query, const void* key,
 // One CUDA block computes one (segment, query, head) output row. This is the
 // shape-general L0 fallback for the segmented L3 semantic; offsets remain a
 // device input and all segments are processed by one launch.
-template <class T>
+template <class T, bool StagedBf16 = false>
 __global__ void segmented_attention_kernel(
     const T* query, const T* key, const T* value, const uint32_t* offsets,
     T* output, int total_tokens, int segments, int max_segment_tokens,
@@ -273,7 +273,12 @@ __global__ void segmented_attention_kernel(
     for (int dimension = 0; dimension < head_dim; ++dimension) {
       dot += to_float(q[dimension]) * to_float(k[dimension]);
     }
-    scores[key_token] = dot * scale;
+    if constexpr (StagedBf16) {
+      dot = to_float(from_float<T>(dot));
+      scores[key_token] = to_float(from_float<T>(dot * scale));
+    } else {
+      scores[key_token] = dot * scale;
+    }
   }
   __syncthreads();
   if (threadIdx.x == 0) {
@@ -285,8 +290,10 @@ __global__ void segmented_attention_kernel(
       scores[key_token] = expf(scores[key_token] - maximum);
       sum += scores[key_token];
     }
-    for (int key_token = 0; key_token < tokens; ++key_token)
-      scores[key_token] /= sum;
+    for (int key_token = 0; key_token < tokens; ++key_token) {
+      const float probability = scores[key_token] / sum;
+      scores[key_token] = StagedBf16 ? to_float(from_float<T>(probability)) : probability;
+    }
   }
   __syncthreads();
   for (int dimension = threadIdx.x; dimension < head_dim;
@@ -302,14 +309,14 @@ __global__ void segmented_attention_kernel(
   }
 }
 
-template <class T>
+template <class T, bool StagedBf16 = false>
 cudaError_t launch_segmented_attention(
     const void* query, const void* key, const void* value,
     const void* offsets, void* output, int segments, int max_segment_tokens,
     int total_tokens, int heads, int head_dim, float scale,
     cudaStream_t stream) {
   constexpr int threads = 128;
-  segmented_attention_kernel<T><<<
+  segmented_attention_kernel<T, StagedBf16><<<
       dim3(max_segment_tokens, heads, segments), threads,
       static_cast<size_t>(max_segment_tokens) * sizeof(float), stream>>>(
       static_cast<const T*>(query), static_cast<const T*>(key),

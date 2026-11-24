@@ -115,6 +115,7 @@ impl Qwen35AttentionCache {
 pub struct Qwen35Fp8AttentionBackend {
     hidden_size: usize,
     rope_theta: f32,
+    image_positions: Option<Rc<super::vision_input::ImagePositions>>,
     kv_cache_dtype: Qwen35KvCacheDType,
     scratch: HashMap<(usize, usize, usize, bool), AttentionScratch>,
     pre_projection_sessions: HashMap<(usize, usize, usize), Rc<PreparedExecution>>,
@@ -175,11 +176,34 @@ impl Qwen35Fp8AttentionBackend {
         Ok(Self {
             hidden_size: TARGET_HIDDEN_SIZE,
             rope_theta: config.text_config.rope_parameters.rope_theta,
+            image_positions: None,
             kv_cache_dtype,
             scratch: HashMap::new(),
             pre_projection_sessions: HashMap::new(),
             post_projection_sessions: HashMap::new(),
         })
+    }
+
+    pub(super) fn set_image_positions(
+        &mut self,
+        positions: Option<Rc<super::vision_input::ImagePositions>>,
+    ) {
+        self.replace_image_positions(positions);
+    }
+
+    pub(super) fn replace_image_positions(
+        &mut self,
+        positions: Option<Rc<super::vision_input::ImagePositions>>,
+    ) -> Option<Rc<super::vision_input::ImagePositions>> {
+        if self.image_positions.is_none() && positions.is_none() {
+            return None;
+        }
+        let previous = std::mem::replace(&mut self.image_positions, positions);
+        for scratch in self.scratch.values_mut() {
+            scratch.positions_start = None;
+            scratch.image_positions = None;
+        }
+        previous
     }
 
     pub fn retained_profiles(&self) -> usize {
@@ -236,6 +260,13 @@ impl Qwen35Fp8AttentionBackend {
 }
 
 impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
+    fn requires_rowwise_verification(&self) -> bool {
+        // Image prompts amplify differences between batched prefill and the
+        // selected scalar decoder. Verify with that decoder for every KV
+        // precision, retaining its native FP8 kernels and Graph phases.
+        self.image_positions.is_some()
+    }
+
     type Cache = Qwen35AttentionCache;
 
     fn allocate_cache(
@@ -393,8 +424,13 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             request.phase,
             tokens,
         )?;
+        let image_positions = self.image_positions.clone();
         let scratch = self.scratch(ctx, tokens, cache.capacity, request.phase)?;
-        scratch.ensure_text_positions(ctx, request.start_position)?;
+        if let Some(plan) = image_positions.as_ref() {
+            scratch.ensure_image_positions(ctx, request.start_position, plan)?;
+        } else {
+            scratch.ensure_text_positions(ctx, request.start_position)?;
+        }
         let profile_attention = tokens == ops::QWEN35_MTP_DRAFT_STEPS + 1
             && std::env::var_os("APXINF_QWEN35_ATTENTION_TIMING").is_some();
         if profile_attention {
@@ -599,31 +635,47 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             ops::QWEN35_ATTENTION_RMS_EPSILON,
         )?;
 
-        // Partial RoPE (mRoPE) on query and key.
-        // `partial_rope` expects 1-D positions [tokens]; `ensure_text_positions`
-        // fills [3, tokens] for mRoPE, whose three channels are identical in
-        // text mode.  Take the first channel as a view.
-        let pos_bytes = tokens * DType::I32.size_in_bytes();
-        let positions_1d = CudaBuffer::from_tensor(&scratch.positions)
-            .map_err(Error::Cuda)?
-            .view(0, pos_bytes)
-            .map_err(Error::Cuda)?
-            .as_tensor(Shape::new(vec![tokens]), DType::I32)
-            .map_err(Error::Cuda)?;
-        ops::partial_rope(
-            ctx,
-            &scratch.query,
-            &positions_1d,
-            ops::QWEN35_ATTENTION_ROTARY_DIM,
-            rope_theta,
-        )?;
-        ops::partial_rope(
-            ctx,
-            &key_heads,
-            &positions_1d,
-            ops::QWEN35_ATTENTION_ROTARY_DIM,
-            rope_theta,
-        )?;
+        if let Some(positions) = scratch.image_positions.as_ref() {
+            // BF16/general prefill needs all three axes, just like the fused FP8 paths.
+            for mut data in [scratch.query.clone(), key_heads.clone()] {
+                ops::multimodal_rope(
+                    ctx,
+                    ops::MultimodalRopeArgs {
+                        data: &mut data,
+                        positions,
+                        rotary_dim: ops::QWEN35_ATTENTION_ROTARY_DIM,
+                        sections: [11, 11, 10],
+                        theta: rope_theta,
+                    },
+                )?;
+            }
+        } else {
+            // Partial RoPE (mRoPE) on query and key.
+            // `partial_rope` expects 1-D positions [tokens]; `ensure_text_positions`
+            // fills [3, tokens] for mRoPE, whose three channels are identical in
+            // text mode.  Take the first channel as a view.
+            let pos_bytes = tokens * DType::I32.size_in_bytes();
+            let positions_1d = CudaBuffer::from_tensor(&scratch.positions)
+                .map_err(Error::Cuda)?
+                .view(0, pos_bytes)
+                .map_err(Error::Cuda)?
+                .as_tensor(Shape::new(vec![tokens]), DType::I32)
+                .map_err(Error::Cuda)?;
+            ops::partial_rope(
+                ctx,
+                &scratch.query,
+                &positions_1d,
+                ops::QWEN35_ATTENTION_ROTARY_DIM,
+                rope_theta,
+            )?;
+            ops::partial_rope(
+                ctx,
+                &key_heads,
+                &positions_1d,
+                ops::QWEN35_ATTENTION_ROTARY_DIM,
+                rope_theta,
+            )?;
+        }
 
         // ---- Append K/V using the selected runtime cache representation ----
         let cache_dtype = cache.dtype.tensor_dtype();
@@ -992,6 +1044,7 @@ struct AttentionScratch {
     projected_key: Tensor,
     projected_value: Tensor,
     positions: Tensor,
+    image_positions: Option<Tensor>,
     query: Tensor,
     gate: Tensor,
     attention_output: Tensor,
@@ -1113,6 +1166,7 @@ impl AttentionScratch {
                 DType::BF16,
             )?,
             positions: zeros(ctx, vec![TEXT_POSITION_CHANNELS, tokens], DType::I32)?,
+            image_positions: None,
             query: zeros(ctx, attention_shape.clone(), DType::BF16)?,
             gate: zeros(ctx, attention_shape.clone(), DType::BF16)?,
             attention_output: zeros(ctx, attention_shape, DType::BF16)?,
@@ -1155,6 +1209,36 @@ impl AttentionScratch {
             tokens,
             positions_start: None,
         })
+    }
+
+    fn ensure_image_positions(
+        &mut self,
+        ctx: &CudaContext,
+        start: usize,
+        plan: &super::vision_input::ImagePositions,
+    ) -> Result<()> {
+        if self.positions_start == Some(start) {
+            return Ok(());
+        }
+        let values = plan.values(start, self.tokens)?;
+        let host = Tensor::from_i32(vec![3, self.tokens], &values)?;
+        transfers::copy_cpu_to_cuda_on_stream(ctx, host, &self.positions)?;
+        let interleaved: Vec<i32> = (0..self.tokens)
+            .flat_map(|i| {
+                [
+                    values[i],
+                    values[self.tokens + i],
+                    values[2 * self.tokens + i],
+                ]
+            })
+            .collect();
+        let host = Tensor::from_i32(vec![self.tokens, 3], &interleaved)?;
+        if self.image_positions.is_none() {
+            self.image_positions = Some(zeros(ctx, vec![self.tokens, 3], DType::I32)?);
+        }
+        transfers::copy_cpu_to_cuda_on_stream(ctx, host, self.image_positions.as_ref().unwrap())?;
+        self.positions_start = Some(start);
+        Ok(())
     }
 
     fn ensure_text_positions(&mut self, ctx: &CudaContext, start_position: usize) -> Result<()> {

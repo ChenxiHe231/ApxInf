@@ -39,6 +39,7 @@ __global__ void flow_update_f32_kernel(
   }
 }
 
+template <bool StagedFp32 = false>
 __global__ void vision_position_kernel(
     const __nv_bfloat16* __restrict__ table,
     __nv_bfloat16* __restrict__ embeddings,
@@ -72,10 +73,14 @@ __global__ void vision_position_kernel(
   const int column0 = static_cast<int>(floorf(column_position));
   const int row1 = min(row0 + 1, source_side - 1);
   const int column1 = min(column0 + 1, source_side - 1);
-  const float row_weight = row_position - static_cast<float>(row0);
-  const float column_weight = column_position - static_cast<float>(column0);
+  float row_weight = row_position - static_cast<float>(row0);
+  float column_weight = column_position - static_cast<float>(column0);
   const float row_weight0 = 1.0f - row_weight;
   const float column_weight0 = 1.0f - column_weight;
+  if constexpr (StagedFp32) {
+    row_weight = __fsub_rn(1.0f, fabsf(__fsub_rn(row_weight,1.0f)));
+    column_weight = __fsub_rn(1.0f, fabsf(__fsub_rn(column_weight,1.0f)));
+  }
 
   for (int channel = threadIdx.x; channel < hidden; channel += blockDim.x) {
     const long long offset00 =
@@ -90,11 +95,18 @@ __global__ void vision_position_kernel(
     const long long offset11 =
         (static_cast<long long>(row1) * source_side + column1) * hidden +
         channel;
-    const float value =
+    float value =
         row_weight0 * column_weight0 * __bfloat162float(table[offset00]) +
         row_weight0 * column_weight * __bfloat162float(table[offset01]) +
         row_weight * column_weight0 * __bfloat162float(table[offset10]) +
         row_weight * column_weight * __bfloat162float(table[offset11]);
+    if constexpr (StagedFp32) {
+      const float p00=__fmul_rn(__fmul_rn(row_weight0,column_weight0),__bfloat162float(table[offset00]));
+      const float p01=__fmul_rn(__fmul_rn(row_weight0,column_weight),__bfloat162float(table[offset01]));
+      const float p10=__fmul_rn(__fmul_rn(row_weight,column_weight0),__bfloat162float(table[offset10]));
+      const float p11=__fmul_rn(__fmul_rn(row_weight,column_weight),__bfloat162float(table[offset11]));
+      value=__fadd_rn(__fadd_rn(__fadd_rn(p00,p01),p10),p11);
+    }
     embeddings[static_cast<long long>(token) * hidden + channel] =
         __float2bfloat16(value);
   }

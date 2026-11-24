@@ -55,8 +55,13 @@ void validate_spec(const Spec& spec) {
       spec.head_dim > INT32_MAX || spec.query_start > INT32_MAX ||
       spec.segments > INT32_MAX || spec.max_segment_tokens > INT32_MAX ||
       spec.scale_is_default > 1 || spec.dynamic_decode > 1 ||
-      spec.numerics > APXINF_ATTENTION_NUMERICS_STABLE) {
+      spec.numerics > APXINF_ATTENTION_NUMERICS_STAGED_BF16) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Attention Spec");
+  }
+  if (spec.numerics == APXINF_ATTENTION_NUMERICS_STAGED_BF16 &&
+      (spec.semantic != APXINF_ATTENTION_SEMANTIC_SEGMENTED ||
+       spec.dtype != APXINF_DTYPE_BF16)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "staged BF16 numerics require segmented BF16 Attention");
   }
   if (spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
       (spec.key_capacity != spec.key_tokens ||

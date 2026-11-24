@@ -26,6 +26,7 @@ typedef enum {
   // candidate consolidation. Candidates must opt in after model-level
   // qualification; this is a numerical contract, not a provider request.
   APXINF_ATTENTION_NUMERICS_STABLE = 1,
+  APXINF_ATTENTION_NUMERICS_STAGED_BF16 = 2,
 } apxinf_attention_numerics_t;
 
 typedef struct {

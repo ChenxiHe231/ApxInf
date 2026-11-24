@@ -5,7 +5,9 @@
 //! schedule. The full-attention backend, native BF16 MTP proposer and
 //! batch-one serving surface are registered with [`crate::AutoModel`]. Exact
 //! neutral greedy requests use transactional MTP speculation; other sampling
-//! policies fall back to the base target decoder.
+//! policies use the base target decoder. Ordered image prefill uses the native
+//! BF16 visual tower and three-axis mRoPE, including shifted MTP teacher forcing.
+//! The image implementation's numerical acceptance remains pending.
 
 pub mod architecture;
 #[cfg(feature = "qwen35-cuda")]
@@ -53,3 +55,10 @@ pub use runtime_weights::{
 pub use weights::{
     expected_text_and_mtp_weights, is_visual_weight, CheckpointDType, WeightRole, WeightSpec,
 };
+
+#[cfg(feature = "qwen35-cuda")]
+mod vision;
+mod vision_config;
+pub mod vision_input;
+#[cfg(feature = "qwen35-cuda")]
+mod vision_weights;

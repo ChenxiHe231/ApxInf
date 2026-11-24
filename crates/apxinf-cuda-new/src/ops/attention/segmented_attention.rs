@@ -83,6 +83,9 @@ pub(crate) fn normalize(ctx: &CudaContext, args: SegmentedAttentionArgs<'_>) -> 
             "segmented Attention offsets must be monotonic and span all tokens",
         ));
     }
+    if args.numerics == AttentionNumerics::StagedBf16 && args.query.dtype() != DType::BF16 {
+        return Err(invalid("staged BF16 Attention requires BF16 operands"));
+    }
     let offsets_bytes = args
         .host_offsets
         .len()

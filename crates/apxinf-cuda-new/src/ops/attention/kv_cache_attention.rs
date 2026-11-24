@@ -194,6 +194,9 @@ pub(crate) fn normalize(ctx: &CudaContext, args: KvCacheAttentionArgs<'_>) -> Re
     {
         return Err(invalid("invalid KV-cache Attention contract"));
     }
+    if args.numerics == AttentionNumerics::StagedBf16 {
+        return Err(invalid("staged BF16 numerics require segmented Attention"));
+    }
     if !args.scale.is_finite() || args.scale <= 0.0 {
         return Err(invalid(
             "KV-cache Attention scale must be finite and positive",

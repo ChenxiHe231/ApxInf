@@ -67,6 +67,9 @@ pub enum GemmNumerics {
     /// Preserve the established shared-cuBLAS BF16 reduction path. This is a
     /// semantic constraint; native dispatch still owns the provider choice.
     LegacyCublas,
+    /// NK BF16 GEMM+bias with ordered BF16 pair products, round-to-odd FP32
+    /// pair/accumulator sums, then one FP32 bias addition and BF16 output.
+    PairwiseBf16Odd,
 }
 
 /// Parameters common to the GEMM semantic operators.
@@ -524,6 +527,22 @@ fn normalize_fused<'a>(
             "legacy cuBLAS numerics require unit-scale canonical BF16 GEMM",
         ));
     }
+    if args.policy.numerics == GemmNumerics::PairwiseBf16Odd
+        && (semantic != Semantic::GemmBias
+            || !matches!(args.quantization, GemmQuantization::None)
+            || args.weight_layout != GemmWeightLayout::OutputMajor
+            || args.a.dtype() != DType::BF16
+            || args.b.dtype() != DType::BF16
+            || args.out.dtype() != DType::BF16
+            || k % 2 != 0
+            || ((m as u64 + 7) / 8) * ((n as u64 + 15) / 16) > i32::MAX as u64
+            || args.alpha != 1.0
+            || args.output_scale != 1.0)
+    {
+        return Err(invalid(
+            "pairwise BF16 numerics requires unit-scale NK BF16 GEMM+bias and even K",
+        ));
+    }
     let needs_bias = matches!(semantic, Semantic::GemmBias | Semantic::GemmBiasGelu);
     let allows_bias = needs_bias || semantic == Semantic::GemmBiasResidual;
     if (bias.is_some() && !allows_bias) || (bias.is_none() && needs_bias) {
@@ -774,6 +793,7 @@ fn normalize_fused<'a>(
             numerics: match args.policy.numerics {
                 GemmNumerics::Default => 0,
                 GemmNumerics::LegacyCublas => 1,
+                GemmNumerics::PairwiseBf16Odd => 2,
             },
             b_is_immutable: bindings.b_is_immutable,
             a_alignment: alignment_class(bindings.a),

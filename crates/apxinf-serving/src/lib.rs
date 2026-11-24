@@ -8,6 +8,7 @@ pub mod anthropic;
 mod api;
 mod engine;
 mod error;
+mod image;
 pub mod protocol;
 pub mod tool_calling;
 mod worker;

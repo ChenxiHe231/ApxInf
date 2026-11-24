@@ -1329,7 +1329,8 @@ fn encode_e4m3_fast(value: f32) -> u8 {
         return sign | 0x7e;
     }
     if value < 2.0f32.powi(-6) {
-        return sign | ((value * 512.0).round_ties_even().min(7.0) as u8);
+        // RNE can carry the largest subnormal into the smallest normal (0x08).
+        return sign | ((value * 512.0).round_ties_even().min(8.0) as u8);
     }
     let bits = value.to_bits();
     let exponent = ((bits >> 23) & 0xff) as i32 - 127;
@@ -1509,6 +1510,10 @@ mod tests {
             for fraction in [0.25f32, 0.5, 0.75] {
                 let sample = value + (next - value) * fraction;
                 assert_eq!(encode_e4m3_fast(sample), ops::encode_cache_element(sample));
+                assert_eq!(
+                    encode_e4m3_fast(-sample),
+                    ops::encode_cache_element(-sample)
+                );
             }
         }
     }

@@ -35,6 +35,7 @@ typedef enum {
 typedef enum {
   APXINF_GEMM_NUMERICS_DEFAULT = 0,
   APXINF_GEMM_NUMERICS_LEGACY_CUBLAS = 1,
+  APXINF_GEMM_NUMERICS_PAIRWISE_BF16_ODD = 2,
 } apxinf_gemm_numerics_t;
 
 typedef enum {

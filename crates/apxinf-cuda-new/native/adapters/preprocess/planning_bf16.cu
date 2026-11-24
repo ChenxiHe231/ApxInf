@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 
 #include <cmath>
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 
@@ -59,10 +60,53 @@ extern "C" cudaError_t apxinf_preprocess_vision_position_bf16(
     return cudaErrorInvalidValue;
   }
   const int tokens = height * width;
-  vision_position_kernel<<<tokens, 256, 0, stream>>>(
+  vision_position_kernel<false><<<tokens, 256, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(table),
       static_cast<__nv_bfloat16*>(embeddings),
       static_cast<int32_t*>(position_ids), source_side, height, width, hidden,
       merge_size);
+  return cudaGetLastError();
+}
+
+
+extern "C" cudaError_t apxinf_preprocess_vision_position_staged_bf16(
+    const void* table, void* embeddings, void* position_ids,
+    int source_side, int height, int width, int hidden, int merge_size,
+    cudaStream_t stream) {
+  if (table == nullptr || embeddings == nullptr || position_ids == nullptr ||
+      source_side <= 0 || height <= 0 || width <= 0 || hidden <= 0 ||
+      merge_size <= 0 || height % merge_size != 0 ||
+      width % merge_size != 0 ||
+      height > std::numeric_limits<int>::max() / width) {
+    return cudaErrorInvalidValue;
+  }
+  const int tokens = height * width;
+  vision_position_kernel<true><<<tokens, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(table),
+      static_cast<__nv_bfloat16*>(embeddings),
+      static_cast<int32_t*>(position_ids), source_side, height, width, hidden,
+      merge_size);
+  return cudaGetLastError();
+}
+
+namespace {
+__global__ void transpose_pad_channels_kernel(const __nv_bfloat16* input,__nv_bfloat16* output,
+    int channels,int spatial,int padded,int64_t count) {
+  for(int64_t i=int64_t(blockIdx.x)*blockDim.x+threadIdx.x;i<count;i+=int64_t(gridDim.x)*blockDim.x) {
+    const int channel=i%padded,position=(i/padded)%spatial;
+    const int64_t batch=i/(int64_t(padded)*spatial);
+    output[i]=channel<channels?input[(batch*channels+channel)*spatial+position]:__float2bfloat16(0.f);
+  }
+}
+}
+extern "C" cudaError_t apxinf_preprocess_transpose_pad_channels_bf16(const void* input,void* output,
+    int batches,int channels,int spatial,int padded,cudaStream_t stream) {
+  if(!input||!output||batches<=0||channels<=0||spatial<=0||padded<channels ||
+      int64_t(batches)*channels>INT64_MAX/spatial || int64_t(batches)*padded>INT64_MAX/spatial)
+    return cudaErrorInvalidValue;
+  const int64_t count=int64_t(batches)*spatial*padded;
+  const int blocks=int(std::min<int64_t>(4096,(count+255)/256));
+  transpose_pad_channels_kernel<<<blocks,256,0,stream>>>((const __nv_bfloat16*)input,
+      (__nv_bfloat16*)output,channels,spatial,padded,count);
   return cudaGetLastError();
 }

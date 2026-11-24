@@ -54,11 +54,11 @@ enum Commands {
         #[arg(short, long)]
         prompt: String,
 
-        /// Path to an image file (for Qwen3-VL/Qwen3.5 multimodal). When set, the
+        /// Image file path; repeat --image for Qwen3.5 MoE multi-image input. The
         /// image is preprocessed by a Python helper and fed alongside the
         /// prompt.
         #[arg(long)]
-        image: Option<PathBuf>,
+        image: Vec<PathBuf>,
 
         /// Maximum new tokens to generate
         #[arg(long)]
@@ -387,7 +387,7 @@ fn main() {
                 chat_options.as_deref(),
                 keep_special_tokens,
                 &prompt,
-                image.as_ref(),
+                &image,
                 max_tokens,
                 !no_eos_stop,
                 system.as_deref(),
@@ -643,7 +643,9 @@ fn parse_device(spec: &str) -> Result<Device, String> {
     let (kind, index) = match normalized.split_once(':') {
         Some((kind, index)) => {
             let index = index.parse::<usize>().map_err(|_| {
-                format!("Invalid device index in '{spec}'; use cpu, cuda:N, hip:N, musa:N, or metal:N")
+                format!(
+                    "Invalid device index in '{spec}'; use cpu, cuda:N, hip:N, musa:N, or metal:N"
+                )
             })?;
             (kind, index)
         }
@@ -765,6 +767,33 @@ mod device_tests {
         };
         assert_eq!(model_name.as_deref(), Some("minicpm5"));
         assert_eq!(model_variant.as_deref(), Some("bf16-compiled"));
+    }
+
+    #[test]
+    fn repeated_image_flags_preserve_order() {
+        let cli = Cli::try_parse_from([
+            "apxinf",
+            "generate",
+            "--model",
+            "/checkpoint",
+            "--prompt",
+            "Compare these images",
+            "--image",
+            "/first.png",
+            "--image",
+            "/second.jpg",
+        ])
+        .unwrap();
+        let Commands::Generate { image, .. } = cli.command else {
+            panic!("expected generate");
+        };
+        assert_eq!(
+            image,
+            vec![
+                std::path::PathBuf::from("/first.png"),
+                std::path::PathBuf::from("/second.jpg")
+            ]
+        );
     }
 
     #[test]
@@ -1183,7 +1212,7 @@ fn run_generate(
     chat_options: Option<&str>,
     keep_special_tokens: bool,
     prompt: &str,
-    image_path: Option<&PathBuf>,
+    image_paths: &[PathBuf],
     max_tokens: Option<usize>,
     eos_stop: bool,
     system_prompt: Option<&str>,
@@ -1227,10 +1256,17 @@ fn run_generate(
         None => AutoModel::detect_model_name(model_dir)
             .map_err(|error| format!("Failed to detect model type: {error}"))?,
     };
-    if image_path.is_some()
+    if !image_paths.is_empty()
         && !matches!(
             model_name.as_str(),
-            "qwen3_vl" | "qwen3vl" | "qwen38" | "qwen3_8" | "qwen3_5" | "qwen3_5_text"
+            "qwen3_vl"
+                | "qwen3vl"
+                | "qwen38"
+                | "qwen3_8"
+                | "qwen3_5"
+                | "qwen3_5_text"
+                | "qwen3_5_moe"
+                | "qwen3_5_moe_text"
         )
     {
         return Err(format!("Model `{model_name}` does not support image input"));
@@ -1249,25 +1285,34 @@ fn run_generate(
 
     // Model-specific processors turn raw media into tensors, while generation
     // itself always receives the model-neutral LlmInput request.
-    let (tokens, prepared_image) = if let Some(image_path) = image_path {
+    if image_paths.len() > 1 && !matches!(model_name.as_str(), "qwen3_5_moe" | "qwen3_5_moe_text") {
+        return Err(format!(
+            "Model `{model_name}` does not support multiple CLI images"
+        ));
+    }
+    if image_paths.len() > 16 {
+        return Err("at most 16 images are supported per request".into());
+    }
+    let (tokens, prepared_image) = if !image_paths.is_empty() {
         println!("Preprocessing image via the Hugging Face processor...");
-        let (data, shape, grid, tokens) = preprocess_image(
+        let (data, shape, grids, tokens) = preprocess_image(
             model_dir,
-            image_path,
+            image_paths,
             prompt,
             system_prompt,
             template_options.as_ref(),
+            matches!(model_name.as_str(), "qwen3_5_moe" | "qwen3_5_moe_text"),
         )
         .map_err(|error| format!("Preprocessing failed: {error}"))?;
         println!(
             "pixel_values: {:?}, grid_thw: {:?}, prompt tokens: {}",
             shape,
-            grid,
+            grids,
             tokens.len()
         );
         let pixels = Tensor::from_bf16(shape, &data)
             .map_err(|error| format!("Invalid processor output: {error}"))?;
-        (tokens, Some((pixels, vec![grid])))
+        (tokens, Some((pixels, grids)))
     } else {
         let tokens = encode_prompt(&tok, prompt, system_prompt, template_options.as_ref())
             .map_err(|error| format!("Failed to encode prompt: {error}"))?;
@@ -1686,11 +1731,12 @@ fn encode_prompt(
 /// `enable_thinking` and `tools` behave the same here as on the text path.
 fn preprocess_image(
     model_dir: &PathBuf,
-    image_path: &PathBuf,
+    image_paths: &[PathBuf],
     prompt: &str,
     system_prompt: Option<&str>,
     template_options: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> Result<(Vec<half::bf16>, Vec<usize>, [u32; 3], Vec<u32>), String> {
+    limit_patches: bool,
+) -> Result<(Vec<half::bf16>, Vec<usize>, Vec<[u32; 3]>, Vec<u32>), String> {
     use std::process::Command;
 
     let suffix = std::process::id();
@@ -1701,11 +1747,19 @@ import json
 import sys
 import numpy as np
 from transformers import AutoProcessor
-from PIL import Image
+from PIL import Image, ImageOps
 
-model_dir, image_path, prompt, system, options_raw, pixel_path, metadata_path = sys.argv[1:]
+model_dir, image_paths, prompt, system, options_raw, pixel_path, metadata_path, limit_patches = sys.argv[1:]
 processor = AutoProcessor.from_pretrained(model_dir, local_files_only=True)
-image = Image.open(image_path).convert("RGB")
+images = []
+for path in json.loads(image_paths):
+    with Image.open(path) as image:
+        if getattr(image,"n_frames",1) != 1:
+            raise ValueError("animated images are unsupported")
+        images.append(ImageOps.exif_transpose(image).convert("RGB"))
+if limit_patches == "1":
+    patch = processor.image_processor.patch_size
+    processor.image_processor.size = {"shortest_edge":65536,"longest_edge":min(1048576,4096*patch*patch//len(images))}
 messages = []
 if system:
     messages.append({
@@ -1715,7 +1769,7 @@ if system:
 messages.append({
     "role": "user",
     "content": [
-        {"type": "image", "image": image},
+        *[{"type": "image", "image": image} for image in images],
         {"type": "text", "text": prompt},
     ],
 })
@@ -1735,11 +1789,11 @@ inputs = processor.apply_chat_template(
     **options,
 )
 pixels = inputs["pixel_values"].cpu().numpy().astype(np.float32)
-grid = inputs["image_grid_thw"][0].cpu().numpy().tolist()
+grids = inputs["image_grid_thw"].cpu().numpy().tolist()
 tokens = inputs["input_ids"][0].cpu().numpy().astype(np.int64).tolist()
 np.save(pixel_path, pixels)
 with open(metadata_path, "w") as output:
-    json.dump({"grid": grid, "tokens": tokens}, output)
+    json.dump({"grids": grids, "tokens": tokens}, output)
 "#;
     let options_raw = match template_options {
         Some(options) => serde_json::to_string(options)
@@ -1751,12 +1805,13 @@ with open(metadata_path, "w") as output:
         .arg("-c")
         .arg(script)
         .arg(model_dir)
-        .arg(image_path)
+        .arg(serde_json::to_string(image_paths).map_err(|e| e.to_string())?)
         .arg(prompt)
         .arg(system_prompt.unwrap_or(""))
         .arg(&options_raw)
         .arg(&pixel_path)
         .arg(&metadata_path)
+        .arg(if limit_patches { "1" } else { "0" })
         .output()
         .map_err(|error| format!("{python}: {error}"))?;
     if !output.status.success() {
@@ -1770,27 +1825,16 @@ with open(metadata_path, "w") as output:
         .map_err(|error| format!("read {}: {error}", metadata_path.display()))?;
     let metadata: serde_json::Value = serde_json::from_str(&metadata_raw)
         .map_err(|error| format!("parse {}: {error}", metadata_path.display()))?;
-    let grid_values = metadata
-        .get("grid")
-        .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| "processor metadata has no grid array".to_string())?;
-    if grid_values.len() != 3 {
-        return Err(format!(
-            "processor grid must have three values, got {}",
-            grid_values.len()
-        ));
+    let grids: Vec<[u32; 3]> = serde_json::from_value(
+        metadata
+            .get("grids")
+            .cloned()
+            .ok_or_else(|| "processor metadata has no image grids".to_string())?,
+    )
+    .map_err(|error| format!("invalid processor grids: {error}"))?;
+    if grids.len() != image_paths.len() {
+        return Err("processor image count does not match CLI image count".into());
     }
-    let grid = [
-        grid_values[0]
-            .as_u64()
-            .ok_or_else(|| "processor grid T is not an integer".to_string())? as u32,
-        grid_values[1]
-            .as_u64()
-            .ok_or_else(|| "processor grid H is not an integer".to_string())? as u32,
-        grid_values[2]
-            .as_u64()
-            .ok_or_else(|| "processor grid W is not an integer".to_string())? as u32,
-    ];
     let tokens = metadata
         .get("tokens")
         .and_then(serde_json::Value::as_array)
@@ -1807,7 +1851,7 @@ with open(metadata_path, "w") as output:
 
     let _ = std::fs::remove_file(&pixel_path);
     let _ = std::fs::remove_file(&metadata_path);
-    Ok((pixel_data, pixel_shape, grid, tokens))
+    Ok((pixel_data, pixel_shape, grids, tokens))
 }
 
 /// Read a NumPy v1 f32 array and convert it to bf16.

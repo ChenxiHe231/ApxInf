@@ -362,6 +362,17 @@ kernels for exactly that architecture, so build on the machine you deploy to;
 cross-compiling fails unless `APXINF_CUDA_ARCH` names the target (`sm_87` Orin,
 `sm_101` Thor-U, `sm_110` Thor).
 
+### Qwen3.5/3.6 MoE image input
+
+The experimental `qwen35-cuda` image path accepts ordered static images through
+CLI `generate --image` or OpenAI chat `image_url` content parts (Base64 data or public HTTPS). It loads
+the BF16 visual tower lazily; neutral greedy requests can use native MTP,
+while sampling uses the target generation path. The frozen visual precision
+gate passes; image MTP uses scalar-equivalent target verification, with no
+performance acceptance claimed.
+See [image input and processor setup](doc/qwen35-thoru/README.md#image-input)
+for the supported checkpoint, dependencies, request format and limits.
+
 ### Thor-U Qwen3.6 long-prefill stability
 
 On the `p3960-0010` Thor-U platform, keep the GPU governor on

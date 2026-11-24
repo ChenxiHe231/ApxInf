@@ -239,6 +239,7 @@ __global__ void split_qkv_bias(const T* qkv, const T* bias, T* q, T* k, T* v,
 }
 
 // Packed BF16 QKV split with height/width axial rotary positions.
+template <bool StagedFp32 = false>
 __global__ void split_qkv_axial_rope(
     const __nv_bfloat16* qkv, const __nv_bfloat16* bias,
     const uint32_t* positions, __nv_bfloat16* query, __nv_bfloat16* key,
@@ -257,8 +258,9 @@ __global__ void split_qkv_axial_rope(
     const int axis = slot / quarter;
     const int pair = slot - axis * quarter;
     const float position = static_cast<float>(positions[token * 2 + axis]);
-    const float frequency =
-        powf(theta, -2.0f * static_cast<float>(pair) / half);
+    const float frequency = StagedFp32
+        ? __fdiv_rn(1.0f, powf(theta, __fdiv_rn(2.0f * pair, static_cast<float>(half))))
+        : powf(theta, -2.0f * static_cast<float>(pair) / half);
     sincosf(position * frequency, &sine[slot], &cosine[slot]);
   }
   __syncthreads();
@@ -284,10 +286,17 @@ __global__ void split_qkv_axial_rope(
     const int slot = axis * quarter + (pair < quarter ? pair : pair - quarter);
     __nv_bfloat16* destination =
         (is_key ? key : query) + (token * heads + head) * head_dim;
+    if constexpr (StagedFp32) {
+      destination[pair] = __float2bfloat16(__fsub_rn(
+          __fmul_rn(first, cosine[slot]), __fmul_rn(second, sine[slot])));
+      destination[half + pair] = __float2bfloat16(__fadd_rn(
+          __fmul_rn(first, sine[slot]), __fmul_rn(second, cosine[slot])));
+    } else {
     destination[pair] =
         __float2bfloat16(first * cosine[slot] - second * sine[slot]);
     destination[half + pair] =
         __float2bfloat16(first * sine[slot] + second * cosine[slot]);
+    }
   }
 
   for (int column = threadIdx.x; column < projection_width;

@@ -67,6 +67,10 @@ pub struct Qwen35MoeConfig {
     pub tie_word_embeddings: bool,
     pub text_config: Qwen35MoeTextConfig,
     pub quantization_config: ModelOptNvfp4Config,
+    #[serde(default)]
+    pub vision_config: Option<super::vision_input::VisionConfig>,
+    #[serde(default)]
+    pub image_token_id: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -170,6 +174,12 @@ impl Qwen35MoeConfig {
             return Err(invalid(
                 "unsupported Qwen3.5 MoE checkpoint identity, dtype, or embedding contract",
             ));
+        }
+        if let Some(vision) = &self.vision_config {
+            vision.validate()?;
+            if self.image_token_id != Some(248056) {
+                return Err(invalid("unsupported Qwen3.5 image token ID"));
+            }
         }
         self.text_config.validate()?;
         self.quantization_config.validate(&self.text_config)
@@ -512,6 +522,29 @@ pub(crate) mod tests {
 
     pub(crate) fn valid_config() -> Qwen35MoeConfig {
         Qwen35MoeConfig::from_json(&valid_value().to_string()).unwrap()
+    }
+
+    #[test]
+    fn validates_optional_vision_geometry_and_token_identity() {
+        let mut value = valid_value();
+        value["image_token_id"] = serde_json::json!(248056);
+        value["vision_config"] = serde_json::json!({
+            "depth":27,"hidden_size":1152,"intermediate_size":4304,"num_heads":16,
+            "in_channels":3,"out_hidden_size":2048,"patch_size":16,"spatial_merge_size":2,
+            "temporal_patch_size":2,"num_position_embeddings":2304,
+            "hidden_act":"gelu_pytorch_tanh","dtype":"bfloat16",
+            "model_type":"qwen3_5_moe_vision","deepstack_visual_indexes":[]
+        });
+        Qwen35MoeConfig::from_json(&value.to_string()).unwrap();
+        let valid = value.clone();
+        value["vision_config"]["out_hidden_size"] = serde_json::json!(5120);
+        assert!(Qwen35MoeConfig::from_json(&value.to_string()).is_err());
+        value = valid.clone();
+        value["vision_config"]["deepstack_visual_indexes"] = serde_json::json!([8]);
+        assert!(Qwen35MoeConfig::from_json(&value.to_string()).is_err());
+        value = valid;
+        value["image_token_id"] = serde_json::json!(0);
+        assert!(Qwen35MoeConfig::from_json(&value.to_string()).is_err());
     }
 
     #[test]

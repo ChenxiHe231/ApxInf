@@ -7,7 +7,8 @@ use crate::{ops, CudaBuffer, CudaContext};
 mod planning;
 
 pub use planning::{
-    concat7_cols, flow_update, fourier_features, vision_position, VisionPositionArgs,
+    concat7_cols, flow_update, fourier_features, transpose_pad_channels, vision_position,
+    vision_position_staged, VisionPositionArgs,
 };
 
 /// Memory layout of a resized RGB `u8` image batch. Mirrors the legacy enum.

@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use apxinf_model::GenerationOptions;
 use axum::{
     body::{Body, Bytes},
-    extract::{rejection::JsonRejection, State},
+    extract::{rejection::JsonRejection, DefaultBodyLimit, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -64,7 +64,11 @@ pub fn router(api: ApiConfig, worker: WorkerClient) -> Router {
         .route("/health", get(health))
         .route("/healthz", get(health))
         .route("/v1/models", get(models))
-        .route("/v1/chat/completions", post(chat_completions))
+        // Eight MiB encoded image data needs approximately eleven MiB in Base64 JSON.
+        .route(
+            "/v1/chat/completions",
+            post(chat_completions).layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
         .route("/v1/messages", post(messages))
         .with_state(Arc::new(state))
 }
@@ -181,7 +185,9 @@ async fn chat_completions(
     let id = format!("chatcmpl-{sequence:016x}");
     let created = unix_seconds();
     if stream {
-        let receiver = state.worker.submit_stream_for_request(engine_request, Some(sequence))?;
+        let receiver = state
+            .worker
+            .submit_stream_for_request(engine_request, Some(sequence))?;
         return Ok(streaming_response(
             receiver,
             registry,
@@ -283,7 +289,9 @@ async fn messages(
     let sequence = REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let id = format!("msg-{sequence:016x}");
     if stream {
-        let receiver = state.worker.submit_stream_for_request(engine_request, Some(sequence))?;
+        let receiver = state
+            .worker
+            .submit_stream_for_request(engine_request, Some(sequence))?;
         return Ok(anthropic_streaming_response(
             receiver,
             registry,

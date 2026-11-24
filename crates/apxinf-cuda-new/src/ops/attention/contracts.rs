@@ -48,6 +48,12 @@ pub enum AttentionNumerics {
     #[default]
     Flexible = 0,
     Stable = 1,
+    /// BF16 QK result, scaled scores and softmax probabilities round separately
+    /// before the BF16 PV product, matching an explicit eager attention graph.
+    /// Pair products and accumulator updates round to odd F32; softmax uses
+    /// SLEEF F32 exp, four-lane reduction and reciprocal multiplication.
+    /// Currently supported for packed segmented BF16 self-attention.
+    StagedBf16 = 2,
 }
 
 #[derive(Clone, Debug)]
@@ -256,6 +262,9 @@ fn normalize_separate(
         || (args.mask == AttentionMask::Causal && key_tokens < query_tokens)
     {
         return Err(invalid("invalid Attention shape or dtype contract"));
+    }
+    if args.numerics == AttentionNumerics::StagedBf16 {
+        return Err(invalid("staged BF16 numerics require segmented Attention"));
     }
     if !args.scale.is_finite() || args.scale <= 0.0 {
         return Err(invalid("Attention scale must be finite and positive"));

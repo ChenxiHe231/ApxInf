@@ -46,6 +46,8 @@ pub enum PointwiseActivation {
     Gelu,
     Silu,
     GeluExact,
+    /// BF16 tanh GELU using a staged F32 exp2 table/polynomial approximation.
+    GeluTanhExp2,
     Relu,
 }
 
@@ -56,6 +58,7 @@ impl PointwiseActivation {
             Self::Gelu => 1,
             Self::Silu => 2,
             Self::GeluExact => 3,
+            Self::GeluTanhExp2 => 5,
             Self::Relu => 4,
         }
     }
@@ -302,6 +305,16 @@ pub(crate) fn normalize(ctx: &CudaContext, args: PointwiseArgs<'_>) -> Result<No
     if args.scales.is_some() != matches!(semantic, PointwiseSemantic::SwigluRowwiseE4m3) {
         return Err(invalid(
             "Pointwise scales binding is required only for rowwise SwiGLU quantization",
+        ));
+    }
+    if args.activation == PointwiseActivation::GeluTanhExp2
+        && (args.input.dtype() != DType::BF16
+            || args.out.dtype() != DType::BF16
+            || args.bias.is_some()
+            || args.input.numel() > i32::MAX as usize)
+    {
+        return Err(invalid(
+            "GeluTanhExp2 requires unbiased BF16 input/output, at most INT32_MAX elements",
         ));
     }
     if args.activation != PointwiseActivation::None

@@ -30,7 +30,7 @@ bool supports_vendor_math(const Spec& spec) {
 }
 
 bool supports_cublas(const Spec& spec) {
-  return supports_vendor_math(spec);
+  return spec.numerics != APXINF_GEMM_NUMERICS_PAIRWISE_BF16_ODD && supports_vendor_math(spec);
 }
 
 bool supports_vendor(const Spec& spec) {
@@ -510,6 +510,9 @@ const ImplementationRegistry& registry(uint32_t semantic) {
   // Keep GEMM+bias as a separate L3 tuning domain even though its current L1
   // candidates happen to be the same vendor implementations.
   static const ImplementationRegistry gemm_bias_entries = {
+      {4, 1, 1, "bf16-pairwise-round-odd", WeightLayout::NK, 0, true, true, false,
+       supports_pairwise_bf16_bias, vendor_alignment, pairwise_bf16_resource_requirements,
+       one_configuration, prepare_pairwise_bf16, launch_pairwise_bf16, destroy_pairwise_bf16},
       {kProviderCublas, 1, 1, "cublas+custom-epilogue", WeightLayout::Canonical, 0, true, true, true,
        supports_cublas, vendor_alignment, cublas_resource_requirements,
        one_configuration, prepare_cublas, launch_cublas, destroy_cublas},

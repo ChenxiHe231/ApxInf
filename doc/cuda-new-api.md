@@ -209,8 +209,18 @@ KvCacheAttentionArgs::new(query, key_cache, value_cache, out)
 // remaining public fields: valid_key_tokens / query_start / mask / scale / policy
 
 SegmentedAttentionArgs::new(query, key, value, out, offsets, host_offsets)
+// numerics: Flexible (default), or StagedBf16 for explicit eager BF16 boundaries
 // offsets: &CudaBuffer (U32 segment boundaries), host_offsets: &[u32] (same content on the host)
 ```
+
+`AttentionNumerics::StagedBf16` is restricted to segmented BF16 self-attention.
+The QK product rounds to BF16, scaling rounds again, softmax is computed in F32
+and rounded to BF16, and the PV product accumulates in F32 before BF16 output.
+Dot products use ordered BF16 pairs and round-to-odd F32 updates. Softmax uses
+SLEEF F32 exp, a four-lane sum, then reciprocal multiplication.
+Segments are independent; a prepared native implementation supports Graph replay
+and can be selected with fallback disabled. This numerical contract does not
+imply a model-level precision or throughput acceptance result.
 
 `KvCacheDecodeMeta` — fixed-address metadata for CUDA Graph decode (design doc §5.6):
 
@@ -285,6 +295,12 @@ split_grouped_qkv(ctx, GroupedQkvRopeArgs { ... })         // group-major Q/G/K/
 split_query_and_gate(ctx, fused, query, gate)              // q_proj output split
 apply_output_gate(ctx, OutputGateArgs { ... })             // sigmoid output gate, source/numerics in the contract
 ```
+
+`AxialRopeNumerics::StagedFp32` uses reciprocal positive-power frequencies,
+separately rounded FP32 rotation products/sums and a final BF16 boundary.
+`vision_position_staged` uses explicit FP32 four-tap interpolation and ordered
+summation before BF16 output. These are opt-in numerical contracts; existing
+rotation and interpolation entry points keep their previous defaults.
 
 Precomputed BF16 half-split rotation uses compile-time indexing for H=16,
 D=128 and the generic runtime-index path for other supported geometries. Both
@@ -562,3 +578,14 @@ Hidden and normalized outputs must be disjoint; each may exactly alias an
 activation input. The backend preserves the two-stage BF16 gate/residual
 rounding and grouped normalization semantics, with an aligned 2048-column
 vectorized path and a general two-kernel fallback.
+
+
+Vision numerical primitives preserve explicit arithmetic without changing the
+family defaults. `GemmNumerics::PairwiseBf16Odd` admits only unit-scale BF16
+output-major GEMM+bias, F32 accumulation and even K. `NormNumerics::Welford4F32`
+admits plain BF16 weighted LayerNorm with width divisible by eight, at most
+32768, and explicit four-lane Welford/FMA order. `PointwiseActivation::GeluTanhExp2`
+is an unbiased BF16 tanh GELU with staged exp2 table/polynomial arithmetic.
+These narrow contracts support caller-owned outputs and Graph replay.
+`transpose_pad_channels` transforms BF16 `[B,C,S]` to `[B,S,Cp]` with zero
+padding for `Cp >= C`, rejecting overlapping input/output storage.

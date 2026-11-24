@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use apxinf_core::Device;
 use apxinf_model::{
-    AutoModel, GenerationOptions, LlmInput, LoadOptions, LoadedModel, SamplingMode,
+    AutoModel, GenerationOptions, ImageInput, LlmInput, LoadOptions, LoadedModel, SamplingMode,
 };
 use apxinf_tokenizer::{ChatTemplateMessage, ChatToolCall, ChatToolCallFunction, Tokenizer};
 use serde_json::{Map, Value};
@@ -78,6 +78,8 @@ pub struct ApxInfEngineConfig {
 }
 
 pub struct ApxInfChatEngine {
+    model_path: PathBuf,
+    image_processor: Option<crate::image::ImageProcessor>,
     tokenizer: Tokenizer,
     model: LoadedModel,
     default_max_tokens: usize,
@@ -145,6 +147,8 @@ impl ApxInfChatEngine {
                 ApiError::unavailable(format!("failed to configure context reuse: {error}"))
             })?;
         Ok(Self {
+            model_path: config.model_path,
+            image_processor: None,
             tokenizer,
             model,
             default_max_tokens: config.default_max_tokens,
@@ -168,7 +172,20 @@ impl ChatEngine for ApxInfChatEngine {
     ) -> Result<EngineOutput, ApiError> {
         let timing = (std::env::var("APXINF_AIOS_TIMELINE").as_deref() == Ok("1"))
             .then(std::time::Instant::now);
-        let mut messages = to_template_messages(&request.messages)?;
+        let (text_messages, image_message) = crate::image::parse_messages(&request.messages)?;
+        if image_message.is_some()
+            && !self
+                .model
+                .text_capabilities()
+                .map_err(|e| ApiError::internal(e.to_string()))?
+                .image
+        {
+            return Err(ApiError::invalid(
+                "this model does not support image input",
+                Some("messages".into()),
+            ));
+        }
+        let mut messages = to_template_messages(&text_messages)?;
         apply_tool_choice_instruction(&mut messages, &request.tool_choice);
         let mut options = request.chat_template_kwargs;
         for reserved in [
@@ -211,9 +228,23 @@ impl ChatEngine for ApxInfChatEngine {
                     .map_err(|error| ApiError::internal(error.to_string()))?,
             );
         }
+        let prepared_image = image_message
+            .map(|image| {
+                crate::image::preprocess(
+                    &self.model_path,
+                    &messages,
+                    request.messages.len(),
+                    image,
+                    &options,
+                    &mut self.image_processor,
+                )
+            })
+            .transpose()?;
         let prompt_key = serde_json::to_string(&(&messages, &options))
             .map_err(|error| ApiError::internal(error.to_string()))?;
-        let prompt_tokens = if let Some(index) = self
+        let prompt_tokens = if let Some(image) = prepared_image.as_ref() {
+            image.tokens.clone()
+        } else if let Some(index) = self
             .prompt_token_cache
             .iter()
             .position(|(cached, _)| cached == &prompt_key)
@@ -258,7 +289,7 @@ impl ChatEngine for ApxInfChatEngine {
                 Some("messages".to_owned()),
             ));
         }
-        let reusable_prefix_tokens = if self.enable_context_reuse {
+        let reusable_prefix_tokens = if self.enable_context_reuse && prepared_image.is_none() {
             let key = system_prefix_cache_key(&messages, &options)?;
             if let Some(index) = self
                 .reusable_prefix_cache
@@ -361,7 +392,15 @@ impl ChatEngine for ApxInfChatEngine {
         let output = self
             .model
             .generate_streaming_with_options(
-                LlmInput::text_with_reusable_prefix(&prompt_tokens, reusable_prefix_tokens),
+                match prepared_image.as_ref() {
+                    Some(image) => LlmInput::with_image(
+                        &prompt_tokens,
+                        ImageInput::new(&image.pixels, &image.grids),
+                    ),
+                    None => {
+                        LlmInput::text_with_reusable_prefix(&prompt_tokens, reusable_prefix_tokens)
+                    }
+                },
                 &generation,
                 |token| {
                     if !consumer_connected

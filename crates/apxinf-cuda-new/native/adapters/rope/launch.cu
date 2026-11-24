@@ -32,6 +32,8 @@ extern "C" cudaError_t apxinf_rope_half_split_f16(
     uint32_t seq_len, float rope_theta, uint32_t pos_offset,
     cudaStream_t stream);
 
+cudaError_t apxinf_axial_staged_fp32(const void*,const void*,const void*,void*,void*,void*,int,int,int,float,cudaStream_t);
+
 namespace {
 
 #include "../../kernels/primitives/cache.cuh"
@@ -116,8 +118,8 @@ bool valid_contract_fields(const apxinf_rope_spec_t& spec) {
       return spec.layout == APXINF_ROPE_LAYOUT_PACKED_QKV &&
              spec.cache_write == APXINF_ROPE_CACHE_WRITE_TOKEN_MAJOR &&
              spec.rotation_source == APXINF_ROPE_ROTATION_AXIAL_IDS &&
-             spec.rotary_convention ==
-                 APXINF_ROPE_CONVENTION_HALF_SPLIT_AXIAL;
+             (spec.rotary_convention == APXINF_ROPE_CONVENTION_HALF_SPLIT_AXIAL ||
+              spec.rotary_convention == APXINF_ROPE_CONVENTION_HALF_SPLIT_AXIAL_STAGED_FP32);
     case APXINF_ROPE_SEMANTIC_PARTIAL_MROPE:
       return spec.layout == APXINF_ROPE_LAYOUT_IN_PLACE &&
              spec.cache_write == APXINF_ROPE_CACHE_WRITE_NONE &&
@@ -420,10 +422,14 @@ cudaError_t launch_split(const apxinf_rope_spec_t& spec,
       break;
     case APXINF_ROPE_SEMANTIC_SPLIT_QKV_AXIAL:
       if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-        kernels::split_qkv_axial_rope<<<
+        if (spec.rotary_convention == APXINF_ROPE_CONVENTION_HALF_SPLIT_AXIAL_STAGED_FP32) {
+          return apxinf_axial_staged_fp32(qkv,bias,bindings.position,q,kv_k,kv_v,tokens,q_heads,head_dim,bindings.theta,stream);
+        } else {
+        kernels::split_qkv_axial_rope<false><<<
             tokens, 256, static_cast<size_t>(head_dim) * sizeof(float), stream>>>(
             qkv, bias, bindings.position, q, kv_k, kv_v, tokens, q_heads,
             head_dim, bindings.theta);
+        }
       } else {
         return cudaErrorInvalidValue;
       }

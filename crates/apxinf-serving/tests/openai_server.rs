@@ -755,3 +755,23 @@ async fn wraps_json_extraction_errors_in_an_openai_error_envelope() {
     assert_eq!(body["error"]["param"], "body");
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
+
+#[tokio::test]
+async fn accepts_base64_sized_image_bodies_and_keeps_a_bounded_limit() {
+    let (app, _) = app().await;
+    let (status, _) = json_response(app.clone(), serde_json::json!({
+        "model":"fake-model", "messages":[{"role":"user","content":[
+            {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{}", "A".repeat(3*1024*1024))}},
+            {"type":"text","text":"Describe this image"}
+        ]}]
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = json_response(
+        app,
+        serde_json::json!({
+            "model":"fake-model", "messages":[{"role":"user","content":"A".repeat(13*1024*1024)}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

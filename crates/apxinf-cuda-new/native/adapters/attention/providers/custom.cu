@@ -1,6 +1,9 @@
 #include "../internal.h"
 #include "../../../kernels/custom/attention.cuh"
 
+cudaError_t apxinf_staged_attention_shared_limit(int);
+cudaError_t apxinf_staged_attention(const void*,const void*,const void*,const void*,void*,int,int,int,int,int,float,cudaStream_t);
+
 namespace apxinf::attention {
 namespace {
 
@@ -56,6 +59,8 @@ void prepare_custom(Execution& execution) {
             kernels::segmented_attention_kernel<__half>,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             static_cast<int>(shared_bytes)));
+      } else if (execution.spec.numerics == APXINF_ATTENTION_NUMERICS_STAGED_BF16) {
+        check_cuda(apxinf_staged_attention_shared_limit(static_cast<int>(shared_bytes)));
       } else {
         check_cuda(cudaFuncSetAttribute(
             kernels::segmented_attention_kernel<__nv_bfloat16>,
@@ -83,6 +88,11 @@ cudaError_t launch_custom(Execution& execution) {
           static_cast<int>(spec.query_tokens),
           static_cast<int>(spec.query_heads), static_cast<int>(spec.head_dim),
           bindings.scale, stream);
+    }
+    if (spec.numerics == APXINF_ATTENTION_NUMERICS_STAGED_BF16) {
+      return apxinf_staged_attention(bindings.query,bindings.key,bindings.value,bindings.offsets,
+          bindings.output,int(spec.query_tokens),int(spec.segments),int(spec.max_segment_tokens),
+          int(spec.query_heads),int(spec.head_dim),bindings.scale,stream);
     }
     return kernels::launch_segmented_attention<__nv_bfloat16>(
         bindings.query, bindings.key, bindings.value, bindings.offsets,

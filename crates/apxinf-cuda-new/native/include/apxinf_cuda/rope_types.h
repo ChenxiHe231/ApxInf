@@ -73,6 +73,7 @@ typedef enum {
   APXINF_ROPE_CONVENTION_HALF_SPLIT_INTERLEAVED_AXES = 3,
   /* Axial half-split rotation after the biased inputs are rounded to BF16. */
   APXINF_ROPE_CONVENTION_HALF_SPLIT_AXIAL_ROUNDED_INPUT = 4,
+  APXINF_ROPE_CONVENTION_HALF_SPLIT_AXIAL_STAGED_FP32 = 5,
 } apxinf_rope_convention_t;
 
 #define APXINF_ROPE_SPEC_VERSION 6u

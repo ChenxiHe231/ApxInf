@@ -34,6 +34,20 @@ pub struct VisionPositionArgs<'a> {
 }
 
 pub fn vision_position(ctx: &CudaContext, args: VisionPositionArgs<'_>) -> Result<()> {
+    vision_position_impl(ctx, args, false)
+}
+
+/// Bilinear position interpolation with separately rounded F32 tap weights,
+/// products, and left-to-right four-tap summation before BF16 output.
+pub fn vision_position_staged(ctx: &CudaContext, args: VisionPositionArgs<'_>) -> Result<()> {
+    vision_position_impl(ctx, args, true)
+}
+
+fn vision_position_impl(
+    ctx: &CudaContext,
+    args: VisionPositionArgs<'_>,
+    staged: bool,
+) -> Result<()> {
     let table_dims = args.table.shape().dims();
     if table_dims.len() != 2 {
         return Err(invalid("vision position table must be rank 2"));
@@ -79,8 +93,13 @@ pub fn vision_position(ctx: &CudaContext, args: VisionPositionArgs<'_>) -> Resul
         return Err(invalid("vision position tensor storage must not overlap"));
     }
     crate::workspace::validate_capture_target(ctx.device_id(), ctx.stream().handle() as usize)?;
+    let launch = if staged {
+        preprocess_abi::apxinf_preprocess_vision_position_staged_bf16
+    } else {
+        preprocess_abi::apxinf_preprocess_vision_position_bf16
+    };
     unsafe {
-        check_cuda(preprocess_abi::apxinf_preprocess_vision_position_bf16(
+        check_cuda(launch(
             table.ptr(),
             embeddings.ptr(),
             position_ids.ptr(),
@@ -206,5 +225,58 @@ pub fn flow_update(
             w.numel() as i64,
             ctx.stream().handle(),
         ))
+    }
+}
+
+/// Transpose contiguous BF16 `[batch, channels, spatial]` into
+/// `[batch, spatial, padded_channels]`, filling extra channels with zero.
+/// Caller retains output storage; input and output must not overlap.
+pub fn transpose_pad_channels(
+    ctx: &CudaContext,
+    input: &Tensor,
+    output: &mut Tensor,
+) -> Result<()> {
+    let x = input.shape().dims();
+    let y = output.shape().dims();
+    if x.len() != 3
+        || y.len() != 3
+        || x.contains(&0)
+        || y.contains(&0)
+        || x[0] != y[0]
+        || x[2] != y[1]
+        || x[1] > y[2]
+    {
+        return Err(invalid(
+            "transpose/pad requires [B,C,S] -> [B,S,Cp], Cp >= C",
+        ));
+    }
+    for &extent in x.iter().chain(y.iter()) {
+        i32::try_from(extent)
+            .map_err(|_| invalid("transpose/pad dimension exceeds native range"))?;
+    }
+    for dims in [x, y] {
+        dims.iter()
+            .try_fold(2usize, |size, &v| size.checked_mul(v))
+            .filter(|&size| size <= i64::MAX as usize)
+            .ok_or_else(|| invalid("transpose/pad size overflow"))?;
+    }
+    let a = tensor_storage(ctx, input, DType::BF16, x)?;
+    let b = tensor_storage(ctx, output, DType::BF16, y)?;
+    if storage_ranges_overlap(&a, &b) {
+        return Err(invalid("transpose/pad storage must not overlap"));
+    }
+    crate::workspace::validate_capture_target(ctx.device_id(), ctx.stream().handle() as usize)?;
+    unsafe {
+        check_cuda(
+            preprocess_abi::apxinf_preprocess_transpose_pad_channels_bf16(
+                a.ptr(),
+                b.ptr(),
+                x[0] as i32,
+                x[1] as i32,
+                x[2] as i32,
+                y[2] as i32,
+                ctx.stream().handle(),
+            ),
+        )
     }
 }

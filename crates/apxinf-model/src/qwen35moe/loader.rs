@@ -26,8 +26,8 @@ use super::weights::{
 /// Consume a native host tensor map into the exact runtime container.
 ///
 /// Every text/MTP tensor must occur exactly once with the manifest dtype and
-/// physical shape. Vision tensors are intentionally discarded because this
-/// runtime is text-only. Any other leftover checkpoint key is rejected.
+/// physical shape. This text/MTP loader excludes visual tensors; the runtime
+/// retains them separately for lazy vision loading. Any other leftover key is rejected.
 pub fn load_qwen35_runtime_weights(
     config: &Qwen35MoeConfig,
     tensors: HashMap<String, Tensor>,
@@ -268,9 +268,8 @@ impl Qwen35TensorSource for HostTensorSource {
 
 impl HostTensorSource {
     fn finish(mut self) -> Result<()> {
-        // The pinned checkpoint is multimodal, while this runtime contract is
-        // explicitly text-only. Visual weights are accepted only under this
-        // exact namespace and are deliberately dropped without interpretation.
+        // This container owns text/MTP weights only. The runtime keeps the visual
+        // source separately; do not interpret or duplicate its tensors here.
         self.tensors.retain(|name, _| !is_visual_weight(name));
         if self.tensors.is_empty() {
             return Ok(());

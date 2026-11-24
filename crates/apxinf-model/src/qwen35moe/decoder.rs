@@ -238,6 +238,12 @@ pub struct FullAttentionRequest<'a> {
 pub trait FullAttentionBackend {
     type Cache;
 
+    /// Request one-row target arithmetic for verification when a cache's
+    /// batched attention differs numerically from its scalar decode contract.
+    fn requires_rowwise_verification(&self) -> bool {
+        false
+    }
+
     fn allocate_cache(
         &mut self,
         ctx: &CudaContext,
@@ -529,6 +535,57 @@ impl Qwen35Decoder {
         )
     }
 
+    /// Prefill the target with text embeddings whose image rows were replaced on CUDA.
+    pub(super) fn run_image_prefill<B: FullAttentionBackend>(
+        &self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        attention: &mut B,
+        caches: &mut [B::Cache],
+        states: &[GdnState],
+        token_ids: &[u32],
+        embeddings: &Tensor,
+        hidden_selection: HiddenSelection,
+    ) -> Result<DecoderOutput> {
+        self.validate_weights(weights)?;
+        self.validate_call(
+            caches.len(),
+            states.len(),
+            token_ids,
+            0,
+            DecoderPhase::Prefill,
+        )?;
+        let moe = self.architecture.layers[0].moe;
+        let mut scratch = DecoderScratch::new(
+            ctx,
+            token_ids.len(),
+            self.architecture.hidden_size,
+            self.architecture.vocab_size,
+            moe.experts,
+            moe.experts_per_token,
+            moe.expert_intermediate_size,
+            LogitsSelection::Last,
+            hidden_selection,
+        )?;
+        scratch.write_token_ids(ctx, token_ids)?;
+        self.run_after_token_ids(
+            ctx,
+            weights,
+            attention,
+            caches,
+            states,
+            None,
+            0,
+            DecoderPhase::Prefill,
+            LogitsSelection::Last,
+            hidden_selection,
+            &mut scratch,
+            None,
+            None,
+            Some(embeddings),
+        )
+    }
+
     /// Allocate the one-row scratch bank reused by ordinary session decode.
     /// It is intentionally separate from variable prompt and MTP verification
     /// scratch so a large call does not permanently pin its buffers.
@@ -633,7 +690,93 @@ impl Qwen35Decoder {
             scratch,
             None,
             verify_phases,
+            None,
         )
+    }
+
+    /// Preserve scalar target arithmetic while retaining device MTP proposals,
+    /// shadow transactions, row checkpoints and fixed verifier output buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_verify_rows_device<B: FullAttentionBackend>(
+        &self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        attention: &mut B,
+        caches: &mut [B::Cache],
+        states: &[GdnState],
+        checkpoints: &[GdnStateCheckpoints],
+        token_ids: &Tensor,
+        start_position: usize,
+        output: &mut DecoderScratch,
+        decode: &mut DecoderScratch,
+        phases: Option<&[Qwen35DecodePhase]>,
+    ) -> Result<DecoderOutput> {
+        self.validate_weights(weights)?;
+        let rows = token_ids.numel();
+        self.validate_call_dimensions(
+            caches.len(),
+            states.len(),
+            rows,
+            start_position,
+            DecoderPhase::Prefill,
+        )?;
+        output.validate_contract(
+            rows,
+            self.architecture.hidden_size,
+            self.architecture.vocab_size,
+            LogitsSelection::All,
+            HiddenSelection::All,
+        )?;
+        decode.validate_contract(
+            1,
+            self.architecture.hidden_size,
+            self.architecture.vocab_size,
+            LogitsSelection::Last,
+            HiddenSelection::Last,
+        )?;
+        if checkpoints.len() != states.len() {
+            return Err(invalid("Qwen3.5 row verifier checkpoint count mismatch"));
+        }
+        let tokens = CudaBuffer::from_tensor(token_ids).map_err(Error::Cuda)?;
+        for row in 0..rows {
+            let token = tokens
+                .view(row * 4, 4)
+                .map_err(Error::Cuda)?
+                .as_tensor(Shape::new(vec![1]), DType::I32)
+                .map_err(Error::Cuda)?;
+            decode.write_token_ids_device(ctx, &token)?;
+            let result = self.run_after_token_ids(
+                ctx,
+                weights,
+                attention,
+                caches,
+                states,
+                None,
+                start_position + row,
+                DecoderPhase::Decode,
+                LogitsSelection::Last,
+                HiddenSelection::Last,
+                decode,
+                phases,
+                None,
+                None,
+            )?;
+            let logits = row_view(&output.logits, row, self.architecture.vocab_size)?;
+            let hidden = row_view(&output.final_normalized, row, self.architecture.hidden_size)?;
+            transfers::copy_cuda_to_cuda(ctx, &result.logits, &logits)?;
+            transfers::copy_cuda_to_cuda(ctx, &result.hidden_states, &hidden)?;
+            for (checkpoint, state) in checkpoints.iter().zip(states) {
+                checkpoint.copy_row_from(ctx, row, state)?;
+            }
+        }
+        Ok(DecoderOutput {
+            logits: output.logits.clone(),
+            rows,
+            hidden_states: output.final_normalized.clone(),
+            hidden_rows: rows,
+            start_position,
+            end_position: start_position + rows,
+        })
     }
 
     /// Prepare one execution session per target layer for the fixed-row
@@ -1115,6 +1258,7 @@ impl Qwen35Decoder {
             scratch,
             decode_phases,
             verify_phases,
+            None,
         )
     }
 
@@ -1134,9 +1278,20 @@ impl Qwen35Decoder {
         scratch: &mut DecoderScratch,
         decode_phases: Option<&[Qwen35DecodePhase]>,
         verify_phases: Option<&[Qwen35VerifyPhase]>,
+        input_embeddings: Option<&Tensor>,
     ) -> Result<DecoderOutput> {
         let tokens = scratch.tokens;
-        scratch.embed(ctx, &weights.embedding)?;
+        if let Some(embeddings) = input_embeddings {
+            if embeddings.shape().dims() != [tokens, self.architecture.hidden_size]
+                || embeddings.dtype() != DType::BF16
+                || embeddings.device() != Device::Cuda(ctx.device_id())
+            {
+                return Err(invalid("invalid Qwen3.5 image embeddings"));
+            }
+            ops::copy_tensor(ctx, embeddings, &scratch.hidden)?;
+        } else {
+            scratch.embed(ctx, &weights.embedding)?;
+        }
 
         let mut gdn_index = 0usize;
         let mut attention_index = 0usize;

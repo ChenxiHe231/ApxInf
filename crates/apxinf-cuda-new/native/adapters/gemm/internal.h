@@ -193,6 +193,11 @@ std::unique_ptr<CandidateTrial> prepare_trial(
 
 using ImplementationRegistry = apxinf::framework::Registry<Implementation>;
 const ImplementationRegistry& registry(uint32_t semantic);
+bool supports_pairwise_bf16_bias(const Spec&);
+size_t pairwise_bf16_resource_requirements(const Spec&);
+void prepare_pairwise_bf16(Execution&);
+void destroy_pairwise_bf16(Execution&) noexcept;
+cudaError_t launch_pairwise_bf16(Execution&);
 void prepare_cublas(Execution& execution);
 size_t cublas_resource_requirements(const Spec& spec);
 void destroy_cublas(Execution& execution) noexcept;

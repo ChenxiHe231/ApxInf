@@ -523,12 +523,14 @@ fn main() {
         "gemm/providers/cublaslt.cu",
         "gemm/providers/cutlass.cu",
         "gemm/providers/custom.cu",
+        "gemm/providers/pairwise_bf16.cu",
         "attention/candidates.cpp",
         "attention/tuning_key.cpp",
         "attention/autotune.cpp",
         "attention/execution.cpp",
         "attention/gates.cpp",
         "attention/providers/custom.cu",
+        "attention/staged_bf16.cu",
         "attention/providers/wide_bf16.cu",
         "elementwise/ops.cpp",
         "cache/ops.cpp",
@@ -571,8 +573,11 @@ fn main() {
         "sampling/suppress_bf16.cu",
         "sampling/launch.cu",
         "norm/launch.cu",
+        "norm/welford4.cu",
         "pointwise/launch.cu",
+        "pointwise/gelu_tanh_exp2.cu",
         "rope/launch.cu",
+        "rope/staged_fp32.cu",
         "gather/launch.cu",
         "quantization/launch.cu",
         "volume.cu",
@@ -878,6 +883,12 @@ fn main() {
             .args(["--compiler-options", "-fPIC", "-O3", "-std=c++17"])
             .arg(format!("-I{}", native.join("include").display()))
             .arg(format!("-I{}", out.display()));
+        if matches!(
+            source.file_name().and_then(|s| s.to_str()),
+            Some("welford4.cu" | "staged_bf16.cu" | "staged_fp32.cu" | "gelu_tanh_exp2.cu")
+        ) {
+            command.arg("--fmad=false");
+        }
         // The build IDs fold a whole-tree fingerprint, so they change on any
         // kernel edit. Only the two tuning-key translation units read them;
         // putting them on every command line would invalidate the whole object

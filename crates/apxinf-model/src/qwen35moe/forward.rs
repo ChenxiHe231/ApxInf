@@ -357,7 +357,9 @@ impl BaseMoeScratch {
         // routed/shared FFN capture. Eager and prepare execution remain serial.
         if matches!(self.tokens, 1 | 4) {
             if let DeviceNvfp4RoutedExperts::Edge(edge) = &weights.routed_experts {
-                if self.run_edge_capture_fork(ctx, weights, edge, input)? { return Ok(()); }
+                if self.run_edge_capture_fork(ctx, weights, edge, input)? {
+                    return Ok(());
+                }
             }
         }
         if matches!(&weights.routed_experts, DeviceNvfp4RoutedExperts::Edge(_)) {
@@ -855,81 +857,104 @@ impl BaseMoeScratch {
     /// Same operators/bindings as the original Edge path, same host order.
     /// Only capture dependency frontiers change; eager/prepare remain serial.
     fn run_edge_capture_fork(
-        &mut self, ctx: &CudaContext, weights: &DeviceNvfp4Moe,
-        edge: &super::device_weights::DeviceEdgeNvfp4Experts, input: &Tensor,
+        &mut self,
+        ctx: &CudaContext,
+        weights: &DeviceNvfp4Moe,
+        edge: &super::device_weights::DeviceEdgeNvfp4Experts,
+        input: &Tensor,
     ) -> Result<bool> {
         let config = RoutedMoeConfig::new(self.experts, self.top_k);
-            let mut routed_output = CudaBuffer::from_tensor(&self.assignment_output)
-                .map_err(Error::Cuda)?
-                .view(0, self.tokens * self.hidden * DType::BF16.size_in_bytes())
-                .map_err(Error::Cuda)?
-                .as_tensor(Shape::new(vec![self.tokens, self.hidden]), DType::BF16)
-                .map_err(Error::Cuda)?;
-        let captured = apxinf_cuda_new::capture_independent(ctx, self,
+        let mut routed_output = CudaBuffer::from_tensor(&self.assignment_output)
+            .map_err(Error::Cuda)?
+            .view(0, self.tokens * self.hidden * DType::BF16.size_in_bytes())
+            .map_err(Error::Cuda)?
+            .as_tensor(Shape::new(vec![self.tokens, self.hidden]), DType::BF16)
+            .map_err(Error::Cuda)?;
+        let captured = apxinf_cuda_new::capture_independent(
+            ctx,
+            self,
             |state| {
-                ops::routed_moe_route_topk(ctx, RoutedMoeRouteTopkArgs {
-                    config, logits: &state.router_logits,
-                    expert_ids: &mut state.expert_ids, expert_weights: &mut state.expert_weights,
-                })?;
-            let workspace = state
-                .edge_workspace
-                .as_ref()
-                .ok_or_else(|| invalid("SM110 Edge NVFP4 workspace is unavailable"))?;
-            // Diagnostic only, default off. The decode layout kernel
-            // (`small_batch_setup_kernel`, tokens <= 4) writes only the live
-            // `tokens * top_k` permutation slots and leaves the padded
-            // remainder of `permuted_m` untouched, unlike the prefill
-            // `build_layout_kernel` which fills padding with -1 behind a
-            // barrier. `permuted_m` is 32,640 for a single decode token, so
-            // 32,632 slots carry whatever the previous call left behind.
-            // Setting APXINF_QWEN35_MOE_WS_POISON=<byte> fills the whole
-            // workspace before every MoE call; if two runs with different
-            // poison bytes produce different tokens, the generated FC1/FC2
-            // kernels are reading past `tile_limit`.
-            if let Some(byte) = std::env::var("APXINF_QWEN35_MOE_WS_POISON")
-                .ok()
-                .and_then(|value| value.parse::<u8>().ok())
-            {
-                workspace
-                    .fill_async(byte, ctx.stream())
-                    .map_err(Error::Cuda)?;
-            }
-            ops::fused_routed_moe(
-                ctx,
-                EdgeNvfp4MoeArgs {
-                    config,
-                    intermediate: state.intermediate,
-                    input,
-                    expert_ids: &state.expert_ids,
-                    expert_weights: &state.expert_weights,
-                    weights: EdgeNvfp4MoeWeights {
-                        fc1_weight: &edge.fc1_weight,
-                        fc1_scales: &edge.fc1_scales,
-                        fc1_alpha: &edge.fc1_alpha,
-                        input_global_scale: &edge.input_global_scale,
-                        fc2_weight: &edge.fc2_weight,
-                        fc2_scales: &edge.fc2_scales,
-                        fc2_alpha: &edge.fc2_alpha,
-                        down_input_scale: &edge.down_input_scale,
+                ops::routed_moe_route_topk(
+                    ctx,
+                    RoutedMoeRouteTopkArgs {
+                        config,
+                        logits: &state.router_logits,
+                        expert_ids: &mut state.expert_ids,
+                        expert_weights: &mut state.expert_weights,
                     },
-                    workspace,
-                    output: &mut routed_output,
-                },
-            )?;
+                )?;
+                let workspace = state
+                    .edge_workspace
+                    .as_ref()
+                    .ok_or_else(|| invalid("SM110 Edge NVFP4 workspace is unavailable"))?;
+                // Diagnostic only, default off. The decode layout kernel
+                // (`small_batch_setup_kernel`, tokens <= 4) writes only the live
+                // `tokens * top_k` permutation slots and leaves the padded
+                // remainder of `permuted_m` untouched, unlike the prefill
+                // `build_layout_kernel` which fills padding with -1 behind a
+                // barrier. `permuted_m` is 32,640 for a single decode token, so
+                // 32,632 slots carry whatever the previous call left behind.
+                // Setting APXINF_QWEN35_MOE_WS_POISON=<byte> fills the whole
+                // workspace before every MoE call; if two runs with different
+                // poison bytes produce different tokens, the generated FC1/FC2
+                // kernels are reading past `tile_limit`.
+                if let Some(byte) = std::env::var("APXINF_QWEN35_MOE_WS_POISON")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                {
+                    workspace
+                        .fill_async(byte, ctx.stream())
+                        .map_err(Error::Cuda)?;
+                }
+                ops::fused_routed_moe(
+                    ctx,
+                    EdgeNvfp4MoeArgs {
+                        config,
+                        intermediate: state.intermediate,
+                        input,
+                        expert_ids: &state.expert_ids,
+                        expert_weights: &state.expert_weights,
+                        weights: EdgeNvfp4MoeWeights {
+                            fc1_weight: &edge.fc1_weight,
+                            fc1_scales: &edge.fc1_scales,
+                            fc1_alpha: &edge.fc1_alpha,
+                            input_global_scale: &edge.input_global_scale,
+                            fc2_weight: &edge.fc2_weight,
+                            fc2_scales: &edge.fc2_scales,
+                            fc2_alpha: &edge.fc2_alpha,
+                            down_input_scale: &edge.down_input_scale,
+                        },
+                        workspace,
+                        output: &mut routed_output,
+                    },
+                )?;
                 Ok(())
             },
             |state| {
                 state.run_shared_nvfp4(ctx, weights, input)?;
-                ops::gemm(ctx, ops::GemmArgs::new(input, &weights.shared_expert_gate.weight,
-                    &mut state.shared_gate_logits))
+                ops::gemm(
+                    ctx,
+                    ops::GemmArgs::new(
+                        input,
+                        &weights.shared_expert_gate.weight,
+                        &mut state.shared_gate_logits,
+                    ),
+                )
             },
         )?;
-        if !captured { return Ok(false); }
+        if !captured {
+            return Ok(false);
+        }
         let shared_gate_logits = view(&self.shared_gate_logits, vec![self.tokens], DType::BF16)?;
-        ops::routed_moe_add_shared(ctx, RoutedMoeAddSharedArgs {
-            routed_output: &routed_output, shared_output: &self.shared_output,
-            shared_gate_logits: &shared_gate_logits, output: &mut self.output,
-        })?;
+        ops::routed_moe_add_shared(
+            ctx,
+            RoutedMoeAddSharedArgs {
+                routed_output: &routed_output,
+                shared_output: &self.shared_output,
+                shared_gate_logits: &shared_gate_logits,
+                output: &mut self.output,
+            },
+        )?;
         Ok(true)
     }
 
@@ -1248,6 +1273,37 @@ impl GdnStateCheckpoints {
         transfers::copy_cuda_to_cuda(ctx, &recurrent, &destination.recurrent)
     }
 
+    pub(super) fn copy_row_from(
+        &self,
+        ctx: &CudaContext,
+        row: usize,
+        source: &GdnState,
+    ) -> Result<()> {
+        if row >= self.rows {
+            return Err(invalid("Qwen3.5 GDN checkpoint row is out of range"));
+        }
+        let conv = tensor_row_view(
+            &self.conv,
+            row,
+            ops::QWEN35_GDN_QKV_WIDTH * ops::QWEN35_GDN_CONV_WIDTH,
+            vec![ops::QWEN35_GDN_QKV_WIDTH, ops::QWEN35_GDN_CONV_WIDTH],
+            DType::F32,
+        )?;
+        let recurrent = tensor_row_view(
+            &self.recurrent,
+            row,
+            ops::QWEN35_GDN_VALUE_HEADS * ops::QWEN35_GDN_HEAD_DIM * ops::QWEN35_GDN_HEAD_DIM,
+            vec![
+                ops::QWEN35_GDN_VALUE_HEADS,
+                ops::QWEN35_GDN_HEAD_DIM,
+                ops::QWEN35_GDN_HEAD_DIM,
+            ],
+            DType::F32,
+        )?;
+        transfers::copy_cuda_to_cuda(ctx, &source.conv, &conv)?;
+        transfers::copy_cuda_to_cuda(ctx, &source.recurrent, &recurrent)
+    }
+
     fn core(&self) -> ops::Qwen35GdnStateCheckpoints<'_> {
         ops::Qwen35GdnStateCheckpoints {
             conv: &self.conv,
@@ -1461,24 +1517,26 @@ impl GdnScratch {
             DType::BF16,
         )?;
         let args = ops::Qwen35GdnPrefillArgs {
-                projected_qkv: &self.projected_qkv,
-                z: &z,
-                a: &self.a,
-                b: &self.b,
-                weights: core_weights(weights),
-                state: core_state(state),
-                checkpoints: checkpoints.map(GdnStateCheckpoints::core),
-                scratch: ops::Qwen35GdnPrefillScratch {
-                    convolved_qkv: &self.convolved_qkv,
-                    decay: &self.decay,
-                    beta: &self.beta,
-                    core_output: &self.core_output,
-                    gated_output: &self.gated_output,
-                },
-                cake: self.cake_scratch(),
-            };
+            projected_qkv: &self.projected_qkv,
+            z: &z,
+            a: &self.a,
+            b: &self.b,
+            weights: core_weights(weights),
+            state: core_state(state),
+            checkpoints: checkpoints.map(GdnStateCheckpoints::core),
+            scratch: ops::Qwen35GdnPrefillScratch {
+                convolved_qkv: &self.convolved_qkv,
+                decay: &self.decay,
+                beta: &self.beta,
+                core_output: &self.core_output,
+                gated_output: &self.gated_output,
+            },
+            cake: self.cake_scratch(),
+        };
         if checkpoints.is_some() {
-            let source = state.verify_source.as_ref()
+            let source = state
+                .verify_source
+                .as_ref()
                 .ok_or_else(|| invalid("GDN verifier requires a bound committed state"))?;
             ops::qwen35_gdn_verify_from_source(ctx, self.tokens, &args, source)?;
         } else {

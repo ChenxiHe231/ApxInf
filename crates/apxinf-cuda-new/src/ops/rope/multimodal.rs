@@ -23,6 +23,9 @@ pub enum AxialRopeNumerics {
     Flexible,
     /// Round biased Q/K inputs to BF16 before applying the rotation.
     RoundedInput,
+    /// Reciprocal positive-power frequencies and separately rounded FP32
+    /// rotation products/sums, followed by the BF16 output boundary.
+    StagedFp32,
 }
 
 pub struct AxialRopeArgs<'a> {
@@ -110,6 +113,7 @@ fn normalize_axial(ctx: &CudaContext, args: AxialRopeArgs<'_>) -> Result<Normali
     let (semantic, convention) = match args.numerics {
         AxialRopeNumerics::Flexible => (3, abi::CONVENTION_HALF_SPLIT_AXIAL),
         AxialRopeNumerics::RoundedInput => (5, abi::CONVENTION_HALF_SPLIT_AXIAL_ROUNDED_INPUT),
+        AxialRopeNumerics::StagedFp32 => (3, abi::CONVENTION_HALF_SPLIT_AXIAL_STAGED_FP32),
     };
     let spec = abi::Spec {
         version: abi::SPEC_VERSION,

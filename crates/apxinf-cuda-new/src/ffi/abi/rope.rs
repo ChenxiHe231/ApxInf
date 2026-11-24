@@ -30,6 +30,7 @@ pub(crate) const CONVENTION_HALF_SPLIT: u32 = 1;
 pub(crate) const CONVENTION_HALF_SPLIT_AXIAL: u32 = 2;
 pub(crate) const CONVENTION_HALF_SPLIT_INTERLEAVED_AXES: u32 = 3;
 pub(crate) const CONVENTION_HALF_SPLIT_AXIAL_ROUNDED_INPUT: u32 = 4;
+pub(crate) const CONVENTION_HALF_SPLIT_AXIAL_STAGED_FP32: u32 = 5;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

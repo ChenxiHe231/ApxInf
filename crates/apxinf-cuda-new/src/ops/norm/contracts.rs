@@ -102,6 +102,8 @@ pub enum NormNumerics {
     /// Round LayerNorm, (1 + scale), their product, and shifted result to BF16;
     /// for a grouped gated residual, round the product before residual addition.
     StagedBf16,
+    /// Four-lane Welford cascade, F32 moments and fused affine, BF16 output.
+    Welford4F32,
 }
 
 impl NormNumerics {
@@ -111,6 +113,7 @@ impl NormNumerics {
             Self::StableDecode => 1,
             Self::StablePlanning => 2,
             Self::StagedBf16 => 3,
+            Self::Welford4F32 => 4,
         }
     }
 }
@@ -483,6 +486,20 @@ pub(crate) fn normalize(ctx: &CudaContext, args: RawArgs<'_>) -> Result<Normaliz
         return Err(invalid(
             "F32 Norm is supported only for stable decode RMSNorm",
         ));
+    }
+    if args.numerics == NormNumerics::Welford4F32
+        && (operation != Operation::Norm
+            || statistic != Statistic::Layer
+            || affine != AffineKind::Weight
+            || gate != GateKind::None
+            || args.quantization != Quantization::None
+            || args.input.dtype() != DType::BF16
+            || args.weight_offset
+            || args.bias.is_some()
+            || cols % 8 != 0
+            || cols > 32768)
+    {
+        return Err(invalid("Welford4F32 requires plain unquantized BF16 weighted LayerNorm, width divisible by 8 and at most 32768"));
     }
     if args.numerics == NormNumerics::StableDecode
         && !((operation == Operation::Norm

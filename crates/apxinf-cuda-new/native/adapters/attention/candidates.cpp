@@ -50,6 +50,13 @@ bool supports_segmented_custom(const Spec& spec) {
          supports_custom(spec);
 }
 
+bool supports_segmented_staged_bf16(const Spec& spec) {
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED &&
+      spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
+      spec.dtype == APXINF_DTYPE_BF16 && spec.output_dtype == APXINF_DTYPE_BF16 &&
+      spec.numerics == APXINF_ATTENTION_NUMERICS_STAGED_BF16;
+}
+
 bool supports_wide_bf16(const Spec& spec) {
   return spec.semantic == APXINF_ATTENTION_SEMANTIC_DENSE &&
       spec.qkv_layout == APXINF_ATTENTION_QKV_LAYOUT_SEPARATE &&
@@ -428,6 +435,10 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        launch_custom, destroy_custom},
   };
   static const ImplementationRegistry segmented_entries = {
+      {kProviderCustom, 4, 1, "staged-bf16-segmented-attention", 0, true, true,
+       false, supports_segmented_staged_bf16, natural_alignment,
+       custom_resource_requirements, one_configuration, prepare_custom,
+       launch_custom, destroy_custom},
 #if defined(APXINF_SEGMENTED_ATTENTION_SM110)
       {kProviderSpecializedSm110, 3, 1, "specialized-segmented-vision-sm110",
        apxinf::gemm::kDeviceFeatureFixedSm110, true, true, false,

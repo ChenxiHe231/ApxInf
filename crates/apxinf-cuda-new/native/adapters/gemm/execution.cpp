@@ -42,7 +42,7 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
       spec.accumulation_dtype > APXINF_DTYPE_I32 ||
       spec.output_dtype > APXINF_DTYPE_E4M3 ||
       spec.quantization > APXINF_GEMM_QUANT_NVFP4_BLOCK ||
-      spec.numerics > APXINF_GEMM_NUMERICS_LEGACY_CUBLAS || spec.m <= 0 ||
+      spec.numerics > APXINF_GEMM_NUMERICS_PAIRWISE_BF16_ODD || spec.m <= 0 ||
       spec.n <= 0 || spec.k <= 0 || spec.m > INT32_MAX ||
       spec.n > INT32_MAX || spec.k > INT32_MAX ||
       spec.alpha_is_unit > 1 || spec.output_scale_is_unit > 1 ||
@@ -116,6 +116,10 @@ void validate_spec(const apxinf::gemm::Spec& spec) {
       spec.accumulation_dtype != APXINF_DTYPE_F32) {
     throw Failure(APXINF_STATUS_UNSUPPORTED,
                   "floating-point GEMM requires F32 accumulation");
+  }
+  if (spec.numerics == APXINF_GEMM_NUMERICS_PAIRWISE_BF16_ODD &&
+      !apxinf::gemm::supports_pairwise_bf16_bias(spec)) {
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid pairwise BF16 GEMM contract");
   }
   if (spec.numerics == APXINF_GEMM_NUMERICS_LEGACY_CUBLAS &&
       (spec.semantic != APXINF_GEMM_SEMANTIC_GEMM ||

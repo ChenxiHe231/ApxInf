@@ -10,6 +10,8 @@
 #include <cstdint>
 #include <cuda_fp8.h>
 
+cudaError_t apxinf_gelu_tanh_exp2(const void*,void*,int64_t,cudaStream_t);
+
 namespace {
 #include "../../kernels/primitives/math.cuh"
 #include "../../kernels/primitives/activation.cuh"
@@ -52,7 +54,7 @@ void validate_spec(const apxinf_pointwise_spec_t& spec) {
            spec.semantic == APXINF_POINTWISE_SEMANTIC_EULER_UPDATE))) ||
       (!quantized_geglu && !quantized_swiglu &&
        spec.output_dtype != spec.dtype) ||
-      spec.activation > APXINF_POINTWISE_ACTIVATION_RELU ||
+      spec.activation > APXINF_POINTWISE_ACTIVATION_GELU_TANH_EXP2 ||
       spec.has_bias > 1 || spec.rows <= 0 || spec.cols <= 0 ||
       spec.input_cols <= 0 || spec.logical_cols <= 0 ||
       spec.rows > INT32_MAX || spec.cols > INT32_MAX ||
@@ -64,6 +66,10 @@ void validate_spec(const apxinf_pointwise_spec_t& spec) {
       !valid_alignment(spec.output_alignment)) {
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid Pointwise Spec");
   }
+  if (spec.activation == APXINF_POINTWISE_ACTIVATION_GELU_TANH_EXP2 &&
+      (spec.dtype != APXINF_DTYPE_BF16 || spec.output_dtype != APXINF_DTYPE_BF16 ||
+       spec.has_bias || spec.rows*spec.cols > INT32_MAX))
+    throw Failure(APXINF_STATUS_INVALID_ARGUMENT, "invalid staged exp2 GELU contract");
   if ((!quantized_geglu && spec.output_scale_is_unit != 1) ||
       (quantized_geglu &&
        (spec.cols % 2 != 0 || spec.input_alignment < 4 ||
@@ -212,6 +218,8 @@ cudaError_t launch_bf16_bias_activation(
     const __nv_bfloat16* input, const __nv_bfloat16* bias,
     __nv_bfloat16* output, int rows, int cols, int activation,
     cudaStream_t stream) {
+  if (activation == APXINF_POINTWISE_ACTIVATION_GELU_TANH_EXP2)
+    return apxinf_gelu_tanh_exp2(input,output,int64_t(rows)*cols,stream);
   const int64_t count = static_cast<int64_t>(rows) * cols;
   const bool packed8_gelu =
       activation == APXINF_POINTWISE_ACTIVATION_GELU && bias != nullptr &&
