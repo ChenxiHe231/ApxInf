@@ -1044,6 +1044,9 @@ struct AttentionScratch {
     projected_key: Tensor,
     projected_value: Tensor,
     positions: Tensor,
+    // Image uploads must never overwrite a readonly text-table view.
+    uploaded_positions: Tensor,
+    positions_are_image: bool,
     image_positions: Option<Tensor>,
     query: Tensor,
     gate: Tensor,
@@ -1058,6 +1061,7 @@ struct AttentionScratch {
     dynamic_partial_output: Option<Tensor>,
     tokens: usize,
     positions_start: Option<usize>,
+    position_table: Option<Tensor>,
 }
 
 impl AttentionScratch {
@@ -1075,6 +1079,22 @@ impl AttentionScratch {
         {
             return Err(invalid("Qwen3.5 attention profile token count is invalid"));
         }
+        // Fixed decode/verify positions are integer metadata. Retaining every
+        // valid text row removes the synchronous pageable H2D upload from each
+        // round; the dynamic attention mixer consumes the selected view eagerly.
+        let position_table = if cache_dtype == Qwen35KvCacheDType::Fp8Dynamic
+            && tokens <= ops::QWEN35_MTP_DRAFT_STEPS + 1
+            && cache_capacity >= tokens {
+            let starts = cache_capacity.checked_sub(tokens).and_then(|n| n.checked_add(1))
+                .ok_or_else(|| invalid("Qwen3.5 position table exceeds cache capacity"))?;
+            let width = TEXT_POSITION_CHANNELS * tokens;
+            let count = starts.checked_mul(width)
+                .ok_or_else(|| invalid("Qwen3.5 position table size overflow"))?;
+            let mut values = Vec::with_capacity(count);
+            for start in 0..starts { values.extend(text_position_values(start, tokens)?); }
+            Some(transfers::to_cuda_on_stream(ctx,
+                Tensor::from_i32(vec![starts, width], &values)?)?)
+        } else { None };
         let attention_shape = vec![
             tokens,
             ops::QWEN35_ATTENTION_Q_HEADS,
@@ -1140,6 +1160,7 @@ impl AttentionScratch {
         } else {
             ops::QWEN35_ATTENTION_MAX_SPLITS
         };
+        let uploaded_positions = zeros(ctx, vec![TEXT_POSITION_CHANNELS, tokens], DType::I32)?;
         Ok(Self {
             fp8_projection_input: zeros(ctx, vec![tokens, TARGET_HIDDEN_SIZE], DType::F8E4M3)?,
             fp8_output_input: zeros(
@@ -1165,7 +1186,9 @@ impl AttentionScratch {
                 vec![tokens, ops::QWEN35_ATTENTION_KV_WIDTH],
                 DType::BF16,
             )?,
-            positions: zeros(ctx, vec![TEXT_POSITION_CHANNELS, tokens], DType::I32)?,
+            positions: uploaded_positions.clone(),
+            uploaded_positions,
+            positions_are_image: false,
             image_positions: None,
             query: zeros(ctx, attention_shape.clone(), DType::BF16)?,
             gate: zeros(ctx, attention_shape.clone(), DType::BF16)?,
@@ -1208,6 +1231,7 @@ impl AttentionScratch {
             dynamic_partial_output,
             tokens,
             positions_start: None,
+            position_table,
         })
     }
 
@@ -1217,9 +1241,10 @@ impl AttentionScratch {
         start: usize,
         plan: &super::vision_input::ImagePositions,
     ) -> Result<()> {
-        if self.positions_start == Some(start) {
+        if self.positions_start == Some(start) && self.positions_are_image {
             return Ok(());
         }
+        self.positions = self.uploaded_positions.clone();
         let values = plan.values(start, self.tokens)?;
         let host = Tensor::from_i32(vec![3, self.tokens], &values)?;
         transfers::copy_cpu_to_cuda_on_stream(ctx, host, &self.positions)?;
@@ -1238,17 +1263,35 @@ impl AttentionScratch {
         }
         transfers::copy_cpu_to_cuda_on_stream(ctx, host, self.image_positions.as_ref().unwrap())?;
         self.positions_start = Some(start);
+        self.positions_are_image = true;
         Ok(())
     }
 
     fn ensure_text_positions(&mut self, ctx: &CudaContext, start_position: usize) -> Result<()> {
-        if self.positions_start == Some(start_position) {
+        if self.positions_start == Some(start_position) && !self.positions_are_image {
             return Ok(());
         }
+        if let Some(table) = &self.position_table {
+            let starts = table.shape().dims()[0];
+            if start_position >= starts {
+                return Err(invalid("Qwen3.5 text position table index exceeds capacity"));
+            }
+            let width = TEXT_POSITION_CHANNELS * self.tokens;
+            self.positions = CudaBuffer::from_tensor(table).map_err(Error::Cuda)?
+                .view(start_position * width * DType::I32.size_in_bytes(),
+                    width * DType::I32.size_in_bytes()).map_err(Error::Cuda)?
+                .as_tensor(Shape::new(vec![TEXT_POSITION_CHANNELS, self.tokens]), DType::I32)
+                .map_err(Error::Cuda)?;
+            self.positions_start = Some(start_position);
+            self.positions_are_image = false;
+            return Ok(());
+        }
+        self.positions = self.uploaded_positions.clone();
         let values = text_position_values(start_position, self.tokens)?;
         let host = Tensor::from_i32(vec![TEXT_POSITION_CHANNELS, self.tokens], &values)?;
         transfers::copy_cpu_to_cuda_on_stream(ctx, host, &self.positions)?;
         self.positions_start = Some(start_position);
+        self.positions_are_image = false;
         Ok(())
     }
 
@@ -1724,6 +1767,50 @@ mod tests {
             text_position_values(7, 3).unwrap(),
             vec![7, 8, 9, 7, 8, 9, 7, 8, 9]
         );
+    }
+
+    #[test]
+    #[ignore = "exclusive GPU exact text-position table boundary/read-only check"]
+    fn real_gpu_position_table_exact_views() -> Result<()> {
+        let ctx = CudaContext::new_with_autotune(0, false).map_err(Error::Cuda)?;
+        for capacity in [128, 2200, 8200] {
+            for rows in 1..=4 {
+                let mut scratch = AttentionScratch::new(&ctx, rows, capacity,
+                    Qwen35KvCacheDType::Fp8Dynamic, DecoderPhase::Prefill)?;
+                let table = scratch.position_table.as_ref().expect("position table").clone();
+                let before = transfers::to_cpu(&table)?.as_i32()?.to_vec();
+                for start in [0,1,31,32,127,128,129,511,512,capacity-rows,0] {
+                    if start + rows > capacity { continue; }
+                    scratch.ensure_text_positions(&ctx,start)?;
+                    assert_eq!(transfers::to_cpu(&scratch.positions)?.as_i32()?,
+                        text_position_values(start, rows)?.as_slice());
+                    // Repeat the cached lookup, then change start again.
+                    scratch.ensure_text_positions(&ctx,start)?;
+                    assert_eq!(scratch.positions_start,Some(start));
+                }
+                // Same-start text/image/text transitions cannot hit the wrong
+                // cached kind or write into the text table's selected view.
+                let plan = super::super::vision_input::ImagePositions {
+                    prompt: (0..capacity).map(|i| [i as u32, i as u32 + 1, i as u32 + 2]).collect(),
+                    delta: 0,
+                };
+                for start in [0, capacity - rows, 0] {
+                    scratch.ensure_text_positions(&ctx, start)?;
+                    scratch.ensure_image_positions(&ctx, start, &plan)?;
+                    assert_eq!(transfers::to_cpu(&scratch.positions)?.as_i32()?,
+                        plan.values(start, rows)?.as_slice());
+                    scratch.ensure_text_positions(&ctx, start)?;
+                    assert_eq!(transfers::to_cpu(&scratch.positions)?.as_i32()?,
+                        text_position_values(start, rows)?.as_slice());
+                }
+                assert_eq!(transfers::to_cpu(&table)?.as_i32()?,before.as_slice());
+                assert!(scratch.ensure_text_positions(&ctx,capacity-rows+1).is_err());
+                println!("{}",serde_json::json!({"schema":"apxinf.verify.position_table.v1",
+                    "capacity":capacity,"rows":rows,"exact_positions":true,
+                    "table_readonly":true,"same_input_cosine":1.0}));
+            }
+        }
+        Ok(())
     }
 
     #[test]

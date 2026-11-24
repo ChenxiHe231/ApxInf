@@ -6,7 +6,7 @@
 //! prefill/decode a strong error guarantee without host snapshots.
 
 use apxinf_core::{Error, Result, Tensor};
-use apxinf_cuda_new::{ops, transfers, CudaContext};
+use apxinf_cuda_new::{capture, ops, transfers, CapturedGraph, CudaContext};
 
 use super::architecture::MixerKind;
 use super::decoder::{
@@ -293,6 +293,9 @@ impl PreparedTargetPrefill {
 /// One independent text sequence. Sessions must not be shared by concurrent
 /// requests; serving should allocate or pool one session per active sequence.
 pub struct Qwen35Session<B: FullAttentionBackend> {
+    // Destroy graphs before the fixed physical state banks they reference.
+    to_shadow_verify_copy: Option<CapturedGraph>,
+    to_committed_verify_copy: Option<CapturedGraph>,
     attention: B,
     committed_gdn: Vec<GdnState>,
     shadow_gdn: Vec<GdnState>,
@@ -409,6 +412,8 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             });
         }
         let mut session = Self {
+            to_shadow_verify_copy: None,
+            to_committed_verify_copy: None,
             attention,
             committed_gdn,
             shadow_gdn,
@@ -489,6 +494,21 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
                     &mut session.decode_scratch,
                 )?;
             }
+        }
+        if cuda_graphs {
+            ctx.synchronize().map_err(Error::Cuda)?;
+            session.to_shadow_verify_copy = Some(capture(ctx, || {
+                for (source, destination) in session.committed_gdn.iter().zip(&session.shadow_gdn) {
+                    destination.copy_for_verify_from(ctx, source)?;
+                }
+                Ok(())
+            })?);
+            session.to_committed_verify_copy = Some(capture(ctx, || {
+                for (source, destination) in session.shadow_gdn.iter().zip(&session.committed_gdn) {
+                    destination.copy_for_verify_from(ctx, source)?;
+                }
+                Ok(())
+            })?);
         }
         session.reset_all_storage(ctx)?;
         ctx.synchronize().map_err(Error::Cuda)?;
@@ -1241,15 +1261,17 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         self.prepare_shadow_from_committed_impl(ctx, false)
     }
 
-    fn prepare_shadow_from_committed_impl(
-        &mut self,
-        ctx: &CudaContext,
-        verifier: bool,
-    ) -> Result<()> {
-        for (committed, shadow) in self.committed_gdn.iter().zip(&self.shadow_gdn) {
-            if verifier {
-                shadow.copy_for_verify_from(ctx, committed)?;
+    fn prepare_shadow_from_committed_impl(&mut self, ctx: &CudaContext, verifier: bool) -> Result<()> {
+        if verifier {
+            if let Some(copy) = &self.to_shadow_verify_copy {
+                copy.replay()?;
             } else {
+                for (committed, shadow) in self.committed_gdn.iter().zip(&self.shadow_gdn) {
+                    shadow.copy_for_verify_from(ctx, committed)?;
+                }
+            }
+        } else {
+            for (committed, shadow) in self.committed_gdn.iter().zip(&self.shadow_gdn) {
                 shadow.copy_from(ctx, committed)?;
             }
         }
@@ -1279,6 +1301,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             .checked_add(1)
             .ok_or_else(|| invalid("Qwen3.5 session epoch overflow"))?;
         std::mem::swap(&mut self.committed_gdn, &mut self.shadow_gdn);
+        std::mem::swap(&mut self.to_shadow_verify_copy, &mut self.to_committed_verify_copy);
         std::mem::swap(&mut self.committed_attention, &mut self.shadow_attention);
         std::mem::swap(
             &mut self.committed_decode_phases,

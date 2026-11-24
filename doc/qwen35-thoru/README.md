@@ -342,6 +342,12 @@ target verifier always uses the full vocabulary. This selection adds no
 environment switch. See the [Final real-request A/B and validated scope](APXINF4_MTP_DRAFT_SHORTLIST.md)
 for numerical, Graph, lifetime and performance evidence.
 
+Dynamic-FP8 attention prepares read-only position views for 1–4 rows. Verifier
+state copies use directional CUDA Graphs that follow physical state-bank swaps;
+the existing recurrent source binding is retained. See the
+[incremental transport A/B](APXINF4_MTP_VERIFY_TRANSPORT.md), measured against
+the shortlist commit rather than the original Final.
+
 Build and start the server without enabling the legacy CUDA runtime:
 
 ```bash

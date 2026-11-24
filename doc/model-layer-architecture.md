@@ -345,6 +345,10 @@ views and transactional eligibility in `qwen35moe/mtp_runtime.rs`; the target
 verifier retains full-vocabulary logits. Selection is automatic for eligible
 contexts, with full draft-head fallback after excluded tokens. See the
 [draft-head capability and measured scope](qwen35-thoru/APXINF4_MTP_DRAFT_SHORTLIST.md).
+`attention_backend.rs` owns prepared integer position views for dynamic-FP8
+short rows; `session.rs` owns directional verifier-copy Graphs bound to physical
+GDN state banks, including their swap and destruction order. See the
+[transport increment](qwen35-thoru/APXINF4_MTP_VERIFY_TRANSPORT.md).
 
 New VLA code should use `Model` for forward computation and `ModelRunner` for
 execution ownership. Existing family symbols remain their actual names until

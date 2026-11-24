@@ -3734,6 +3734,23 @@ pub(super) mod gpu_raw_protocol {
     }
 
 
+    #[test]
+    #[ignore = "RECIPE PREPARATION ONLY: explicit shortlist contract recipes; not a correctness or performance result"]
+    fn prepare_shortlist_candidate_recipes() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let arguments: Vec<String> = std::env::args().collect();
+        let name = "qwen35moe::mtp_runtime::gpu_raw_protocol::prepare_shortlist_candidate_recipes";
+        assert!(arguments.iter().any(|x| x == "--ignored")
+            && arguments.iter().any(|x| x == "--exact")
+            && arguments.iter().any(|x| x == name)
+            && arguments.iter().any(|x| x == "--test-threads=1"));
+        let mut f = Fixture::load_with_autotune(true)?;
+        f.prompt = vec![248045,846,198,68111,449,21870,5640,4849,1675,883,264,3110,8151,310,26629,11];
+        shortlist_head_and_context_gate(&f)?;
+        draft_gate(&f, Some(42))?;
+        shortlist_weight_rebind_gate(&mut f)?;
+        Ok(())
+    }
+
     // Recipe preparation is an explicit different ignored test and process.
     // It executes actual target/MTP operations; it is not a protocol/quality gate.
     fn prep_command(
