@@ -335,18 +335,21 @@ by both versions. Select `--enable-context-reuse` to retain request prefixes and
 the recipe directory for the chosen KV mode.
 
 The checkpoint-native W4A16 MTP draft head automatically uses the vocabulary
-views `[0, 131072)` and `[247808, 248320)` while the prompt and committed tokens
+views `[0, 131072)` and `[247808, 248320)` for text requests while the prompt and committed tokens
 remain in that set. An excluded token selects the full draft head for that
 context; snapshots preserve eligibility and reset starts a new decision. The
 target verifier always uses the full vocabulary. This selection adds no
 environment switch. See the [Final real-request A/B and validated scope](APXINF4_MTP_DRAFT_SHORTLIST.md)
 for numerical, Graph, lifetime and performance evidence.
 
-Dynamic-FP8 attention prepares read-only position views for 1–4 rows. Verifier
+Dynamic-FP8 attention prepares read-only position views for 1–4 text rows.
+Image position uploads use separate writable storage; image requests retain the full draft head. Verifier
 state copies use directional CUDA Graphs that follow physical state-bank swaps;
 the existing recurrent source binding is retained. See the
 [incremental transport A/B](APXINF4_MTP_VERIFY_TRANSPORT.md), measured against
 the shortlist commit rather than the original Final.
+
+- [Final 默认 MTP 优化：完整长上下文逐提交验收](APXINF4_MTP_LONG_CONTEXT.md)：最新 Final429c649b，两个独立提交，15-case、2 warmup＋10 repeat、逐轮证据及资源恢复。
 
 Build and start the server without enabling the legacy CUDA runtime:
 

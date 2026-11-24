@@ -1,0 +1,17 @@
+--- a/crates/apxinf-model/examples/qwen35_mtp_bench.rs
++++ b/crates/apxinf-model/examples/qwen35_mtp_bench.rs
+@@ -586 +586,13 @@
+-    let prompt = exact_prompt(prompt_tokens);
++    // Private validation-only input binding; the production generate API is unchanged.
++    let prompt = if let Some(path) = benchmark::optional_path(&args, "--input-ids")? {
++        let bytes = std::fs::read(path)?;
++        if bytes.len() != prompt_tokens.checked_mul(4).ok_or("input size overflow")? {
++            return Err("input-ids length differs from --prompt-tokens".into());
++        }
++        let ids: Vec<u32> = bytes.chunks_exact(4)
++            .map(|b| u32::from_le_bytes(b.try_into().expect("four bytes"))).collect();
++        if ids.iter().any(|&id| id as usize >= benchmark::VOCAB_SIZE) {
++            return Err("input-ids contains an invalid vocabulary id".into());
++        }
++        ids
++    } else { exact_prompt(prompt_tokens) };

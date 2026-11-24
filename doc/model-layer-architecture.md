@@ -343,10 +343,13 @@ renamed as part of unrelated work.
 Qwen3.5/3.6's checkpoint-native W4A16 MTP proposer owns its prepared vocabulary
 views and transactional eligibility in `qwen35moe/mtp_runtime.rs`; the target
 verifier retains full-vocabulary logits. Selection is automatic for eligible
-contexts, with full draft-head fallback after excluded tokens. See the
+text contexts, with full draft-head fallback after excluded tokens; image
+requests retain the full draft head. See the
 [draft-head capability and measured scope](qwen35-thoru/APXINF4_MTP_DRAFT_SHORTLIST.md).
 `attention_backend.rs` owns prepared integer position views for dynamic-FP8
-short rows; `session.rs` owns directional verifier-copy Graphs bound to physical
+short text rows. Image uploads use separate writable position storage, including
+same-start text/image transitions; they never overwrite a text-table view.
+`session.rs` owns directional verifier-copy Graphs bound to physical
 GDN state banks, including their swap and destruction order. See the
 [transport increment](qwen35-thoru/APXINF4_MTP_VERIFY_TRANSPORT.md).
 
