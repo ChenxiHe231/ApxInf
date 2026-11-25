@@ -1,5 +1,7 @@
 # Final 默认 MTP 优化的长上下文逐提交验收
 
+> **2026-11-25 Thor-U 增补：** 原表是 Thor-2 的历史逐提交验收。本机最新 TRT Engine 与远程 Final 的新测量见[文末对照](#thoru-final-trt-20261125)，两机成绩不混用。
+
 完整矩阵通过，两个提交在各自声明的受影响配置组上均有端到端收益，且无确认的 ≥2% 回退。汇总吞吐按同组 token 总数/时间总数计算；两行对应不同输入组和父版本，不能相加百分比。逐项结果和小幅负收益均保留在后文。
 
 | 独立增量及汇总输入组 | Decode 提升 | 含prefill端到端提升 |
@@ -128,3 +130,86 @@ python3 devlocal/mtp-final-validation/long-current-final/scripts/matrix.py \
 ```
 
 表中吞吐按实际 token 总数/总时间重算，追加 prefill 为测量均值。逐轮波动和筛查记录均保留，本轮未触发追加复测；结论限于本机、这些输入和冻结配置。
+
+<a id="thoru-final-trt-20261125"></a>
+
+## Thor-U：最新 TRT Engine 与 Final（2026-11-25）
+
+本次固定远程 Final `438d5940b6a9e197a6dd085c6c6740204081490b`，在 Thor-U 本机重新编译和测量。TRT 使用本机最新可用交付包中的 `Qwen3.6-35B-A3B-NVFP4-FP16KV-MTP-703-14sm-64k-latest-20261112`，配套运行时 `qwen36-703-viskv_20261105`，不是旧的 128K FP8-KV Engine。Engine、embedding、tokenizer 和配置的九项交付 MD5 校验全部通过。
+
+Thor-U：SM101、14 SM；CUDA 12.8.93，TensorRT 10.10.10.3。GPU 固定在本机最高可用频率 **1530 MHz**，实际 GPC 时钟持续采样；CPU performance（约 2.6 GHz），EMC 4266 MHz。按用户要求，本轮**不测试 48K**，没有使用 1206 MHz。
+
+Final 使用原位 `Qwen3.6-35B-A3B-NVFP4` checkpoint、checkpoint-native mixed weights、NVFP4 MoE activation、dynamic-FP8 target KV、scale1 FP8 draft KV；TRT 的 target/draft KV 均为 FP16，内部算子精度按交付 Engine 固定。两者都是 greedy、MTP depth3 / verify4、CUDA Graph，关闭 EOS 提前结束。FP8 KV 不等于 FP8 权重/激活投影；本表是两套交付配置对照，不是同精度的算子 A/B；不透明 Engine 未做逐张量同权重校验。
+
+12 个 case × 2 后端，每项 **2 次预热＋10 次计分**，共 **240 条计分、48 条受测预热请求**；前缀建立请求另计且不计分。Decode 类严格输出 1024 token（追加类输出 1 token），首 token 计入 TTFT，Decode 用其后 1023 个首末回调间隔。吞吐按正式 token 总数/正式时间总数计算，追加 prefill 按正式时延均值；均排除加载和 Graph 捕获。
+
+本机产物仅对两个既有 benchmark 例程增加了计时外的显式 token 文件绑定，产品运行代码原样来自表列 Final；补丁及 ELF SHA256 在证据中。两边输入 token 已用各自 tokenizer 校验一致。原历史 LCG token 不能直接无损送入 TRT 的纯文字接口，因此本轮主表复用本机冻结的可往返长文字，另测本次 13 题循环语料；输入 SHA256 和题目 ID 列在证据中。它们不替代前面的 Thor-2 LCG 测量。
+
+**冷请求边界：** 本机 1530 MHz 下，TRT 的 16K 整段冷 prefill 导致系统无响应，Linux 串口无响应，最终通过控制器断电/上电恢复；根因未确认。该次没有计分。24K/32K 未继续整段冷请求。对 16K/24K/32K（含补充文字的 16K/32K），改用 2K 分段在计时外建立至少 `N−2K` 的缓存前缀，再测完整 1024 输出的 Decode。每轮实际复用量均核验；这些行**只比较 Decode，不比较缓存请求的总吞吐与 Final 冷生成吞吐**。
+
+**接口边界：** TRT 经公开运行时文字请求入口，包含其内部分词、调度，以及适用时的缓存恢复；Final 模型入口接收相同的预分词 IDs。追加 prefill 的两边都在计时外建立初始 KV，TRT 用 2K 分段建立前缀，计时请求必须精确复用 N 个 token、只追加 4096 个输入及输出首 token。表中时间不是纯 kernel 时间，接口开销不能归为算子收益。
+
+### 共享长文字：Decode（tok/s）
+
+| 输入 / Decode 起始 KV | TRT | Final | Final 较 TRT | TRT 路径 |
+|---|---:|---:|---:|---|
+| 4K | 101.44 | 95.89 | -5.47% | 冷请求 |
+| 8K | 97.85 | 92.68 | -5.28% | 冷请求 |
+| 16K | 94.33 | 89.04 | -5.61% | 缓存前缀 |
+| 24K | 88.34 | 82.25 | -6.90% | 缓存前缀 |
+| 32K | 83.57 | 77.62 | -7.11% | 缓存前缀 |
+
+### 共享长文字：含 prefill 的冷生成吞吐（输出 tok/s）
+
+“—”表示无可比的 TRT 冷请求结果；不使用缓存请求吞吐填补。
+
+| 输入 | TRT 冷生成 | Final 冷生成 | Final 较 TRT |
+|---|---:|---:|---:|
+| 4K | 94.18 | 90.25 | -4.18% |
+| 8K | 85.53 | 82.62 | -3.40% |
+| 16K | — | 70.30 | — |
+| 24K | — | 59.66 | — |
+| 32K | — | 51.99 | — |
+
+### 已有 KV 追加 4K（ms，越低越好）
+
+百分比为 Final 相对 TRT 的时延降低；负数表示更慢。两套入口范围见上文。
+
+| 初始 KV | TRT 请求 | Final 模型 | Final 时延降低 |
+|---|---:|---:|---:|
+| 4K | 846.51 | 702.49 | +17.01% |
+| 8K | 893.22 | 745.67 | +16.52% |
+| 16K | 975.18 | 805.04 | +17.45% |
+| 32K | 1139.93 | 930.69 | +18.36% |
+
+### 补充：本次 13 题循环长文字（输出 1K）
+
+| 输入 / KV | TRT Decode | Final Decode | Final 较 TRT | TRT 冷生成 | Final 冷生成 |
+|---|---:|---:|---:|---:|---:|
+| 4K | 111.20 | 99.14 | -10.85% | 102.42 | 93.08 |
+| 16K | 92.45 | 78.85 | -14.71% | — | 63.79 |
+| 32K | 100.75 | 76.74 | -23.84% | — | 51.57 |
+
+16K/32K 的 TRT 为缓存前缀 Decode；两档冷生成留空。单位均为输出 tok/s。
+
+### 运行检查、限制与复现
+
+所有纳入成绩的请求都完成了输入长度、输出数量、初始 KV / 实际复用量和时钟检查；Final 还通过例程内的逐轮输出一致性检查。TRT 的 greedy 输出在重新 prefill 时存在轮间差异，逐 case 的正式输出种类数及波动范围保留在证据中；不同 KV 精度及输出/MTP 工作量不能作逐 token 质量等价或单一 kernel 因果结论。未新增自然任务质量验收。
+
+Engine 反序列化时 TensorRT 提示 plan 设备型号差异警告；本表保留该交付包在本机的实际运行结果，不将其表述为重新原生构建 Engine 的验收。
+
+准备阶段曾发生一次整模型在线调优中断，之后禁止该路径，缺项通过独立算子准备，新准备项的常量数值、guard 和只读检查通过。Final 正式计时严格使用冻结 recipe，不在线调优、无缺项回退；权重/Engine/运行时身份、相关 ELF 和 recipe 内容在三段有效采集之间一致。16K 冷请求挂起前已完成的五组完整 2＋10 数据经恢复后核对并复用，没有重跑或挑选更好的轮次。中断请求不计分。恢复后十二组完成，切换到 TRT 32K 追加前的内存预留检查安全退出；整理空闲内存后仅补余下七组，先前成绩均未重跑。
+
+测试后恢复原 GPU 策略与 7380 页 HugeTLB，确认无遗留推理进程。仅维护 benchmark 证据与文档；没有把本次两套配置的差值当作新代码优化收益，也不与前面的 Thor-2 逐提交百分比累加。
+
+- [逐轮证据及身份](model-microbench/evidence/thoru-final-trt-20261125.json)：240 条正式测量、预热、实际模式、输入/产物/recipe 身份、时钟与恢复记录。
+- [离线核验器](model-microbench/verify_thoru_final_trt.py)：重新计算表格，可校验保留的原始文件与 ELF。
+
+原始资产保留在 Thor-U 的 `/opt/data/devlocal/final-prefill-range-thoru/source/devlocal/thoru-final-trt/checkout/devlocal/thoru-final-trt/`。`runs/formal-02/` 复用五组完整记录，`runs/formal-03/` 复用十二组，`runs/formal-04/` 补齐最后七组。原始文件、失败尝试和控制器均保留，私有输入内容不写入维护证据。
+
+```sh
+python3 doc/qwen35-thoru/model-microbench/verify_thoru_final_trt.py \
+  doc/qwen35-thoru/model-microbench/evidence/thoru-final-trt-20261125.json
+
+# 在保留原始资产的 Thor-U 上追加 --raw-root，核对日志、输入、recipe 和 ELF。
+```
