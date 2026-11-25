@@ -1,0 +1,497 @@
+{
+  "schema": "apxinf.routed_input_quant.thor3_affected.v1",
+  "status": "affected_formal_and_focused_NCU_review_pass_full_matrix_pending",
+  "candidate_id": "routed-quant-02",
+  "base_commit": "5ad29ed890f336f7c19f900de1d418cfb0a3c5dd",
+  "original_goal_baseline": "02f1e638ae76e350826473693e454e772f08ae0c",
+  "pushed": false,
+  "source": {
+    "sha256": "61e021daa96260320a1171f8cbd6d8e0b3b5260a49cd0afb952328158791e701",
+    "patch_sha256": "453aa92924aa26637dc48c211e2da22efa19e04828e553da7c95b47b57342603",
+    "qualification": "tokens>4,H2048,top8,tokens>=min(tokens*8,SMcount*8);current20SM threshold160",
+    "math": "original quantization round/order,FP4-SF bytes and layouts unchanged; actualGPUscale-bit exact equality; unequal scales use original perroute math",
+    "new_ENV_or_user_switch": false
+  },
+  "artifact": {
+    "directory": "remoteT/final15/artifacts/routed-quant02-validation-attempt02",
+    "core_source_manifest_sha256": "c533a58babeb91c228d3c7fdd9dedfc887bd5002128d799460f470a2feaa158f",
+    "combined_source_manifest_sha256": "e386a471afc9e380b3bffca73afaa34dbb45d23d95f69f58444f10648c38639e",
+    "native_sha256": "9a4fa1e416c228c8ad4e436822c0759ee7d2536f833c8714e13d786469ef584a",
+    "only_changed_native_member": "gemm-7a8f4bfb81a59d25-runner.o",
+    "ELF_sha256": {
+      "qwen35_context_bench": "76399efff73fdfe73fa76c4b1110d8a8a2274d86f75f0686715b5fe3da868f50",
+      "qwen35_mtp_bench": "f075d0fc9966f9709acde34ec3bcdf4b0f6873091a1aed2dd1b8e4e0bda2d5c3"
+    },
+    "execution_host": "Thor3",
+    "compiler": {
+      "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+      "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)"
+    },
+    "recipes_unchanged": true,
+    "live5ad_restored": true
+  },
+  "evidence": {
+    "build": {
+      "relative_path": "devlocal/final-plus20/results/thor3-quant02-raw-01/final15/artifacts/routed-quant02-validation-attempt02/build-receipt.json",
+      "sha256": "aba2c7d0e5d66430d8e7885e1d2398b7c370d5727ebbdfe90e32615017785eb8"
+    },
+    "combined": {
+      "relative_path": "devlocal/final-plus20/results/thor3-quant02-raw-01/final15/artifacts/routed-quant02-validation-attempt02/combined-source.json",
+      "sha256": "e386a471afc9e380b3bffca73afaa34dbb45d23d95f69f58444f10648c38639e"
+    },
+    "operator": {
+      "relative_path": "devlocal/final-plus20/results/thor3-quant02-raw-01/probes/routed-quant02/check-screen-01/receipt.json",
+      "sha256": "ab22dd89fbfc61c46f7c01b12295716fe185184a556954f74a61151437cd2306"
+    },
+    "strict": {
+      "relative_path": "devlocal/final-plus20/results/thor3-quant02-raw-01/final15/runs/thor3-quant02-strict-01/summary.json",
+      "sha256": "47aee07a9e1a3d15f8c4d30fec08f937cbe43b9929e2d8640fe79b1b12152e62"
+    },
+    "screen": {
+      "relative_path": "devlocal/final-plus20/results/thor3-quant02-raw-01/final15/runs/thor3-quant02-screen-01/summary.json",
+      "sha256": "605fd4fa9cd429f22ee1214e30a44d8998999cfbd8e48f5066aafa7182db002a"
+    },
+    "formal": {
+      "relative_path": "devlocal/final-plus20/results/thor3-quant02-raw-01/final15/runs/thor3-quant02-formal-01/summary.json",
+      "sha256": "071c7a52c4735db82e55b03d34a3d15a8e71cc17e6796d9e3fb48b97441c4ff3"
+    },
+    "AB15_preflight": {
+      "relative_path": "devlocal/final-plus20/results/thor3-quant02-raw-01/final15/runs/thor3-final15-preflight-01/summary.json",
+      "sha256": "0556a739435faf8c1f0a9cc55145838b70b74ef9be3fd624d10001a5620b97dd"
+    }
+  },
+  "operator": {
+    "current61_Thor3_probe_ELF_sha256": "f53f947611ca5c7dc762df72e9a15bd6f8cfdfa75fbc66630c273547e83ad5e2",
+    "60checks_pass": true,
+    "actual_scales": "34 distinct values representing40 layers tested onqualifiedM161 path",
+    "graph_changed_input_full_FP4_SF_readonly_canary": true,
+    "old01_ELF_resigned": false,
+    "all_raw_probe_stdout_stderr_hashes_verified": true
+  },
+  "strict": {
+    "cases": [
+      "decode4K1024",
+      "append4K",
+      "append32K"
+    ],
+    "full_output_vectors_and_MTP_work_equal": true,
+    "P1_old_lifecycle_resigned_as_C": false
+  },
+  "screen": {
+    "warmups": 2,
+    "repeats": 3,
+    "formal_credit": false,
+    "comparisons": [
+      {
+        "case": "append-4k",
+        "latency_reduction_percent": 7.878190037512233
+      },
+      {
+        "case": "append-32k",
+        "latency_reduction_percent": 5.475473817066079
+      }
+    ]
+  },
+  "formal": {
+    "warmups": 2,
+    "repeats": 5,
+    "comparisons": [
+      {
+        "case": "append-4k",
+        "P1_mean_ms": 504.27261300000004,
+        "candidate_mean_ms": 468.82080759999997,
+        "latency_reduction_percent": 7.030285699850225,
+        "P1_samples_ms": [
+          503.533778,
+          504.550268,
+          503.34740200000005,
+          503.762414,
+          506.16920300000004
+        ],
+        "candidate_samples_ms": [
+          471.054441,
+          467.76886299999995,
+          468.304834,
+          468.386394,
+          468.589506
+        ],
+        "P1_sample_stdev_ms": 1.1550261359025733,
+        "candidate_sample_stdev_ms": 1.2849270377135498
+      },
+      {
+        "case": "append-32k",
+        "P1_mean_ms": 665.266624,
+        "candidate_mean_ms": 629.4345718,
+        "latency_reduction_percent": 5.386119024663416,
+        "P1_samples_ms": [
+          665.472227,
+          661.112169,
+          665.193942,
+          665.431526,
+          669.123256
+        ],
+        "candidate_samples_ms": [
+          629.0344249999999,
+          627.081411,
+          627.480716,
+          632.8049890000001,
+          630.771318
+        ],
+        "P1_sample_stdev_ms": 2.8375982215064286,
+        "candidate_sample_stdev_ms": 2.3802120811322256
+      }
+    ],
+    "all_worker_receipts_stdout_stderr_reparsed": true,
+    "all_vectors_and_MTP_work_equal": true,
+    "append_outputs": 1,
+    "decode_intervals": 0,
+    "frequency_samples": 306,
+    "GPU_fixed_MHz": 1530,
+    "CPU_fixed_MHz": 2601,
+    "EMC_fixed_MHz": 4266,
+    "clock_policy_restored": true,
+    "post_guards_ok": true,
+    "fatal": [],
+    "summary_identity_sha256": "2a5cc84c34d39c8592341aa5b19845a7be4af39476e0e8ee1f30539d8ba71833",
+    "frequency_sha256": "2631c34726a2ce3d32f341fbf807473a637fd186bb19eec9bd9c0af295c77985",
+    "formal_tar_sha256": "5f43d53e00430e03e2c316b39e23dbcb3c710f1ccf6e04a186c808470a3bd362"
+  },
+  "model_gain": "Affected append latency -7.030285699850225%/-5.386119024663416% incremental versus same-Thor3 P1; not Decode gain",
+  "full15_formal_complete": false,
+  "both20_targets_achieved": false,
+  "profiler": {
+    "critical_path_f": "MISSING",
+    "current_paired_model_NSys": "MISSING; not required to relabel scalar ROI as MTP trace",
+    "NCU": {
+      "independent_review_relative_path": "devlocal/final-plus20/results/thor3-routed-quant-ncu-independent-review-01.json",
+      "independent_review_sha256": "7cae20cf8207d33a9dbc00327d56cdcc9e8e06ba56818841a59d6e34efaf7664",
+      "actual_checkpoint_target_scalar_append": true,
+      "same_MTP_E2E_configuration": false,
+      "configuration": "4K+4K,capacity8196,2warm1,profilingtrue,performanceEligiblefalse",
+      "selected_kernels_per_arm": 1,
+      "replay_mode": "kernel",
+      "cache_control": "all",
+      "diagnostic_comparison": {
+        "parent_duration_us": 1194.464,
+        "candidate_duration_us": 241.6,
+        "instrumented_speed_ratio": 4.943973509933775,
+        "instrumented_duration_reduction_percent": 79.77335440833713,
+        "registers_requested": {
+          "parent": 34,
+          "candidate": 40
+        },
+        "registers_allocated": {
+          "parent": 40,
+          "candidate": 40
+        },
+        "theoretical_CTA_limit_both": 6,
+        "active_warps_percent": {
+          "parent": 74.566499,
+          "candidate": 89.765093
+        },
+        "interpretation": [
+          "The source removes repeated quantization for identical-scale routes while preserving eight output copies; this is consistent with a shorter selected kernel under replay.",
+          "Requested registers rise by six, but allocated registers remain 40/thread and theoretical register/warp CTA limits remain six. No register-occupancy regression is demonstrated.",
+          "Measured active-warps percentage rises; SM throughput percentage falls. These normalized percentages do not independently prove absolute instruction reduction or memory bottleneck.",
+          "Available spilling counters are zero. No DRAM conclusions are possible from missing DRAM metrics."
+        ]
+      },
+      "raw_arms": {
+        "parent": {
+          "root_relative": "devlocal/final-plus20/results/thor3-quant02-raw-01/profiles/thor3-scalar-quant-parent-01",
+          "receipt_sha256": "e79a49bcbfb5b1a9d5ef1c5d567edd44a4f923f8d8b496c4c1fe785ce8d3835d",
+          "report": {
+            "sha256": "6e2547676cf6297b6cac0f2ab249682ea70154a0b01ef20dacb491121c653d49",
+            "bytes": 220983
+          },
+          "CSV": {
+            "sha256": "b71adc192800dc0075587b3523a3873e1685ccf5b105ea507d43bda1ce22578e",
+            "bytes": 34940
+          },
+          "ELF_sha256": "db5ebb79cee28a553de7e00beb6c5f9cf82806a018b54fd7b997832783cff34d",
+          "native_sha256": "1da78c0ec2a63a272e34c7c5ddd9a7e0a2af9c6837540736c64d8f63e2a8887a",
+          "source_manifest_sha256": "8758753771416037a2158d744337b5709a889f9d21cf09d6d65ba5c1a94e7181",
+          "kernel": "<unnamed>::quantize_routed_kernel(int, int, int, const __nv_bfloat16 *, const int *, const float *, unsigned int *, unsigned char *)",
+          "grid": "(160, 1, 1)",
+          "block": "(256, 1, 1)",
+          "metrics": {
+            "gpu__time_duration.avg": {
+              "value": "1.194464",
+              "unit": "ms"
+            },
+            "launch__registers_per_thread": {
+              "value": "34",
+              "unit": "register/thread"
+            },
+            "launch__registers_per_thread_allocated": {
+              "value": "40.000000",
+              "unit": "register/thread"
+            },
+            "launch__shared_mem_per_block_dynamic": {
+              "value": "0",
+              "unit": "byte/block"
+            },
+            "launch__shared_mem_per_block_driver": {
+              "value": "1.024000",
+              "unit": "Kbyte/block"
+            },
+            "launch__shared_mem_per_block_allocated": {
+              "value": "1.024000",
+              "unit": "Kbyte/block"
+            },
+            "launch__occupancy_limit_registers": {
+              "value": "6.000000",
+              "unit": "block"
+            },
+            "launch__occupancy_limit_shared_mem": {
+              "value": "16.000000",
+              "unit": "block"
+            },
+            "launch__occupancy_limit_warps": {
+              "value": "6.000000",
+              "unit": "block"
+            },
+            "launch__occupancy_limit_blocks": {
+              "value": "24.000000",
+              "unit": "block"
+            },
+            "launch__occupancy_limit_barriers": {
+              "value": "24.000000",
+              "unit": "block"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "74.566499",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.per_cycle_active": {
+              "value": "35.791919",
+              "unit": "warp"
+            },
+            "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+              "value": "69.233204",
+              "unit": "%"
+            },
+            "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": {
+              "value": "15.520054",
+              "unit": "%"
+            },
+            "launch__waves_per_multiprocessor": {
+              "value": "1.33",
+              "unit": ""
+            },
+            "derived__local_spilling_requests": {
+              "value": "0",
+              "unit": ""
+            },
+            "derived__shared_spilling_requests": {
+              "value": "0",
+              "unit": ""
+            },
+            "sass__inst_executed_register_spilling": {
+              "value": "0",
+              "unit": "inst"
+            },
+            "dram__bytes_read.sum": {
+              "value": "MISSING",
+              "unit": "MISSING"
+            },
+            "dram__bytes_write.sum": {
+              "value": "MISSING",
+              "unit": "MISSING"
+            },
+            "dram__throughput.avg.pct_of_peak_sustained_elapsed": {
+              "value": "MISSING",
+              "unit": "MISSING"
+            }
+          },
+          "frequency_samples": 140,
+          "clock_control_limits_restored": true
+        },
+        "candidate": {
+          "root_relative": "devlocal/final-plus20/results/thor3-quant02-raw-01/profiles/thor3-scalar-quant-candidate-01",
+          "receipt_sha256": "0079041293b3fe1c34d36791ad2267379f427d8c8332dfda8bc0ba8bb69e5624",
+          "report": {
+            "sha256": "142e0ce62047981d93f542081217210fe07a6cb913c92a3b7527e0d56a4cd506",
+            "bytes": 323804
+          },
+          "CSV": {
+            "sha256": "fbea33600c269f3d8c237d7d4fb5d6b899516bbe14b32e7ca8c6a0feacea2b22",
+            "bytes": 34980
+          },
+          "ELF_sha256": "76399efff73fdfe73fa76c4b1110d8a8a2274d86f75f0686715b5fe3da868f50",
+          "native_sha256": "9a4fa1e416c228c8ad4e436822c0759ee7d2536f833c8714e13d786469ef584a",
+          "source_manifest_sha256": "e386a471afc9e380b3bffca73afaa34dbb45d23d95f69f58444f10648c38639e",
+          "kernel": "<unnamed>::quantize_routed_token_kernel(int, int, const __nv_bfloat16 *, const int *, const float *, unsigned int *, unsigned char *)",
+          "grid": "(160, 1, 1)",
+          "block": "(256, 1, 1)",
+          "metrics": {
+            "gpu__time_duration.avg": {
+              "value": "241.600000",
+              "unit": "us"
+            },
+            "launch__registers_per_thread": {
+              "value": "40",
+              "unit": "register/thread"
+            },
+            "launch__registers_per_thread_allocated": {
+              "value": "40.000000",
+              "unit": "register/thread"
+            },
+            "launch__shared_mem_per_block_dynamic": {
+              "value": "0",
+              "unit": "byte/block"
+            },
+            "launch__shared_mem_per_block_driver": {
+              "value": "1.024000",
+              "unit": "Kbyte/block"
+            },
+            "launch__shared_mem_per_block_allocated": {
+              "value": "1.024000",
+              "unit": "Kbyte/block"
+            },
+            "launch__occupancy_limit_registers": {
+              "value": "6.000000",
+              "unit": "block"
+            },
+            "launch__occupancy_limit_shared_mem": {
+              "value": "16.000000",
+              "unit": "block"
+            },
+            "launch__occupancy_limit_warps": {
+              "value": "6.000000",
+              "unit": "block"
+            },
+            "launch__occupancy_limit_blocks": {
+              "value": "24.000000",
+              "unit": "block"
+            },
+            "launch__occupancy_limit_barriers": {
+              "value": "24.000000",
+              "unit": "block"
+            },
+            "sm__warps_active.avg.pct_of_peak_sustained_active": {
+              "value": "89.765093",
+              "unit": "%"
+            },
+            "sm__warps_active.avg.per_cycle_active": {
+              "value": "43.087245",
+              "unit": "warp"
+            },
+            "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+              "value": "48.876437",
+              "unit": "%"
+            },
+            "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": {
+              "value": "31.645642",
+              "unit": "%"
+            },
+            "launch__waves_per_multiprocessor": {
+              "value": "1.33",
+              "unit": ""
+            },
+            "derived__local_spilling_requests": {
+              "value": "0",
+              "unit": ""
+            },
+            "derived__shared_spilling_requests": {
+              "value": "0",
+              "unit": ""
+            },
+            "sass__inst_executed_register_spilling": {
+              "value": "0",
+              "unit": "inst"
+            },
+            "dram__bytes_read.sum": {
+              "value": "MISSING",
+              "unit": "MISSING"
+            },
+            "dram__bytes_write.sum": {
+              "value": "MISSING",
+              "unit": "MISSING"
+            },
+            "dram__throughput.avg.pct_of_peak_sustained_elapsed": {
+              "value": "MISSING",
+              "unit": "MISSING"
+            }
+          },
+          "frequency_samples": 139,
+          "clock_control_limits_restored": true
+        }
+      },
+      "raw_receipt_listed_artifacts_hash_verified": 50,
+      "limits": [
+        "Actual checkpoint target scalar append kernel counters, not synthetic data. Scalar disables MTP draft bookkeeping, so this is not the MTP end-to-end configuration.",
+        "One selected quant kernel per arm, kernel replay/cache-control=all; instrumented duration is not a benchmark or model speedup.",
+        "Do not multiply one kernel duration by layer count to predict model latency or use primitive sum as critical-path fraction.",
+        "DRAM read/write bytes and DRAM throughput are MISSING; composite compute-memory throughput is not a substitute."
+      ],
+      "warp_stall_breakdown": "MISSING",
+      "instrumented_time_not_model_gain": true,
+      "version_stdout": "NVIDIA (R) Nsight Compute Command Line Profiler\nCopyright (c) 2018-2026 NVIDIA Corporation\nVersion 2026.1.1.0 (build 37634170) (public-release)",
+      "ncu_binary_sha256": "a44ff2c735c4dcf66c78f3f430155805d6a0b1f74f26331f98ecec03bfbf3f1a"
+    },
+    "no_DRAM_or_full_model_speedup_inference": true
+  },
+  "small_M_stop": {
+    "old01_Thor3_root_reported_negative_ratios": {
+      "M5_hetero": [
+        2.45,
+        2.74
+      ],
+      "M7_hetero": [
+        2.31,
+        2.25
+      ],
+      "M32_hetero": [
+        1.37,
+        1.59
+      ],
+      "M64_hetero": [
+        1,
+        1.11
+      ]
+    },
+    "action": "stop small tokenmajor domain and retain original path; no thread tuning"
+  },
+  "review": {
+    "independent_CPU_source61_and_actual_raw_audit": true,
+    "numeric_thresholds_changed": false,
+    "summary_stat_platform_notes": [
+      {
+        "phase": "screen",
+        "case": "append-4k",
+        "arm": "P1",
+        "field": "sample_stdev_ms",
+        "stored": 4.986118426475311,
+        "Mac_recomputed": 4.986118426475312,
+        "explanation": "platform Python summary-stat rounding only; raw samples/mean and model thresholds unchanged"
+      },
+      {
+        "phase": "screen",
+        "case": "append-4k",
+        "arm": "candidate",
+        "field": "sample_stdev_ms",
+        "stored": 5.795469832000984,
+        "Mac_recomputed": 5.795469832000983,
+        "explanation": "platform Python summary-stat rounding only; raw samples/mean and model thresholds unchanged"
+      },
+      {
+        "phase": "formal",
+        "case": "append-32k",
+        "arm": "P1",
+        "field": "sample_stdev_ms",
+        "stored": 2.8375982215064286,
+        "Mac_recomputed": 2.837598221506429,
+        "explanation": "platform Python summary-stat rounding only; raw samples/mean and model thresholds unchanged"
+      }
+    ],
+    "no_GPU_SSH_compile_by_reviewer": true,
+    "source_blockers": [],
+    "pending": [
+      "three-version full15 final2warm10 and both20 targets",
+      "push remains separate from affected-scope commit"
+    ],
+    "independent_profiler_review_complete": true
+  },
+  "identity_policy": "Parent commit and full current61 source/artifact hashes identify evidence; resulting commit hash is tracked externally, never self-embedded."
+}

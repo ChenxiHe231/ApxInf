@@ -277,6 +277,7 @@ __device__ __forceinline__ uint32_t pack_e2m1(float2 (&values)[4]) {
   return packed;
 }
 
+template <int kCopies = 1>
 __device__ void quantize_row(const __nv_bfloat16* input, int columns,
                              float global_scale, uint32_t* output_fp4,
                              uint8_t* output_sf) {
@@ -302,8 +303,13 @@ __device__ void quantize_row(const __nv_bfloat16* input, int columns,
       values[i].x *= scale;
       values[i].y *= scale;
     }
-    output_fp4[column] = pack_e2m1(values);
-    if ((column & 1) == 0) output_sf[column / 2] = sf.__x;
+    const uint32_t packed = pack_e2m1(values);
+#pragma unroll
+    for (int copy = 0; copy < kCopies; ++copy) {
+      output_fp4[static_cast<int64_t>(copy) * columns / 8 + column] = packed;
+      if ((column & 1) == 0)
+        output_sf[static_cast<int64_t>(copy) * sf_columns + column / 2] = sf.__x;
+    }
   }
 }
 
@@ -319,6 +325,38 @@ __global__ __launch_bounds__(512, 4) void quantize_routed_kernel(
                  expert_scales[expert],
                  output_fp4 + static_cast<int64_t>(row) * hidden / 8,
                  output_sf + static_cast<int64_t>(row) * hidden / kSfVecSize);
+  }
+}
+
+// Only the 2048-wide top-8 prefill profile uses this token-major traversal.
+// Every warp independently compares the same eight actual scale bit patterns;
+// no host promise, block barrier, temporary buffer or additional launch is needed.
+__global__ __launch_bounds__(512, 4) void quantize_routed_token_kernel(
+    int tokens, int hidden, const __nv_bfloat16* input,
+    const int32_t* expert_ids, const float* expert_scales,
+    uint32_t* output_fp4, uint8_t* output_sf) {
+  constexpr int kTopK = 8;
+  const int lane = threadIdx.x & 31;
+  for (int token = blockIdx.x; token < tokens; token += gridDim.x) {
+    const int64_t first_row = static_cast<int64_t>(token) * kTopK;
+    const float scale = expert_scales[expert_ids[first_row + (lane & (kTopK - 1))]];
+    const uint32_t first_bits = __shfl_sync(0xffffffff, __float_as_uint(scale), 0);
+    const bool equal = __all_sync(0xffffffff, __float_as_uint(scale) == first_bits);
+    if (equal) {
+      quantize_row<kTopK>(
+          input + static_cast<int64_t>(token) * hidden, hidden,
+          __uint_as_float(first_bits), output_fp4 + first_row * hidden / 8,
+          output_sf + first_row * hidden / kSfVecSize);
+    } else {
+#pragma unroll
+      for (int route = 0; route < kTopK; ++route) {
+        const int64_t row = first_row + route;
+        quantize_row(input + static_cast<int64_t>(token) * hidden, hidden,
+                     expert_scales[expert_ids[row]],
+                     output_fp4 + row * hidden / 8,
+                     output_sf + row * hidden / kSfVecSize);
+      }
+    }
   }
 }
 
@@ -531,10 +569,18 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
     const int blocks_per_sm = std::max(1, kMaxResidentThreadsPerSm /
                                              std::min(column_threads, kThreads));
     const int grid = std::min(routes, properties.multiProcessorCount * blocks_per_sm);
-    quantize_routed_kernel<<<grid, std::min(column_threads, kThreads), 0, stream>>>(
-        spec.tokens, spec.top_k, spec.hidden,
-        static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
-        bindings.input_global_scale, input_fp4, input_sf);
+    if (spec.hidden == 2048 && spec.top_k == 8 && spec.tokens >= static_cast<uint32_t>(grid)) {
+      const int token_grid = std::min(static_cast<int>(spec.tokens), grid);
+      quantize_routed_token_kernel<<<token_grid, 256, 0, stream>>>(
+          spec.tokens, spec.hidden,
+          static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
+          bindings.input_global_scale, input_fp4, input_sf);
+    } else {
+      quantize_routed_kernel<<<grid, std::min(column_threads, kThreads), 0, stream>>>(
+          spec.tokens, spec.top_k, spec.hidden,
+          static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
+          bindings.input_global_scale, input_fp4, input_sf);
+    }
   }
   apxinf::framework::check_cuda(cudaGetLastError());
 
