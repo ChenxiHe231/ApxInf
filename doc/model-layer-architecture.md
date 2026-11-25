@@ -356,6 +356,11 @@ automatic retry or context recovery.
 
 Qwen3.5/3.6's checkpoint-native W4A16 MTP proposer owns its prepared vocabulary
 views and transactional eligibility in `qwen35moe/mtp_runtime.rs`; the target
+and proposer receive the same existing Thor execution profile from the loader.
+On that qualified profile KV-only materialization, suffix KV synchronization and
+SM101/110 draft split-KV attention are static defaults. The compatibility
+constructor retains legacy policy outside that profile; transactional reset,
+snapshots and cache revisions do not carry or change this runtime policy. The
 verifier retains full-vocabulary logits. Selection is automatic for eligible
 text contexts, with full draft-head fallback after excluded tokens; image
 requests retain the full draft head. See the

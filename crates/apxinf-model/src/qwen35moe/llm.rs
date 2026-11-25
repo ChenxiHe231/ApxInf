@@ -433,7 +433,7 @@ impl Qwen35Moe {
         let attention =
             Qwen35Fp8AttentionBackend::with_kv_cache(&config, execution.kv_cache, kv_cache_scales)?;
         let target = Qwen35Session::new(&ctx, &decoder, &weights, attention, kv_capacity)?;
-        let mtp = Qwen35MtpRuntime::new(&config)?;
+        let mtp = Qwen35MtpRuntime::with_execution(&config, thor_dynamic_fp8_decode)?;
         let runtime = Qwen35MtpCoordinator::new(&ctx, target, mtp)?;
         ctx.synchronize().map_err(Error::Cuda)?;
 

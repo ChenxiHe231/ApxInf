@@ -1,0 +1,258 @@
+{
+  "schema": "apxinf.default-mtp-profile.delivery.v1",
+  "kind": "default_path_correctness_and_delivery",
+  "performance_gain_credit_percent": 0,
+  "base_commit": "451b8163230848666687c3271347901b46c06b24",
+  "compiled_candidate_patch_sha256": "df6f04f8c25f758b8a79a6dba1ba116fda538eb528a562d0dd1ad57493109d32",
+  "actual_build": {
+    "examples_ELFs": {
+      "qwen35_context_bench": {
+        "sha256": "ab299a10afdb3c112ab0d8debee7819424dd3ce453b4488b608395c8250c5ddd",
+        "bytes": 48796600,
+        "cargo_executable": "/home/wwxq/devlocal/prefill-range-thor2/target/release/examples/qwen35_context_bench",
+        "target": {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "qwen35_context_bench",
+          "src_path": "/home/wwxq/devlocal/eglops-eval/checkout/crates/apxinf-model/examples/qwen35_context_bench.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        "cargo_fresh": false
+      },
+      "qwen35_mtp_bench": {
+        "sha256": "dc467b01bd121b3e4f5b3833d53e26bc30bf183c810f206ae82d5d20e5dc97e6",
+        "bytes": 49610568,
+        "cargo_executable": "/home/wwxq/devlocal/prefill-range-thor2/target/release/examples/qwen35_mtp_bench",
+        "target": {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "qwen35_mtp_bench",
+          "src_path": "/home/wwxq/devlocal/eglops-eval/checkout/crates/apxinf-model/examples/qwen35_mtp_bench.rs",
+          "edition": "2021",
+          "required-features": [
+            "qwen35-cuda"
+          ],
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        "cargo_fresh": false
+      }
+    },
+    "source_manifest_sha256": "0a45b6f33146ec90bff06e667759f37630c1de474bc9ecc102ecbaa715f6dbaa",
+    "core_source_manifest_sha256": "40d6eb50a7e0ac373e2aee9f503a76918aec47d23179bf8f09a8aee6d5b01bb2",
+    "native_sha256": "9a4fa1e416c228c8ad4e436822c0759ee7d2536f833c8714e13d786469ef584a",
+    "libtest_artifact": {
+      "apxinf_model-770f20966d8c4fd1": {
+        "sha256": "0f0ad682336a0ccac15f44cdb3c27674ca8b7ce86f533daeb831cbace1dfa4cf",
+        "bytes": 52517088,
+        "cargo_executable": "/home/wwxq/devlocal/prefill-range-thor2/target/release/deps/apxinf_model-770f20966d8c4fd1",
+        "target": {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "apxinf_model",
+          "src_path": "/home/wwxq/devlocal/eglops-eval/checkout/crates/apxinf-model/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        },
+        "cargo_fresh": false
+      }
+    },
+    "builder_sha256": "6133de5670395da65fef89f049a4e8e3a09d874c98061e0d2f3e72439c6987e7"
+  },
+  "unit_tests": {
+    "passed": 3,
+    "summary_sha256": "1c6e8938a77364ccb278b35f6478b929ce2eb0ae9b12a1ad498baff094af1746"
+  },
+  "strict": {
+    "cases": [
+      "decode-4k",
+      "decode-48k",
+      "eligible-decode-4k"
+    ],
+    "processes": 6,
+    "output_tokens_each": 1024,
+    "complete_output_and_work_exact_parent": true,
+    "summary_sha256": "64573b847bc3a4e04f4671b130d16cb769b4e914fced02fca9a3b74b12af6e95"
+  },
+  "initial_screen": {
+    "warmups": 2,
+    "measured_repeats": 3,
+    "comparisons": [
+      {
+        "scope": "Same new ELF FLAGS1 vs all-unset,2warm3; delivery check,zero new optimization credit",
+        "reference": {
+          "decode_tps": 111.96858212400146,
+          "e2e_tps": 106.89496348357481,
+          "mean_ttft_ms": 442.7124123333333
+        },
+        "delivery": {
+          "decode_tps": 109.80021923310683,
+          "e2e_tps": 104.86458166930859,
+          "mean_ttft_ms": 447.6523936666666
+        }
+      }
+    ],
+    "summary_sha256": "701f8afc965288752da57275a4ff6e6e22f49305a04f8a34e82ed39e4f1ab3c5",
+    "negative_signal_retained": true
+  },
+  "BAAB": {
+    "execution_controller_sha256": "e43b96b71bb35a94293b2ce478692c6eaaa4a5831b667ab560b0cbe715d47a20",
+    "summary_sha256": "020da43f9394d0e784a2fdbf3069072e86b06b9c0a8c75021f52bb73b7d393cd",
+    "order": [
+      "B_clean",
+      "A_FLAGS1",
+      "A_FLAGS1",
+      "B_clean"
+    ],
+    "warmups_per_process": 2,
+    "repeats_per_process": 5,
+    "independent_processes": 4,
+    "measured_samples_each_environment": 10,
+    "same_ELF": true,
+    "comparisons": [
+      {
+        "scope": "Same ELF independent process2warm5 diagnostic; not performance acceptance",
+        "order": "clean_then_FLAGS1",
+        "clean_block": 1,
+        "FLAGS1_block": 2,
+        "decode_tps_ratio_clean_to_FLAGS1": 1.0004659191754444,
+        "e2e_tps_ratio_clean_to_FLAGS1": 1.0002838184102378,
+        "TTFT_ratio_clean_to_FLAGS1": 1.0038418443945984
+      },
+      {
+        "scope": "Same ELF independent process2warm5 diagnostic; not performance acceptance",
+        "order": "FLAGS1_then_clean",
+        "clean_block": 4,
+        "FLAGS1_block": 3,
+        "decode_tps_ratio_clean_to_FLAGS1": 1.002567477797724,
+        "e2e_tps_ratio_clean_to_FLAGS1": 1.0029285542970152,
+        "TTFT_ratio_clean_to_FLAGS1": 0.9897335070735429
+      }
+    ],
+    "pooled": {
+      "flags1_reference": {
+        "decode_tps": 110.75435952429142,
+        "e2e_tps": 105.75952079969485,
+        "mean_ttft_ms": 445.2421792,
+        "decode_interval_ms_samples": [
+          9168.131058,
+          9178.883869,
+          9184.473170000001,
+          9186.138939999999,
+          9182.047025,
+          9275.361098,
+          9292.649772,
+          9293.407712,
+          9304.447455,
+          9301.027176
+        ],
+        "total_latency_ms_samples": [
+          9614.878448000001,
+          9619.949771,
+          9624.915744000002,
+          9624.399442,
+          9622.524587999998,
+          9727.788022,
+          9740.978536,
+          9744.304482,
+          9754.974749,
+          9748.720388
+        ],
+        "ttft_ms_samples": [
+          446.46097899999995,
+          440.227354,
+          440.166412,
+          437.961369,
+          439.981668,
+          452.129568,
+          447.28506600000003,
+          450.544293,
+          450.248967,
+          447.416116
+        ],
+        "independent_process_blocks": 2,
+        "measured_samples": 10
+      },
+      "delivery_all_unset": {
+        "decode_tps": 110.92293306949962,
+        "e2e_tps": 105.93008689758567,
+        "mean_ttft_ms": 443.7817066,
+        "decode_interval_ms_samples": [
+          9244.213414000002,
+          9169.42532,
+          9163.841501,
+          9151.404635,
+          9149.413613,
+          9286.316046,
+          9290.973227,
+          9289.67181,
+          9235.487524,
+          9245.447412000001
+        ],
+        "total_latency_ms_samples": [
+          9691.748849,
+          9610.748418,
+          9605.542484000001,
+          9593.306922,
+          9591.671636,
+          9733.571278,
+          9736.314719999998,
+          9734.873388,
+          9680.438181,
+          9689.315511
+        ],
+        "ttft_ms_samples": [
+          447.25278299999997,
+          441.03126100000003,
+          441.401017,
+          441.617951,
+          441.96526,
+          446.969756,
+          445.05424999999997,
+          444.30393699999996,
+          444.640515,
+          443.58033600000005
+        ],
+        "independent_process_blocks": 2,
+        "measured_samples": 10
+      }
+    },
+    "pooled_comparison": {
+      "decode_tps_ratio_clean_to_FLAGS1": 1.001522048846946,
+      "e2e_tps_ratio_clean_to_FLAGS1": 1.0016127729834732,
+      "TTFT_ratio_clean_to_FLAGS1": 0.9967198242479539
+    },
+    "automatic_acceptance": false
+  },
+  "manual_delivery_assessment": "Strict vectors/work and source qualification pass; both reversed-pair Decode ratios nonnegative. Accept qualified default policy; initial -1.94% signal retained, no new performance or statistical significance claim. Full 15-case table remains original FLAGS1 protocol.",
+  "evidence_archives": {
+    "initial": {
+      "relative_path": "devlocal/final-plus20/results/default02-delivery-evidence-01.tar.xz",
+      "sha256": "09a5348c17d0d608356fe33e8a037e565cf447e0affe90be6eb3bca21527d2e3"
+    },
+    "BAAB": {
+      "relative_path": "devlocal/final-plus20/results/default02-baab-evidence-01.tar.xz",
+      "sha256": "3bebd66dfa1a249b1099ba1280d7d30f1fbc4f6052c25198e16226d7e61b4386"
+    }
+  },
+  "target20_complete": false,
+  "upstream_integration_new_artifact_validation_complete": false
+}

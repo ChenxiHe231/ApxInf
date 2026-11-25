@@ -37,6 +37,23 @@ const MTP_DRAFT_WORKSPACE: usize = 4 * 1024 * 1024;
 pub const QWEN35_MTP_KV_DTYPE: DType = DType::F8E4M3;
 const MTP_KV_SCALE: f32 = 1.0;
 
+// Keep legacy reads lazy: non-qualified constructors retain their existing
+// read point, while a qualified static profile cannot be disabled by ENV0.
+fn profile_or_legacy(
+    qualified: bool,
+    read_legacy: impl FnOnce() -> Option<String>,
+) -> bool {
+    qualified || read_legacy().as_deref() == Some("1")
+}
+
+fn split_profile_or_legacy(
+    qualified: bool,
+    sm: u32,
+    read_legacy: impl FnOnce() -> Option<String>,
+) -> bool {
+    profile_or_legacy(qualified, read_legacy) && matches!(sm, 101 | 110)
+}
+
 // Draft-only candidate vocabulary. Main verification always projects VOCAB.
 const MTP_SHORTLIST_PREFIX: usize = 131_072;
 const MTP_SHORTLIST_TAIL: usize = 512;
@@ -272,6 +289,8 @@ pub struct Qwen35MtpRuntime {
     rms_norm_eps: f32,
     rope_theta: f32,
     kv_only_materialization: bool,
+    // Immutable execution policy; never copied into transactional state.
+    auto_split_kv: bool,
     scratch: Option<MtpScratch>,
     prefill_scratch: Option<MtpPrefillScratch>,
     pending_draft: Option<PendingDraft>,
@@ -281,6 +300,13 @@ pub struct Qwen35MtpRuntime {
 
 impl Qwen35MtpRuntime {
     pub fn new(config: &Qwen35MoeConfig) -> Result<Self> {
+        Self::with_execution(config, false)
+    }
+
+    pub(super) fn with_execution(
+        config: &Qwen35MoeConfig,
+        thor_dynamic_fp8_decode: bool,
+    ) -> Result<Self> {
         config.validate()?;
         let text = &config.text_config;
         let geometry = AttentionGeometry {
@@ -302,15 +328,16 @@ impl Qwen35MtpRuntime {
             geometry,
             rms_norm_eps: text.rms_norm_eps,
             rope_theta: text.rope_parameters.rope_theta,
-            kv_only_materialization: std::env::var("APXINF_QWEN35_MTP_KV_ONLY_MATERIALIZE")
-                .as_deref()
-                == Ok("1"),
+            kv_only_materialization: profile_or_legacy(thor_dynamic_fp8_decode, || {
+                std::env::var("APXINF_QWEN35_MTP_KV_ONLY_MATERIALIZE").ok()
+            }),
+            auto_split_kv: thor_dynamic_fp8_decode,
             scratch: None,
             prefill_scratch: None,
             pending_draft: None,
-            draft_kv_suffix_sync: std::env::var("APXINF_QWEN35_MTP_DRAFT_KV_SUFFIX_SYNC")
-                .as_deref()
-                == Ok("1"),
+            draft_kv_suffix_sync: profile_or_legacy(thor_dynamic_fp8_decode, || {
+                std::env::var("APXINF_QWEN35_MTP_DRAFT_KV_SUFFIX_SYNC").ok()
+            }),
             synced_draft_prefix: None,
         })
     }
@@ -432,7 +459,12 @@ impl Qwen35MtpRuntime {
         cache_capacity: usize,
     ) -> Result<&mut MtpScratch> {
         if self.scratch.is_none() {
-            self.scratch = Some(MtpScratch::new(ctx, self.geometry, cache_capacity)?);
+            self.scratch = Some(MtpScratch::new(
+                ctx,
+                self.geometry,
+                cache_capacity,
+                self.auto_split_kv,
+            )?);
         } else if self
             .scratch
             .as_ref()
@@ -1867,14 +1899,20 @@ struct MtpScratch {
 }
 
 impl MtpScratch {
-    fn new(ctx: &CudaContext, geometry: AttentionGeometry, cache_capacity: usize) -> Result<Self> {
+    fn new(
+        ctx: &CudaContext,
+        geometry: AttentionGeometry,
+        cache_capacity: usize,
+        auto_split_kv: bool,
+    ) -> Result<Self> {
         if cache_capacity == 0 || cache_capacity % ops::QWEN35_KV_CACHE_BLOCK_TOKENS != 0 {
             return Err(invalid("Qwen3.5 MTP scratch capacity is not page aligned"));
         }
-        let draft_attention_workspace = if std::env::var("APXINF_QWEN35_MTP_SPLIT_KV").as_deref()
-            == Ok("1")
-            && matches!(ctx.caps().sm, 101 | 110)
-        {
+        let draft_attention_workspace = if split_profile_or_legacy(
+            auto_split_kv,
+            ctx.caps().sm,
+            || std::env::var("APXINF_QWEN35_MTP_SPLIT_KV").ok(),
+        ) {
             let elements = ops::qwen35_draft_attention_workspace_elements(cache_capacity)?;
             Some(zeros(ctx, vec![elements], DType::F32)?)
         } else {
@@ -2849,6 +2887,48 @@ fn schedule_error(error: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualified_mtp_policy_cannot_be_disabled_by_legacy_zero() {
+        let reads = std::cell::Cell::new(0);
+        assert!(profile_or_legacy(true, || {
+            reads.set(reads.get() + 1);
+            Some("0".into())
+        }));
+        assert_eq!(reads.get(), 0, "qualified policy must not consult legacy ENV");
+    }
+
+    #[test]
+    fn unqualified_mtp_policy_reads_legacy_value_once_without_env_mutation() {
+        for (value, expected) in [
+            (None, false), (Some("0"), false), (Some("1"), true),
+            (Some(""), false), (Some("true"), false), (Some("invalid"), false),
+        ] {
+            let reads = std::cell::Cell::new(0);
+            assert_eq!(profile_or_legacy(false, || {
+                reads.set(reads.get() + 1);
+                value.map(str::to_owned)
+            }), expected);
+            assert_eq!(reads.get(), 1);
+        }
+    }
+
+    #[test]
+    fn mtp_split_profile_retains_sm_guard_and_deferred_legacy_read() {
+        for sm in [80u32, 89, 100, 101, 110, 120] {
+            let supported = matches!(sm, 101 | 110);
+            assert_eq!(split_profile_or_legacy(true, sm, || {
+                panic!("qualified split policy must not consult legacy ENV")
+            }), supported);
+            let reads = std::cell::Cell::new(0);
+            assert_eq!(split_profile_or_legacy(false, sm, || {
+                reads.set(reads.get() + 1);
+                Some("1".into())
+            }), supported);
+            assert_eq!(reads.get(), 1, "legacy read still precedes the SM guard");
+            assert!(!split_profile_or_legacy(false, sm, || Some("0".into())));
+        }
+    }
 
     #[test]
     fn draft_kv_prefix_requires_both_bank_revisions_and_a_valid_row_count() {
