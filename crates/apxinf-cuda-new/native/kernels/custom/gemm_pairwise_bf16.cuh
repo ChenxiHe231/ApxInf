@@ -8,15 +8,7 @@ namespace apxinf::gemm::kernels {
 // without masking every operand in the inner loop. Directed bounds still
 // detect inexact additions; zero must stay flushed after setting the odd bit.
 __device__ __forceinline__ float pairwise_add_round_odd(float a, float b) {
-  float result, up, down;
-  asm("add.rz.ftz.f32 %0, %1, %2;" : "=f"(result) : "f"(a), "f"(b));
-  asm("add.rp.ftz.f32 %0, %1, %2;" : "=f"(up) : "f"(a), "f"(b));
-  asm("add.rm.ftz.f32 %0, %1, %2;" : "=f"(down) : "f"(a), "f"(b));
-  if (isnan(result)) return __uint_as_float(0x7fc00000u);
-  unsigned bits = __float_as_uint(result);
-  if (up != down) bits |= 1u;
-  return (bits & 0x7f800000u) == 0
-      ? __uint_as_float(bits & 0x80000000u) : __uint_as_float(bits);
+  return numerics::add_round_odd_native(a, b);
 }
 
 __device__ __forceinline__ float pairwise_bf16_product(float a, float b) {

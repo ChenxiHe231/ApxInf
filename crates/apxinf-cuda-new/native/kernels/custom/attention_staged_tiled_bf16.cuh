@@ -1,21 +1,11 @@
 #pragma once
 
+#include "../primitives/bf16_pairwise.cuh"
+
 namespace apxinf::attention::kernels::staged_tiled {
 #include "../../vendor/sleef/sleefinline_cuda.h"
 
-// Hardware FTZ implements the staged attention pair-add contract. Preserve an
-// exact even result; only inexact results acquire the odd low bit.
-__device__ __forceinline__ float add_round_odd_native(float a, float b) {
-  float result, up, down;
-  asm("add.rz.ftz.f32 %0, %1, %2;" : "=f"(result) : "f"(a), "f"(b));
-  asm("add.rp.ftz.f32 %0, %1, %2;" : "=f"(up) : "f"(a), "f"(b));
-  asm("add.rm.ftz.f32 %0, %1, %2;" : "=f"(down) : "f"(a), "f"(b));
-  if (isnan(result)) return __uint_as_float(0x7fc00000u);
-  unsigned bits = __float_as_uint(result);
-  if (up != down) bits |= 1u;
-  return (bits & 0x7f800000u) == 0
-      ? __uint_as_float(bits & 0x80000000u) : __uint_as_float(bits);
-}
+using apxinf::numerics::add_round_odd_native;
 
 __device__ __forceinline__ bool span(const uint32_t* offsets, int segment,
                                    int tokens, int maximum,

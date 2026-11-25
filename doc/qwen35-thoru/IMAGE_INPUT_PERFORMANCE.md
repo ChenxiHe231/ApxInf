@@ -170,7 +170,7 @@ use the same strict benchmark command and shared locks described above.
 Frozen base: `7835c253967bf36463f6dd9ed2e79f3c5319df68`. The target is at least25%
 lower geometric-mean warm model TTFT across four image inputs, each in scalar
 and adaptive image-MTP modes; both4096-patch cases must improve by at least35%,
-with no case regressing more than3%. This remains an active optimization target.
+with no case regressing more than3%. The target definition stays fixed across rounds.
 
 This matrix uses the same Thor-3/checkpoint, NVFP4 MoE activation, dynamic FP8
 target KV and CUDA Graph configuration, with KV capacity2048 for every case.
@@ -193,7 +193,7 @@ are separate experiments. Both revisions use2warmups and10measurements.
 
 Geometric-mean reduction: **21.03%**. All measured output token sequences
 match their frozen baseline. This round meets the large-image subtarget; the
-overall25%target still requires another model improvement. TTFT includes
+overall25%target at G1 still required another model improvement. TTFT includes
 visual encoding and language prefill after model loading; image download, CPU
 preprocessing/startup and model loading remain outside the measured interval.
 No decode or sampling-throughput improvement is claimed.
@@ -255,3 +255,61 @@ export APXINF_REQUIRE_RECIPES=1 BENCH_WARMUPS=2 BENCH_ITERS=10
 Use both shared GPU locks, the frozen inputs and existing checkpoint in place.
 `goal-25/summarize.py` checks all eight cases, sample counts,32tokens and
 unchanged output sequences before evaluating the25%/35%/3%target.
+
+## Predicated arithmetic and wide projections: round G4
+
+This follow-up keeps the G1 fixed matrix, baseline7835, checkpoint, resolution,
+KV/activation precision, CUDA Graph, capacity2048 and32-token work unchanged.
+Both primary revisions have2warmups and10measurements per case.
+
+| Input | Mode | Base TTFT (ms) | G4 TTFT (ms) | Reduction |
+| --- | --- | ---: | ---: | ---: |
+| photo-256 | scalar | 879.966 | 732.279 | 16.78% |
+| photo-256 | mtp | 866.067 | 720.628 | 16.79% |
+| multi-616 | scalar | 1912.453 | 1491.268 | 22.02% |
+| multi-616 | mtp | 1913.771 | 1484.929 | 22.41% |
+| photo-1024 | scalar | 3857.638 | 2574.733 | 33.26% |
+| photo-1024 | mtp | 3865.691 | 2569.241 | 33.54% |
+| photo-4096 | scalar | 32394.411 | 14930.126 | 53.91% |
+| photo-4096 | mtp | 32398.825 | 14935.410 | 53.90% |
+
+Primary geometric-mean TTFT reduction is **33.23%**. All eight outputs match
+the frozen32-token baseline. The primary matrix exceeds the25%aggregate and
+35%large-image thresholds, with every case improving by at least16.78%.
+Final independent reverse-order and HTTP confirmations are recorded separately
+after their completion.
+
+G4 preserves every directed floating-point sum and multiplication. NaN,
+inexact/sticky-bit and signed-zero finishing use PTX predicates/selects rather
+than compiler-generated early-return branches. The shared helper is used by
+ordered GEMM and tiled staged attention; their product semantics are retained
+separately. For the same2x2/U4 projection, SM110 disassembly reduces each of
+BSSY/BSYNC/BRA by32instructions, retaining32each FMUL and directed RZ/RP/RM
+adds. ArbitraryF32, everyBF16encoding in four pairings and exceptional boundaries
+cover1311010add pairs with zero bit mismatches against the published helper.
+
+Projection-sized M>=128, N>=1024, K>=1024 uses32x64 output tiles with16
+independent accumulators per thread. K order and final bias/BF16 rounding stay
+unchanged; smaller matrices retain their previous tiles. The qualified wide
+prototype uses56registers,24960shared bytes and zero stack/spill bytes. No new
+persistent allocation is added. Representative operator probes show10–21%
+reductions; only the model-call table above is counted as model performance.
+
+The four goal visual references and original five gates all remain elementwise
+equal to frozen CPU BF16 eager results, with unchanged finite/cosine>=0.999/
+relativeL2<=0.02 thresholds. Wide129x1025x1026 cancellation/partial-tile guards,
+readonly inputs and Graph replay pass, together with existing product/overflow/
+NaN and staged-attention/resource tests. All six scalar/MTP EOS controls across
+BF16, static FP8 and dynamic FP8 KV match7835. New source fingerprints required
+preparing the actual BF16 short-EOS Q=2/K=2 path separately; strict controls
+were then rerun. No source or precision threshold changed for that preparation.
+
+Primary timing, short screening and EOS controls all use strict prepared
+recipes, with unchanged file hashes over each interval. Unchanged choices are
+held to G1 (whose unchanged GEMMs are held to7835); config0 retains the same
+ordered numerical implementation and applies the larger internal geometry.
+No tuning or fallback runs during timing. Evidence is under the same
+`performance/goal-25/` directory: `g4-formal-summary.json`, raw JSONL,
+`g4-recipe-pinning.json`, all visual/token gates and arithmetic/SASS probes.
+Use `LABEL=g4` with `summarize.py`; the model benchmark command above uses
+`model_bench-g4`. The accepted forward matrix is reused for final confirmation.

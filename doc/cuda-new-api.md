@@ -599,5 +599,11 @@ admits plain BF16 weighted LayerNorm with width divisible by eight, at most
 32768, and explicit four-lane Welford/FMA order. `PointwiseActivation::GeluTanhExp2`
 is an unbiased BF16 tanh GELU with staged exp2 table/polynomial arithmetic.
 These narrow contracts support caller-owned outputs and Graph replay.
+The ordered GEMM uses a 32x64 output tile with 16 independent accumulators per
+thread for M>=128, N>=1024 and K>=1024; smaller matrices retain their previous
+tiles. Ordered GEMM and tiled staged attention share a predicated FTZ
+round-to-odd add: all three directed F32 sums, inexact detection, signed-zero
+flushing and canonical NaN output remain. Products keep each operator's
+existing semantics. This changes no public numerical or allocation contract.
 `transpose_pad_channels` transforms BF16 `[B,C,S]` to `[B,S,Cp]` with zero
 padding for `Cp >= C`, rejecting overlapping input/output storage.

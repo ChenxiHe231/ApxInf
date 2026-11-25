@@ -29,7 +29,14 @@ cudaError_t launch_pairwise_bf16(Execution& execution) {
   const auto* weight = static_cast<const __nv_bfloat16*>(b.b);
   const auto* bias = static_cast<const __nv_bfloat16*>(b.bias);
   auto* output = static_cast<__nv_bfloat16*>(b.output);
-  if (s.m >= 16 && s.n >= 32) {
+  // A larger register tile pays off for projection/MLP-sized matrices while
+  // preserving each output's ordered reduction. Small/skinny cases retain
+  // their original tiles; no tuning or allocation is performed on enqueue.
+  if (s.m >= 128 && s.n >= 1024 && s.k >= 1024) {
+    const unsigned blocks = unsigned(((s.m + 31) / 32) * ((s.n + 63) / 64));
+    kernels::pairwise_bf16_bias<4, 4><<<blocks, dim3(16, 8), 0, stream>>>(
+        a, weight, bias, output, int(s.m), int(s.n), int(s.k));
+  } else if (s.m >= 16 && s.n >= 32) {
     const unsigned blocks = unsigned(((s.m + 15) / 16) * ((s.n + 31) / 32));
     kernels::pairwise_bf16_bias<2, 2><<<blocks, dim3(16, 8), 0, stream>>>(
         a, weight, bias, output, int(s.m), int(s.n), int(s.k));

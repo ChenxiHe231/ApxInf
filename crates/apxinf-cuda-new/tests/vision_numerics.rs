@@ -330,3 +330,70 @@ fn staged_exp2_gelu_matches_pinned_bf16_cpu_values() {
     assert_eq!(read(&output), expected);
     assert_eq!(read(&input), values);
 }
+
+#[test]
+fn ordered_wide_projection_keeps_cancellation_partial_tiles_and_graph_guards() {
+    use apxinf_core::Shape;
+    use apxinf_cuda_new::CudaBuffer;
+
+    let ctx = CudaContext::new_with_autotune(0, false).unwrap();
+    // Partial 32x64 output tiles and a partial 64-element K tile, with
+    // cancellation examples whose expected results depend on round-to-odd.
+    let (m, n, k) = (129, 1025, 1026);
+    let a = device(&ctx, vec![m, k], &vec![1.; m * k]);
+    let mut weights = vec![0.; n * k];
+    let mut bias_values = vec![0.; n];
+    let mut expected = vec![0.; m * n];
+    for c in 0..n {
+        let row = &mut weights[c * k..(c + 1) * k];
+        let value = if c % 3 == 1 {
+            row[62..66].copy_from_slice(&[2., -2., 3., -3.]);
+            bias_values[c] = 0.5;
+            0.5
+        } else {
+            row[..4].copy_from_slice(&[
+                1.,
+                2f32.powi(if c % 3 == 0 { -24 } else { -100 }),
+                -1.,
+                0.,
+            ]);
+            2f32.powi(-23)
+        };
+        for r in 0..m {
+            expected[r * n + c] = value;
+        }
+    }
+    let b = device(&ctx, vec![n, k], &weights);
+    let bias = device(&ctx, vec![n], &bias_values);
+    let guarded = device(&ctx, vec![m * n + 32], &vec![42.; m * n + 32]);
+    let output = CudaBuffer::from_tensor(&guarded)
+        .unwrap()
+        .view(32, m * n * 2)
+        .unwrap()
+        .as_tensor(Shape::new(vec![m, n]), DType::BF16)
+        .unwrap();
+    let phase = PreparedPhase::prepare_and_capture(
+        &ctx,
+        ExecutionSession::with_capacity(1024 * 1024, 0).unwrap(),
+        || {
+            let mut out = output.clone();
+            let mut gemm = ops::GemmArgs::new(&a, &b, &mut out).with_output_major_weight();
+            gemm.policy.numerics = ops::GemmNumerics::PairwiseBf16Odd;
+            gemm.policy.online_tune = false;
+            gemm.policy.cache_dir = Some(String::new());
+            ops::gemm_bias(&ctx, ops::GemmBiasArgs { gemm, bias: &bias })
+        },
+    )
+    .unwrap();
+    for _ in 0..3 {
+        phase.replay().unwrap();
+    }
+    ctx.synchronize().unwrap();
+    assert_eq!(read(&output), expected);
+    assert_eq!(read(&a), vec![1.; m * k]);
+    assert_eq!(read(&b), weights);
+    assert_eq!(read(&bias), bias_values);
+    let guards = read(&guarded);
+    assert_eq!(&guards[..16], &[42.; 16]);
+    assert_eq!(&guards[m * n + 16..], &[42.; 16]);
+}

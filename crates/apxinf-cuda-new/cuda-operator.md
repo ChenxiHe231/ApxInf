@@ -78,6 +78,15 @@ and autotuner, with no model-specific dispatch.
 | Constraints | bias dtype matches the projection dtype; W8A8 output must be BF16 |
 | Reference test | `gemm_bias_all_candidates_match_torch`, `gemm_bias_accepts_output_major_checkpoint_weights_and_replays` |
 
+`GemmNumerics::PairwiseBf16Odd` requires unit-scale, unquantized BF16 output-major
+GEMM+bias, F32 accumulation and even K. Projection-sized M>=128/N>=1024/K>=1024
+uses 32x64 tiles, retaining the ordered pair reduction and final F32 bias/BF16
+boundary. A predicated three-directed-add helper is shared with tiled staged
+attention. This adds no persistent allocation; the wide CTA uses 24960 shared
+bytes. Cancellation, partial M/N/K tiles, readonly inputs, guards and Graph
+replay are checked by
+`ordered_wide_projection_keeps_cancellation_partial_tiles_and_graph_guards`.
+
 <!-- l3-operator:gemm_bias_residual -->
 ### `gemm_bias_residual`
 

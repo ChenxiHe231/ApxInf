@@ -26,6 +26,31 @@ __device__ __forceinline__ float add_round_odd(float a, float b) {
   return flush_subnormal(result);
 }
 
+// FTZ round-to-odd using the same three directed sums. Keep exceptional-value
+// finishing predicated so every ordered dot step avoids reconvergence branches.
+__device__ __forceinline__ float add_round_odd_native(float a, float b) {
+  unsigned bits;
+  asm("{\n"
+      " .reg .f32 r,u,d;\n"
+      " .reg .b32 rb,sb,eb,zb;\n"
+      " .reg .pred pn,pi,pz;\n"
+      " add.rz.ftz.f32 r,%1,%2;\n"
+      " add.rp.ftz.f32 u,%1,%2;\n"
+      " add.rm.ftz.f32 d,%1,%2;\n"
+      " mov.b32 rb,r;\n"
+      " setp.nan.f32 pn,r,r;\n"
+      " setp.neu.f32 pi,u,d;\n"
+      " selp.b32 sb,1,0,pi;\n"
+      " or.b32 rb,rb,sb;\n"
+      " and.b32 eb,rb,0x7f800000;\n"
+      " setp.eq.u32 pz,eb,0;\n"
+      " and.b32 zb,rb,0x80000000;\n"
+      " selp.b32 rb,zb,rb,pz;\n"
+      " selp.b32 %0,0x7fc00000,rb,pn;\n"
+      "}\n" : "=r"(bits) : "f"(a), "f"(b));
+  return __uint_as_float(bits);
+}
+
 __device__ __forceinline__ float bf16_product(float a, float b) {
   return flush_subnormal(__fmul_rn(flush_subnormal(a), flush_subnormal(b)));
 }
