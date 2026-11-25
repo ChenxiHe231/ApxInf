@@ -3,6 +3,7 @@
 
 cudaError_t apxinf_staged_attention_shared_limit(int);
 cudaError_t apxinf_staged_attention(const void*,const void*,const void*,const void*,void*,int,int,int,int,int,float,cudaStream_t);
+cudaError_t apxinf_staged_attention_tiled(const void*,const void*,const void*,const void*,void*,void*,int,int,int,int,int,int,float,cudaStream_t);
 
 namespace apxinf::attention {
 namespace {
@@ -13,8 +14,33 @@ struct CustomState {
 
 }  // namespace
 
-size_t custom_resource_requirements(const Spec& spec, int) {
-  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED) return 0;
+bool supports_staged_tiled(const Spec& spec) {
+  return spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED &&
+      spec.numerics == APXINF_ATTENTION_NUMERICS_STAGED_BF16 &&
+      spec.dtype == APXINF_DTYPE_BF16 && spec.output_dtype == APXINF_DTYPE_BF16 &&
+      spec.batch == 1 && spec.query_heads == spec.kv_heads &&
+      spec.query_tokens == spec.key_tokens && spec.mask == APXINF_ATTENTION_MASK_NONE &&
+      spec.query_tokens > 0 && spec.query_tokens <= 4096 &&
+      spec.max_segment_tokens >= 128 && spec.max_segment_tokens <= 4096 &&
+      spec.head_dim > 0 && spec.head_dim <= 256;
+}
+
+size_t custom_resource_requirements(const Spec& spec, int configuration) {
+  if (spec.semantic == APXINF_ATTENTION_SEMANTIC_SEGMENTED) {
+    if (spec.numerics != APXINF_ATTENTION_NUMERICS_STAGED_BF16 || configuration == 1)
+      return 0;
+    if (configuration != 0 || !supports_staged_tiled(spec))
+      throw Failure(APXINF_STATUS_UNSUPPORTED, "unsupported staged tiled geometry");
+    size_t bytes = 1;
+    for (uint64_t extent : {uint64_t(spec.segments), uint64_t(spec.query_heads),
+                           uint64_t(kStagedQueryChunkRows),
+                           uint64_t(spec.max_segment_tokens), uint64_t(sizeof(float))}) {
+      if (extent == 0 || extent > SIZE_MAX / bytes)
+        throw Failure(APXINF_STATUS_UNSUPPORTED, "staged probability workspace overflow");
+      bytes *= static_cast<size_t>(extent);
+    }
+    return bytes;
+  }
   const auto rows = static_cast<uint64_t>(spec.batch) * spec.query_tokens *
                     spec.query_heads;
   const auto elements = rows * spec.key_tokens;
@@ -90,6 +116,13 @@ cudaError_t launch_custom(Execution& execution) {
           bindings.scale, stream);
     }
     if (spec.numerics == APXINF_ATTENTION_NUMERICS_STAGED_BF16) {
+      if (execution.configuration == 0) {
+        return apxinf_staged_attention_tiled(
+            bindings.query,bindings.key,bindings.value,bindings.offsets,
+            bindings.output,state->probabilities,int(spec.query_tokens),int(spec.segments),
+            int(spec.max_segment_tokens),int(spec.query_heads),int(spec.head_dim),
+            kStagedQueryChunkRows,bindings.scale,stream);
+      }
       return apxinf_staged_attention(bindings.query,bindings.key,bindings.value,bindings.offsets,
           bindings.output,int(spec.query_tokens),int(spec.segments),int(spec.max_segment_tokens),
           int(spec.query_heads),int(spec.head_dim),bindings.scale,stream);
@@ -138,3 +171,27 @@ void destroy_custom(Execution& execution) noexcept {
 }
 
 }  // namespace apxinf::attention
+
+// Private test hooks: check ownership directly rather than inferring it from
+// free system memory, which also fluctuates with CPU allocations on Tegra.
+extern "C" const void* apxinf_attention_test_custom_workspace(const void* raw) {
+  const auto* wrapper = static_cast<const apxinf_attention_execution*>(raw);
+  const auto* execution = wrapper == nullptr ? nullptr : wrapper->state.get();
+  if (execution == nullptr || execution->implementation->provider_id != 1 ||
+      execution->implementation->implementation_id != 4) return nullptr;
+  const auto* state = static_cast<const apxinf::attention::CustomState*>(
+      execution->provider_state);
+  return state == nullptr ? nullptr : state->probabilities;
+}
+
+extern "C" int apxinf_attention_test_is_live_device_pointer(const void* pointer) {
+  if (pointer == nullptr) return 0;
+  cudaPointerAttributes attributes{};
+  const auto status = cudaPointerGetAttributes(&attributes, pointer);
+  if (status != cudaSuccess) {
+    cudaGetLastError();
+    return 0;
+  }
+  return attributes.type == cudaMemoryTypeDevice &&
+      attributes.devicePointer == pointer;
+}

@@ -93,6 +93,8 @@ TuningKeys tuning_keys(const Spec& spec,
                        const apxinf_attention_policy_t& policy, int device);
 
 size_t custom_resource_requirements(const Spec& spec, int configuration);
+inline constexpr int kStagedQueryChunkRows = 128;
+bool supports_staged_tiled(const Spec& spec);
 void prepare_custom(Execution& execution);
 cudaError_t launch_custom(Execution& execution);
 void destroy_custom(Execution& execution) noexcept;

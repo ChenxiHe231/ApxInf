@@ -85,6 +85,12 @@ void one_configuration(const Spec&, std::vector<int>& configurations) {
   configurations.push_back(0);
 }
 
+void staged_bf16_configurations(const Spec& spec, std::vector<int>& out) {
+  if (supports_staged_tiled(spec)) out.push_back(0);
+  // The original zero-workspace path also serves resource-limited callers.
+  out.push_back(1);
+}
+
 #if defined(APXINF_ATTENTION_FA2)
 bool fa2_head_dim_supported(const Spec& spec) {
   return spec.head_dim > 0 && spec.head_dim <= 256 &&
@@ -435,9 +441,9 @@ const ImplementationRegistry& registry(uint32_t semantic) {
        launch_custom, destroy_custom},
   };
   static const ImplementationRegistry segmented_entries = {
-      {kProviderCustom, 4, 1, "staged-bf16-segmented-attention", 0, true, true,
+      {kProviderCustom, 4, 2, "staged-bf16-segmented-attention", 0, true, true,
        false, supports_segmented_staged_bf16, natural_alignment,
-       custom_resource_requirements, one_configuration, prepare_custom,
+       custom_resource_requirements, staged_bf16_configurations, prepare_custom,
        launch_custom, destroy_custom},
 #if defined(APXINF_SEGMENTED_ATTENTION_SM110)
       {kProviderSpecializedSm110, 3, 1, "specialized-segmented-vision-sm110",

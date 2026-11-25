@@ -18,3 +18,5 @@ mod operator_doc;
 mod precision;
 mod rope_precomputed;
 mod volume_lowering;
+
+mod attention_staged_resources;

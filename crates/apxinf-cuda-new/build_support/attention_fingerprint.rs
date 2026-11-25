@@ -28,6 +28,7 @@ const INPUT_FILES: &[&str] = &[
     "include/apxinf_cuda/types.h",
     "kernels/custom/attention.cuh",
     "kernels/custom/attention_staged_bf16.cuh",
+    "kernels/custom/attention_staged_tiled_bf16.cuh",
     "kernels/primitives/bf16_pairwise.cuh",
     "vendor/sleef/sleefinline_cuda.h",
 ];

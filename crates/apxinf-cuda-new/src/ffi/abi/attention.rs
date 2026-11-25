@@ -124,6 +124,10 @@ unsafe extern "C" {
     #[cfg(test)]
     pub(crate) fn apxinf_attention_summary(execution: Execution) -> *const c_char;
     #[cfg(test)]
+    pub(crate) fn apxinf_attention_test_custom_workspace(execution: Execution) -> *const c_void;
+    #[cfg(test)]
+    pub(crate) fn apxinf_attention_test_is_live_device_pointer(pointer: *const c_void) -> i32;
+    #[cfg(test)]
     pub(crate) fn apxinf_attention_test_validate_candidates(
         runtime: Runtime,
         spec: *const Spec,

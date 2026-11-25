@@ -222,6 +222,18 @@ Segments are independent; a prepared native implementation supports Graph replay
 and can be selected with fallback disabled. This numerical contract does not
 imply a model-level precision or throughput acceptance result.
 
+The staged implementation offers an ordered tiled QK/softmax/PV configuration
+for at most 4096 total tokens, a maximum segment length from 128 through 4096,
+and head dimensions through 256. Its native execution owns
+`segments * heads * 128 * max_segment_tokens * sizeof(float)` bytes of scratch;
+these are F32 encodings of BF16-rounded intermediates. The policy workspace
+limit is checked before allocation. The original zero-scratch configuration
+remains available for smaller/unsupported geometries and limited resources.
+Both configurations implement the same numerical contract. Preparation allocates
+scratch; enqueue only launches on the bound stream, and Graph/session ownership
+keeps it alive until the prepared execution is released. This native allocation
+is separate from the session's GraphWorkspace capacity and is per execution.
+
 `KvCacheDecodeMeta` — fixed-address metadata for CUDA Graph decode (design doc §5.6):
 
 ```rust

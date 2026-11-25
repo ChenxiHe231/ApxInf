@@ -531,6 +531,7 @@ fn main() {
         "attention/gates.cpp",
         "attention/providers/custom.cu",
         "attention/staged_bf16.cu",
+        "attention/staged_tiled_bf16.cu",
         "attention/providers/wide_bf16.cu",
         "elementwise/ops.cpp",
         "cache/ops.cpp",
@@ -885,7 +886,13 @@ fn main() {
             .arg(format!("-I{}", out.display()));
         if matches!(
             source.file_name().and_then(|s| s.to_str()),
-            Some("welford4.cu" | "staged_bf16.cu" | "staged_fp32.cu" | "gelu_tanh_exp2.cu")
+            Some(
+                "welford4.cu"
+                    | "staged_bf16.cu"
+                    | "staged_tiled_bf16.cu"
+                    | "staged_fp32.cu"
+                    | "gelu_tanh_exp2.cu"
+            )
         ) {
             command.arg("--fmad=false");
         }

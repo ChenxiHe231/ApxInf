@@ -196,6 +196,18 @@ non-default scale, nonuniform scores, uniform scores and graph capture/replay.
 | Constraints | offsets contain at least two elements, are monotonically nondecreasing, begin at 0, and end at `total_tokens`; empty segments are allowed; causal and differing Q/KV head counts are unsupported |
 | Reference test | `segmented_attention_all_candidates_match_reference` |
 
+`AttentionNumerics::StagedBf16` preserves ordered pair products/round-to-odd
+updates, BF16 QK/scaling/probability boundaries and the four-lane SLEEF softmax
+sum. Its tiled configuration reuses 128 query rows at a time, requiring
+`segments * heads * 128 * max_segment_tokens * 4` native workspace bytes.
+It supports total tokens up to4096, maximum segment length128..4096 and head
+dimension1..256. The policy rejects this configuration before allocation when
+the resource limit is too small; the zero-workspace configuration remains a
+valid implementation of the same numerics. Scratch belongs to the prepared
+execution, including capture retention, and is freed when that execution drops.
+The resource/Graph regression test is
+`gpu_staged_tiled_exact_dispatch_graph_and_workspace_release`.
+
 ## Routed MoE Building Blocks
 
 Routed-MoE execution keeps router selection and expert data movement on the

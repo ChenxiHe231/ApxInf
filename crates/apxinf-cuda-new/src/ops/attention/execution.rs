@@ -158,6 +158,10 @@ impl Execution {
         &self.summary
     }
 
+    pub(crate) fn workspace_address_for_test(&self) -> *const std::ffi::c_void {
+        unsafe { abi::apxinf_attention_test_custom_workspace(self.raw) }
+    }
+
     pub(crate) fn enqueue_for_test(&self) -> Result<()> {
         self.stream.set_current_device().map_err(Error::Cuda)?;
         unsafe { status::check(abi::apxinf_attention_enqueue(self.raw)) }
