@@ -1,9 +1,9 @@
 {
   "schema": "apxinf.conv_temporal4.curated_delivery.v1",
-  "status": "AFFECTED_FORMAL_AND_PAIRED_NSYS_PASS; FINAL15_MERGE_ACCEPTANCE_PENDING",
+  "status": "AFFECTED_FORMAL_PAIRED_NSYS_AND_LATER_B6_FULL15_N10_RAW_REVIEW_PASS",
   "parent_commit": "39784163d32a82ccc059db4f5c519a7dac26c7e0",
   "experiment_source_commit_not_delivery": "b6a440c5bde534fe2384db9da2d8322ce162bdb5",
-  "delivery_commit": "CONTAINING_COMMIT",
+  "delivery_commit": "81e2e942c67c613be1de20e0bf7a1ae58d2476d7",
   "source_composition": {
     "parent_gdn_sha256": "f644ef64e4c592b90e0f854d569d6deba24ed64af98f1315234e350de4fa1305",
     "candidate_gdn_sha256": "64d08fcc11f1da03db0ec01b77cb5b757a7cad8cebdbc4347805d436e927f382",
@@ -1084,9 +1084,9 @@
     "validated_without_GPU_rerun": true
   },
   "limits": [
-    "Twoaffected freshAB/BA2warm5 pairs only, no candidatefull15N10 mergeacceptance yet",
+    "Affected freshAB/BA2warm5 pairs; laterB6 full15N10 separatelyvalidated, referenced without changing originalN5 scores",
     "Operator15percent reduction does not equal model1percent; no percentageaddition",
-    "Independent delivery commit contains this evidence; remoteFinal push pending",
+    "Independent convolution delivery81e2e942; subsequent documentary updates do not change measuredcode or originalN5 data",
     "Two20percent objectives notaccepted; no claimglobal20goalmet",
     "Decode strict1024 correctnesspass is not Decodeperformancegain evidence"
   ],
@@ -1094,5 +1094,6 @@
     "path": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/safe-conv-b6-model-evidence-01.tar",
     "sha256": "3ecdd89a35a44330c8c2143ed6428b9842ecef82179578ba12673727bd6aac9f"
   },
-  "parent_strict_summary_sha256": "c793ae2a9dc75ae0ea857cb6a1a4d5e0c5edb644981e8252010b493f843bb629"
+  "parent_strict_summary_sha256": "c793ae2a9dc75ae0ea857cb6a1a4d5e0c5edb644981e8252010b493f843bb629",
+  "later_full15_evidence": "commit-step-final15-thor3.json"
 }

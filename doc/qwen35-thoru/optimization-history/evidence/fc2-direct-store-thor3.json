@@ -1,0 +1,2815 @@
+{
+  "schema": "apxinf.fc2_direct_store.curated_delivery.v1",
+  "status": "AFFECTED_N5_PAIRED_NSYS_WARM_NCU_FULL15_N10_AND_CURRENT_FINAL_TWO_CASE_FAIR_REVIEW_PASS",
+  "delivery_commit": "CONTAINING_COMMIT",
+  "experiment_source_commit": "d875b94d324315def839e206c99c3c7699d052c9",
+  "experiment_parent": "b6a440c5bde534fe2384db9da2d8322ce162bdb5",
+  "delivery_parent": "81e2e942",
+  "source_files": {
+    "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/runner.cu": "950a20b251b8f82ac49f28e9d33f7dd54cacb8d7dc8387db76f048728617f2da",
+    "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/aot/aarch64-sm110-cuda12/libapxinf_edge_nvfp4_moe_sm110_cuda12.a": "ba531eadca41f1d24cc66b27c984e3570e77657787d0ef9865f9ca61b86e4a5f",
+    "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/generated/nvfp4_moe_sm110_fc2_n128_store_bf16.h": "0a664eea60806c919cab94b3c0099e8c10618a80cda237404d456e3cd3e92551",
+    "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/codegen/direct_store/fc2_store_n128.py": "dbf2dc07ac6e89d13a60c0319712a09f7b830a554ce84b8c67d7aa96530c903f",
+    "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/codegen/direct_store/direct_store_helpers.py": "8817c5596b39dc31eb0b01521899438f95a5a73638faa7dd6d0fd5dac6186bf4",
+    "crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/codegen/direct_store/PRODUCER.json": "e7d0c868a8d435db63a685de450ef5630d767c66880c66795057342465abf60b"
+  },
+  "formal_comparisons": [
+    {
+      "case": "append-4k",
+      "order": [
+        "parent",
+        "candidate"
+      ],
+      "parent_metrics": {
+        "mean_prefill_ms": 452.653844,
+        "median_prefill_ms": 452.992524,
+        "samples_ms": [
+          452.818825,
+          453.15670800000004,
+          453.166739,
+          452.992524,
+          451.13442399999997
+        ],
+        "sample_stdev_ms": 0.8611755762738147
+      },
+      "candidate_metrics": {
+        "mean_prefill_ms": 412.6981414,
+        "median_prefill_ms": 413.19456199999996,
+        "samples_ms": [
+          411.73388300000005,
+          411.804629,
+          413.231521,
+          413.526112,
+          413.19456199999996
+        ],
+        "sample_stdev_ms": 0.8579949293540602
+      },
+      "latency_reduction_percent": 8.826988465826435,
+      "full_output_and_work_exact_parent": true,
+      "formal_result": true
+    },
+    {
+      "case": "append-32k",
+      "order": [
+        "candidate",
+        "parent"
+      ],
+      "parent_metrics": {
+        "mean_prefill_ms": 618.7527886,
+        "median_prefill_ms": 618.428261,
+        "samples_ms": [
+          618.428261,
+          615.666503,
+          620.925985,
+          618.1158,
+          620.627394
+        ],
+        "sample_stdev_ms": 2.137355810525047
+      },
+      "candidate_metrics": {
+        "mean_prefill_ms": 573.7060646,
+        "median_prefill_ms": 572.1573920000001,
+        "samples_ms": [
+          571.80506,
+          570.841058,
+          578.3211769999999,
+          572.1573920000001,
+          575.4056360000001
+        ],
+        "sample_stdev_ms": 3.0987204430856026
+      },
+      "latency_reduction_percent": 7.280245815444886,
+      "full_output_and_work_exact_parent": true,
+      "formal_result": true
+    }
+  ],
+  "formal_runs": [
+    {
+      "case": "append-4k",
+      "arm": "parent",
+      "warmups": 2,
+      "repeats": 5,
+      "argv": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe-conv-b6-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "8196",
+        "--prefix-tokens",
+        "4096",
+        "--input-tokens",
+        "4096"
+      ],
+      "selection_environment": {},
+      "ELF_sha256": "27fe6b38225b552e64906c8b5b32a5e099a8a5ed0f3dfb1e6f47078892f6174e",
+      "parsed": {
+        "rows": [
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 0,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 450.927161,
+            "prefill_tokens_per_second": 9083.506948032345,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 1,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 455.773336,
+            "prefill_tokens_per_second": 8986.923271878284,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 2,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 452.818825,
+            "prefill_tokens_per_second": 9045.560329785318,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 3,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 453.15670800000004,
+            "prefill_tokens_per_second": 9038.815773196056,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 4,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 453.166739,
+            "prefill_tokens_per_second": 9038.615695932618,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 5,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 452.992524,
+            "prefill_tokens_per_second": 9042.091829312398,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 6,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 451.13442399999997,
+            "prefill_tokens_per_second": 9079.333746431197,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          }
+        ],
+        "metadata": {
+          "allow_repeat_divergence": false,
+          "autotune": false,
+          "checkpoint": "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+          "chunk_digest_fnv1a64": "9b08af98633069ab",
+          "context_reuse": false,
+          "device": 0,
+          "draft_kv_dtype": "fp8",
+          "draft_kv_scale": 1.0,
+          "fa2_packed_gqa": 0,
+          "fixed_depth": 3,
+          "input_digest_fnv1a64": "1c99f0f992165db5",
+          "input_seed_hex": "35a3bf0440960001",
+          "input_tokens": 4096,
+          "kv_capacity": 8196,
+          "load_seconds": 17.600125561,
+          "mode": "mtp",
+          "mtp_depth": 3,
+          "mtp_enabled": true,
+          "mtp_strategy": "fixed",
+          "output_tokens": 1,
+          "performance_eligible": true,
+          "prefix_digest_fnv1a64": "da7ee97285eaa2a3",
+          "prefix_tokens": 4096,
+          "profiling": false,
+          "qwen35_kv_cache": "fp8_dynamic",
+          "qwen35_moe_activation": "nvfp4",
+          "recipe_audit_required": true,
+          "repeats": 5,
+          "sampling_mode": "greedy",
+          "schema": "apxinf.qwen35.context_benchmark.config.v1",
+          "strict_recipe_required": true,
+          "temperature": 0.0,
+          "timing_scope": "prefix setup excluded; prefill includes first argmax token; decode excludes first token",
+          "total_context_tokens": 8192,
+          "tuning_dir": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+          "warmups": 2
+        },
+        "output_token_ids": [
+          220
+        ],
+        "digest": "c8bbed67024e3c09",
+        "speculation": {
+          "accepted_prefix_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "bonus_tokens": 0,
+          "committed_accepted_tokens": 0,
+          "correction_tokens": 0,
+          "draft_steps": 3,
+          "emitted_tokens": 0,
+          "full_accept_rounds": 0,
+          "implementation": "qwen3.6_moe_adaptive_mtp",
+          "matched_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "partial_accept_rounds": 0,
+          "proposed_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "proposed_tokens": 0,
+          "rounds": 0,
+          "target_committed_rows": 0,
+          "target_rolled_back_rows": 0,
+          "target_verified_rows": 0,
+          "verified_accepted_tokens": 0,
+          "zero_accept_rounds": 0
+        },
+        "metrics": {
+          "mean_prefill_ms": 452.653844,
+          "median_prefill_ms": 452.992524,
+          "samples_ms": [
+            452.818825,
+            453.15670800000004,
+            453.166739,
+            452.992524,
+            451.13442399999997
+          ],
+          "sample_stdev_ms": 0.8611755762738147
+        }
+      },
+      "files": {
+        "stdout.jsonl": {
+          "sha256": "981ac124dfc42a225de5435bd2075f9c82c037750e59a69687fdf7cfbed2b546",
+          "bytes": 11711
+        },
+        "stderr.log": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      }
+    },
+    {
+      "case": "append-4k",
+      "arm": "candidate",
+      "warmups": 2,
+      "repeats": 5,
+      "argv": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/direct-store-d875-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "8196",
+        "--prefix-tokens",
+        "4096",
+        "--input-tokens",
+        "4096"
+      ],
+      "selection_environment": {},
+      "ELF_sha256": "7667d8e908d08d0f110e1811eee913438f0d6087220ca9ebd1227ebb1da3a5a2",
+      "parsed": {
+        "rows": [
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 0,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 410.916353,
+            "prefill_tokens_per_second": 9967.965426773852,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 1,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 415.36640600000004,
+            "prefill_tokens_per_second": 9861.173029000327,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 2,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 411.73388300000005,
+            "prefill_tokens_per_second": 9948.173247621691,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 3,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 411.804629,
+            "prefill_tokens_per_second": 9946.464200624612,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 4,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 413.231521,
+            "prefill_tokens_per_second": 9912.118974099269,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 5,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 413.526112,
+            "prefill_tokens_per_second": 9905.057700443353,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 8192,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 4096,
+            "input_tokens": 4096,
+            "iteration": 6,
+            "mode": "mtp",
+            "output_token_ids": [
+              220
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 413.19456199999996,
+            "prefill_tokens_per_second": 9913.005583069606,
+            "prefix_tokens": 4096,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "c8bbed67024e3c09",
+            "total_context_tokens": 8192,
+            "warmup": false
+          }
+        ],
+        "metadata": {
+          "allow_repeat_divergence": false,
+          "autotune": false,
+          "checkpoint": "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+          "chunk_digest_fnv1a64": "9b08af98633069ab",
+          "context_reuse": false,
+          "device": 0,
+          "draft_kv_dtype": "fp8",
+          "draft_kv_scale": 1.0,
+          "fa2_packed_gqa": 0,
+          "fixed_depth": 3,
+          "input_digest_fnv1a64": "1c99f0f992165db5",
+          "input_seed_hex": "35a3bf0440960001",
+          "input_tokens": 4096,
+          "kv_capacity": 8196,
+          "load_seconds": 17.81694397,
+          "mode": "mtp",
+          "mtp_depth": 3,
+          "mtp_enabled": true,
+          "mtp_strategy": "fixed",
+          "output_tokens": 1,
+          "performance_eligible": true,
+          "prefix_digest_fnv1a64": "da7ee97285eaa2a3",
+          "prefix_tokens": 4096,
+          "profiling": false,
+          "qwen35_kv_cache": "fp8_dynamic",
+          "qwen35_moe_activation": "nvfp4",
+          "recipe_audit_required": true,
+          "repeats": 5,
+          "sampling_mode": "greedy",
+          "schema": "apxinf.qwen35.context_benchmark.config.v1",
+          "strict_recipe_required": true,
+          "temperature": 0.0,
+          "timing_scope": "prefix setup excluded; prefill includes first argmax token; decode excludes first token",
+          "total_context_tokens": 8192,
+          "tuning_dir": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+          "warmups": 2
+        },
+        "output_token_ids": [
+          220
+        ],
+        "digest": "c8bbed67024e3c09",
+        "speculation": {
+          "accepted_prefix_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "bonus_tokens": 0,
+          "committed_accepted_tokens": 0,
+          "correction_tokens": 0,
+          "draft_steps": 3,
+          "emitted_tokens": 0,
+          "full_accept_rounds": 0,
+          "implementation": "qwen3.6_moe_adaptive_mtp",
+          "matched_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "partial_accept_rounds": 0,
+          "proposed_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "proposed_tokens": 0,
+          "rounds": 0,
+          "target_committed_rows": 0,
+          "target_rolled_back_rows": 0,
+          "target_verified_rows": 0,
+          "verified_accepted_tokens": 0,
+          "zero_accept_rounds": 0
+        },
+        "metrics": {
+          "mean_prefill_ms": 412.6981414,
+          "median_prefill_ms": 413.19456199999996,
+          "samples_ms": [
+            411.73388300000005,
+            411.804629,
+            413.231521,
+            413.526112,
+            413.19456199999996
+          ],
+          "sample_stdev_ms": 0.8579949293540602
+        }
+      },
+      "files": {
+        "stdout.jsonl": {
+          "sha256": "e41814689971abd43c9151c96030bd23edaac1108f76467fcde1bf4f11f87adc",
+          "bytes": 11726
+        },
+        "stderr.log": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      }
+    },
+    {
+      "case": "append-32k",
+      "arm": "candidate",
+      "warmups": 2,
+      "repeats": 5,
+      "argv": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/direct-store-d875-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "36868",
+        "--prefix-tokens",
+        "32768",
+        "--input-tokens",
+        "4096"
+      ],
+      "selection_environment": {},
+      "ELF_sha256": "7667d8e908d08d0f110e1811eee913438f0d6087220ca9ebd1227ebb1da3a5a2",
+      "parsed": {
+        "rows": [
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 0,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 592.200434,
+            "prefill_tokens_per_second": 6916.577166844832,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 1,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 569.660769,
+            "prefill_tokens_per_second": 7190.244129309175,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 2,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 571.80506,
+            "prefill_tokens_per_second": 7163.280436867768,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 3,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 570.841058,
+            "prefill_tokens_per_second": 7175.377353462897,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 4,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 578.3211769999999,
+            "prefill_tokens_per_second": 7082.569622035474,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 5,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 572.1573920000001,
+            "prefill_tokens_per_second": 7158.86932034953,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 6,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 575.4056360000001,
+            "prefill_tokens_per_second": 7118.456517864207,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          }
+        ],
+        "metadata": {
+          "allow_repeat_divergence": false,
+          "autotune": false,
+          "checkpoint": "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+          "chunk_digest_fnv1a64": "d427f6f5e12602ee",
+          "context_reuse": false,
+          "device": 0,
+          "draft_kv_dtype": "fp8",
+          "draft_kv_scale": 1.0,
+          "fa2_packed_gqa": 0,
+          "fixed_depth": 3,
+          "input_digest_fnv1a64": "50d2d5c0e9368e41",
+          "input_seed_hex": "35a3bf0440960001",
+          "input_tokens": 4096,
+          "kv_capacity": 36868,
+          "load_seconds": 18.076380497,
+          "mode": "mtp",
+          "mtp_depth": 3,
+          "mtp_enabled": true,
+          "mtp_strategy": "fixed",
+          "output_tokens": 1,
+          "performance_eligible": true,
+          "prefix_digest_fnv1a64": "3457e2f0e0bfd802",
+          "prefix_tokens": 32768,
+          "profiling": false,
+          "qwen35_kv_cache": "fp8_dynamic",
+          "qwen35_moe_activation": "nvfp4",
+          "recipe_audit_required": true,
+          "repeats": 5,
+          "sampling_mode": "greedy",
+          "schema": "apxinf.qwen35.context_benchmark.config.v1",
+          "strict_recipe_required": true,
+          "temperature": 0.0,
+          "timing_scope": "prefix setup excluded; prefill includes first argmax token; decode excludes first token",
+          "total_context_tokens": 36864,
+          "tuning_dir": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+          "warmups": 2
+        },
+        "output_token_ids": [
+          3734
+        ],
+        "digest": "f8dded1f65ccaf0d",
+        "speculation": {
+          "accepted_prefix_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "bonus_tokens": 0,
+          "committed_accepted_tokens": 0,
+          "correction_tokens": 0,
+          "draft_steps": 3,
+          "emitted_tokens": 0,
+          "full_accept_rounds": 0,
+          "implementation": "qwen3.6_moe_adaptive_mtp",
+          "matched_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "partial_accept_rounds": 0,
+          "proposed_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "proposed_tokens": 0,
+          "rounds": 0,
+          "target_committed_rows": 0,
+          "target_rolled_back_rows": 0,
+          "target_verified_rows": 0,
+          "verified_accepted_tokens": 0,
+          "zero_accept_rounds": 0
+        },
+        "metrics": {
+          "mean_prefill_ms": 573.7060646,
+          "median_prefill_ms": 572.1573920000001,
+          "samples_ms": [
+            571.80506,
+            570.841058,
+            578.3211769999999,
+            572.1573920000001,
+            575.4056360000001
+          ],
+          "sample_stdev_ms": 3.0987204430856026
+        }
+      },
+      "files": {
+        "stdout.jsonl": {
+          "sha256": "0a0b3473c17d795489a47831da96c672eca1ed833564994997563e3a1ab6d30a",
+          "bytes": 11767
+        },
+        "stderr.log": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      }
+    },
+    {
+      "case": "append-32k",
+      "arm": "parent",
+      "warmups": 2,
+      "repeats": 5,
+      "argv": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe-conv-b6-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "36868",
+        "--prefix-tokens",
+        "32768",
+        "--input-tokens",
+        "4096"
+      ],
+      "selection_environment": {},
+      "ELF_sha256": "27fe6b38225b552e64906c8b5b32a5e099a8a5ed0f3dfb1e6f47078892f6174e",
+      "parsed": {
+        "rows": [
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 0,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 623.2857550000001,
+            "prefill_tokens_per_second": 6571.624599378176,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 1,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 610.7643230000001,
+            "prefill_tokens_per_second": 6706.351117368719,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": true
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 2,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 618.428261,
+            "prefill_tokens_per_second": 6623.241947864345,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 3,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 615.666503,
+            "prefill_tokens_per_second": 6652.9524995125485,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 4,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 620.925985,
+            "prefill_tokens_per_second": 6596.599432056302,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 5,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 618.1158,
+            "prefill_tokens_per_second": 6626.590033776843,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          },
+          {
+            "autotune": false,
+            "committed_context_tokens_after_prefill": 36864,
+            "computed_input_tokens": 4096,
+            "decode_intervals": 0,
+            "decode_ms": null,
+            "decode_tokens_per_second": null,
+            "initial_kv_tokens": 32768,
+            "input_tokens": 4096,
+            "iteration": 6,
+            "mode": "mtp",
+            "output_token_ids": [
+              3734
+            ],
+            "output_tokens": 1,
+            "performance_eligible": true,
+            "prefill_ms": 620.627394,
+            "prefill_tokens_per_second": 6599.773132154073,
+            "prefix_tokens": 32768,
+            "profiling": false,
+            "recipe_audit_required": true,
+            "repeat_diverged": false,
+            "schema": "apxinf.qwen35.context_benchmark.iteration.v1",
+            "speculation": {
+              "accepted_prefix_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "bonus_tokens": 0,
+              "committed_accepted_tokens": 0,
+              "correction_tokens": 0,
+              "draft_steps": 3,
+              "emitted_tokens": 0,
+              "full_accept_rounds": 0,
+              "implementation": "qwen3.6_moe_adaptive_mtp",
+              "matched_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "partial_accept_rounds": 0,
+              "proposed_by_depth": [
+                0,
+                0,
+                0
+              ],
+              "proposed_tokens": 0,
+              "rounds": 0,
+              "target_committed_rows": 0,
+              "target_rolled_back_rows": 0,
+              "target_verified_rows": 0,
+              "verified_accepted_tokens": 0,
+              "zero_accept_rounds": 0
+            },
+            "strict_recipe_required": true,
+            "token_digest_fnv1a64": "f8dded1f65ccaf0d",
+            "total_context_tokens": 36864,
+            "warmup": false
+          }
+        ],
+        "metadata": {
+          "allow_repeat_divergence": false,
+          "autotune": false,
+          "checkpoint": "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+          "chunk_digest_fnv1a64": "d427f6f5e12602ee",
+          "context_reuse": false,
+          "device": 0,
+          "draft_kv_dtype": "fp8",
+          "draft_kv_scale": 1.0,
+          "fa2_packed_gqa": 0,
+          "fixed_depth": 3,
+          "input_digest_fnv1a64": "50d2d5c0e9368e41",
+          "input_seed_hex": "35a3bf0440960001",
+          "input_tokens": 4096,
+          "kv_capacity": 36868,
+          "load_seconds": 17.977392236,
+          "mode": "mtp",
+          "mtp_depth": 3,
+          "mtp_enabled": true,
+          "mtp_strategy": "fixed",
+          "output_tokens": 1,
+          "performance_eligible": true,
+          "prefix_digest_fnv1a64": "3457e2f0e0bfd802",
+          "prefix_tokens": 32768,
+          "profiling": false,
+          "qwen35_kv_cache": "fp8_dynamic",
+          "qwen35_moe_activation": "nvfp4",
+          "recipe_audit_required": true,
+          "repeats": 5,
+          "sampling_mode": "greedy",
+          "schema": "apxinf.qwen35.context_benchmark.config.v1",
+          "strict_recipe_required": true,
+          "temperature": 0.0,
+          "timing_scope": "prefix setup excluded; prefill includes first argmax token; decode excludes first token",
+          "total_context_tokens": 36864,
+          "tuning_dir": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+          "warmups": 2
+        },
+        "output_token_ids": [
+          3734
+        ],
+        "digest": "f8dded1f65ccaf0d",
+        "speculation": {
+          "accepted_prefix_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "bonus_tokens": 0,
+          "committed_accepted_tokens": 0,
+          "correction_tokens": 0,
+          "draft_steps": 3,
+          "emitted_tokens": 0,
+          "full_accept_rounds": 0,
+          "implementation": "qwen3.6_moe_adaptive_mtp",
+          "matched_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "partial_accept_rounds": 0,
+          "proposed_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "proposed_tokens": 0,
+          "rounds": 0,
+          "target_committed_rows": 0,
+          "target_rolled_back_rows": 0,
+          "target_verified_rows": 0,
+          "verified_accepted_tokens": 0,
+          "zero_accept_rounds": 0
+        },
+        "metrics": {
+          "mean_prefill_ms": 618.7527886,
+          "median_prefill_ms": 618.428261,
+          "samples_ms": [
+            618.428261,
+            615.666503,
+            620.925985,
+            618.1158,
+            620.627394
+          ],
+          "sample_stdev_ms": 2.137355810525047
+        }
+      },
+      "files": {
+        "stdout.jsonl": {
+          "sha256": "12d7ee6d21b2e94c440f12f1dc28e37f764d8183d172f591d1ffea2faa02dff5",
+          "bytes": 11749
+        },
+        "stderr.log": {
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "bytes": 0
+        }
+      }
+    }
+  ],
+  "raw_proofs": [
+    {
+      "phase": "strict",
+      "summary_sha256": "abf95073a1a1319e6b0a8074f5ecf0a9411c22fa597efd620da20152c332bd37",
+      "all_run_files_hash_verified": true
+    },
+    {
+      "phase": "screen",
+      "summary_sha256": "0df3201b27b408d755a2933ea8959597db682a3b9c873473fdefd13c635feff7",
+      "all_run_files_hash_verified": true
+    },
+    {
+      "phase": "formal",
+      "summary_sha256": "87dc4bb78bb307d8bac85bc634b3df7a46d7ed541c34d54e08d9a3315161b228",
+      "all_run_files_hash_verified": true
+    }
+  ],
+  "product_guards": [
+    {
+      "name": "build",
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/current-profiles-and-product-guards-01/product-guard-build/receipt.json",
+      "sha256": "64d3cf93750cccd1390b935e4e562fb02c046ef2a13caddffe4e0ee328f7b415",
+      "ok": true
+    },
+    {
+      "name": "domain",
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/current-profiles-and-product-guards-01/product-guard-domain/receipt.json",
+      "sha256": "73b8cb2f6606ad46f9a02fbeb889e6509b577645e7fbd69a2d4c73f1afd58c5f",
+      "ok": true
+    },
+    {
+      "name": "cold",
+      "path": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/current-profiles-and-product-guards-01/product-guard-cold/receipt.json",
+      "sha256": "aa93dcfa8d5670c4035ceb44c5ac59604e0ed451a1d6b68af90c3121aed914b9",
+      "ok": true
+    }
+  ],
+  "build_receipt_sha256": "15a020d458e80add4e1e6cc0891d9a471efbd9df70cc03eeae2da984976e18ff",
+  "native_snapshot": {
+    "path": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/tools/final-integration-build/inputs-d875b94d-direct-store-01/native/774365178ce4680d09c9c3fbc531e832cf9d67a2c128450635686ed78428fad3/libapxinf_gemm_native.a",
+    "source_path": "/home/wwxq/devlocal/prefill-range-thor2/target/release/build/apxinf-cuda-new-08c3ca3e3978e009/out/libapxinf_gemm_native.a",
+    "sha256": "774365178ce4680d09c9c3fbc531e832cf9d67a2c128450635686ed78428fad3",
+    "bytes": 51980722,
+    "immutable_copy": true
+  },
+  "static_AOT_link_inputs": {
+    "parent": {
+      "path": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/tools/final-integration-build/inputs-d875b94d-direct-store-01/aot/7486d16d00dcb155647fb569b8c7eab0eba60df47103666369264f156648176e/libapxinf_edge_nvfp4_moe_sm110_cuda12.a",
+      "sha256": "7486d16d00dcb155647fb569b8c7eab0eba60df47103666369264f156648176e",
+      "bytes": 188166,
+      "members": {
+        "CudaDialectRuntime.c.o": "1d67a153432e4630166ae055cc68a5d536559d9a40295a4e630db6e2b27ba8e1",
+        "cuEvents_generated.c.o": "7e4a5317ef67e3cdf71770993ddaa9c63eaa60690cc781ae93d657801840571f",
+        "cuLibrarys_generated.c.o": "0142d7ee55b12427543cfb7abaf1a98d64ac5d8d841c2e86ac745beeae1f8c54",
+        "cudaDevices_generated.c.o": "040d58bc03eb63faadf4d6919c74ad7f5af2603ad9b6ff391fac89a7779b7483",
+        "cudaEvents_generated.c.o": "cccbf7c58249faa5e522026e13cf520a6410e1f540151f2493c81d1dda2d1900",
+        "cudaGraphs_generated.c.o": "56d1280adae0a72ac785e1308f78a38e836dea72f92f45c75e29858228a50fbf",
+        "cudaLibrarys_generated.c.o": "53eb356fe69dd3668d087b8baa6934038a81b56942a8d7ea8c59b0a601372374",
+        "cudaMemorys_generated.c.o": "301ccf2100138d5fb524b89f67a25d02e40ab91853ee0f8d2f4934018f1054b7",
+        "tvm_ffi_extension.c.o": "a546bfb359cbf5f4fa4e39311752b227357968d0fab0f29aa9b266408100fcb5",
+        "nvfp4_moe_sm110_fc1_swiglu_n128.o": "6193c62403f647c122b3e2c9381a7083abf49d559f3daaecb01ee3b422cdb5e8",
+        "nvfp4_moe_sm110_fc2_n128_bf16.o": "2ef4c721623b16e37073d7d7a074367dca526d36c3c8f10b080f0f6ec368a833"
+      },
+      "immutable_copy": true,
+      "source_link_path": "/home/wwxq/devlocal/eglops-eval/checkout/crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/aot/aarch64-sm110-cuda12/libapxinf_edge_nvfp4_moe_sm110_cuda12.a"
+    },
+    "candidate": {
+      "path": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/tools/final-integration-build/inputs-d875b94d-direct-store-01/aot/ba531eadca41f1d24cc66b27c984e3570e77657787d0ef9865f9ca61b86e4a5f/libapxinf_edge_nvfp4_moe_sm110_cuda12.a",
+      "sha256": "ba531eadca41f1d24cc66b27c984e3570e77657787d0ef9865f9ca61b86e4a5f",
+      "bytes": 244874,
+      "members": {
+        "CudaDialectRuntime.c.o": "1d67a153432e4630166ae055cc68a5d536559d9a40295a4e630db6e2b27ba8e1",
+        "cuEvents_generated.c.o": "7e4a5317ef67e3cdf71770993ddaa9c63eaa60690cc781ae93d657801840571f",
+        "cuLibrarys_generated.c.o": "0142d7ee55b12427543cfb7abaf1a98d64ac5d8d841c2e86ac745beeae1f8c54",
+        "cudaDevices_generated.c.o": "040d58bc03eb63faadf4d6919c74ad7f5af2603ad9b6ff391fac89a7779b7483",
+        "cudaEvents_generated.c.o": "cccbf7c58249faa5e522026e13cf520a6410e1f540151f2493c81d1dda2d1900",
+        "cudaGraphs_generated.c.o": "56d1280adae0a72ac785e1308f78a38e836dea72f92f45c75e29858228a50fbf",
+        "cudaLibrarys_generated.c.o": "53eb356fe69dd3668d087b8baa6934038a81b56942a8d7ea8c59b0a601372374",
+        "cudaMemorys_generated.c.o": "301ccf2100138d5fb524b89f67a25d02e40ab91853ee0f8d2f4934018f1054b7",
+        "tvm_ffi_extension.c.o": "a546bfb359cbf5f4fa4e39311752b227357968d0fab0f29aa9b266408100fcb5",
+        "nvfp4_moe_sm110_fc1_swiglu_n128.o": "6193c62403f647c122b3e2c9381a7083abf49d559f3daaecb01ee3b422cdb5e8",
+        "nvfp4_moe_sm110_fc2_n128_bf16.o": "2ef4c721623b16e37073d7d7a074367dca526d36c3c8f10b080f0f6ec368a833",
+        "nvfp4_moe_sm110_fc2_n128_store_bf16.o": "c8887403520dbabb0589904b463f8949fff4090e937c5896592c1f9f98e90e02"
+      },
+      "immutable_copy": true,
+      "source_link_path": "/home/wwxq/devlocal/eglops-eval/checkout/crates/apxinf-cuda-new/native/kernels/edge_nvfp4_moe/aot/aarch64-sm110-cuda12/libapxinf_edge_nvfp4_moe_sm110_cuda12.a"
+    }
+  },
+  "native_member_changes": [
+    "gemm-7a8f4bfb81a59d25-runner.o"
+  ],
+  "tuning_identity": {
+    "APXINF_GEMM_BUILD_ID": {
+      "value": "gemm-kb1-0df81e227cb4a241a00bc6edae6f1f8e",
+      "cmdline_path": "/home/wwxq/devlocal/prefill-range-thor2/target/release/build/apxinf-cuda-new-08c3ca3e3978e009/out/gemm-9a996f016fa11b8b-tuning_key.cmdline",
+      "cmdline_sha256": "79b1ca9f61da5cc8cde6222515265f9e3a143dee0f712fe0eb1f549d748c3123"
+    },
+    "APXINF_ATTENTION_BUILD_ID": {
+      "value": "attention-kb1-99d246fa110b8c6cb4d01026d8e87c04",
+      "cmdline_path": "/home/wwxq/devlocal/prefill-range-thor2/target/release/build/apxinf-cuda-new-08c3ca3e3978e009/out/gemm-e711210f14481acf-tuning_key.cmdline",
+      "cmdline_sha256": "d354a1abf9897ebf4dfcadcd2786385dc8af6a0c3e9edfe9318a333a054dc2a4"
+    }
+  },
+  "paired_model_profiler": {
+    "status": "ACTUAL_PAIRED_APPEND4K_NSys_PASS_INDEPENDENTLY_REVIEWED",
+    "review_path": "paired-NSys-independent-review-01.json",
+    "review_sha256": "f1e881b4d539c947a5473d89ece1b87b5153ff0b71eb754b5135b13257dd819e",
+    "raw_archive_sha256": "ac563f29f916efe1ff4927e8bf44551376fd5a1c3bfc6c924f3bea816b110963",
+    "actual_receipt_sha256": "81fc9c2b4243af89d15dfb7eab37e4b12c5234086412f6be1735e3b1066bdf23",
+    "scope": "actualb6/d875 each2warm1 append4K+4K/maxnew1;prefixexcluded;notperfscore",
+    "profiles": {
+      "parent": {
+        "SQLite_sha256": "cd9ca497a13ddc6eda4ac0b0820cfdd5d6e0f8dc2280c29924ddfad9b807260f",
+        "NSys_report_sha256": "08a504dd466a48208543d330fcc151f015fd7e6c206e9f9c01f701dc8831cad2",
+        "stdout_sha256": "7c1fe6b08f1ee3403650ed172d782e41140c0a30935102699623f3d97de9ca1e",
+        "all3_output_FNV_work_exact_actual_N5": true,
+        "profiling": true,
+        "performance_eligible": false,
+        "scope": "append4096+firstargmax/commit only;prepared4096prefixexcluded;2warm1diagnostic",
+        "FC1": {
+          "calls": 40,
+          "symbol": "kernel_cutlass_kernel_blockscaled_contiguous_gather_grouped_gemm_act_fusionBlockScaledContiguousGatherGroupedGemmKernel_object_at__TiledMMA_ThrLayoutVMNK11110000_PermutationMNK____MMAAtom_0",
+          "sum_ns": 74294112,
+          "union_ns": 74294112,
+          "grid": [
+            1,
+            1,
+            20
+          ],
+          "block": [
+            384,
+            1,
+            1
+          ],
+          "regs": [
+            168
+          ],
+          "dynamic_SMEM": [
+            230400
+          ],
+          "streams": [
+            13
+          ]
+        },
+        "FC2": {
+          "calls": 40,
+          "symbol": "kernel_cutlass_kernel_blockscaled_contiguous_grouped_gemm_finalize_fusionSm100BlockScaledContiguousGroupedGemmFinalizeFusionKernel_object_at__TiledMMA_ThrLayoutVMNK11110000_PermutationMNK_0",
+          "sum_ns": 66866144,
+          "union_ns": 66866144,
+          "grid": [
+            1,
+            1,
+            20
+          ],
+          "block": [
+            224,
+            1,
+            1
+          ],
+          "regs": [
+            255
+          ],
+          "dynamic_SMEM": [
+            220160
+          ],
+          "streams": [
+            13
+          ]
+        },
+        "kernel_events": 1366,
+        "allkernel_union_ns": 425152704,
+        "instrumented_host_prefill_ms_not_score": 460.48816
+      },
+      "candidate": {
+        "SQLite_sha256": "f405fdcc8b6fa094fbf7735b4cb4e1ed083fa377fcb538e765560214bf701499",
+        "NSys_report_sha256": "f32bec56a2b276a992abf055d2d5fa89bea0b811ce210ad0bd753e91480c00c7",
+        "stdout_sha256": "d8c658f8b721c7e0e31adde2a9f7e44a476b75344ba572a6c6861500f4a69142",
+        "all3_output_FNV_work_exact_actual_N5": true,
+        "profiling": true,
+        "performance_eligible": false,
+        "scope": "append4096+firstargmax/commit only;prepared4096prefixexcluded;2warm1diagnostic",
+        "FC1": {
+          "calls": 40,
+          "symbol": "kernel_cutlass_kernel_blockscaled_contiguous_gather_grouped_gemm_act_fusionBlockScaledContiguousGatherGroupedGemmKernel_object_at__TiledMMA_ThrLayoutVMNK11110000_PermutationMNK____MMAAtom_0",
+          "sum_ns": 52528160,
+          "union_ns": 52528160,
+          "grid": [
+            1,
+            1,
+            20
+          ],
+          "block": [
+            384,
+            1,
+            1
+          ],
+          "regs": [
+            168
+          ],
+          "dynamic_SMEM": [
+            230400
+          ],
+          "streams": [
+            13
+          ]
+        },
+        "FC2": {
+          "calls": 40,
+          "symbol": "kernel_cutlass_kernel_fc2_store_n128Sm100BlockScaledContiguousGroupedGemmFinalizeFusionKernel_object_at__TiledMMA_ThrLayoutVMNK11110000_PermutationMNK____MMAAtom_ThrID10_ShapeMNK12812864__0",
+          "sum_ns": 50354816,
+          "union_ns": 50354816,
+          "grid": [
+            1,
+            1,
+            20
+          ],
+          "block": [
+            224,
+            1,
+            1
+          ],
+          "regs": [
+            255
+          ],
+          "dynamic_SMEM": [
+            220160
+          ],
+          "streams": [
+            13
+          ]
+        },
+        "kernel_events": 1366,
+        "allkernel_union_ns": 387871008,
+        "instrumented_host_prefill_ms_not_score": 421.977367
+      }
+    },
+    "changes": {
+      "FC1": {
+        "parent_ms": 74.294112,
+        "candidate_ms": 52.52816,
+        "difference_ms": 21.765952,
+        "reduction_percent": 29.297008085916687
+      },
+      "FC2": {
+        "parent_ms": 66.866144,
+        "candidate_ms": 50.354816,
+        "difference_ms": 16.511328,
+        "reduction_percent": 24.693106275127818
+      }
+    },
+    "FC1_FC2_component_difference_ms": 38.27728,
+    "critical_f": "MISSING",
+    "DRAM_proof": "MISSING_NO_DRAM_COUNTERS; COMPLETED_NCU_HAS_L2_ONLY",
+    "new_model_gain": null
+  },
+  "NCU": {
+    "status": "FIVE_ACTUAL_WARM_APPLICATION_REPLAY_JOBS_PASS_INDEPENDENT_REVIEW",
+    "review_path": "warm-NCU-independent-review-01.json",
+    "review_sha256": "86b64c5feff6c8513c875c4cad3c70c66b8b96290e9dd1b3c4d3a521c384551b",
+    "raw_archive_sha256": "c64518a7d44de004488b769de479daed656f874abbf5f4f6883734348ccb059a",
+    "jobs": [
+      {
+        "name": "thor3-d875-firstM4-warm-fc1-01",
+        "receipt_sha256": "5479b8e5ecc017573ced3bd5c116e673c0d1d59df4982681edf8caeea3253df0",
+        "controller_sha256": "66dd664e20d7ccab4f3e4792dfc4c65d54a2a0f733419b6b03442faf5e88c8d9",
+        "report_sha256": "f581a9ca34452ad4617468471316cc96a00397411ce58e271b55737e2b655139",
+        "raw_CSV_sha256": "b14cf9a36f808d30b58c244ebf928b518401ec7ea4dca0d0f8687ec02e46392c",
+        "stdout_sha256": "9e0a5a8e46a0ed377a7399793a527d685cc29f2b6e16aeae998d10754f3f9490",
+        "source_NCU_sha256": "a44ff2c735c4dcf66c78f3f430155805d6a0b1f74f26331f98ecec03bfbf3f1a",
+        "permission_receipt_sha256": "40b6af1d8804219410fbf9e5b80ca37ce369617117710edaa9572928e6a6ef98",
+        "replay_executions": 4,
+        "each_execution_warmups": 2,
+        "each_execution_measured": 1,
+        "all_CFG_full_output_FNV_MTP_work_exact": true,
+        "source_and_AOT_historic_guards_ok": true,
+        "frequency_samples": 2537,
+        "frequency_restored": true,
+        "selected_M4_proven": true,
+        "requested_metrics": [
+          "gpu__time_duration.sum",
+          "lts__t_sector_hit_rate.pct",
+          "lts__t_sectors_lookup_miss.sum",
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed"
+        ],
+        "counters": {
+          "gpu__time_duration.sum": {
+            "value": 147.008,
+            "unit": "us"
+          },
+          "lts__t_sector_hit_rate.pct": {
+            "value": 3.369978,
+            "unit": "%"
+          },
+          "lts__t_sectors_lookup_miss.sum": {
+            "value": 1125259.0,
+            "unit": "sector"
+          },
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+            "value": 0.0,
+            "unit": "%"
+          }
+        }
+      },
+      {
+        "name": "thor3-d875-warm-candidate-fc1-01",
+        "receipt_sha256": "970b35ddfad3e0771d83cda1cdb8216d3bfa98497066f98c798418c716e03fd8",
+        "controller_sha256": "f6b276fd5e7bd0cb6361abf3930c129b44a914f7d2d23f8689d82887e4f75040",
+        "report_sha256": "ae69a02271177de5f602e9b9c182a6643feee9eb87f4a60da2337d1160c617f8",
+        "raw_CSV_sha256": "1d0548c2019b4e1862644d362fca3ab91547aee6f9f4be8b3fad43bbdd6efb35",
+        "stdout_sha256": "1a7419b3d4828137b8150d30e0c3b3d715ac49e60137e8ab81b02b233576ae78",
+        "source_NCU_sha256": "a44ff2c735c4dcf66c78f3f430155805d6a0b1f74f26331f98ecec03bfbf3f1a",
+        "permission_receipt_sha256": "40b6af1d8804219410fbf9e5b80ca37ce369617117710edaa9572928e6a6ef98",
+        "replay_executions": 4,
+        "each_execution_warmups": 2,
+        "each_execution_measured": 1,
+        "all_CFG_full_output_FNV_MTP_work_exact": true,
+        "source_and_AOT_historic_guards_ok": true,
+        "frequency_samples": 383,
+        "frequency_restored": true,
+        "selected_M4_proven": false,
+        "requested_metrics": [
+          "gpu__time_duration.sum",
+          "lts__t_sector_hit_rate.pct",
+          "lts__t_sectors_lookup_miss.sum",
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed"
+        ],
+        "counters": {
+          "gpu__time_duration.sum": {
+            "value": 1.402816,
+            "unit": "ms"
+          },
+          "lts__t_sector_hit_rate.pct": {
+            "value": 57.705091,
+            "unit": "%"
+          },
+          "lts__t_sectors_lookup_miss.sum": {
+            "value": 10532330.0,
+            "unit": "sector"
+          },
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+            "value": 0.0,
+            "unit": "%"
+          }
+        }
+      },
+      {
+        "name": "thor3-d875-warm-candidate-fc2-01",
+        "receipt_sha256": "468541dd52e9468f6ec51e8666c26e48e0f18b95654c1e71c3650c4819aebee3",
+        "controller_sha256": "f6b276fd5e7bd0cb6361abf3930c129b44a914f7d2d23f8689d82887e4f75040",
+        "report_sha256": "8bdfbd36e6b382409130d3b7838309cf8f8c7446d0aa13962107f225c07df184",
+        "raw_CSV_sha256": "566c200036da2c46bddb1b47846f845483ef6962b0c7058ea2badbfcc75aec41",
+        "stdout_sha256": "90053773fe712af80d14e3c7b1bbbe350d3a8071704deced3413c8c609b36948",
+        "source_NCU_sha256": "a44ff2c735c4dcf66c78f3f430155805d6a0b1f74f26331f98ecec03bfbf3f1a",
+        "permission_receipt_sha256": "40b6af1d8804219410fbf9e5b80ca37ce369617117710edaa9572928e6a6ef98",
+        "replay_executions": 4,
+        "each_execution_warmups": 2,
+        "each_execution_measured": 1,
+        "all_CFG_full_output_FNV_MTP_work_exact": true,
+        "source_and_AOT_historic_guards_ok": true,
+        "frequency_samples": 380,
+        "frequency_restored": true,
+        "selected_M4_proven": false,
+        "requested_metrics": [
+          "gpu__time_duration.sum",
+          "lts__t_sector_hit_rate.pct",
+          "lts__t_sectors_lookup_miss.sum",
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed"
+        ],
+        "counters": {
+          "gpu__time_duration.sum": {
+            "value": 1.35552,
+            "unit": "ms"
+          },
+          "lts__t_sector_hit_rate.pct": {
+            "value": 52.161041,
+            "unit": "%"
+          },
+          "lts__t_sectors_lookup_miss.sum": {
+            "value": 9287919.0,
+            "unit": "sector"
+          },
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+            "value": 0.0,
+            "unit": "%"
+          }
+        }
+      },
+      {
+        "name": "thor3-d875-warm-parent-fc1-01",
+        "receipt_sha256": "8c1d7389eed6d547300225feff792bcfe0d573fdadce6f7eb3b8b11391e36ceb",
+        "controller_sha256": "f6b276fd5e7bd0cb6361abf3930c129b44a914f7d2d23f8689d82887e4f75040",
+        "report_sha256": "83602c823b5eff5db67cafbf3aa0ec91cc69c334be6feb141bee76904601c093",
+        "raw_CSV_sha256": "20aabbbb1588593330cee51067920f4d5dd4ebda8a47448f2ddbf2de9276f65f",
+        "stdout_sha256": "e6d8a0c21c2fb3210084653345e6177ef370f8065e8ac5459c4b2c4364d7f362",
+        "source_NCU_sha256": "a44ff2c735c4dcf66c78f3f430155805d6a0b1f74f26331f98ecec03bfbf3f1a",
+        "permission_receipt_sha256": "40b6af1d8804219410fbf9e5b80ca37ce369617117710edaa9572928e6a6ef98",
+        "replay_executions": 4,
+        "each_execution_warmups": 2,
+        "each_execution_measured": 1,
+        "all_CFG_full_output_FNV_MTP_work_exact": true,
+        "source_and_AOT_historic_guards_ok": true,
+        "frequency_samples": 382,
+        "frequency_restored": true,
+        "selected_M4_proven": false,
+        "requested_metrics": [
+          "gpu__time_duration.sum",
+          "lts__t_sector_hit_rate.pct",
+          "lts__t_sectors_lookup_miss.sum",
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed"
+        ],
+        "counters": {
+          "gpu__time_duration.sum": {
+            "value": 2.03936,
+            "unit": "ms"
+          },
+          "lts__t_sector_hit_rate.pct": {
+            "value": 49.03819,
+            "unit": "%"
+          },
+          "lts__t_sectors_lookup_miss.sum": {
+            "value": 14857694.0,
+            "unit": "sector"
+          },
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+            "value": 0.0,
+            "unit": "%"
+          }
+        }
+      },
+      {
+        "name": "thor3-d875-warm-parent-fc2-01",
+        "receipt_sha256": "dc7c7cb503c47d54465cf591e5a177e851dae043af71851d8ec92e7d8be77ac7",
+        "controller_sha256": "f6b276fd5e7bd0cb6361abf3930c129b44a914f7d2d23f8689d82887e4f75040",
+        "report_sha256": "100f1dd34dad9ba91666d2a020fdcb2d41b52d68eb0fe7b62451a08897022785",
+        "raw_CSV_sha256": "ff7391fbc777b71d42166725da4ef5b2c7d0e930fe7114035929c4faf007ebe9",
+        "stdout_sha256": "1b901230e90e29162bdc9f4de4b89b4c01b20bf2b391192beea75ba6332cd347",
+        "source_NCU_sha256": "a44ff2c735c4dcf66c78f3f430155805d6a0b1f74f26331f98ecec03bfbf3f1a",
+        "permission_receipt_sha256": "40b6af1d8804219410fbf9e5b80ca37ce369617117710edaa9572928e6a6ef98",
+        "replay_executions": 4,
+        "each_execution_warmups": 2,
+        "each_execution_measured": 1,
+        "all_CFG_full_output_FNV_MTP_work_exact": true,
+        "source_and_AOT_historic_guards_ok": true,
+        "frequency_samples": 383,
+        "frequency_restored": true,
+        "selected_M4_proven": false,
+        "requested_metrics": [
+          "gpu__time_duration.sum",
+          "lts__t_sector_hit_rate.pct",
+          "lts__t_sectors_lookup_miss.sum",
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed"
+        ],
+        "counters": {
+          "gpu__time_duration.sum": {
+            "value": 1.770496,
+            "unit": "ms"
+          },
+          "lts__t_sector_hit_rate.pct": {
+            "value": 52.113712,
+            "unit": "%"
+          },
+          "lts__t_sectors_lookup_miss.sum": {
+            "value": 9287665.0,
+            "unit": "sector"
+          },
+          "lts__d_atomic_input_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+            "value": 9.688619,
+            "unit": "%"
+          }
+        }
+      }
+    ],
+    "FC2_L2_miss_delta_sectors": 254.0,
+    "FC2_L2_miss_basically_unchanged": true,
+    "first_kernel_only_not_all40": true,
+    "M4_only_FC1_no_more_Decode_counters": true,
+    "critical_f": "MISSING",
+    "DRAM_proof": "MISSING_NOT_MEASURED",
+    "new_model_gain": null
+  },
+  "full15": {
+    "status": "PASS_INDEPENDENT_RAW_COLLATION",
+    "matrix_summary_sha256": "67ff954338468e967e02ad018d099d203ebbeac10e68c4aed44b8bb092fa728c",
+    "raw_archive_sha256": "f0b9788b3110a2e6f3ef10736e6dba611c815519058bdfca542b2f732659a20d",
+    "curated_evidence": "commit-step-final15-thor3.json",
+    "append5_latency_reduction_vs_parent_geomean_percent": 6.85637,
+    "append5_latency_reduction_vs_frozenFinal_geomean_percent": 17.99715,
+    "decode6_throughput_vs_frozenFinal_geomean_percent": -0.04964
+  },
+  "target20_accepted": false,
+  "raw_archive_sha256": "bfbb5384d38cac73de5f9940433ee7ca23df4283c77c5e8c8bdaefd3b521585e",
+  "product_byte_bridge": {
+    "schema": "apxinf.direct_store.delivery_product_byte_bridge.v1",
+    "delivery_parent": "81e2e942",
+    "experimental_source": "d875b94d324315def839e206c99c3c7699d052c9",
+    "staged_code_identical_all_product_paths": true,
+    "only_working_tree_differences_vs_experiment": [
+      "doc/qwen35-thoru/optimization-history/GDN_PREFILL_TEMPORAL4_THOR3.md",
+      "doc/qwen35-thoru/optimization-history/README.md",
+      "doc/qwen35-thoru/optimization-history/evidence/gdn-prefill-temporal4-thor3.json"
+    ],
+    "actual_build_receipt_sha256": "15a020d458e80add4e1e6cc0891d9a471efbd9df70cc03eeae2da984976e18ff",
+    "native_sha256": "774365178ce4680d09c9c3fbc531e832cf9d67a2c128450635686ed78428fad3",
+    "model_context_ELF_sha256": "7667d8e908d08d0f110e1811eee913438f0d6087220ca9ebd1227ebb1da3a5a2",
+    "model_MTP_ELF_sha256": "588a3275b12a7ce01ad8b5edde0cc62f25e0363ff9dfcd279c7011715416f44e",
+    "fresh_product_rebuild_claimed": false,
+    "bridge_reason": "Only curated formal documents differ; product sources and common validation overlay retain actual immutable d875 build identity. No GPU rerun for documentation."
+  },
+  "NCU_independent_review_sha256": "86b64c5feff6c8513c875c4cad3c70c66b8b96290e9dd1b3c4d3a521c384551b",
+  "current_final_fair_evidence": "current-final-fair-thor3.json",
+  "remote_publication_separate_from_benchmark": true
+}

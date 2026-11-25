@@ -104,4 +104,6 @@ Prefix Cache 的1/64新增token是热态exact/live cache结果，第一次真正
 
 ## 2026-11-26 Thor3 追加 Prefill
 
-[GDN 四 token 卷积复用](GDN_PREFILL_TEMPORAL4_THOR3.md)：受影响模型正式 N5 时延降低 0.91% / 1.12%，成对 NSys 支持组件归因；完整逐提交矩阵与远程 Final 推送待完成。两个 20% 目标尚未达标。
+[GDN 四 token 卷积复用](GDN_PREFILL_TEMPORAL4_THOR3.md)：受影响模型正式 N5 时延降低 0.91% / 1.12%，成对 NSys 支持组件归因；完整逐提交矩阵已通过，两个20%目标尚未达标。
+
+[FC2 直接写回](FC2_DIRECT_STORE_THOR3.md)：受影响 N5 端到端时延降低 8.83% / 7.28%，全五档 N10 较卷积父版降低 6.86%（几何平均）。[完整逐提交 15 项矩阵](COMMIT_STEP_FINAL15_THOR3.md)保留所有负点；两项整体20%目标未达；[当前Final4K/32K公平复核](CURRENT_FINAL_FAIR_THOR3.md)已通过。

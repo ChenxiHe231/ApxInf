@@ -35,6 +35,9 @@ using apxinf::framework::Failure;
   } while (0)
 #include "generated/nvfp4_moe_sm110_fc1_swiglu_n128.h"
 #include "generated/nvfp4_moe_sm110_fc2_n128_bf16.h"
+#if CUDART_VERSION >= 13020
+#include "generated/nvfp4_moe_sm110_fc2_n128_store_bf16.h"
+#endif
 #undef CUTE_DSL_CUDA_ERROR_CHECK
 
 namespace {
@@ -360,6 +363,61 @@ __global__ __launch_bounds__(512, 4) void quantize_routed_token_kernel(
   }
 }
 
+#if CUDART_VERSION >= 13020
+// Store-only prefill guard: invalid route slots have no GEMM writer. Clear just
+// their BF16 C row before any scale access; no valid route receives a clear.
+__device__ __forceinline__ void quantize_or_zero_store_route(
+    int token, int64_t row, int hidden, const __nv_bfloat16* input,
+    const int32_t* expert_ids, const float* expert_scales,
+    uint32_t* output_fp4, uint8_t* output_sf, uint16_t* expanded_output) {
+  const int expert = expert_ids[row];
+  if (expert < 0 || expert >= 256) {
+    for (int column = threadIdx.x; column < hidden; column += blockDim.x)
+      expanded_output[row * hidden + column] = uint16_t(0);
+    return;
+  }
+  quantize_row(input + static_cast<int64_t>(token) * hidden, hidden,
+               expert_scales[expert], output_fp4 + row * hidden / 8,
+               output_sf + row * hidden / kSfVecSize);
+}
+__global__ __launch_bounds__(512, 4) void quantize_routed_store_kernel(
+    int tokens, int top_k, int hidden, const __nv_bfloat16* input,
+    const int32_t* expert_ids, const float* expert_scales,
+    uint32_t* output_fp4, uint8_t* output_sf, uint16_t* expanded_output) {
+  for (int row = blockIdx.x; row < tokens * top_k; row += gridDim.x)
+    quantize_or_zero_store_route(row / top_k, row, hidden, input, expert_ids,
+                                expert_scales, output_fp4, output_sf, expanded_output);
+}
+__global__ __launch_bounds__(512, 4) void quantize_routed_token_store_kernel(
+    int tokens, int hidden, const __nv_bfloat16* input,
+    const int32_t* expert_ids, const float* expert_scales,
+    uint32_t* output_fp4, uint8_t* output_sf, uint16_t* expanded_output) {
+  constexpr int kTopK = 8;
+  const int lane = threadIdx.x & 31;
+  for (int token = blockIdx.x; token < tokens; token += gridDim.x) {
+    const int64_t first_row = static_cast<int64_t>(token) * kTopK;
+    const int expert = expert_ids[first_row + (lane & (kTopK - 1))];
+    const bool all_valid = __all_sync(0xffffffff, expert >= 0 && expert < 256);
+    if (all_valid) {
+      const float scale = expert_scales[expert];
+      const uint32_t first_bits = __shfl_sync(0xffffffff, __float_as_uint(scale), 0);
+      const bool equal = __all_sync(0xffffffff, __float_as_uint(scale) == first_bits);
+      if (equal) {
+        quantize_row<kTopK>(input + static_cast<int64_t>(token) * hidden, hidden,
+                           __uint_as_float(first_bits), output_fp4 + first_row * hidden / 8,
+                           output_sf + first_row * hidden / kSfVecSize);
+        continue;
+      }
+    }
+#pragma unroll
+    for (int route = 0; route < kTopK; ++route)
+      quantize_or_zero_store_route(token, first_row + route, hidden, input,
+                                  expert_ids, expert_scales, output_fp4, output_sf,
+                                  expanded_output);
+  }
+}
+#endif
+
 __global__ __launch_bounds__(512, 4) void small_batch_setup_kernel(
     int tokens, int top_k, int hidden, int experts, const __nv_bfloat16* input,
     const int32_t* expert_ids, const float* expert_scales,
@@ -480,6 +538,23 @@ void ensure_modules() {
   });
 }
 
+#if CUDART_VERSION >= 13020
+// This fixed AOT is single-CTA-cluster, complete-K, and has one writer per
+// private expanded route/channel. Decode M1/M4 retains the original provider.
+bool uses_direct_store(const apxinf_moe_edge_nvfp4_spec_t& spec) {
+  return spec.dtype == APXINF_DTYPE_BF16 && spec.tokens > 4 &&
+         spec.hidden == 2048 && spec.intermediate == 512 &&
+         spec.experts == 256 && spec.top_k == 8;
+}
+std::once_flag store_module_once;
+nvfp4_moe_sm110_fc2_n128_store_bf16_Kernel_Module_t store_module{};
+void ensure_store_module() {
+  std::call_once(store_module_once, [] {
+    nvfp4_moe_sm110_fc2_n128_store_bf16_Kernel_Module_Load(&store_module);
+  });
+}
+
+#endif
 void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
             const apxinf_moe_edge_nvfp4_bindings_t& bindings) {
   if (runtime == nullptr) {
@@ -512,7 +587,15 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
     throw Failure(APXINF_STATUS_INVALID_ARGUMENT,
                   "Edge NVFP4 MoE workspace is too small");
   }
+#if CUDART_VERSION >= 13020
+  const bool direct_store = sm == 110 && uses_direct_store(spec);
+#else
+  constexpr bool direct_store = false;
+#endif
   ensure_modules();
+#if CUDART_VERSION >= 13020
+  if (direct_store) ensure_store_module();
+#endif
 
   auto* input_fp4 = at<uint32_t>(bindings.workspace, layout.input_fp4);
   auto* input_sf = at<uint8_t>(bindings.workspace, layout.input_sf);
@@ -571,15 +654,37 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
     const int grid = std::min(routes, properties.multiProcessorCount * blocks_per_sm);
     if (spec.hidden == 2048 && spec.top_k == 8 && spec.tokens >= static_cast<uint32_t>(grid)) {
       const int token_grid = std::min(static_cast<int>(spec.tokens), grid);
-      quantize_routed_token_kernel<<<token_grid, 256, 0, stream>>>(
-          spec.tokens, spec.hidden,
-          static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
-          bindings.input_global_scale, input_fp4, input_sf);
+#if CUDART_VERSION >= 13020
+      if (direct_store) {
+        quantize_routed_token_store_kernel<<<token_grid, 256, 0, stream>>>(
+            spec.tokens, spec.hidden,
+            static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
+            bindings.input_global_scale, input_fp4, input_sf,
+            static_cast<uint16_t*>(fc2_output));
+      } else
+#endif
+      {
+        quantize_routed_token_kernel<<<token_grid, 256, 0, stream>>>(
+            spec.tokens, spec.hidden,
+            static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
+            bindings.input_global_scale, input_fp4, input_sf);
+      }
     } else {
-      quantize_routed_kernel<<<grid, std::min(column_threads, kThreads), 0, stream>>>(
-          spec.tokens, spec.top_k, spec.hidden,
-          static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
-          bindings.input_global_scale, input_fp4, input_sf);
+#if CUDART_VERSION >= 13020
+      if (direct_store) {
+        quantize_routed_store_kernel<<<grid, std::min(column_threads, kThreads), 0, stream>>>(
+            spec.tokens, spec.top_k, spec.hidden,
+            static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
+            bindings.input_global_scale, input_fp4, input_sf,
+            static_cast<uint16_t*>(fc2_output));
+      } else
+#endif
+      {
+        quantize_routed_kernel<<<grid, std::min(column_threads, kThreads), 0, stream>>>(
+            spec.tokens, spec.top_k, spec.hidden,
+            static_cast<const __nv_bfloat16*>(bindings.input), bindings.expert_ids,
+            bindings.input_global_scale, input_fp4, input_sf);
+      }
     }
   }
   apxinf::framework::check_cuda(cudaGetLastError());
@@ -590,7 +695,7 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
   int result = cute_dsl_nvfp4_moe_sm110_fc1_swiglu_n128_wrapper(
       &fc1_module, input_fp4, const_cast<void*>(bindings.fc1_weight), input_sf,
       const_cast<void*>(bindings.fc1_scales), fc1_fp4, fc1_sf, fc2_output,
-      static_cast<int64_t>(expanded_elements), 1,
+      static_cast<int64_t>(expanded_elements), direct_store ? 0 : 1,
       const_cast<float*>(bindings.fc1_alpha),
       const_cast<float*>(bindings.input_global_scale),
       const_cast<float*>(bindings.down_input_scale), tile_group, tile_limit,
@@ -602,14 +707,28 @@ void launch(apxinf_runtime_t runtime, const apxinf_moe_edge_nvfp4_spec_t& spec,
   }
   apxinf::framework::check_cuda(cudaGetLastError());
 
-  result = cute_dsl_nvfp4_moe_sm110_fc2_n128_bf16_wrapper(
-      &fc2_module, fc1_fp4, const_cast<void*>(bindings.fc2_weight), fc1_sf,
-      const_cast<void*>(bindings.fc2_scales), fc2_output,
-      const_cast<float*>(bindings.fc2_alpha),
-      const_cast<float*>(bindings.down_input_scale), tile_group, tile_limit,
-      permutation, num_tiles, const_cast<float*>(bindings.expert_weights), m,
-      spec.hidden, spec.intermediate, spec.experts, routes, 1,
-      properties.multiProcessorCount, pdl, stream);
+#if CUDART_VERSION >= 13020
+  if (direct_store) {
+    result = cute_dsl_nvfp4_moe_sm110_fc2_n128_store_bf16_wrapper(
+        &store_module, fc1_fp4, const_cast<void*>(bindings.fc2_weight), fc1_sf,
+        const_cast<void*>(bindings.fc2_scales), fc2_output,
+        const_cast<float*>(bindings.fc2_alpha),
+        const_cast<float*>(bindings.down_input_scale), tile_group, tile_limit,
+        permutation, num_tiles, const_cast<float*>(bindings.expert_weights), m,
+        spec.hidden, spec.intermediate, spec.experts, routes, 1,
+        properties.multiProcessorCount, pdl, stream);
+  } else
+#endif
+  {
+    result = cute_dsl_nvfp4_moe_sm110_fc2_n128_bf16_wrapper(
+        &fc2_module, fc1_fp4, const_cast<void*>(bindings.fc2_weight), fc1_sf,
+        const_cast<void*>(bindings.fc2_scales), fc2_output,
+        const_cast<float*>(bindings.fc2_alpha),
+        const_cast<float*>(bindings.down_input_scale), tile_group, tile_limit,
+        permutation, num_tiles, const_cast<float*>(bindings.expert_weights), m,
+        spec.hidden, spec.intermediate, spec.experts, routes, 1,
+        properties.multiProcessorCount, pdl, stream);
+  }
   if (result != 0) {
     throw Failure(APXINF_STATUS_PROVIDER_ERROR,
                   "Edge NVFP4 MoE FC2 returned " + std::to_string(result));
