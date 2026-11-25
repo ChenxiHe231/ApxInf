@@ -817,6 +817,114 @@ __global__ void fused_conv_prepare_kernel(
   }
 }
 
+
+template<int HeadsPerBlock>
+__global__ void fused_conv_prepare_temporal4_kernel(
+    const __nv_bfloat16* input, const __nv_bfloat16* weights,
+    const float* initial_window,
+    __half* query, __half* key, __half* value, const float* decay,
+    float* alpha, int tokens, int key_heads, int value_heads, float epsilon) {
+  const int first_token = blockIdx.x * 4;
+  const int lane = threadIdx.x % 32;
+  const int warp = threadIdx.x / 32;
+  const int heads = 2 * key_heads + value_heads;
+  const int channels = heads * 128;
+  const int first_head = blockIdx.y * HeadsPerBlock;
+  for (int head = first_head + warp; head < min(heads, first_head + HeadsPerBlock); head += 8) {
+    // Keep the original four-tap arithmetic and reuse only its source values.
+    float history[3][4];
+    float coefficients[4][4];
+#pragma unroll
+    for (int part = 0; part < 4; ++part) {
+      const int channel = head * 128 + part * 32 + lane;
+#pragma unroll
+      for (int tap = 0; tap < 4; ++tap)
+        coefficients[tap][part] = __bfloat162float(weights[channel * 4 + tap]);
+#pragma unroll
+      for (int prior = 0; prior < 3; ++prior) {
+        const int source_token = first_token - 3 + prior;
+        history[prior][part] = source_token < 0
+            ? initial_window[(long long)channel * 4 + source_token + 4]
+            : __bfloat162float(input[(long long)source_token * channels + channel]);
+      }
+    }
+#pragma unroll 1
+    for (int step = 0; step < 4; ++step) {
+      const int token = first_token + step;
+      float current[4];
+      float values[4];
+      float sums[4];
+#pragma unroll
+      for (int part = 0; part < 4; ++part) {
+        const int channel = head * 128 + part * 32 + lane;
+        current[part] = __bfloat162float(input[(long long)token * channels + channel]);
+        float accumulator = 0.0f;
+#pragma unroll
+        for (int tap = 0; tap < 4; ++tap) {
+          const float sample = tap < 3 ? history[tap][part] : current[part];
+          accumulator += sample * coefficients[tap][part];
+        }
+        values[part] = __bfloat162float(__float2bfloat16(accumulator / (1.0f + __expf(-accumulator))));
+        sums[part] = 0.0f;
+        sums[part] += values[part] * values[part];
+      }
+      if (head < 2 * key_heads) {
+#pragma unroll
+        for (int shift = 16; shift > 0; shift >>= 1) {
+#pragma unroll
+          for (int part = 0; part < 4; ++part)
+            sums[part] += __shfl_down_sync(0xffffffffu, sums[part], shift);
+        }
+        float total = 0.0f;
+#pragma unroll
+      for (int part = 0; part < 4; ++part) total += sums[part];
+      total = __shfl_sync(0xffffffffu, total, 0);
+      const float inverse = rsqrtf(total + epsilon);
+      __half* destination = head < key_heads ? query : key;
+      const long long offset = ((long long)token * key_heads + head % key_heads) * 128;
+#pragma unroll
+      for (int part = 0; part < 4; ++part)
+        destination[offset + part * 32 + lane] = __float2half(values[part] * inverse);
+    } else {
+      const int value_head = head - 2 * key_heads;
+      const long long offset = ((long long)token * value_heads + value_head) * 128;
+#pragma unroll
+      for (int part = 0; part < 4; ++part)
+        value[offset + part * 32 + lane] = __float2half(values[part]);
+      if (lane == 0) alpha[(long long)token * value_heads + value_head] = __expf(decay[(long long)token * value_heads + value_head]);
+    }
+#pragma unroll
+      for (int part = 0; part < 4; ++part) {
+        history[0][part] = history[1][part];
+        history[1][part] = history[2][part];
+        history[2][part] = current[part];
+      }
+    }
+  }
+}
+
+// Restrict temporal reuse to disjoint storage; preserve the original dispatch
+// for callers whose buffers overlap, without adding aliasing assumptions.
+bool conv_temporal_storage_disjoint(const void* input, const void* weight,
+                                   const void* window, const void* query,
+                                   const void* key, const void* value,
+                                   const void* decay, const void* alpha) {
+  const void* pointers[] = {input, weight, window, query, key, value, decay, alpha};
+  constexpr uintptr_t lengths[] = {
+      4096ULL * 8192 * 2, 8192ULL * 4 * 2, 8192ULL * 4 * 4,
+      4096ULL * 16 * 128 * 2, 4096ULL * 16 * 128 * 2,
+      4096ULL * 32 * 128 * 2, 4096ULL * 32 * 4, 4096ULL * 32 * 4};
+  for (int i = 0; i < 8; ++i) {
+    const uintptr_t begin = reinterpret_cast<uintptr_t>(pointers[i]);
+    if (begin == 0 || begin > UINTPTR_MAX - lengths[i]) return false;
+    for (int j = 0; j < i; ++j) {
+      const uintptr_t other = reinterpret_cast<uintptr_t>(pointers[j]);
+      if (begin < other + lengths[j] && other < begin + lengths[i]) return false;
+    }
+  }
+  return true;
+}
+
 __global__ void conv_final_window_kernel(const __nv_bfloat16* input, float* window, int tokens, int channels) {
   const int index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= channels * 4) return;
@@ -934,12 +1042,24 @@ int gdn_conv_prepare(const void* input, const void* weight,
     return -1;
   const int channels = static_cast<int>(channel_count);
   const int head_groups = (2 * k_heads + v_heads + 79) / 80;
+  const bool temporal4 = tokens == 4096 && k_heads == 16 && v_heads == 32 &&
+      conv_temporal_storage_disjoint(input, weight, window, q_out, k_out, v_out,
+                                     decay, alpha);
+  if (temporal4) {
+  fused_conv_prepare_temporal4_kernel<80><<<dim3(tokens / 4, head_groups), 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(weight), static_cast<const float*>(window),
+      static_cast<__half*>(q_out), static_cast<__half*>(k_out), static_cast<__half*>(v_out),
+      static_cast<const float*>(decay), static_cast<float*>(alpha),
+      tokens, k_heads, v_heads, epsilon);
+  } else {
   fused_conv_prepare_kernel<80><<<dim3(tokens, head_groups), 256, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(input),
       static_cast<const __nv_bfloat16*>(weight), static_cast<const float*>(window),
       static_cast<__half*>(q_out), static_cast<__half*>(k_out), static_cast<__half*>(v_out),
       static_cast<const float*>(decay), static_cast<float*>(alpha),
       tokens, k_heads, v_heads, epsilon);
+  }
   const auto result = cudaGetLastError();
   if (result != cudaSuccess) return static_cast<int>(result);
   conv_final_window_kernel<<<(channels * 4 + 255LL) / 256, 256, 0, stream>>>(

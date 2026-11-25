@@ -101,3 +101,7 @@ Prefix Cache 的1/64新增token是热态exact/live cache结果，第一次真正
 另已恢复声明为 `2c24e07` 的历史部署包：二进制 SHA256 已核对，5轮 AIOS 输出、逐调用 profile 和 HTTP 时间戳可复查；源码归属只有包内声明，未建立干净重建证明。日期审计发现 UTC/上海跨午夜歧义，旧“5/5成功”不能当成5轮日期正确。详见该版本记录与 `evidence/2c24e07-package-weather.json`。
 
 历史 AMap 记录为两次模型 HTTP 之间的间隔，包含调度与序列化，不等于纯 API 时间。新实测直接读取 AIOS 的工具执行时长；剩余编排间隔归入余项。模型时间以 server profile 为准；TTFT 包括缓存恢复及首 token。其余为差值，不能据此宣称 AIOS 或 AMap 被 kernel 优化加速。旧 3.92 s 表无可定位的完整 trace，不能用于分阶段增益归因。
+
+## 2026-11-26 Thor3 追加 Prefill
+
+[GDN 四 token 卷积复用](GDN_PREFILL_TEMPORAL4_THOR3.md)：受影响模型正式 N5 时延降低 0.91% / 1.12%，成对 NSys 支持组件归因；完整逐提交矩阵与远程 Final 推送待完成。两个 20% 目标尚未达标。

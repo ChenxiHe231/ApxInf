@@ -1,0 +1,1098 @@
+{
+  "schema": "apxinf.conv_temporal4.curated_delivery.v1",
+  "status": "AFFECTED_FORMAL_AND_PAIRED_NSYS_PASS; FINAL15_MERGE_ACCEPTANCE_PENDING",
+  "parent_commit": "39784163d32a82ccc059db4f5c519a7dac26c7e0",
+  "experiment_source_commit_not_delivery": "b6a440c5bde534fe2384db9da2d8322ce162bdb5",
+  "delivery_commit": "CONTAINING_COMMIT",
+  "source_composition": {
+    "parent_gdn_sha256": "f644ef64e4c592b90e0f854d569d6deba24ed64af98f1315234e350de4fa1305",
+    "candidate_gdn_sha256": "64d08fcc11f1da03db0ec01b77cb5b757a7cad8cebdbc4347805d436e927f382",
+    "prior_FP16_norm_function_byte_exact": true,
+    "temporal4_function_guard_and_dispatch_exact_to_operator_validated_source": true,
+    "changed_core_paths": [
+      "crates/apxinf-cuda-new/native/kernels/custom/gdn_ops.cu"
+    ]
+  },
+  "formal": [
+    {
+      "case": "append-4k",
+      "order": [
+        "parent",
+        "candidate"
+      ],
+      "parent_ms": 457.6329674,
+      "candidate_ms": 453.4791502,
+      "reduction_percent": 0.9076743801041065,
+      "parent_samples_ms": [
+        457.732307,
+        457.538271,
+        457.244059,
+        460.13099,
+        455.51921
+      ],
+      "candidate_samples_ms": [
+        454.446641,
+        452.563004,
+        456.249264,
+        452.58716799999996,
+        451.54967400000004
+      ],
+      "parent_stdev_ms": 1.6491037538658115,
+      "candidate_stdev_ms": 1.8686494738374997,
+      "output_ids": [
+        220
+      ],
+      "digest": "c8bbed67024e3c09",
+      "speculation": {
+        "accepted_prefix_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "bonus_tokens": 0,
+        "committed_accepted_tokens": 0,
+        "correction_tokens": 0,
+        "draft_steps": 3,
+        "emitted_tokens": 0,
+        "full_accept_rounds": 0,
+        "implementation": "qwen3.6_moe_adaptive_mtp",
+        "matched_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "partial_accept_rounds": 0,
+        "proposed_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "proposed_tokens": 0,
+        "rounds": 0,
+        "target_committed_rows": 0,
+        "target_rolled_back_rows": 0,
+        "target_verified_rows": 0,
+        "verified_accepted_tokens": 0,
+        "zero_accept_rounds": 0
+      },
+      "full_vector_and_work_exact": true,
+      "argv_parent": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe397-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "8196",
+        "--prefix-tokens",
+        "4096",
+        "--input-tokens",
+        "4096"
+      ],
+      "argv_candidate": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe-conv-b6-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "8196",
+        "--prefix-tokens",
+        "4096",
+        "--input-tokens",
+        "4096"
+      ]
+    },
+    {
+      "case": "append-32k",
+      "order": [
+        "candidate",
+        "parent"
+      ],
+      "parent_ms": 625.3781142,
+      "candidate_ms": 618.3745342,
+      "reduction_percent": 1.1198952827057629,
+      "parent_samples_ms": [
+        623.265046,
+        625.6158889999999,
+        623.9759280000001,
+        629.178453,
+        624.855255
+      ],
+      "candidate_samples_ms": [
+        619.18729,
+        618.587122,
+        619.57145,
+        615.534582,
+        618.992227
+      ],
+      "parent_stdev_ms": 2.3023725236506856,
+      "candidate_stdev_ms": 1.6267487428063958,
+      "output_ids": [
+        3734
+      ],
+      "digest": "f8dded1f65ccaf0d",
+      "speculation": {
+        "accepted_prefix_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "bonus_tokens": 0,
+        "committed_accepted_tokens": 0,
+        "correction_tokens": 0,
+        "draft_steps": 3,
+        "emitted_tokens": 0,
+        "full_accept_rounds": 0,
+        "implementation": "qwen3.6_moe_adaptive_mtp",
+        "matched_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "partial_accept_rounds": 0,
+        "proposed_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "proposed_tokens": 0,
+        "rounds": 0,
+        "target_committed_rows": 0,
+        "target_rolled_back_rows": 0,
+        "target_verified_rows": 0,
+        "verified_accepted_tokens": 0,
+        "zero_accept_rounds": 0
+      },
+      "full_vector_and_work_exact": true,
+      "argv_parent": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe397-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "36868",
+        "--prefix-tokens",
+        "32768",
+        "--input-tokens",
+        "4096"
+      ],
+      "argv_candidate": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe-conv-b6-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "5",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "36868",
+        "--prefix-tokens",
+        "32768",
+        "--input-tokens",
+        "4096"
+      ]
+    }
+  ],
+  "short_screen_not_formal": [
+    {
+      "case": "append-4k",
+      "order": [
+        "parent",
+        "candidate"
+      ],
+      "parent_ms": 461.508157,
+      "candidate_ms": 451.33064966666666,
+      "reduction_percent": 2.2052713866405838,
+      "parent_samples_ms": [
+        465.34578700000003,
+        459.11324599999995,
+        460.065438
+      ],
+      "candidate_samples_ms": [
+        451.249348,
+        452.319938,
+        450.422663
+      ],
+      "parent_stdev_ms": 3.3574127559612448,
+      "candidate_stdev_ms": 0.951246853954489,
+      "output_ids": [
+        220
+      ],
+      "digest": "c8bbed67024e3c09",
+      "speculation": {
+        "accepted_prefix_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "bonus_tokens": 0,
+        "committed_accepted_tokens": 0,
+        "correction_tokens": 0,
+        "draft_steps": 3,
+        "emitted_tokens": 0,
+        "full_accept_rounds": 0,
+        "implementation": "qwen3.6_moe_adaptive_mtp",
+        "matched_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "partial_accept_rounds": 0,
+        "proposed_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "proposed_tokens": 0,
+        "rounds": 0,
+        "target_committed_rows": 0,
+        "target_rolled_back_rows": 0,
+        "target_verified_rows": 0,
+        "verified_accepted_tokens": 0,
+        "zero_accept_rounds": 0
+      },
+      "full_vector_and_work_exact": true,
+      "argv_parent": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe397-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "3",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "8196",
+        "--prefix-tokens",
+        "4096",
+        "--input-tokens",
+        "4096"
+      ],
+      "argv_candidate": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe-conv-b6-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "3",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "8196",
+        "--prefix-tokens",
+        "4096",
+        "--input-tokens",
+        "4096"
+      ]
+    },
+    {
+      "case": "append-32k",
+      "order": [
+        "candidate",
+        "parent"
+      ],
+      "parent_ms": 624.9156773333333,
+      "candidate_ms": 617.3056143333333,
+      "reduction_percent": 1.2177743775726557,
+      "parent_samples_ms": [
+        624.3581019999999,
+        624.105664,
+        626.2832659999999
+      ],
+      "candidate_samples_ms": [
+        616.321597,
+        619.208315,
+        616.386931
+      ],
+      "parent_stdev_ms": 1.1910731744343928,
+      "candidate_stdev_ms": 1.6481108891968637,
+      "output_ids": [
+        3734
+      ],
+      "digest": "f8dded1f65ccaf0d",
+      "speculation": {
+        "accepted_prefix_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "bonus_tokens": 0,
+        "committed_accepted_tokens": 0,
+        "correction_tokens": 0,
+        "draft_steps": 3,
+        "emitted_tokens": 0,
+        "full_accept_rounds": 0,
+        "implementation": "qwen3.6_moe_adaptive_mtp",
+        "matched_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "partial_accept_rounds": 0,
+        "proposed_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "proposed_tokens": 0,
+        "rounds": 0,
+        "target_committed_rows": 0,
+        "target_rolled_back_rows": 0,
+        "target_verified_rows": 0,
+        "verified_accepted_tokens": 0,
+        "zero_accept_rounds": 0
+      },
+      "full_vector_and_work_exact": true,
+      "argv_parent": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe397-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "3",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "36868",
+        "--prefix-tokens",
+        "32768",
+        "--input-tokens",
+        "4096"
+      ],
+      "argv_candidate": [
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/final15/artifacts/safe-conv-b6-validation-01/qwen35_context_bench",
+        "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+        "--device",
+        "0",
+        "--mode",
+        "mtp",
+        "--qwen35-moe-activation",
+        "nvfp4",
+        "--qwen35-kv-cache",
+        "fp8_dynamic",
+        "--tuning-dir",
+        "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+        "--warmups",
+        "2",
+        "--repeats",
+        "3",
+        "--max-new",
+        "1",
+        "--kv-capacity",
+        "36868",
+        "--prefix-tokens",
+        "32768",
+        "--input-tokens",
+        "4096"
+      ]
+    }
+  ],
+  "operator_screen_not_model": [
+    {
+      "order": "AB",
+      "samples_ms": {
+        "parent": [
+          1.181280017,
+          1.187999964,
+          1.194496036
+        ],
+        "candidate": [
+          1.001952052,
+          1.02681601,
+          0.99772799
+        ]
+      },
+      "mean_ms": {
+        "parent": 1.187925339,
+        "candidate": 1.0088320173333334
+      },
+      "reduction_percent": 15.07614290115471,
+      "event_includes_launch_supply_gaps": true,
+      "model_E2E": false,
+      "stdout_sha256": "06cd76e85b75571a1af381cc4a63f9cbd58f2bde9f520ddf400d52bbda709e4f"
+    },
+    {
+      "order": "BA",
+      "samples_ms": {
+        "parent": [
+          1.198176026,
+          1.181952,
+          1.179360032
+        ],
+        "candidate": [
+          1.000031948,
+          1.014368057,
+          1.000223994
+        ]
+      },
+      "mean_ms": {
+        "parent": 1.1864960193333334,
+        "candidate": 1.0048746663333332
+      },
+      "reduction_percent": 15.307371456842244,
+      "event_includes_launch_supply_gaps": true,
+      "model_E2E": false,
+      "stdout_sha256": "44d2d360b0d6f4bf4e781958a279275ffab7c9a6c98419287c1300b270aaf424"
+    }
+  ],
+  "operator_precision": {
+    "receipt_sha256": "65d03ae340396cc27ae7061c652ebc9afded448cf8382b6a2c14a4764213dc88",
+    "boundary_cases": [
+      1,
+      4,
+      4095,
+      4097
+    ],
+    "Graph_replays": 4,
+    "finite_readonly_canary": true
+  },
+  "raw_verification": {
+    "strict": {
+      "summary_path": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/safe-conv-b6-model-evidence-01/safe-conv-b6-strict-01/summary.json",
+      "summary_sha256": "d82b2107568c3a61c4af7fc8e14739cb4f9fb926dde98b5baee9eb578d207929",
+      "frequency_sha256": "82ced36cdcfa5090cf2169e454bab6d41cceaff3046369c218927eaca452d048",
+      "frequency_samples": 103,
+      "all_raw_reparsed": true,
+      "all_tokens_FNV_work_exact": true,
+      "recipes_unchanged": true,
+      "whole_matrix_complete": false
+    },
+    "screen": {
+      "summary_path": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/safe-conv-b6-model-evidence-01/safe-conv-b6-screen-01/summary.json",
+      "summary_sha256": "0c984edec54579d05de1a6e88db0a1deb076034cfd4c0b82b3fa8ad5a935a804",
+      "frequency_sha256": "ce043e845d41c4c9177fb86100a76d33e409054638fa5a346f50bebbd26d6414",
+      "frequency_samples": 264,
+      "all_raw_reparsed": true,
+      "all_tokens_FNV_work_exact": true,
+      "recipes_unchanged": true,
+      "whole_matrix_complete": false
+    },
+    "formal": {
+      "summary_path": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/summary.json",
+      "summary_sha256": "c47474059a88629438de705bb0e09c57a903abecf8969fa4acd92b46b62a77ef",
+      "frequency_sha256": "7011c3181bd1b4a119c1c66a57b1bee59b6207e5f558b105ee0570e1423944be",
+      "frequency_samples": 308,
+      "all_raw_reparsed": true,
+      "all_tokens_FNV_work_exact": true,
+      "recipes_unchanged": true,
+      "whole_matrix_complete": false
+    }
+  },
+  "raw_file_hashes": {
+    "results/safe397-final15-evidence-01/safe397-strict-01/decode-4k/stdout.jsonl": "63edd6a311a0724254b83525299b3c63fd1114d5a39851a894bd36698cc41cf4",
+    "results/safe397-final15-evidence-01/safe397-strict-01/decode-4k/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe397-final15-evidence-01/safe397-strict-01/append-4k/stdout.jsonl": "9af9b4b028263249ddfeb2835f66e274b98d9cdf61d59b8e6e8640ee8329b9c8",
+    "results/safe397-final15-evidence-01/safe397-strict-01/append-4k/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe397-final15-evidence-01/safe397-strict-01/append-32k/stdout.jsonl": "9007187e0818602494616c2927fedfac44d28e82cf819b3904c5a8182e918cf6",
+    "results/safe397-final15-evidence-01/safe397-strict-01/append-32k/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-strict-01/decode-4k/candidate/stdout.jsonl": "d11f0d67eb9c9bd3b49cbe54c6b85599ded456248c8f8cb550145d9d1a13538c",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-strict-01/decode-4k/candidate/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-strict-01/append-32k/candidate/stdout.jsonl": "11e7fdf12378d046378fa5df6c9f736e08d5e2ead026ae39c57a8385dd718c1e",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-strict-01/append-32k/candidate/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-screen-01/append-4k/parent/stdout.jsonl": "6c7a9dfec29eab774e24b91c6680ca1969941f693c4826afc1e522d1c097f195",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-screen-01/append-4k/parent/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-screen-01/append-4k/candidate/stdout.jsonl": "b4e58499c78d405d83bccd010f3882e9fe1a285cd7be3d120b0ef24c746c24f0",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-screen-01/append-4k/candidate/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-screen-01/append-32k/candidate/stdout.jsonl": "a51f5020ee6f071d86fdc46cc46b116e6eb87d740a402a88f339a913799ca008",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-screen-01/append-32k/candidate/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-screen-01/append-32k/parent/stdout.jsonl": "d38fcc771b6646d605685dc3d4f41180fd4045ecfcf36e6db7be2f851fdce387",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-screen-01/append-32k/parent/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-4k/parent/stdout.jsonl": "64754e707ce49f859c2787722c86699e4f53e0ea28a5752843e4ff8b0c6ea5ef",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-4k/parent/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-4k/candidate/stdout.jsonl": "d34691ced99fb16c776828f0ca87539e2c0a4db5270e7852d4fe4c2ef94eceb4",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-4k/candidate/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-32k/candidate/stdout.jsonl": "9878a3b26d65c6d8949c54d12810faf6af3e335a86619b3971990e222ca91701",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-32k/candidate/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-32k/parent/stdout.jsonl": "8a2661ea81e7cdd46e0f0de75dc48bac51198dce53fb698b320db64d91e2992f",
+    "results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-32k/parent/stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "rounding_metadata_only": [
+    {
+      "where": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-4k/parent",
+      "derived_field": "sample_stdev_ms",
+      "raw_samples_exact": true,
+      "stored": 1.6491037538658113,
+      "fresh": 1.6491037538658115,
+      "abs_difference": 2.220446049250313e-16
+    },
+    {
+      "where": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/safe-conv-b6-model-evidence-01/safe-conv-b6-formal-01/append-32k/parent",
+      "derived_field": "sample_stdev_ms",
+      "raw_samples_exact": true,
+      "stored": 2.302372523650686,
+      "fresh": 2.3023725236506856,
+      "abs_difference": 4.440892098500626e-16
+    }
+  ],
+  "build": {
+    "receipt_sha256": "385c335a4c1e5cb9e3083fd52d1c19dd5da5aaa8d7ea886bf27e91e1c91d9a3d",
+    "combined_source_sha256": "8b26fc0e94d7c64c4bad590100f90aa3bd565a6a815241d6626a47111c983d75",
+    "core_source_sha256": "7caf266fbe196ad4daca09e1cdf73d9de442d11a4a9ce5304000687fd04695ce",
+    "benchmark_overlay_sha256": "def3e8bd093f481334b93dffed6c3835ade133e44d7a8a9c955838d30da72892",
+    "benchmark_source_description": "Gitcore plus common validation-only input-binding and output-token JSON overlay; do not relabel as unmodifiedwholecore ELF",
+    "native_parent": {
+      "path": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/tools/final-integration-build/inputs-safe397-01/native/144e591ade049cd39ff19ddf007ffb3dac1ace6b859a2406cca4a0ab327906bf/libapxinf_gemm_native.a",
+      "source_path": "/home/wwxq/devlocal/prefill-range-thor2/target/release/build/apxinf-cuda-new-08c3ca3e3978e009/out/libapxinf_gemm_native.a",
+      "sha256": "144e591ade049cd39ff19ddf007ffb3dac1ace6b859a2406cca4a0ab327906bf",
+      "bytes": 51866172,
+      "immutable_copy": true
+    },
+    "native_candidate": {
+      "path": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/tools/final-integration-build/inputs-b6a440c5-safe-conv-01/native/419f805533e3996a6f0e8138a87c7007a3629aa47a461268d5c6749451d45bd0/libapxinf_gemm_native.a",
+      "source_path": "/home/wwxq/devlocal/prefill-range-thor2/target/release/build/apxinf-cuda-new-08c3ca3e3978e009/out/libapxinf_gemm_native.a",
+      "sha256": "419f805533e3996a6f0e8138a87c7007a3629aa47a461268d5c6749451d45bd0",
+      "bytes": 51890282,
+      "immutable_copy": true
+    },
+    "native_changed_members": [
+      "gemm-81fa885e11ea7db4-gdn_ops.o"
+    ],
+    "other_native_members_exact": true,
+    "IDs_unchanged": {
+      "APXINF_GEMM_BUILD_ID": {
+        "value": "gemm-kb1-0df81e227cb4a241a00bc6edae6f1f8e",
+        "cmdline_path": "/home/wwxq/devlocal/prefill-range-thor2/target/release/build/apxinf-cuda-new-08c3ca3e3978e009/out/gemm-9a996f016fa11b8b-tuning_key.cmdline",
+        "cmdline_sha256": "79b1ca9f61da5cc8cde6222515265f9e3a143dee0f712fe0eb1f549d748c3123"
+      },
+      "APXINF_ATTENTION_BUILD_ID": {
+        "value": "attention-kb1-99d246fa110b8c6cb4d01026d8e87c04",
+        "cmdline_path": "/home/wwxq/devlocal/prefill-range-thor2/target/release/build/apxinf-cuda-new-08c3ca3e3978e009/out/gemm-e711210f14481acf-tuning_key.cmdline",
+        "cmdline_sha256": "d354a1abf9897ebf4dfcadcd2786385dc8af6a0c3e9edfe9318a333a054dc2a4"
+      }
+    },
+    "candidate_ELFs": {
+      "qwen35_context_bench": {
+        "sha256": "27fe6b38225b552e64906c8b5b32a5e099a8a5ed0f3dfb1e6f47078892f6174e",
+        "bytes": 49120968,
+        "cargo_executable": "/home/wwxq/devlocal/prefill-range-thor2/target/release/examples/qwen35_context_bench",
+        "target": {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "qwen35_context_bench",
+          "src_path": "/home/wwxq/devlocal/eglops-eval/checkout/crates/apxinf-model/examples/qwen35_context_bench.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        "cargo_fresh": false
+      },
+      "qwen35_mtp_bench": {
+        "sha256": "1ba153036a0784ccf66e8169e7597c5be0ee54027bc5114d6fc7db29ad82bcac",
+        "bytes": 49934736,
+        "cargo_executable": "/home/wwxq/devlocal/prefill-range-thor2/target/release/examples/qwen35_mtp_bench",
+        "target": {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "qwen35_mtp_bench",
+          "src_path": "/home/wwxq/devlocal/eglops-eval/checkout/crates/apxinf-model/examples/qwen35_mtp_bench.rs",
+          "edition": "2021",
+          "required-features": [
+            "qwen35-cuda"
+          ],
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        "cargo_fresh": false
+      }
+    },
+    "actualRustELFs_fresh_not_reused": true,
+    "restore_guards_passed": true
+  },
+  "hardware": {
+    "uuid": "GPU-a7c66ad2-6dbb-0ab8-c1a2-37ba6dba3600",
+    "name": "NVIDIA Thor",
+    "pci_bus_id": "00000000:01:00.0",
+    "driver_version": "595.78"
+  },
+  "frequency": {
+    "GPU_MHz": 1530,
+    "max_available_MHz_from_original_clock_max": 1575,
+    "is_max_frequency": false,
+    "CPU_kHz": 2601000,
+    "EMC_Hz": 4266000000,
+    "protocol": "User approved1530MHz; before/afterrange restored; everyrecordedsamplefixed"
+  },
+  "configuration": "NVFP4 routedMoE, staticFP8 denseprojections, dynamicFP8KV, greedy, fixedMTPdepth3; appendinitial4K/32K+4096newinput output1; prefixsetup excluded; TTFTfirstargmaxtoken included",
+  "paired_profiler": {
+    "status": "ACTUAL_PAIRED_MODEL_NSYS_VERIFIED",
+    "receipt_path": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/current-profiles-and-product-guards-01/conv-pair-profile/receipt.json",
+    "receipt_sha256": "27d1ab3c607b260d2bd2ea42eec6c32478d8a2dd1a37af0452a6612274451b52",
+    "controller_sha256": "2fb85ba51efb85caaa851c3777e075fbdf5f1cc5fff552f90ddc14827a50844f",
+    "archive_sha256": "30c976f883aaf056a19bf560f793fd1d6868de41528c93446c2cb6137295a215",
+    "seconds_including_load_export": 51.629148826003075,
+    "scope": "Each actual artifact2warm1; append4096+firstargmax/commit only, prepared4096 prefix excluded; node trace/no new sync.",
+    "arms": {
+      "parent": {
+        "subject": {
+          "build_receipt_sha256": "c2402d7cc7f5512b8bcefb1b0b1e1592e7e353784654681e13a63aa44b180068",
+          "ELF_sha256": "939d3c94368cb88c1c390f28f4253bee32af83285facb2a16ce87f57ad5f8d5c",
+          "native_sha256": "144e591ade049cd39ff19ddf007ffb3dac1ace6b859a2406cca4a0ab327906bf"
+        },
+        "profile_stdout_sha256": "dc3a063656d933d9b8a6b1e96ed640bd1d661d58f431ca07ca951cdb2b0dc4bf",
+        "report_sha256": "f9a18ff97184f932a0220077d5be779c0ca331a790e9c3a5ca98288cb43a3164",
+        "SQLite_sha256": "445fb1be7d7aadc1bdc96c8f060ec4b31febb85cbfc720bfa52b81ae8af493b2",
+        "SQLite_quick_check": "ok",
+        "conv_calls": 30,
+        "conv_sum_ns": 35475744,
+        "conv_union_ns": 35475744,
+        "conv_symbols": [
+          "void apxinf::cuda_new::gdn_ops::<unnamed>::fused_conv_prepare_kernel<(int)80>(const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, __half *, __half *, __half *, const float *, float *, int, int, int, float)"
+        ],
+        "grid": [
+          [
+            4096,
+            1,
+            1
+          ]
+        ],
+        "block": [
+          [
+            256,
+            1,
+            1
+          ]
+        ],
+        "registers": [
+          40
+        ],
+        "streams": [
+          13
+        ],
+        "dynamic_shared": [
+          0
+        ],
+        "static_shared": [
+          0
+        ],
+        "NVTX_event_count": null,
+        "actual_config": {
+          "allow_repeat_divergence": false,
+          "autotune": false,
+          "checkpoint": "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+          "chunk_digest_fnv1a64": "9b08af98633069ab",
+          "context_reuse": false,
+          "device": 0,
+          "draft_kv_dtype": "fp8",
+          "draft_kv_scale": 1.0,
+          "fa2_packed_gqa": 0,
+          "fixed_depth": 3,
+          "input_digest_fnv1a64": "1c99f0f992165db5",
+          "input_seed_hex": "35a3bf0440960001",
+          "input_tokens": 4096,
+          "kv_capacity": 8196,
+          "load_seconds": 17.968744977,
+          "mode": "mtp",
+          "mtp_depth": 3,
+          "mtp_enabled": true,
+          "mtp_strategy": "fixed",
+          "output_tokens": 1,
+          "performance_eligible": false,
+          "prefix_digest_fnv1a64": "da7ee97285eaa2a3",
+          "prefix_tokens": 4096,
+          "profiling": true,
+          "qwen35_kv_cache": "fp8_dynamic",
+          "qwen35_moe_activation": "nvfp4",
+          "recipe_audit_required": true,
+          "repeats": 1,
+          "sampling_mode": "greedy",
+          "schema": "apxinf.qwen35.context_benchmark.config.v1",
+          "strict_recipe_required": true,
+          "temperature": 0.0,
+          "timing_scope": "prefix setup excluded; prefill includes first argmax token; decode excludes first token",
+          "total_context_tokens": 8192,
+          "tuning_dir": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+          "warmups": 2
+        },
+        "full_output_ids": [
+          220
+        ],
+        "digest": "c8bbed67024e3c09",
+        "MTP_work": {
+          "accepted_prefix_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "bonus_tokens": 0,
+          "committed_accepted_tokens": 0,
+          "correction_tokens": 0,
+          "draft_steps": 3,
+          "emitted_tokens": 0,
+          "full_accept_rounds": 0,
+          "implementation": "qwen3.6_moe_adaptive_mtp",
+          "matched_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "partial_accept_rounds": 0,
+          "proposed_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "proposed_tokens": 0,
+          "rounds": 0,
+          "target_committed_rows": 0,
+          "target_rolled_back_rows": 0,
+          "target_verified_rows": 0,
+          "verified_accepted_tokens": 0,
+          "zero_accept_rounds": 0
+        },
+        "all3_iterations_exact_N5_anchor": true,
+        "profiling": true,
+        "performance_eligible": false
+      },
+      "candidate": {
+        "subject": {
+          "build_receipt_sha256": "385c335a4c1e5cb9e3083fd52d1c19dd5da5aaa8d7ea886bf27e91e1c91d9a3d",
+          "ELF_sha256": "27fe6b38225b552e64906c8b5b32a5e099a8a5ed0f3dfb1e6f47078892f6174e",
+          "native_sha256": "419f805533e3996a6f0e8138a87c7007a3629aa47a461268d5c6749451d45bd0"
+        },
+        "profile_stdout_sha256": "297f88753b6d6e829b67f75c0df3ddb6569f5b82b5e8698a92d6789ae90dbefd",
+        "report_sha256": "58f767711a4e5da4655d67b4accb0636dc4ac94f5808fbb4ee318afcc668770c",
+        "SQLite_sha256": "cea9a96dbfa906719f288e1bdf98d1698e9e4f7a5e314e484bac833ef5430978",
+        "SQLite_quick_check": "ok",
+        "conv_calls": 30,
+        "conv_sum_ns": 29481536,
+        "conv_union_ns": 29481536,
+        "conv_symbols": [
+          "void apxinf::cuda_new::gdn_ops::<unnamed>::fused_conv_prepare_temporal4_kernel<(int)80>(const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, __half *, __half *, __half *, const float *, float *, int, int, int, float)"
+        ],
+        "grid": [
+          [
+            1024,
+            1,
+            1
+          ]
+        ],
+        "block": [
+          [
+            256,
+            1,
+            1
+          ]
+        ],
+        "registers": [
+          64
+        ],
+        "streams": [
+          13
+        ],
+        "dynamic_shared": [
+          0
+        ],
+        "static_shared": [
+          0
+        ],
+        "NVTX_event_count": null,
+        "actual_config": {
+          "allow_repeat_divergence": false,
+          "autotune": false,
+          "checkpoint": "/home/wwxq/models/Qwen3.6-35B-A3B-NVFP4",
+          "chunk_digest_fnv1a64": "9b08af98633069ab",
+          "context_reuse": false,
+          "device": 0,
+          "draft_kv_dtype": "fp8",
+          "draft_kv_scale": 1.0,
+          "fa2_packed_gqa": 0,
+          "fixed_depth": 3,
+          "input_digest_fnv1a64": "1c99f0f992165db5",
+          "input_seed_hex": "35a3bf0440960001",
+          "input_tokens": 4096,
+          "kv_capacity": 8196,
+          "load_seconds": 17.704935892,
+          "mode": "mtp",
+          "mtp_depth": 3,
+          "mtp_enabled": true,
+          "mtp_strategy": "fixed",
+          "output_tokens": 1,
+          "performance_eligible": false,
+          "prefix_digest_fnv1a64": "da7ee97285eaa2a3",
+          "prefix_tokens": 4096,
+          "profiling": true,
+          "qwen35_kv_cache": "fp8_dynamic",
+          "qwen35_moe_activation": "nvfp4",
+          "recipe_audit_required": true,
+          "repeats": 1,
+          "sampling_mode": "greedy",
+          "schema": "apxinf.qwen35.context_benchmark.config.v1",
+          "strict_recipe_required": true,
+          "temperature": 0.0,
+          "timing_scope": "prefix setup excluded; prefill includes first argmax token; decode excludes first token",
+          "total_context_tokens": 8192,
+          "tuning_dir": "/home/wwxq/devlocal/eglops-eval/checkout/devlocal/final-plus20/integration-validation/safe397-prefix-recipes/recipes",
+          "warmups": 2
+        },
+        "full_output_ids": [
+          220
+        ],
+        "digest": "c8bbed67024e3c09",
+        "MTP_work": {
+          "accepted_prefix_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "bonus_tokens": 0,
+          "committed_accepted_tokens": 0,
+          "correction_tokens": 0,
+          "draft_steps": 3,
+          "emitted_tokens": 0,
+          "full_accept_rounds": 0,
+          "implementation": "qwen3.6_moe_adaptive_mtp",
+          "matched_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "partial_accept_rounds": 0,
+          "proposed_by_depth": [
+            0,
+            0,
+            0
+          ],
+          "proposed_tokens": 0,
+          "rounds": 0,
+          "target_committed_rows": 0,
+          "target_rolled_back_rows": 0,
+          "target_verified_rows": 0,
+          "verified_accepted_tokens": 0,
+          "zero_accept_rounds": 0
+        },
+        "all3_iterations_exact_N5_anchor": true,
+        "profiling": true,
+        "performance_eligible": false
+      }
+    },
+    "conv_union_reduction_ns": 5994208,
+    "conv_component_reduction_percent": 16.896637883056098,
+    "kernel_name_count_changes_after_conv_rename_normalization": {
+      "parent_only": {},
+      "candidate_only": {}
+    },
+    "recipes1150_exact_before_after": true,
+    "recorded_frequency_samples": 89,
+    "raw_file_hashes_verified": {
+      "candidate-profile.stdout": {
+        "bytes": 6226,
+        "sha256": "297f88753b6d6e829b67f75c0df3ddb6569f5b82b5e8698a92d6789ae90dbefd"
+      },
+      "candidate-profile.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "frequency.json": {
+        "bytes": 139021,
+        "sha256": "8d69382070a02d02be6ca47c203c3a86612432e4c24f81520fef6cc76a7412b6"
+      },
+      "candidate-export.stderr": {
+        "bytes": 8101,
+        "sha256": "355ec7de2cfa58d21bdf4ea428d71d66f8374dd4645008f8521b4d923f2e751a"
+      },
+      "clock-restored.json": {
+        "bytes": 1437,
+        "sha256": "bd19f65e97be80a05a70f19ba5d229d6e827ca3bef6e66a6aca9c861752a6e62"
+      },
+      "nsys-version.stdout": {
+        "bytes": 58,
+        "sha256": "f1a861cc50ea024703753c8e9a5a5cd54f41a0de11cf12abc6cca24bcdeb1703"
+      },
+      "parent-profile.stdout": {
+        "bytes": 6230,
+        "sha256": "dc3a063656d933d9b8a6b1e96ed640bd1d661d58f431ca07ca951cdb2b0dc4bf"
+      },
+      "clock-tool.log": {
+        "bytes": 892,
+        "sha256": "a8e55f666ed641e751e96ddcad3395bdf989aa49f2fb8de9955180079e672a56"
+      },
+      "jetson-before.conf": {
+        "bytes": 3185,
+        "sha256": "271380cbd8efe1d983111bbe390222c93febe6e311950411228c9632af73b2f3"
+      },
+      "parent-profile.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "parent-export.stdout": {
+        "bytes": 26,
+        "sha256": "98069b76963302fa0631c4b719029f7b19477eb3a372a05da3583ad144044aef"
+      },
+      "parent-export.stderr": {
+        "bytes": 8101,
+        "sha256": "355ec7de2cfa58d21bdf4ea428d71d66f8374dd4645008f8521b4d923f2e751a"
+      },
+      "jetson-1530.conf": {
+        "bytes": 3250,
+        "sha256": "0383578802209e2ce05c8c450e1197469fe97c152367fa87f744e20a015924cd"
+      },
+      "controller.py": {
+        "bytes": 18146,
+        "sha256": "2fb85ba51efb85caaa851c3777e075fbdf5f1cc5fff552f90ddc14827a50844f"
+      },
+      "nsys-version.stderr": {
+        "bytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "clock-controller.py": {
+        "bytes": 2867,
+        "sha256": "88d55c7d069150d3b9264bf6fab0d6cc9efdec847402b3245701d49d864ffea1"
+      },
+      "clock-fixed.json": {
+        "bytes": 1451,
+        "sha256": "5986205fc417f5b965733ed6f7eb58f16a494ef67b5c6c819a05103ad5fb5110"
+      },
+      "jetson-restore.conf": {
+        "bytes": 3234,
+        "sha256": "fd3e9f0a6a080334fbd43fb3873ec4165d061bf0f6f56c8dabbe3c067c9f938c"
+      },
+      "candidate-export.stdout": {
+        "bytes": 26,
+        "sha256": "2d9a054eb522b7e52176ad8673be19a9295a413d36bcb0d6eb69f1d7730aea22"
+      },
+      "clock-before.json": {
+        "bytes": 1436,
+        "sha256": "f370ad379fdf6b2b3254182948c1774d67261e25894f62d591aaa5bcebf8fda3"
+      },
+      "parent/trace.sqlite": {
+        "bytes": 811008,
+        "sha256": "445fb1be7d7aadc1bdc96c8f060ec4b31febb85cbfc720bfa52b81ae8af493b2"
+      },
+      "parent/sqlite-inventory.json": {
+        "bytes": 43068,
+        "sha256": "d4301ec32a98da9c13ad1d571740a40a5b172d81ad63734102f7ba57f1bf6ea0"
+      },
+      "parent/trace.nsys-rep": {
+        "bytes": 291432,
+        "sha256": "f9a18ff97184f932a0220077d5be779c0ca331a790e9c3a5ca98288cb43a3164"
+      },
+      "candidate/trace.sqlite": {
+        "bytes": 811008,
+        "sha256": "cea9a96dbfa906719f288e1bdf98d1698e9e4f7a5e314e484bac833ef5430978"
+      },
+      "candidate/sqlite-inventory.json": {
+        "bytes": 43068,
+        "sha256": "d4301ec32a98da9c13ad1d571740a40a5b172d81ad63734102f7ba57f1bf6ea0"
+      },
+      "candidate/trace.nsys-rep": {
+        "bytes": 291350,
+        "sha256": "58f767711a4e5da4655d67b4accb0636dc4ac94f5808fbb4ee318afcc668770c"
+      }
+    },
+    "formal_N5_scores_unchanged": true,
+    "critical_f": "MISSING",
+    "DRAM_L2_counters": "MISSING_NO_NCU_THIS_PAIR",
+    "limits": [
+      "30calls eachwithinactualappendROI; initial4Kprefix/warmupsnotcaptured",
+      "Componentdurationdifference is instrumentationevidence, not newE2Escore; existingN5 0.907674/1.119895 remains onlyscore",
+      "NoNVTXevents, no criticalpathfraction or removable-cost claim",
+      "Legacyparsedfieldlabelcontains_N10 but actualanchorsarepairedformalN5; notcandidatefull15N10admission",
+      "Sourcebytebridge64d andoldnormretention plusnativeonlygdn.o/sameIDs remain priorverified"
+    ],
+    "validated_without_GPU_rerun": true
+  },
+  "limits": [
+    "Twoaffected freshAB/BA2warm5 pairs only, no candidatefull15N10 mergeacceptance yet",
+    "Operator15percent reduction does not equal model1percent; no percentageaddition",
+    "Independent delivery commit contains this evidence; remoteFinal push pending",
+    "Two20percent objectives notaccepted; no claimglobal20goalmet",
+    "Decode strict1024 correctnesspass is not Decodeperformancegain evidence"
+  ],
+  "archive": {
+    "path": "/Users/wwxq/Documents/ChatGPT/apxinf/devlocal/eglops-eval/checkout/devlocal/final-plus20/results/safe-conv-b6-model-evidence-01.tar",
+    "sha256": "3ecdd89a35a44330c8c2143ed6428b9842ecef82179578ba12673727bd6aac9f"
+  },
+  "parent_strict_summary_sha256": "c793ae2a9dc75ae0ea857cb6a1a4d5e0c5edb644981e8252010b493f843bb629"
+}
