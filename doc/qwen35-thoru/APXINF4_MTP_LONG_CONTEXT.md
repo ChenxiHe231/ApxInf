@@ -1,5 +1,7 @@
 # Final 默认 MTP 优化的长上下文逐提交验收
 
+> **同日缓存协议复测：** 8K/16K、1530MHz、精确 N−1 缓存对照及 MTP 工作量核对见[缓存复测](#thoru-cache-repro-20261125)。
+
 > **2026-11-25 Thor-U 增补：** 原表是 Thor-2 的历史逐提交验收。本机最新 TRT Engine 与远程 Final 的新测量见[文末对照](#thoru-final-trt-20261125)，两机成绩不混用。
 
 完整矩阵通过，两个提交在各自声明的受影响配置组上均有端到端收益，且无确认的 ≥2% 回退。汇总吞吐按同组 token 总数/时间总数计算；两行对应不同输入组和父版本，不能相加百分比。逐项结果和小幅负收益均保留在后文。
@@ -212,4 +214,76 @@ python3 doc/qwen35-thoru/model-microbench/verify_thoru_final_trt.py \
   doc/qwen35-thoru/model-microbench/evidence/thoru-final-trt-20261125.json
 
 # 在保留原始资产的 Thor-U 上追加 --raw-root，核对日志、输入、recipe 和 ELF。
+```
+
+<a id="thoru-cache-repro-20261125"></a>
+
+## Thor-U：1530MHz、旧 N−1 缓存协议复测（2026-11-25）
+
+本节专门核对用户旧表的 8K/16K Decode。GPU min=max **1530MHz**，同一份冻结文字/token IDs，按原来的 2048-token 分段边界建立前缀至 `N−1`；每个受测请求精确复用 `N−1`，只计算 1 个新输入 token，严格输出 1024 token。三套后端均 greedy、固定 MTP depth3/verify4、CUDA Graph、禁止 EOS 提前结束。**不测试 48K，不使用 1206MHz。**
+
+统一使用原协议的父进程时钟：收到首个 `T+u32le` token 帧至最后一个帧的 1023 个间隔；前缀准备和首 token 在 Decode 计时外。此前一节使用的冷请求/2K 尾段协议及数值保留，不能混入本节汇总。
+
+Final 使用远程 **`9f7aecd204073eafd25bfdb99c1c4ab586f95fad`** 的实际新构建（已保留新增视觉 GEMM 提交），动态 FP8 target KV、scale1 FP8 draft KV、NVFP4 MoE activation。仅增加计时外的 benchmark 缓存准备入口及协议适配例程，正式生成走原模型 API；8-token 直接继续/恢复检查点的一致性检查通过。构建后撤销缓存准备入口的源码覆盖层，补丁和实际 ELF 身份在证据中。
+
+旧 TRT 指本机保留的 `/opt/data/thorU703_vlm_128k` 128K FP8 target/draft KV 交付；最新 TRT 指 `Qwen3.6-35B-A3B-NVFP4-FP16KV-MTP-703-14sm-64k-latest-20261112` 及 `qwen36-703-viskv_20261105` 运行时，target/draft KV 均为 FP16。这两套当前资产有明确身份，但尚未找到用户旧表 TRT 129.6/119.4 对应的完整收据，不能假定任一套与旧表产物逐字节相同。
+
+每个前缀状态 **2 次预热＋10 次正式测量**。最新 TRT 每档独立进程建立两次前缀，分别保留 10 次成绩并按 token 总数/时间总数汇总；Final 和旧 TRT 每档各 10 次。共 **80 条正式测量、16 条纳入数据的预热、16 条独立 MTP 计数诊断**。诊断启用内部 profiling，只用于工作量核对，不进入性能汇总；正式计时关闭 profiling、使用冻结 recipe，无在线调优/缺项回退。
+
+### 同缓存协议 Decode（tok/s）
+
+百分比统一为 `Final / 最新TRT − 1`；最新 TRT 汇总两个独立前缀状态，未挑选较快状态。
+
+| 初始 KV | 旧 TRT FP8 | 最新 TRT FP16（20 次） | Final（10 次） | Final 较最新 TRT |
+|---|---:|---:|---:|---:|
+| 8K | 83.19 | 97.64 | 93.44 | -4.30% |
+| 16K | 82.62 | 90.36 | 86.83 | -3.91% |
+
+### 独立前缀状态与 MTP 工作量
+
+最新 TRT 的计数诊断只在完整输出 SHA 与正式请求匹配时关联；下表轮数来自这些匹配诊断。Final 轮数直接来自正式请求计数。新运行时仅公开验证轮数与生成 token 数，不虚填其未公开的提议/接受计数。Native 的生成计数为首 token 后的 1023，TRT 原生生成计数含首 token 为 1024；轮数按各自原生接口报告，不能视作逐指令工作量完全等价。
+
+| KV | 最新 TRT 前缀 1 / 2 吞吐 | 最新 TRT 前缀 1 / 2 的 MTP 轮数 | Final MTP 轮数 | 最新 TRT 正式输出种类 / 20 | Final 输出种类 / 10 |
+|---|---:|---:|---:|---:|---:|
+| 8K | 99.36 / 95.97 | 369 / 382 | 369 | 2 | 1 |
+| 16K | 89.49 / 91.25 | 384 / 377 | 385 | 2 | 1 |
+
+两次独立前缀之间，最新 TRT 的完整输出均发生变化；8K 的 MTP 轮数由 369 增至 382，吞吐由第一状态的约 99.36 降至第二状态的约 95.97 tok/s，变化与轮数增加相符。不能只用某一次前缀状态代表该 Engine 的唯一吞吐。
+
+跨后端完整输出也不相同：两次 TRT 前缀状态均在 8K 的第 2 个输出 token、16K 的第 9 个输出 token 与 Final 首次分叉。分叉位置和完整 SHA 已核对；两套精度/数值路径的质量优劣尚未验收。
+
+旧 TRT 的正式输出仍有轮间变化：8K 为 10/10 种；16K 为 10/10 种。其诊断单独记录；与正式输出不匹配的诊断不冒充正式请求的 MTP 工作量。
+
+### 与用户旧表核对
+
+本次三后端完整输入及各段前缀均通过 tokenizer/token ID 对齐；它们也与已找到的旧 ApxInf 输入哈希一致。旧表 TRT 两个数字对应的输入哈希、Engine/运行时和逐轮输出尚缺直接证据，不能把这一事实扩大为“旧 TRT 的输入也已证明相同”。
+
+| KV | 用户旧表 TRT（1530MHz） | 本次最新 TRT 同缓存汇总 | 数值差异 |
+|---|---:|---:|---:|
+| 8K | 129.6 | 97.64 | -24.66% |
+| 16K | 119.4 | 90.36 | -24.32% |
+
+按旧缓存协议测量后的实际数值如上；仅更换缓存协议不足以解释与旧表的全部差异。由于旧 TRT 原始产物/输出记录未对齐，这个跨记录数值差不能直接归为 Engine 版本性能回退，也不能据此宣称 Final 已追回旧表差距。
+
+已定位的旧 ApxInf 3.0 为 `68b12f23`，2 次预热＋5 次计分的吞吐中位数为 8K 92.43、16K 90.23 tok/s，与用户表吻合。其实际工作量与本次 Final 对比如下；同输出长度不保证同 MTP 轮数。
+
+| KV | 旧 ApxInf MTP 轮数 | 本次 Final MTP 轮数 | 完整输出 SHA 是否相同 |
+|---|---:|---:|---|
+| 8K | 363 | 369 | 不同 |
+| 16K | 358 | 385 | 不同 |
+
+用户旧表百分比以 ApxInf 为分母，本轮以 TRT 为分母。旧表 4K 的 −22.11% 按本轮公式为 −18.10%；分母变化只解释百分比，不解释 tok/s。历史中位数与本轮按总时间汇总的吞吐也分别标注，不相互替换。
+
+### 证据与范围
+
+本表仍是不同 KV 精度/缩放方案及不透明 TRT 权重的交付配置比较，未新增逐 token 质量等价验收，不把差值称为纯 kernel 收益。TRT 的跨设备 plan 警告继续保留。计时适配器曾在准备/首个预热阶段修正统计字段兼容及输入总量检查；失败请求另存且不计分，完整有效组沿用。新 Final 的缺项只通过独立算子准备，数值、guard、只读检查通过。
+
+结束恢复原 GPU 策略与 7380 页 HugeTLB，确认无遗留推理进程，各有效采集阶段的检查点/Engine/recipe 身份前后不变；Final 切换新提交及补齐其 recipe 均在该版正式计时前完成。原始目录：`/opt/data/devlocal/final-prefill-range-thoru/source/devlocal/thoru-final-trt/checkout/devlocal/thoru-final-trt/cache-repro/`。
+
+- [逐轮计时、输出身份、MTP 诊断及两次前缀证据](model-microbench/evidence/thoru-cache-repro-20261125.json)。
+- [离线核验器](model-microbench/verify_thoru_cache_repro.py)。
+
+```sh
+python3 doc/qwen35-thoru/model-microbench/verify_thoru_cache_repro.py \
+  doc/qwen35-thoru/model-microbench/evidence/thoru-cache-repro-20261125.json
 ```
