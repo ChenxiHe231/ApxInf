@@ -1,5 +1,11 @@
 # Qwen3.5/3.6 image performance acceptance
 
+Latest fixed-matrix acceptance: warm model TTFT geometric mean **-33.23%**
+against Final `7835c253`, with 4096-patch cases **-53.9%**, unchanged frozen
+precision and 22 passing HTTP checks. Independent reverse-order confirmation
+is **-33.40%**. See [round G4](#predicated-arithmetic-and-wide-projections-round-g4)
+for the current result; earlier sections retain their own baselines and scopes.
+
 ## Scope and result
 
 Compared with `429c649bfff135c33033423419c81ab11ad0f2a4`, this change accelerates
@@ -167,18 +173,18 @@ use the same strict benchmark command and shared locks described above.
 
 ## Fixed image-scale target: round G1 (2026-11-25)
 
-Frozen base: `7835c253967bf36463f6dd9ed2e79f3c5319df68`. The target is at least25%
+Frozen base: `7835c253967bf36463f6dd9ed2e79f3c5319df68`. The target is at least 25%
 lower geometric-mean warm model TTFT across four image inputs, each in scalar
-and adaptive image-MTP modes; both4096-patch cases must improve by at least35%,
-with no case regressing more than3%. The target definition stays fixed across rounds.
+and adaptive image-MTP modes; both 4096-patch cases must improve by at least 35%,
+with no case regressing more than 3%. The target definition stays fixed across rounds.
 
 This matrix uses the same Thor-3/checkpoint, NVFP4 MoE activation, dynamic FP8
-target KV and CUDA Graph configuration, with KV capacity2048 for every case.
-Natural-photo inputs have256/1024/4096 patches; the existing two non-square
-images have616 patches total. Prompt lengths are86/326/278/1046 respectively.
-All modes emit exactly32 tokens with EOS stopping disabled for timing.
+target KV and CUDA Graph configuration, with KV capacity 2048 for every case.
+Natural-photo inputs have 256/1024/4096 patches; the existing two non-square
+images have 616 patches total. Prompt lengths are 86/326/278/1046 respectively.
+All modes emit exactly 32 tokens with EOS stopping disabled for timing.
 The baseline was measured once at this capacity; earlier512-capacity tables
-are separate experiments. Both revisions use2warmups and10measurements.
+are separate experiments. Both revisions use 2 warmups and 10 measurements.
 
 | Input (patches) | Mode | Base TTFT (ms) | G1 TTFT (ms) | Reduction |
 | --- | --- | ---: | ---: | ---: |
@@ -205,8 +211,8 @@ A128-query-row probability chunk bounds temporary memory. Configuration0
 supports total tokens<=4096, maximum segment length128..4096 and head dim<=256;
 configuration1 retains the original zero-workspace implementation. Allocation
 is checked against the native execution resource policy before preparation.
-For one4096-patch image with16heads, each execution owns32MiB;27layers can
-retain864MiB for that prepared profile, separately from the GraphWorkspace.
+For one 4096-patch image with 16 heads, each execution owns32 MiB;27 layers can
+retain864 MiB for that prepared profile, separately from the GraphWorkspace.
 Scratch is retained by Graph/session ownership and freed on execution release.
 
 The original five visual gates and the two additional1024/4096 photo references
@@ -218,14 +224,14 @@ and Graph replay. Native pointer registration and weak execution ownership
 confirm workspace release across repeated eager/Graph lifetimes; total free
 system memory on Thor is retained as a diagnostic rather than a precise leak
 oracle. Six EOS-enabled single-/two-image scalar/MTP controls across BF16,
-static FP8 and dynamic FP8 KV match the published7835results.
+static FP8 and dynamic FP8 KV match the published 7835results.
 
 Formal benchmark and token checks require exact recipes, with no online tuning
 or fallback during timing. Their recipe-file snapshots are unchanged across
 each interval. The unchanged GEMM build ID is `gemm-kb1-c83627962e2e26f86d1fc45fc32e1a9e`;
 the G1 attention build ID is `attention-kb1-448ca8e5732402ec7e01648d1831e2d7`.
-The staged provider advances from version1/config0 to version2/config0(tiled)
-and config1(original). Other prepared choices are held to the baseline.
+The staged provider advances from version 1/config 0 to version 2/config 0(tiled)
+and config 1 (original). Other prepared choices are held to the baseline.
 
 A paired Nsight capture of one prepared4096-patch visual traversal runs on one
 stream with zero overlapping kernel intervals. The27original attention kernels
@@ -254,13 +260,13 @@ export APXINF_REQUIRE_RECIPES=1 BENCH_WARMUPS=2 BENCH_ITERS=10
 
 Use both shared GPU locks, the frozen inputs and existing checkpoint in place.
 `goal-25/summarize.py` checks all eight cases, sample counts,32tokens and
-unchanged output sequences before evaluating the25%/35%/3%target.
+unchanged output sequences before evaluating the 25%/35%/3%target.
 
 ## Predicated arithmetic and wide projections: round G4
 
-This follow-up keeps the G1 fixed matrix, baseline7835, checkpoint, resolution,
-KV/activation precision, CUDA Graph, capacity2048 and32-token work unchanged.
-Both primary revisions have2warmups and10measurements per case.
+This follow-up keeps the G1 fixed matrix, baseline 7835, checkpoint, resolution,
+KV/activation precision, CUDA Graph, capacity 2048 and 32-token work unchanged.
+Both primary revisions have 2 warmups and 10 measurements per case.
 
 | Input | Mode | Base TTFT (ms) | G4 TTFT (ms) | Reduction |
 | --- | --- | ---: | ---: | ---: |
@@ -274,24 +280,27 @@ Both primary revisions have2warmups and10measurements per case.
 | photo-4096 | mtp | 32398.825 | 14935.410 | 53.90% |
 
 Primary geometric-mean TTFT reduction is **33.23%**. All eight outputs match
-the frozen32-token baseline. The primary matrix exceeds the25%aggregate and
-35%large-image thresholds, with every case improving by at least16.78%.
-Final independent reverse-order and HTTP confirmations are recorded separately
-after their completion.
+the frozen32-token baseline. The primary matrix exceeds the 25%aggregate and
+35%large-image thresholds, with every case improving by at least 16.78%.
+Independent reverse-order confirmation also passes: **33.40%** geometric-mean
+reduction. It runs G4 first, baseline second, with reversed inputs/modes and
+2 warmups plus 5 measurements per case; the primary acceptance above remains
+2 warmups plus 10 measurements. All reverse outputs are exact and recipe
+snapshots remain unchanged. Both matrices satisfy the aggregate, large-image and per-case limits.
 
 G4 preserves every directed floating-point sum and multiplication. NaN,
 inexact/sticky-bit and signed-zero finishing use PTX predicates/selects rather
 than compiler-generated early-return branches. The shared helper is used by
 ordered GEMM and tiled staged attention; their product semantics are retained
-separately. For the same2x2/U4 projection, SM110 disassembly reduces each of
-BSSY/BSYNC/BRA by32instructions, retaining32each FMUL and directed RZ/RP/RM
+separately. For the same 2x2/U4 projection, SM110 disassembly reduces each of
+BSSY/BSYNC/BRA by 32 instructions, retaining 32 each FMUL and directed RZ/RP/RM
 adds. ArbitraryF32, everyBF16encoding in four pairings and exceptional boundaries
-cover1311010add pairs with zero bit mismatches against the published helper.
+cover 1311010 add pairs with zero bit mismatches against the published helper.
 
-Projection-sized M>=128, N>=1024, K>=1024 uses32x64 output tiles with16
+Projection-sized M>=128, N>=1024, K>=1024 uses 32x64 output tiles with16
 independent accumulators per thread. K order and final bias/BF16 rounding stay
 unchanged; smaller matrices retain their previous tiles. The qualified wide
-prototype uses56registers,24960shared bytes and zero stack/spill bytes. No new
+prototype uses 56 registers, 24960 shared bytes and zero stack/spill bytes. No new
 persistent allocation is added. Representative operator probes show10–21%
 reductions; only the model-call table above is counted as model performance.
 
@@ -300,7 +309,7 @@ equal to frozen CPU BF16 eager results, with unchanged finite/cosine>=0.999/
 relativeL2<=0.02 thresholds. Wide129x1025x1026 cancellation/partial-tile guards,
 readonly inputs and Graph replay pass, together with existing product/overflow/
 NaN and staged-attention/resource tests. All six scalar/MTP EOS controls across
-BF16, static FP8 and dynamic FP8 KV match7835. New source fingerprints required
+BF16, static FP8 and dynamic FP8 KV match 7835. New source fingerprints required
 preparing the actual BF16 short-EOS Q=2/K=2 path separately; strict controls
 were then rerun. No source or precision threshold changed for that preparation.
 
@@ -313,3 +322,51 @@ No tuning or fallback runs during timing. Evidence is under the same
 `g4-recipe-pinning.json`, all visual/token gates and arithmetic/SASS probes.
 Use `LABEL=g4` with `summarize.py`; the model benchmark command above uses
 `model_bench-g4`. The accepted forward matrix is reused for final confirmation.
+
+### Final confirmation and delivery
+
+The fixed goal is achieved. All 22 HTTP checks pass: base64/public HTTPS
+`image_url`, multi-image ordering and messages, scalar/MTP parity, streaming,
+text/image alternation, invalid-input rejection, and repeatable seeded non-MTP
+sampling across BF16, static FP8 and dynamic FP8 KV. These are functional
+checks, separate from the model TTFT measurements.
+
+The same prepared 4096-patch visual traversal explains the second-round gain:
+
+| GPU profile interval | G1 (ms) | G4 (ms) |
+| --- | ---: | ---: |
+| 111 ordered GEMMs | 9443.988 | 7475.322 |
+| 2592 chunked attention kernels | 7872.629 | 6997.433 |
+| Other kernels | 72.692 | 73.042 |
+| First-to-last kernel span | 17392.005 | 14548.406 |
+
+Both captures have one stream and zero overlapping kernel intervals. The table
+reports kernel-interval unions and the GPU span, not model TTFT or a decode
+throughput result. G1's frozen baseline capture is reused; G4 captures only the
+updated traversal. The GPU governor/min/max remain `nvhost_podgov`, 315 MHz and
+1575 MHz. Test model processes and the HTTP server are stopped after validation.
+
+The measured runtime source is `895c0247b14cb07d35897796c6e60e0417459a5f`; final follow-up
+changes are documentation only. `g4-runtime-identity.json` verifies all 15
+changed code files against the measured source, actual executable SHA-256
+(including the HTTP binary), unchanged checkpoint config/index SHA-256,
+checkpoint shard identities, tool versions and frequency policy. Primary,
+short-screen, three-KV token and reverse recipe snapshots are each unchanged.
+The exact backend IDs are:
+
+- GEMM: `gemm-kb1-0df81e227cb4a241a00bc6edae6f1f8e`
+- Attention: `attention-kb1-99d246fa110b8c6cb4d01026d8e87c04`
+
+The new evidence bundle is
+`devlocal/qwen35-image-input/results/image-goal-25-evidence.tar.gz`, with its
+SHA-256 sidecar. It contains the frozen goal inputs/new CPU references, harness
+sources, per-run data, precision/API/ownership checks, exact recipes, binary
+identities and paired profiler records. Existing checkpoint weights are reused
+in place and are excluded. Baseline/G1/G4 benchmark executables are retained on
+Thor-3 under the documented task directory.
+
+For independent confirmation use `reverse_g4.sh` and
+`summarize_reverse.py`; the reversal is 2+5 and does not replace the primary
+2+10 matrix. `finish_validation_g4.sh` checks reverse output/recipe validity
+before the final profile and HTTP checks. No GPU rerun is needed for the final
+documentation-only update.
