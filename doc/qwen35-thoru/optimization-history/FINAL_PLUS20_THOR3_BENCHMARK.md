@@ -1,6 +1,6 @@
 # Thor3：Final → Prefill Session → Routed Quant 完整 Benchmark
 
-> 数据状态：完整 15-case 正式矩阵与独立数值、源码及协议审查通过；两个 20% 目标均未达到，无环境变量默认路径修正尚未验收。
+> 数据状态：完整 15-case 正式矩阵与独立数值、源码及协议审查通过；两个 20% 目标均未达到。默认路径修正已通过后续独立检查并提交，新增性能收益计为 0%。
 
 完整 15 case 已在同一台 Thor3 完成，2 轮预热、10 轮正式测量。当前 C 相对冻结 Final02 的 LCG Decode 吞吐变化为 −0.12%～+0.79%，追加 Prefill 时延降低 7.86%～10.52%；两个 20% 目标均未达到。32K LCG Decode 的 P1 为 −0.87%，C 为 −0.12%，不能以完整矩阵 PASS 表示没有性能回退或目标完成。
 
@@ -14,7 +14,7 @@
 - GPU 锁定 1530 MHz；硬件可用最高频率 1575 MHz，因此本次不是最高频测试。CPU 2601 MHz，EMC 4266 MHz；实测频率与恢复设置已独立核对。
 - 同一原位 Qwen3.6-35B-A3B NVFP4 检查点、NVFP4 MoE 激活、target 动态 FP8 KV（draft FP8 scale1）、greedy、固定 MTP depth3，不复用 context。每个 case 三版本使用完全相同输入、容量和策略；正式计时禁 autotune/fallback，复用有效且不变的 1056 份 recipe。
 - Decode 输出 1024 token：首 token 计入 TTFT，其后 1023 个间隔计入 Decode。表内 Decode tok/s 为 `1023 / mean(decode_interval_seconds)`，不是逐轮 tok/s 的算术平均；含 Prefill tok/s 为 `1024 / mean(total_latency_seconds)`。追加 Prefill 报追加 4096 token 的时延，越低越好。
-- 主表采用冻结的 18 项环境配置，包含 MTP 的三项 legacy `=1` 及 fixed depth3。无环境变量默认路径修正尚未完成产物验收，不能将本表称为已验证的无环境变量交付性能，也不能给该默认修正计入相对此基线的新收益。
+- 主表采用冻结的 18 项环境配置，包含 MTP 的三项 legacy `=1` 及 fixed depth3。后续[默认 MTP 策略检查](DEFAULT_MTP_PROFILE_THOR3.md)已独立通过：单元、清空变量/仅三个旧变量设 0 的六组严格检查，以及同 ELF 反向 BAAB 检查。原三列仍是 FLAGS1 协议，不改称完整无变量 15-case 矩阵；该默认交付修正不增加本轮性能收益。
 
 ## 6 组 LCG 长上下文 Decode
 
@@ -77,7 +77,7 @@
 
 P1 对 32K LCG Decode 的 −0.87% 小退必须保留；C 相对 P1 恢复约 +0.76%，累计仍较 Final 低约 0.12%。eligible 32K 的 C 也较 Final 低约 0.42%。其他小幅负值同样按表保留，不截零、不跨版本累加百分比。
 
-两项优化提交已形成，本记录编写时尚未推送远程 Final；完整矩阵通过不表示两个 20% 目标达到。默认路径修正、draft eligibility、GDN norm 与 FC2 资源候选不在此三列性能成果中。旧 TRT 数字仅可作历史参考，不纳入本次比例或目标判定。
+两项优化提交已形成，本记录编写时尚未推送远程 Final；完整矩阵通过不表示两个 20% 目标达到。默认路径修正已另外验收并提交，计零新增收益；draft eligibility、GDN norm 与 FC2 资源候选不在此三列性能成果中。与最新 Final 合并后的来源与 recipe 桥接仍需独立检查。旧 TRT 数字仅可作历史参考，不纳入本次比例或目标判定。
 
 优化机制与既有局部 profiler 分别见 [Prefill Session 记录](PREFILL_SESSION_THOR2.md) 和 [Routed Input Quant 记录](ROUTED_INPUT_QUANT_THOR3.md)。局部 NCU 的 scalar/单 ROI 结果不能代替本矩阵 MTP 关键路径占比，`f` 仍为 MISSING；本表报告实际模型指标，不从算子倍数外推模型收益。
 

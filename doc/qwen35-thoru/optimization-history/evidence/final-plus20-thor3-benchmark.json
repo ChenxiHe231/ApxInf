@@ -93,7 +93,8 @@
     "append_first_token_argmax_included": true,
     "eligible_input": "cyclic-real13; not full real-QA quality evaluation",
     "draft_KV": "fp8 scale1",
-    "context_reuse": false
+    "context_reuse": false,
+    "default_unset_environment_delivery_verified_field_scope": "Original three-stage FLAGS1 matrix at measurement time, not the status of later independent delivery checks"
   },
   "versions": {
     "final02-validation": {
@@ -1601,5 +1602,20 @@
     "critical_path_f": "MISSING",
     "single_scalar_NCU_ROI_extrapolated_to_MTP_or_whole_model": false,
     "operator_speedup_substituted_for_E2E_gain": false
+  },
+  "subsequent_default_delivery_validation": {
+    "accepted": true,
+    "documentation": "doc/qwen35-thoru/optimization-history/DEFAULT_MTP_PROFILE_THOR3.md",
+    "curated_evidence": "doc/qwen35-thoru/optimization-history/evidence/default-mtp-profile-thor3.json",
+    "classification": "default contract/correctness delivery",
+    "new_model_gain_credit_percent": 0,
+    "initial_negative_2warm3_signal_retained": true,
+    "independent_units_strict_and_same_ELF_reverse_BAAB_passed": true,
+    "does_not_relabel_original_full15_as_ENV_unset": true,
+    "candidate_commit_reported_short": "7452edbb",
+    "main_commit": "b3c6dbfd",
+    "integration_commit_reported_short": "585abd74",
+    "latest_Final_source_recipe_bridge_verified": false,
+    "pushed": false
   }
 }
