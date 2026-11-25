@@ -261,7 +261,9 @@ The ordered visual GEMM now uses conflict-free shared tiles, register reuse and
 native flush-to-zero arithmetic while retaining the same pairwise reduction.
 On Thor-3, the measured warm model TTFT falls by 59–61% for the tested single-
 and two-image dynamic-FP8 requests; see [image performance acceptance](IMAGE_INPUT_PERFORMANCE.md)
-for the exact scope, precision checks and reproduction procedure.
+for the exact scope, precision checks and reproduction procedure. The same note
+also records the subsequent attention scheduling change against `9f7aecd2`
+and its reverse-order confirmation.
 
 The Qwen3.5/3.6 MoE runtime accepts up to 16 ordered static images per request. It loads the
 checkpoint's BF16 `model.visual.*` weights on the first image, replaces image

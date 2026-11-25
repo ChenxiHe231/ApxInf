@@ -123,6 +123,82 @@ fn staged_attention_matches_explicit_bf16_graph_without_cross_image_attention() 
 }
 
 #[test]
+fn staged_parallel_softmax_keeps_graph_guards_and_images_independent() {
+    use apxinf_core::{DType, Shape};
+
+    let ctx = CudaContext::new(0).unwrap();
+    let (tokens, heads, dim) = (192, 2, 72);
+    let zeros = vec![0.; tokens * heads * dim];
+    let values: Vec<f32> = (0..tokens)
+        .flat_map(|row| {
+            (0..heads * dim).map(move |column| {
+                if row < 64 {
+                    2. + (column % 9) as f32 / 8.
+                } else {
+                    -3. + (column % 5) as f32 / 4.
+                }
+            })
+        })
+        .collect();
+    let query = upload(&ctx, &zeros, vec![tokens, heads, dim]);
+    let key = upload(&ctx, &zeros, vec![tokens, heads, dim]);
+    let value = upload(&ctx, &values, vec![tokens, heads, dim]);
+    let guarded = upload(&ctx, &vec![42.; values.len() + 32], vec![values.len() + 32]);
+    let output = CudaBuffer::from_tensor(&guarded)
+        .unwrap()
+        .view(16 * 2, values.len() * 2)
+        .unwrap()
+        .as_tensor(Shape::new(vec![tokens, heads, dim]), DType::BF16)
+        .unwrap();
+    let offsets = [0u32, 64, 192];
+    let buffer = CudaBuffer::alloc(12, ctx.device_id()).unwrap();
+    buffer
+        .copy_from_host(
+            &offsets
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let phase = PreparedPhase::prepare_and_capture(
+        &ctx,
+        ExecutionSession::with_capacity(4 * 1024 * 1024, 0).unwrap(),
+        || {
+            let mut out = output.clone();
+            let mut args =
+                ops::SegmentedAttentionArgs::new(&query, &key, &value, &mut out, &buffer, &offsets);
+            args.numerics = ops::AttentionNumerics::StagedBf16;
+            args.policy.allow_fallback = false;
+            ops::segmented_attention(&ctx, args)
+        },
+    )
+    .unwrap();
+    for _ in 0..3 {
+        phase.replay().unwrap();
+    }
+    ctx.synchronize().unwrap();
+    // Zero scores give exact 1/64 and 1/128 probabilities. Each segment is
+    // constant along its token axis, so its expected output is independent.
+    assert_eq!(read(&output), values);
+    assert_eq!(read(&query), zeros);
+    assert_eq!(read(&key), zeros);
+    assert_eq!(read(&value), values);
+    let guards = read(&guarded);
+    assert_eq!(&guards[..16], &[42.; 16]);
+    assert_eq!(&guards[16 + values.len()..], &[42.; 16]);
+
+    let mut altered = values.clone();
+    altered[64 * heads * dim..].fill(100.);
+    let replacement = upload(&ctx, &altered, vec![tokens, heads, dim]);
+    ops::copy_tensor(&ctx, &replacement, &value).unwrap();
+    phase.replay().unwrap();
+    ctx.synchronize().unwrap();
+    let changed = read(&output);
+    assert_eq!(&changed[..64 * heads * dim], &values[..64 * heads * dim]);
+    assert!(changed[64 * heads * dim..].iter().all(|x| *x == 100.));
+}
+
+#[test]
 fn staged_vision_positions_match_explicit_four_tap_rounding() {
     let ctx = CudaContext::new(0).unwrap();
     let (side, height, width, hidden) = (48usize, 12usize, 20usize, 7usize);
