@@ -1,0 +1,647 @@
+{
+  "schema": "apxinf.gdn-prefill-norm.thor3.affected-evidence.v1",
+  "status": "AFFECTED_SCOPE_VALIDATED_READY_FOR_INDEPENDENT_COMMIT_FULL15_AND20_PENDING",
+  "classification": "automatic default adoption of existing4warp norm path; not new norm algorithm",
+  "code": {
+    "base": "451b8163230848666687c3271347901b46c06b24",
+    "core_sha256": "fb0256033f32d7b3bea37c595e86cb1aa1f6a25af52cc021bc93a7b9a57b2e41",
+    "combined_sha256": "f2789d25a3a3b7460fb418ada2c3583576c4279709b1a0f5add65fef3ec38874",
+    "source_sha256": "f644ef64e4c592b90e0f854d569d6deba24ed64af98f1315234e350de4fa1305",
+    "patch_sha256": "244a0636821441d5bb1b91acd2c3144ea45515ea376b750f4292bf547832f6aa",
+    "post_test_maintenance_documents": [
+      "doc/qwen35-thoru/optimization-history/GDN_PREFILL_NORM_THOR3.md",
+      "doc/qwen35-thoru/optimization-history/evidence/gdn-prefill-norm-thor3.json"
+    ],
+    "post_test_document_additions_do_not_relabel_ELF": true
+  },
+  "native": {
+    "before": "9a4fa1e416c228c8ad4e436822c0759ee7d2536f833c8714e13d786469ef584a",
+    "after": "f83a53defd59ad93a5467efe6b10e89bbc2869bae38fca2600d22f64241b18d3",
+    "member_changes": [
+      "gemm-81fa885e11ea7db4-gdn_ops.o"
+    ],
+    "large_archives_local_rehash": false
+  },
+  "scope": {
+    "entry": "gdn_gated_norm_seq_f16",
+    "input_dtype": "FP16",
+    "output_dtype": "BF16",
+    "automatic_default_predicate": "tokens>=4096 && heads==32 && head_dim==128",
+    "qualified_domain_reads_ENV": false,
+    "other_FP16_domains_legacy_ENV_policy_retained": true,
+    "BF16_entry_unchanged": true,
+    "convolution_unchanged": true,
+    "lane_row_reduction_rounding_kernel_body_unchanged": true,
+    "new_user_switch_or_environment": false,
+    "tested_model_append_tokens": 4096,
+    "tested_initial_KV": [
+      4096,
+      32768
+    ],
+    "all_larger_tokens_exhaustively_tested": false
+  },
+  "measurement": {
+    "host": "thor-3",
+    "GPU_MHz": 1530,
+    "GPU_max_available_MHz": 1575,
+    "CPU_MHz": 2601,
+    "EMC_MHz": 4266,
+    "warmups_per_arm": 2,
+    "measured_per_arm": 5,
+    "kind": "appended4096 input plus first argmax token; prefix setup excluded",
+    "mode": "mtp",
+    "NVFP4_MoE": true,
+    "target_KV": "fp8_dynamic",
+    "draft_KV": "fp8_scale1",
+    "greedy": true,
+    "fixed_MTP_depth": 3,
+    "autotune": false,
+    "fallback": false,
+    "profiling": false,
+    "environment": {
+      "APXINF_NVFP4_A16_WMMA": "1",
+      "APXINF_NVFP4_A16_WMMA_TILE_N": "128",
+      "APXINF_NVFP4_A16_WMMA_MIN_ROWS": "4",
+      "APXINF_NVFP4_A16_M1_STAGE_ALL": "1",
+      "APXINF_FA2_PACKED_GQA": "0",
+      "APXINF_QWEN35_W4A16_SHARED": "0",
+      "APXINF_QWEN35_MTP_FIXED_DEPTH": "3",
+      "APXINF_QWEN35_MTP_SPLIT_KV": "1",
+      "APXINF_QWEN35_MTP_DRAFT_KV_SUFFIX_SYNC": "1",
+      "APXINF_QWEN35_MTP_KV_ONLY_MATERIALIZE": "1",
+      "APXINF_QWEN35_CHUNK_LONG_PREFILL": "0",
+      "APXINF_QWEN35_GDN_SEGMENT_LONG_PREFILL": "0",
+      "APXINF_QWEN35_GDN_PROJECTION_CHUNKS": "0",
+      "APXINF_QWEN35_SHARED_SWIGLU_QUANT": "0",
+      "APXINF_QWEN35_SHARED_GATE_UP": "0",
+      "APXINF_QWEN35_MTP_STATIC_GRAPHS": "0",
+      "APXINF_QWEN35_MTP_MATERIALIZE_SESSION": "0",
+      "APXINF_QWEN35_ATTN_M1_GRAPHS": "0"
+    },
+    "parent": "accepted routed-quant02 product451b actual Thor3 frozen C ELF; no fresh whole15 baseline"
+  },
+  "formal": [
+    {
+      "case": "append-4k",
+      "parent": {
+        "mean_prefill_ms": 468.5065814,
+        "median_prefill_ms": 468.31861299999997,
+        "samples_ms": [
+          466.80170799999996,
+          469.14871000000005,
+          467.968928,
+          468.31861299999997,
+          470.294948
+        ],
+        "sample_stdev_ms": 1.3078207869287095
+      },
+      "candidate": {
+        "mean_prefill_ms": 454.594104,
+        "median_prefill_ms": 455.788731,
+        "samples_ms": [
+          456.51565500000004,
+          455.834705,
+          455.788731,
+          453.628688,
+          451.202741
+        ],
+        "sample_stdev_ms": 2.184717018675189
+      },
+      "latency_reduction_percent": 2.9695372386075114,
+      "order": [
+        "parent",
+        "candidate"
+      ],
+      "output": [
+        220
+      ],
+      "digest": "c8bbed67024e3c09",
+      "MTP_work": {
+        "accepted_prefix_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "bonus_tokens": 0,
+        "committed_accepted_tokens": 0,
+        "correction_tokens": 0,
+        "draft_steps": 3,
+        "emitted_tokens": 0,
+        "full_accept_rounds": 0,
+        "implementation": "qwen3.6_moe_adaptive_mtp",
+        "matched_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "partial_accept_rounds": 0,
+        "proposed_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "proposed_tokens": 0,
+        "rounds": 0,
+        "target_committed_rows": 0,
+        "target_rolled_back_rows": 0,
+        "target_verified_rows": 0,
+        "verified_accepted_tokens": 0,
+        "zero_accept_rounds": 0
+      }
+    },
+    {
+      "case": "append-32k",
+      "parent": {
+        "mean_prefill_ms": 630.4585094,
+        "median_prefill_ms": 631.316984,
+        "samples_ms": [
+          626.2737480000001,
+          633.958652,
+          631.316984,
+          631.8726879999999,
+          628.870475
+        ],
+        "sample_stdev_ms": 2.95896769171237
+      },
+      "candidate": {
+        "mean_prefill_ms": 614.386093,
+        "median_prefill_ms": 613.0660799999999,
+        "samples_ms": [
+          612.638023,
+          615.942856,
+          613.0660799999999,
+          618.054662,
+          612.228844
+        ],
+        "sample_stdev_ms": 2.5166354443482866
+      },
+      "latency_reduction_percent": 2.5493218285364994,
+      "order": [
+        "candidate",
+        "parent"
+      ],
+      "output": [
+        3734
+      ],
+      "digest": "f8dded1f65ccaf0d",
+      "MTP_work": {
+        "accepted_prefix_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "bonus_tokens": 0,
+        "committed_accepted_tokens": 0,
+        "correction_tokens": 0,
+        "draft_steps": 3,
+        "emitted_tokens": 0,
+        "full_accept_rounds": 0,
+        "implementation": "qwen3.6_moe_adaptive_mtp",
+        "matched_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "partial_accept_rounds": 0,
+        "proposed_by_depth": [
+          0,
+          0,
+          0
+        ],
+        "proposed_tokens": 0,
+        "rounds": 0,
+        "target_committed_rows": 0,
+        "target_rolled_back_rows": 0,
+        "target_verified_rows": 0,
+        "verified_accepted_tokens": 0,
+        "zero_accept_rounds": 0
+      }
+    }
+  ],
+  "validation": {
+    "formal_runs": 4,
+    "formal_rows": 28,
+    "formal_output_token_ids": 28,
+    "strict_scope": "candidate decode4k1024 and append32k+4096, each0warm1 against complete frozen C vector/work",
+    "all_model_rows_including_strict_screen_formal": 45,
+    "all_model_output_ids_checked": 1068,
+    "complete_vectors_and_FNV_equal_parent": true,
+    "MTP_work_equal_parent_and_stable_per_arm": true,
+    "all_recipe_tuning_runtime_source_guard_actual_pass": true,
+    "frequency_samples": {
+      "strict": 99,
+      "screen": 172,
+      "formal": 303,
+      "thor3-gdn-norm-harness03-min-screen-01": 43,
+      "thor3-gdn-norm-harness03-boundaries-01": 47
+    },
+    "frequency_policy_restored": true,
+    "fresh_451b_model_library_actual_Cargo_fresh_false": true,
+    "freshness_receipt_sha256": "628b2fe3d4b6f6d270d8c965e417d51308e0f9ba8168abdea8f49923dd2914dd",
+    "actual_ELFs": {
+      "qwen35_context_bench": {
+        "sha256": "e5a50e185470f3bfd847afc50c6771b180fdf1dc737a16c2cb4971b64a8b077b",
+        "bytes": 48730872,
+        "cargo_executable": "/home/wwxq/devlocal/prefill-range-thor2/target/release/examples/qwen35_context_bench",
+        "target": {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "qwen35_context_bench",
+          "src_path": "/home/wwxq/devlocal/eglops-eval/checkout/crates/apxinf-model/examples/qwen35_context_bench.rs",
+          "edition": "2021",
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        "cargo_fresh": false
+      },
+      "qwen35_mtp_bench": {
+        "sha256": "72c10552a66dc817c3322ff61010ffb0eae3f54ba20284aadc82c706e005215d",
+        "bytes": 49610856,
+        "cargo_executable": "/home/wwxq/devlocal/prefill-range-thor2/target/release/examples/qwen35_mtp_bench",
+        "target": {
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "name": "qwen35_mtp_bench",
+          "src_path": "/home/wwxq/devlocal/eglops-eval/checkout/crates/apxinf-model/examples/qwen35_mtp_bench.rs",
+          "edition": "2021",
+          "required-features": [
+            "qwen35-cuda"
+          ],
+          "doc": false,
+          "doctest": false,
+          "test": false
+        },
+        "cargo_fresh": false
+      }
+    }
+  },
+  "operator": {
+    "harness": "gdn-norm-harness03",
+    "actual_ELF_sha256": "7529dfe82095c9db3678902d93002b68356cc9bdde9bf521089f17861a141697",
+    "minimum_tokens4096_heads32_D128": "old1/existing4/new all BF16 bitexact,finite,readonly,canary; changedinput Graph versus fresh eager",
+    "raw_half_finite_edges": [
+      "0001",
+      "03ff",
+      "0400",
+      "3c04",
+      "3c0c",
+      "7bff",
+      "8001",
+      "83ff",
+      "8400",
+      "bc04",
+      "bc0c",
+      "fbff"
+    ],
+    "boundary_cases": [
+      {
+        "arguments": [
+          "--tokens",
+          "64",
+          "--heads",
+          "32",
+          "--dim",
+          "128",
+          "--mode",
+          "check"
+        ],
+        "finite_exact_BF16_readonly_canary_changedinput_Graph_check_passed": true
+      },
+      {
+        "arguments": [
+          "--tokens",
+          "256",
+          "--heads",
+          "32",
+          "--dim",
+          "128",
+          "--mode",
+          "check"
+        ],
+        "finite_exact_BF16_readonly_canary_changedinput_Graph_check_passed": true
+      },
+      {
+        "arguments": [
+          "--tokens",
+          "4095",
+          "--heads",
+          "32",
+          "--dim",
+          "128",
+          "--mode",
+          "check"
+        ],
+        "finite_exact_BF16_readonly_canary_changedinput_Graph_check_passed": true
+      },
+      {
+        "arguments": [
+          "--tokens",
+          "4097",
+          "--heads",
+          "32",
+          "--dim",
+          "128",
+          "--mode",
+          "check"
+        ],
+        "finite_exact_BF16_readonly_canary_changedinput_Graph_check_passed": true
+      },
+      {
+        "arguments": [
+          "--tokens",
+          "5",
+          "--heads",
+          "16",
+          "--dim",
+          "128",
+          "--mode",
+          "check"
+        ],
+        "finite_exact_BF16_readonly_canary_changedinput_Graph_check_passed": true
+      },
+      {
+        "arguments": [
+          "--tokens",
+          "5",
+          "--heads",
+          "48",
+          "--dim",
+          "128",
+          "--mode",
+          "check"
+        ],
+        "finite_exact_BF16_readonly_canary_changedinput_Graph_check_passed": true
+      },
+      {
+        "arguments": [
+          "--tokens",
+          "5",
+          "--heads",
+          "32",
+          "--dim",
+          "64",
+          "--mode",
+          "check"
+        ],
+        "finite_exact_BF16_readonly_canary_changedinput_Graph_check_passed": true
+      },
+      {
+        "arguments": [
+          "--tokens",
+          "5",
+          "--heads",
+          "32",
+          "--dim",
+          "256",
+          "--mode",
+          "check"
+        ],
+        "finite_exact_BF16_readonly_canary_changedinput_Graph_check_passed": true
+      },
+      {
+        "arguments": [
+          "--tokens",
+          "5",
+          "--heads",
+          "31",
+          "--dim",
+          "128",
+          "--mode",
+          "check"
+        ],
+        "finite_exact_BF16_readonly_canary_changedinput_Graph_check_passed": true
+      }
+    ],
+    "old1_existing4_new_screen_2warm3": {
+      "forward": {
+        "candidate_reduction_vs_default1_percent": 43.043791225789306,
+        "candidate_reduction_vs_existing4_percent": 0.258133305603514,
+        "existing4_reduction_vs_default1_percent": 42.89638778395701
+      },
+      "reverse": {
+        "candidate_reduction_vs_default1_percent": 41.638580647126766,
+        "candidate_reduction_vs_existing4_percent": -2.263192223285504,
+        "existing4_reduction_vs_default1_percent": 42.930180366906015
+      }
+    },
+    "screen_is_event_interval_not_kernel_or_E2E": true,
+    "new_algorithm_credit": 0,
+    "harness02_compile_failure": "undefineduint16_t in probe-only host; fixed by cstdint/std::uint16_t before GPU; not model or operator performance failure",
+    "old_harness_and_failure_preserved": true,
+    "BF16_entry_GPU_retested_in_this_gate": false
+  },
+  "counterexample_and_scope": {
+    "existing4_reference": "candidate vs existing4 screen forward+0.2581333% reduction/reverse−2.2631922%; no new algorithm speed claim",
+    "legacy_global_ENV_model_diagnostic": {
+      "case": "append-4k",
+      "metrics": {
+        "mean_prefill_ms": 453.525766,
+        "median_prefill_ms": 453.33107299999995,
+        "samples_ms": [
+          453.33107299999995,
+          454.53627800000004,
+          452.709947
+        ],
+        "sample_stdev_ms": 0.9286012349642065
+      },
+      "output_and_work_exact_C": true,
+      "reference_reduction_vs_frozen_C_N10_percent": 3.402472484647312,
+      "global_ENV_also_changes_conv_not_isolated_norm": true,
+      "new_algorithm_credit": 0
+    },
+    "global_ENV_also_changes_conv_not_norm_isolated": true,
+    "all_frozen_C_no_GDN_tiled_ENV": true,
+    "screen_N3_vs_frozen_N10_not_formal_gain": [
+      {
+        "case": "append-4k",
+        "candidate_reduction_vs_frozen_C_N10_percent": 3.8181589715230335,
+        "candidate_metrics": {
+          "mean_prefill_ms": 451.57411633333334,
+          "median_prefill_ms": 451.188894,
+          "samples_ms": [
+            450.63631599999997,
+            451.188894,
+            452.897139
+          ],
+          "sample_stdev_ms": 1.1786124655315418
+        },
+        "parent_frozen_N10_metrics": {
+          "mean_prefill_ms": 469.5003875,
+          "median_prefill_ms": 469.44451200000003,
+          "samples_ms": [
+            465.795319,
+            469.15972700000003,
+            470.549738,
+            469.63437000000005,
+            467.587812,
+            469.254654,
+            468.421303,
+            471.913867,
+            470.601219,
+            472.085866
+          ],
+          "sample_stdev_ms": 1.9312297655105792
+        },
+        "direction_only_not_paired_or_formal": true
+      },
+      {
+        "case": "append-32k",
+        "candidate_reduction_vs_frozen_C_N10_percent": 2.6078575753282096,
+        "candidate_metrics": {
+          "mean_prefill_ms": 616.5434206666666,
+          "median_prefill_ms": 617.503929,
+          "samples_ms": [
+            617.503929,
+            618.117217,
+            614.009116
+          ],
+          "sample_stdev_ms": 2.2160901719813673
+        },
+        "parent_frozen_N10_metrics": {
+          "mean_prefill_ms": 633.0525289999999,
+          "median_prefill_ms": 633.2711689999999,
+          "samples_ms": [
+            632.5924309999999,
+            632.12775,
+            633.9499069999999,
+            634.233903,
+            639.1193790000001,
+            635.291172,
+            627.809773,
+            629.5346619999999,
+            631.8252789999999,
+            634.041034
+          ],
+          "sample_stdev_ms": 3.11682161785771
+        },
+        "direction_only_not_paired_or_formal": true
+      }
+    ],
+    "new_formal_gain_only_fresh_N5_pairs": true
+  },
+  "profiler": {
+    "schema": "apxinf.gdn_norm.profile-independent-review.v1",
+    "status": "PASS_ACTUAL_NEW_PROFILE_AND_EXISTING_PARENT_SQLITE",
+    "archive_sha256": "be0c0c7006906c1d84691d40dde5f993f45a6dc6d8a5c0f8ef8e050fc58052f0",
+    "archive_files_byte_exact": 20,
+    "receipt_sha256": "57bd5f3f6faf2dd6d386a203f5c76c6d9a4920092f5f7f45feb77df7a9319443",
+    "receipt_listed_files_SHA_bytes_verified": 19,
+    "actual_new_ELF_native_and_freshRust_bound": true,
+    "full_output_work_all3_rows_exact_formal": true,
+    "frequency_samples_fixed": 45,
+    "frequency_policy_restored": true,
+    "parent_existing_profile_reused_not_rerun": true,
+    "parent": {
+      "sqlite_sha256": "f75fb6fcff209571cfc07e12c2381610385863b337305bbe596292a3366b3a4a",
+      "NSys_report_sha256": "406b2f6fdb3693e78b758f8e6fdb1d069e7db0a5fd6b8f242576ddcb5c57b0a1",
+      "SQLite_quick_check": "ok_readonly",
+      "ROI": {
+        "exact_measured_NVTX_range": "MISSING",
+        "definition": "proxy cuProfilerStart.end to lastcaptured CUDA runtimeAPI.end; excludes profiler flush/stop",
+        "start_ns": 7499435,
+        "end_ns": 489340888,
+        "proxy_wall_ms": 481.841453,
+        "not_formal_E2E_or_critical_f": true
+      },
+      "norm": {
+        "symbol": "void apxinf::cuda_new::gdn_ops::<unnamed>::gated_norm_seq_kernel<__half>(const T1 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int, int, int, float)",
+        "count": 30,
+        "sum_ms": 31.132224,
+        "union_ms": 31.132224,
+        "launch_configs": [
+          {
+            "gridX": 131072,
+            "blockX": 32,
+            "registersPerThread": 33,
+            "dynamicSharedMemory": 0,
+            "staticSharedMemory": 0,
+            "streamId": 13
+          }
+        ]
+      },
+      "all_GPU_kernels": {
+        "count": 1366,
+        "sum_ms": 444.038176,
+        "union_ms": 443.479712
+      }
+    },
+    "candidate": {
+      "sqlite_sha256": "4b7f9f323343e244ae470db93cd20a8f1fb55b09291d2e3d3dd7b00482b2c615",
+      "NSys_report_sha256": "33c1dc60d9e226b1be11881fcac0f90c9cecc12533204102fce61acb61446a4e",
+      "SQLite_quick_check": "ok_readonly",
+      "ROI": {
+        "exact_measured_NVTX_range": "MISSING",
+        "definition": "proxy cuProfilerStart.end to lastcaptured CUDA runtimeAPI.end; excludes profiler flush/stop",
+        "start_ns": 7475019,
+        "end_ns": 462995488,
+        "proxy_wall_ms": 455.520469,
+        "not_formal_E2E_or_critical_f": true
+      },
+      "norm": {
+        "symbol": "void apxinf::cuda_new::gdn_ops::<unnamed>::gated_norm_seq_kernel<__half>(const T1 *, const __nv_bfloat16 *, const __nv_bfloat16 *, __nv_bfloat16 *, int, int, int, float)",
+        "count": 30,
+        "sum_ms": 17.638176,
+        "union_ms": 17.638176,
+        "launch_configs": [
+          {
+            "gridX": 32768,
+            "blockX": 128,
+            "registersPerThread": 33,
+            "dynamicSharedMemory": 0,
+            "staticSharedMemory": 0,
+            "streamId": 13
+          }
+        ]
+      },
+      "all_GPU_kernels": {
+        "count": 1366,
+        "sum_ms": 429.18992,
+        "union_ms": 428.676192
+      }
+    },
+    "norm_component_union_reduction_percent": 43.344311026414296,
+    "actual_same_symbol_geometry_change": "grid131072/block32->grid32768/block128; one row perwarp, existing4warp launch reused",
+    "interpretation": "Lower measured norm component cost supports the launcher change. Component time and ROI proxy are instrumented diagnostics, not causal f, pure wholeROI kernel time, formal E2E or extra additive gain. Other kernels/host supply and separate profile cohorts may vary.",
+    "critical_f": "MISSING",
+    "new_performance_credit": false,
+    "GPU_SSH_compile_commit_executed": false,
+    "NCU_counters": "MISSING_NOT_COLLECTED_FOR_THIS_CANDIDATE",
+    "occupancy_stalls_bandwidth_causal_claim": false
+  },
+  "evidence": {
+    "raw_directory_relative_to_mainrepo": "devlocal/final-plus20/results/gdn-norm-acceptance-evidence-01",
+    "archive_sha256": "f77d2b10c55307b6f692868b4fe892843339bcf77b17c0207b1214bf4289faef",
+    "archive_files_byte_exact": 116,
+    "build_receipt_sha256": "781cb092567ca04b64f44b208a0e2d4109fcda4bb305cf4e37045a5544f59973",
+    "summary_sha256": {
+      "strict": "fcd18a91a72d87ecb5d54052c0cd50db61fd452dd1ca25dbf2a8f9c53d27a8c1",
+      "screen": "7792ef960cf7488c70e921f80794fc578a5cd4bf9d43b728d00fb231ac21c170",
+      "formal": "2cfb248f2352c7f1651e09efefa0854324bae1449a65a47beb2e9badf1662c1f"
+    },
+    "CPU_independent_review_sha256": "d3c3e3d4faa304c9a02ee193052f84415c8ded8c68579b33a6755e962c0d2bb0",
+    "CPU_review_development_only_not_product_runtime_dependency": true,
+    "new_profile_raw_directory_relative_to_mainrepo": "devlocal/final-plus20/results/gdn-norm-profile-01-evidence",
+    "new_profile_archive_sha256": "be0c0c7006906c1d84691d40dde5f993f45a6dc6d8a5c0f8ef8e050fc58052f0",
+    "profile_independent_review_sha256": "ebd746b6e91d6b0bd7eb22a3d9abaef9bd0964fe7b97b33e0a56025f4868eea5"
+  },
+  "acceptance": {
+    "formal_affected_gain_validated": true,
+    "delivery_accepted": true,
+    "pushed": false,
+    "new_version_full15_accepted": false,
+    "goal20_accepted": false,
+    "cross_version_percentages_added": false,
+    "family_budget_reset": false,
+    "combined_latestFinal_newELF_source_recipe_bridge": "SEPARATE_PENDING_GATE",
+    "ready_for_root_independent_commit": true
+  }
+}

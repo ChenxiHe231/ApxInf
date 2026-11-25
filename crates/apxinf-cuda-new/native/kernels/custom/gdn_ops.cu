@@ -1099,8 +1099,14 @@ int gdn_gated_norm_seq_f16(const void* input, const void* gate, const void* weig
                           void* output, int tokens, int heads, int head_dim,
                           float epsilon, cudaStream_t stream) {
   if (tokens <= 0 || heads <= 0 || head_dim <= 0) return -1;
-  const char* grouped = std::getenv("APXINF_GDN_PREFILL_TILED");
-  const int warps = grouped != nullptr && grouped[0] == '1' ? 4 : 1;
+  // Reuse the existing four-warp path for the long Qwen3.5 FP16-input
+  // profile. Each warp retains its original row, lanes and reduction order.
+  // Other FP16 profiles keep their legacy policy; the convolution selector
+  // sharing this environment name and the BF16 entry point are unchanged.
+  const bool fixed_long_profile = tokens >= 4096 && heads == 32 && head_dim == 128;
+  const char* grouped = fixed_long_profile
+      ? nullptr : std::getenv("APXINF_GDN_PREFILL_TILED");
+  const int warps = fixed_long_profile || (grouped != nullptr && grouped[0] == '1') ? 4 : 1;
   const int threads = warps * 32;
   const long long blocks = ((long long)tokens * heads + warps - 1) / warps;
   gated_norm_seq_kernel<<<(int)blocks, threads, 0, stream>>>(
