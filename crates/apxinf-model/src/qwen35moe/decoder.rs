@@ -238,6 +238,15 @@ pub struct FullAttentionRequest<'a> {
 pub trait FullAttentionBackend {
     type Cache;
 
+    /// Arena capacity for an outer one-pass session around long text prefill.
+    ///
+    /// Return `Some` only when session-aware temporary allocations fit this
+    /// bound and long-prefill attention opens no nested execution session. Other
+    /// backends retain their existing eager allocation and execution semantics.
+    fn prefill_execution_session_capacity(&self) -> Option<usize> {
+        None
+    }
+
     /// Request one-row target arithmetic for verification when a cache's
     /// batched attention differs numerically from its scalar decode contract.
     fn requires_rowwise_verification(&self) -> bool {
@@ -517,22 +526,57 @@ impl Qwen35Decoder {
             logits_selection,
             hidden_selection,
         )?;
-        self.run_validated(
-            ctx,
-            weights,
-            attention,
-            attention_caches,
-            gdn_states,
-            None,
-            token_ids,
-            start_position,
-            phase,
-            logits_selection,
-            hidden_selection,
-            &mut scratch,
-            None,
-            None,
-        )
+        let session_capacity = if phase == DecoderPhase::Prefill
+            && self.thor_dynamic_fp8_decode
+            && tokens > ops::QWEN35_MTP_DRAFT_STEPS + 1
+            && ExecutionSession::can_start()
+        {
+            attention.prefill_execution_session_capacity()
+        } else {
+            None
+        };
+        let mut run = || {
+            self.run_validated(
+                ctx,
+                weights,
+                attention,
+                attention_caches,
+                gdn_states,
+                None,
+                token_ids,
+                start_position,
+                phase,
+                logits_selection,
+                hidden_selection,
+                &mut scratch,
+                None,
+                None,
+            )
+        };
+        // Short decode/verifier profiles already own their prepared phases.
+        // Large prefill traverses the real stateful computation exactly once:
+        // retain native executions until its boundary, rather than synchronizing
+        // after every GEMM. This does not warm up or capture a second traversal.
+        if let Some(capacity) = session_capacity {
+            let session = ExecutionSession::with_capacity(capacity, ctx.device_id())?;
+            let result = session.prepare(run);
+            // Drain on both success and failure while scratch and all prepared
+            // resources are still owned. Preserve the original operation error.
+            let synchronized = ctx.synchronize().map_err(Error::Cuda);
+            match result {
+                Ok(output) => synchronized.map(|()| output),
+                Err(error) => {
+                    if let Err(sync_error) = synchronized {
+                        eprintln!(
+                            "[qwen35-prefill] secondary stream cleanup error: {sync_error}; primary operation error: {error}"
+                        );
+                    }
+                    Err(error)
+                }
+            }
+        } else {
+            run()
+        }
     }
 
     /// Prefill the target with text embeddings whose image rows were replaced on CUDA.

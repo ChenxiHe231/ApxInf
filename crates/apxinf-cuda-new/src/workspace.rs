@@ -244,6 +244,14 @@ pub struct ExecutionSession {
 }
 
 impl ExecutionSession {
+    /// Whether this thread can open a new preparation scope.
+    ///
+    /// A caller-owned session or CUDA Graph capture keeps responsibility for
+    /// its existing resources and synchronization boundary.
+    pub fn can_start() -> bool {
+        !has_active_session() && !is_capturing()
+    }
+
     #[cfg(test)]
     pub(crate) fn prepared_ids_for_test(&self) -> Vec<usize> { self.inner.prepared_sequence.borrow().clone() }
 

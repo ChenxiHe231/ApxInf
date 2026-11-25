@@ -3572,6 +3572,143 @@ pub(super) mod gpu_raw_protocol {
         super::super::session::gpu_raw_protocol::target_gate(&f)?;
         Ok(())
     }
+    fn select_prefill_lifecycle_decoder(f: &mut Fixture) -> Result<()> {
+        let execution = Qwen35ExecutionOptions {
+            moe_activation: Qwen35MoeActivation::Nvfp4,
+            kv_cache: Qwen35KvCacheDType::Fp8Dynamic,
+        };
+        let thor_profile = execution.uses_thor_dynamic_fp8_decode(f.ctx.device_id(), f.capacity);
+        f.decoder = Qwen35Decoder::with_execution(&f.config, thor_profile)?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "exclusive GPU; strict recipes; real8+8 dynamic-FP8 prefill session lifecycle gate"]
+    fn real_checkpoint_prefill_session_lifecycle(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut f = Fixture::load()?;
+        select_prefill_lifecycle_decoder(&mut f)?;
+        super::super::session::gpu_raw_protocol::prefill_session_lifecycle_gate(&f)?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "RECIPE PREPARATION ONLY: explicit8+8 dynamic-FP8 lifecycle recipes; not correctness or performance acceptance"]
+    fn prepare_prefill_session_lifecycle_recipes(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let argv: Vec<String> = std::env::args().collect();
+        assert!(argv.iter().any(|s| s == "--exact") && argv.iter().any(|s| s == "--ignored")
+            && argv.iter().any(|s| s == "qwen35moe::mtp_runtime::gpu_raw_protocol::prepare_prefill_session_lifecycle_recipes")
+            && argv.iter().any(|s| s == "--test-threads=1"));
+        let mut f = Fixture::load_with_autotune(true)?;
+        select_prefill_lifecycle_decoder(&mut f)?;
+        super::super::session::gpu_raw_protocol::prefill_session_lifecycle_gate(&f)?;
+        println!("{}", serde_json::json!({
+            "schema": "apxinf.qwen35.prefill_session_recipe_preparation.v1",
+            "preparation_only": true,
+            "correctness_accepted": false,
+            "performance_accepted": false
+        }));
+        Ok(())
+    }
+
+    fn long_prefill_lifecycle_case(
+        prefix_rows: usize,
+        preparation_only: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        assert!(matches!(prefix_rows, 4096 | 32768));
+        let append_rows = 4096;
+        let total_rows = prefix_rows + append_rows;
+        // Exact frozen context-benchmark input algorithm; one continuous stream
+        // across prefix and append, not repetition of the short fixture prompt.
+        let mut state = 0x35A3_BF04_4096_0001u64;
+        let tokens: Vec<u32> = (0..total_rows).map(|_| {
+            state = state.wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 17) as usize % (248_320 - 1_000)) as u32
+        }).collect();
+        let digest = |ids: &[u32]| ids.iter().fold(0xcbf29ce484222325u64, |h, id| {
+            id.to_le_bytes().into_iter().fold(h, |h, byte| {
+                (h ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            })
+        });
+        let mut f = if preparation_only {
+            Fixture::load_with_autotune(true)?
+        } else {
+            Fixture::load()?
+        };
+        f.prompt = tokens;
+        // Same minimum as context bench max-new1 + fixed MTP lookahead3;
+        // four subsequent target decodes fit without raising operator limits.
+        f.capacity = total_rows + 4;
+        let execution = Qwen35ExecutionOptions {
+            moe_activation: Qwen35MoeActivation::Nvfp4,
+            kv_cache: Qwen35KvCacheDType::Fp8Dynamic,
+        };
+        let thor_profile = execution.uses_thor_dynamic_fp8_decode(f.ctx.device_id(), f.capacity);
+        f.decoder = Qwen35Decoder::with_execution(&f.config, thor_profile)?;
+        let (prefix, append) = f.prompt.split_at(prefix_rows);
+        println!("{}", serde_json::json!({
+            "schema": "apxinf.qwen35.prefill_session_long_gate_config.v1",
+            "prefix_rows": prefix_rows, "append_rows": append_rows,
+            "capacity": f.capacity, "target_kv": "fp8_dynamic",
+            "thor_dynamic_fp8_decode_profile": thor_profile,
+            "input_seed_hex": "35a3bf0440960001",
+            "input_digest_fnv1a64": format!("{:016x}", digest(&f.prompt)),
+            "prefix_digest_fnv1a64": format!("{:016x}", digest(prefix)),
+            "chunk_digest_fnv1a64": format!("{:016x}", digest(append)),
+            "preparation_only": preparation_only,
+            "performance_accepted": false
+        }));
+        super::super::session::gpu_raw_protocol::prefill_session_lifecycle_gate_case(
+            &f, prefix, append, false)?;
+        if preparation_only {
+            println!("{}", serde_json::json!({
+                "schema": "apxinf.qwen35.prefill_session_recipe_preparation.v1",
+                "prefix_rows": prefix_rows, "append_rows": append_rows,
+                "preparation_only": true,
+                "correctness_accepted": false, "performance_accepted": false
+            }));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "exclusive GPU; strict frozen recipes; real LCG4K+4K raw-state/readonly/retry/decode gate"]
+    fn real_checkpoint_prefill_session_lifecycle_4k_4k(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        long_prefill_lifecycle_case(4096, false)
+    }
+
+    #[test]
+    #[ignore = "exclusive GPU; strict frozen recipes; real LCG32K+4K raw-state/readonly/retry/decode gate"]
+    fn real_checkpoint_prefill_session_lifecycle_32k_4k(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        long_prefill_lifecycle_case(32768, false)
+    }
+
+    #[test]
+    #[ignore = "RECIPE PREPARATION ONLY: explicit LCG4K+4K gate; never correctness/performance acceptance"]
+    fn prepare_prefill_session_lifecycle_4k_4k_recipes(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let argv: Vec<String> = std::env::args().collect();
+        assert!(argv.iter().any(|s| s == "--exact") && argv.iter().any(|s| s == "--ignored")
+            && argv.iter().any(|s| s == "qwen35moe::mtp_runtime::gpu_raw_protocol::prepare_prefill_session_lifecycle_4k_4k_recipes")
+            && argv.iter().any(|s| s == "--test-threads=1"));
+        long_prefill_lifecycle_case(4096, true)
+    }
+
+    #[test]
+    #[ignore = "RECIPE PREPARATION ONLY: explicit LCG32K+4K gate; never correctness/performance acceptance"]
+    fn prepare_prefill_session_lifecycle_32k_4k_recipes(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let argv: Vec<String> = std::env::args().collect();
+        assert!(argv.iter().any(|s| s == "--exact") && argv.iter().any(|s| s == "--ignored")
+            && argv.iter().any(|s| s == "qwen35moe::mtp_runtime::gpu_raw_protocol::prepare_prefill_session_lifecycle_32k_4k_recipes")
+            && argv.iter().any(|s| s == "--test-threads=1"));
+        long_prefill_lifecycle_case(32768, true)
+    }
+
     #[test]
     #[ignore = "preparation only: fills target-only storage gate recipe cache; never a performance result"]
     fn prepare_target_gdn_storage_recipes() -> std::result::Result<(), Box<dyn std::error::Error>> {

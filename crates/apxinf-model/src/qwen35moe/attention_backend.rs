@@ -260,6 +260,14 @@ impl Qwen35Fp8AttentionBackend {
 }
 
 impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
+    fn prefill_execution_session_capacity(&self) -> Option<usize> {
+        // Long prefill owns its GDN/attention tensors outside the arena, and
+        // projection sessions below are restricted to decode/four-row verify.
+        (self.kv_cache_dtype == Qwen35KvCacheDType::Fp8Dynamic
+            && self.image_positions.is_none())
+            .then_some(DECODE_PROJECTION_WORKSPACE)
+    }
+
     fn requires_rowwise_verification(&self) -> bool {
         // Image prompts amplify differences between batched prefill and the
         // selected scalar decoder. Verify with that decoder for every KV

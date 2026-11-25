@@ -1981,4 +1981,290 @@ pub(super) mod gpu_raw_protocol {
         }
         Ok(())
     }
+
+
+    /// Test-only policy adapter. All model math/cache operations delegate to the
+    /// production backend; disabling the new capability is the original eager
+    /// route, not a second implementation or a production optimization switch.
+    struct PrefillSessionGateBackend {
+        inner: Qwen35Fp8AttentionBackend,
+        admit_session: bool,
+        capacity_queries: std::cell::Cell<usize>,
+        fail_after_attention: bool,
+        minimum_observed_free: std::cell::Cell<usize>,
+    }
+
+    impl FullAttentionBackend for PrefillSessionGateBackend {
+        type Cache = Qwen35AttentionCache;
+
+        fn prefill_execution_session_capacity(&self) -> Option<usize> {
+            self.capacity_queries.set(self.capacity_queries.get() + 1);
+            self.admit_session
+                .then(|| self.inner.prefill_execution_session_capacity())
+                .flatten()
+        }
+
+        fn allocate_cache(
+            &mut self,
+            ctx: &CudaContext,
+            layer_index: usize,
+            geometry: super::super::architecture::AttentionGeometry,
+            capacity: usize,
+            scales: Option<super::super::runtime_weights::KvCacheScales>,
+        ) -> Result<Self::Cache> {
+            self.inner.allocate_cache(ctx, layer_index, geometry, capacity, scales)
+        }
+
+        fn reset_cache(&mut self, ctx: &CudaContext, cache: &mut Self::Cache) -> Result<()> {
+            self.inner.reset_cache(ctx, cache)
+        }
+
+        fn copy_cache_range(
+            &mut self,
+            ctx: &CudaContext,
+            source: &Self::Cache,
+            destination: &mut Self::Cache,
+            positions: std::ops::Range<usize>,
+        ) -> Result<()> {
+            self.inner.copy_cache_range(ctx, source, destination, positions)
+        }
+
+        fn run(
+            &mut self,
+            ctx: &CudaContext,
+            request: super::super::decoder::FullAttentionRequest<'_>,
+            cache: &mut Self::Cache,
+        ) -> Result<()> {
+            let long_prefill = request.phase == DecoderPhase::Prefill
+                && request.normalized_hidden.shape().dims()[0] > 4;
+            self.inner.run(ctx, request, cache)?;
+            if long_prefill {
+                let free = ctx.memory_info().map_err(Error::Cuda)?.0;
+                self.minimum_observed_free
+                    .set(self.minimum_observed_free.get().min(free));
+                if self.fail_after_attention {
+                    self.fail_after_attention = false;
+                    // Real GDN/projection/cache work has already been enqueued.
+                    // This is a recoverable backend error, not a CUDA fault.
+                    return Err(invalid("injected prefill-session lifecycle error"));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    type PrefillGateSession = Qwen35Session<PrefillSessionGateBackend>;
+
+    fn prefill_gate_session(f: &Fixture, admit_session: bool) -> Result<PrefillGateSession> {
+        Qwen35Session::new(
+            &f.ctx,
+            &f.decoder,
+            &f.weights,
+            PrefillSessionGateBackend {
+                inner: Qwen35Fp8AttentionBackend::with_kv_cache(
+                    &f.config,
+                    super::super::Qwen35KvCacheDType::Fp8Dynamic,
+                    None,
+                )?,
+                admit_session,
+                capacity_queries: std::cell::Cell::new(0),
+                fail_after_attention: false,
+                minimum_observed_free: std::cell::Cell::new(usize::MAX),
+            },
+            f.capacity,
+        )
+    }
+
+    fn prefill_cache_images(states: &[Qwen35AttentionCache]) -> Result<Vec<Vec<u8>>> {
+        let mut images = Vec::new();
+        for cache in states {
+            images.push(raw(cache.key())?);
+            images.push(raw(cache.value())?);
+            images.push(raw(cache.dynamic_key_scales().expect("dynamic K scales"))?);
+            images.push(raw(cache.dynamic_value_scales().expect("dynamic V scales"))?);
+        }
+        Ok(images)
+    }
+
+    fn prefill_same_images(label: &str, actual: &[Vec<u8>], expected: &[Vec<u8>]) {
+        assert_eq!(actual.len(), expected.len(), "{label}: tensor count");
+        for (i, (a, b)) in actual.iter().zip(expected).enumerate() {
+            exact(&format!("{label} tensor{i}"), a, b);
+        }
+    }
+
+    fn prefill_same_output(label: &str, actual: &DecoderOutput, expected: &DecoderOutput) -> Result<()> {
+        assert_eq!(actual.start_position, expected.start_position, "{label}");
+        assert_eq!(actual.end_position, expected.end_position, "{label}");
+        exact(&format!("{label} logits"), &raw(&actual.logits)?, &raw(&expected.logits)?);
+        exact(&format!("{label} hidden"), &raw(&actual.hidden_states)?, &raw(&expected.hidden_states)?);
+        Ok(())
+    }
+
+    fn prefill_same_committed(
+        label: &str,
+        actual: &PrefillGateSession,
+        expected: &PrefillGateSession,
+    ) -> Result<()> {
+        assert_eq!(actual.position, expected.position, "{label}");
+        prefill_same_images(label, &prefill_cache_images(&actual.committed_attention)?,
+            &prefill_cache_images(&expected.committed_attention)?);
+        same(label, &gdn(&actual.committed_gdn)?, &gdn(&expected.committed_gdn)?);
+        Ok(())
+    }
+
+    fn prefill_gate_prefix(
+        session: &mut PrefillGateSession,
+        f: &Fixture,
+        tokens: &[u32],
+        all_hidden: bool,
+    ) -> Result<DecoderOutput> {
+        if all_hidden {
+            let prepared = session.prepare_target_prefill(&f.ctx, &f.decoder, &f.weights, tokens)?;
+            session.publish_target_prefill(prepared)
+        } else {
+            session.prefill(&f.ctx, &f.decoder, &f.weights, tokens)
+        }
+    }
+
+    fn prefill_gate_append(
+        session: &mut PrefillGateSession,
+        f: &Fixture,
+        tokens: &[u32],
+        all_hidden: bool,
+    ) -> Result<DecoderOutput> {
+        if all_hidden {
+            let prepared = session.prepare_target_append_prefill(&f.ctx, &f.decoder, &f.weights, tokens)?;
+            session.publish_target_prefill(prepared)
+        } else {
+            session.append_prefill(&f.ctx, &f.decoder, &f.weights, tokens)
+        }
+    }
+
+    pub(in crate::qwen35moe) fn prefill_session_lifecycle_gate(f: &Fixture) -> Result<()> {
+        // Keep the original real16-token fixture and its full scope checks.
+        assert_eq!(f.prompt.len(), 16);
+        let (prefix, append) = f.prompt.split_at(8);
+        prefill_session_lifecycle_gate_case(f, prefix, append, true)
+    }
+
+    pub(in crate::qwen35moe) fn prefill_session_lifecycle_gate_case(
+        f: &Fixture,
+        prefix: &[u32],
+        append: &[u32],
+        check_small_scopes: bool,
+    ) -> Result<()> {
+        use apxinf_cuda_new::ExecutionSession;
+        assert!(prefix.len() > 4 && append.len() > 4);
+        assert!(prefix.len() + append.len() + 4 <= f.capacity);
+        let all_hidden = !check_small_scopes;
+        let mut reference = prefill_gate_session(f, false)?;
+        let mut candidate = prefill_gate_session(f, true)?;
+        let reference_prefix = prefill_gate_prefix(&mut reference, f, prefix, all_hidden)?;
+        let candidate_prefix = prefill_gate_prefix(&mut candidate, f, prefix, all_hidden)?;
+        assert_eq!(reference_prefix.hidden_rows, if all_hidden { prefix.len() } else { 1 });
+        assert_eq!(candidate_prefix.hidden_rows, reference_prefix.hidden_rows);
+        prefill_same_output("prefix eager/session", &candidate_prefix, &reference_prefix)?;
+        prefill_same_committed("prefix state eager/session", &candidate, &reference)?;
+        assert_eq!(candidate.attention.capacity_queries.get(), 1);
+
+        let old_kv = prefill_cache_images(&candidate.committed_attention)?;
+        let old_gdn = gdn(&candidate.committed_gdn)?;
+        let old_prefix_last_hidden = raw(&candidate_prefix.last_hidden_state()?)?;
+        let old_position = candidate.position;
+        let old_epoch = candidate.epoch;
+        candidate.attention.fail_after_attention = true;
+        let error = prefill_gate_append(&mut candidate, f, append, all_hidden)
+            .expect_err("backend error must escape, not be silently retried");
+        assert!(error.to_string().contains("injected prefill-session lifecycle error"));
+        assert!(ExecutionSession::can_start(), "error must restore thread-local scope");
+        assert_eq!((candidate.position, candidate.epoch), (old_position, old_epoch));
+        prefill_same_images("failed append committed KV/scales readonly",
+            &prefill_cache_images(&candidate.committed_attention)?, &old_kv);
+        same("failed append committed GDN readonly", &gdn(&candidate.committed_gdn)?, &old_gdn);
+        exact("failed append previous target hidden readonly",
+            &raw(&candidate_prefix.last_hidden_state()?)?, &old_prefix_last_hidden);
+
+        let reference_append = prefill_gate_append(&mut reference, f, append, all_hidden)?;
+        let candidate_append = prefill_gate_append(&mut candidate, f, append, all_hidden)?;
+        assert_eq!(reference_append.hidden_rows, if all_hidden { append.len() } else { 1 });
+        assert_eq!(candidate_append.hidden_rows, reference_append.hidden_rows);
+        prefill_same_output("retry append eager/session", &candidate_append, &reference_append)?;
+        prefill_same_committed("retry append state eager/session", &candidate, &reference)?;
+        exact("retry append previous target hidden readonly",
+            &raw(&candidate_prefix.last_hidden_state()?)?, &old_prefix_last_hidden);
+        prefill_same_images("successful append old physical KV/scales bank readonly",
+            &prefill_cache_images(&candidate.shadow_attention)?, &old_kv);
+        same("successful append old physical GDN bank readonly",
+            &gdn(&candidate.shadow_gdn)?, &old_gdn);
+        // Release full physical CPU snapshots before the decode observations.
+        drop(old_kv);
+        drop(old_gdn);
+        // Keep the original8+8 teacher-token check. Long cases additionally use
+        // real greedy continuation from the appended target logits.
+        let mut next = reference_append.greedy_token_ids(&f.ctx)?[0];
+        for step in 0..4 {
+            let token = if check_small_scopes { f.prompt[step] } else { next };
+            let expected = reference.decode(&f.ctx, &f.decoder, &f.weights, token)?;
+            let actual = candidate.decode(&f.ctx, &f.decoder, &f.weights, token)?;
+            prefill_same_output(&format!("next decode{step}"), &actual, &expected)?;
+            prefill_same_committed(&format!("next decode{step} state"), &candidate, &reference)?;
+            if !check_small_scopes {
+                next = expected.greedy_token_ids(&f.ctx)?[0];
+            }
+        }
+
+        if check_small_scopes {
+            let mut nested = prefill_gate_session(f, true)?;
+            let outer = ExecutionSession::with_capacity(4 * 1024 * 1024, f.ctx.device_id())?;
+            let nested_output = outer.prepare(|| {
+                assert!(!ExecutionSession::can_start());
+                nested.prefill(&f.ctx, &f.decoder, &f.weights, prefix)
+            })?;
+            f.ctx.synchronize().map_err(Error::Cuda)?;
+            assert_eq!(nested.attention.capacity_queries.get(), 0,
+                "caller session must bypass the new capability and scope");
+            prefill_same_output("outer session prefix", &nested_output, &reference_prefix)?;
+            assert!(ExecutionSession::can_start());
+            drop(outer);
+
+            // Exercise the actual capture query and cleanup with caller-owned
+            // storage. Generic allocating decoder.run is not a supported captured
+            // entry; the guard must leave prepared/captured callers in charge.
+            let source = &reference_prefix.hidden_states;
+            let capture_destination = CudaBuffer::alloc_zeros_async(
+                source.size_in_bytes(), f.ctx.device_id(), f.ctx.stream())
+                .map_err(Error::Cuda)?
+                .as_tensor(source.shape().clone(), source.dtype())
+                .map_err(Error::Cuda)?;
+            let graph = capture(&f.ctx, || {
+                assert!(!ExecutionSession::can_start(), "capture must not open a local session");
+                ops::copy_tensor(&f.ctx, source, &capture_destination)
+            })?;
+            graph.replay()?;
+            f.ctx.synchronize().map_err(Error::Cuda)?;
+            exact("capture preserved copy", &raw(&capture_destination)?, &raw(source)?);
+            assert!(ExecutionSession::can_start(), "capture must restore thread-local scope");
+        }
+
+        println!("{}", serde_json::json!({
+            "schema": "apxinf.qwen35.prefill_session_lifecycle.v1",
+            "prefix_rows": prefix.len(), "append_rows": append.len(),
+            "target_kv": "fp8_dynamic", "next_decode_steps": 4,
+            "exact_logits_hidden_gdn_kv_scales": true,
+            "failed_after_real_attention_enqueue": true,
+            "failed_retry_committed_readonly": true,
+            "all_target_hidden_rows_checked": all_hidden,
+            "previous_target_hidden_readonly": true,
+            "greedy_continuation_checked": !check_small_scopes,
+            "outer_session_capability_bypassed": check_small_scopes,
+            "capture_admission_and_copy_checked": check_small_scopes,
+            "sampled_reference_min_free_bytes": reference.attention.minimum_observed_free.get(),
+            "sampled_candidate_min_free_bytes": candidate.attention.minimum_observed_free.get(),
+            "memory_samples_are_not_native_peak": true,
+            "memory_samples_are_not_paired_footprint_comparison": true,
+            "performance_accepted": false
+        }));
+        Ok(())
+    }
 }

@@ -340,6 +340,20 @@ renamed as part of unrelated work.
 | MiniCPM5 / `LlmTrait`, MLX | Independent `metal_minicpm5/` with `model.rs`, `math.rs`, `weights.rs` and `dspark.rs`; official 2B/context 4096; `bf16-public`, `bf16-compiled` (whole decode step and packed residual/norm), explicit `dspark` (compiled draft chain plus target verification). |
 | Clef Flash / `SchemaDecisionRuntime`, MLX | Independent `metal_clef/{config,encode,weights,model}.rs`; affine Q4 Qwen3.5 hybrid backbone and BF16 joint schema head, up to 16384 tokens. `auto` (default) selects the composition qualified on the device: on `applegpu_g13s`, optimized GPU kernels (gate GEMM with SwiGLU epilogue, wm1/wn2 split projections, causal convolution and eight-lane recurrence), which passed quality and paired latency gates there; elsewhere the reference. With `coreml`, explicit `gpu-ane-columns` selects 6656 GPU columns and 5632 ANE INT8 columns per MLP in 512-token tiles; this is not device-qualified by the GPU path's evidence. `reference` is the stock MLX-VLM composition. The decision CLI owns its 1 GiB process cache limit; loading the library model leaves the caller's limit unchanged. All compositions prepare the local shapeless decay/beta callable at load for lengths 1, 2 and 16384; this is not whole-backbone/head or Core ML preparation. |
 
+Qwen3.5/3.6 native variable-length text prefill above the four-row verifier
+profile uses one temporary `ExecutionSession::prepare` traversal only for the
+existing Thor NVFP4/dynamic-FP8 execution profile. The attention backend admits
+dynamic-FP8 text requests without image positions and supplies its bounded arena
+capacity; other profiles and `FullAttentionBackend` implementations keep their
+existing behavior by default.
+It does not replay, capture, or cache decoder scratch. A caller-owned session or
+capture retains
+its existing execution boundary; short prepared profiles keep their own phases.
+The temporary session synchronizes before releasing native executions. On an
+operation error it attempts the same drain, logs a secondary synchronization
+error, and returns the original error unchanged. CUDA errors propagate without
+automatic retry or context recovery.
+
 Qwen3.5/3.6's checkpoint-native W4A16 MTP proposer owns its prepared vocabulary
 views and transactional eligibility in `qwen35moe/mtp_runtime.rs`; the target
 verifier retains full-vocabulary logits. Selection is automatic for eligible
