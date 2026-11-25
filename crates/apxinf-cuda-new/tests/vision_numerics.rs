@@ -91,6 +91,146 @@ fn ordered_pairwise_dot_preserves_small_cancellation_in_graph() {
 }
 
 #[test]
+fn ordered_pairwise_tiles_preserve_cancellation_tails_and_guards_in_graph() {
+    use apxinf_core::Shape;
+    use apxinf_cuda_new::CudaBuffer;
+
+    let ctx = CudaContext::new(0).unwrap();
+    // Cross both register-tile boundaries and the 64-element shared K tile.
+    let (m, n, k) = (17, 35, 66);
+    let input: Vec<f32> = (0..m)
+        .flat_map(|row| vec![if row % 2 == 0 { 1. } else { -1. }; k])
+        .collect();
+    let mut weight = vec![0.; n * k];
+    for column in 0..n {
+        let base = (1 + column % 3) as f32;
+        weight[column * k] = base;
+        weight[column * k + 1] = 2f32.powi(-24);
+        weight[column * k + 2] = -base;
+        // This exact zero pair must be loaded from the partial final K tile.
+        weight[column * k + 64] = 1.;
+        weight[column * k + 65] = -1.;
+    }
+    let a = device(&ctx, vec![m, k], &input);
+    let b = device(&ctx, vec![n, k], &weight);
+    let bias = device(&ctx, vec![n], &vec![0.; n]);
+    let guarded = device(&ctx, vec![m * n + 32], &vec![42.; m * n + 32]);
+    let output = CudaBuffer::from_tensor(&guarded)
+        .unwrap()
+        .view(16 * 2, m * n * 2)
+        .unwrap()
+        .as_tensor(Shape::new(vec![m, n]), DType::BF16)
+        .unwrap();
+    let graph = PreparedPhase::prepare_and_capture(
+        &ctx,
+        ExecutionSession::with_capacity(1024 * 1024, 0).unwrap(),
+        || {
+            let mut out = output.clone();
+            let mut gemm = ops::GemmArgs::new(&a, &b, &mut out).with_output_major_weight();
+            gemm.policy.numerics = ops::GemmNumerics::PairwiseBf16Odd;
+            gemm.policy.allow_fallback = false;
+            ops::gemm_bias(&ctx, ops::GemmBiasArgs { gemm, bias: &bias })
+        },
+    )
+    .unwrap();
+    for _ in 0..3 {
+        graph.replay().unwrap();
+    }
+    ctx.synchronize().unwrap();
+    let expected: Vec<f32> = (0..m)
+        .flat_map(|row| {
+            (0..n).map(move |column| {
+                let residual = 2f32.powi(if column % 3 == 0 { -23 } else { -22 });
+                if row % 2 == 0 {
+                    residual
+                } else {
+                    -residual
+                }
+            })
+        })
+        .collect();
+    assert_eq!(read(&output), expected);
+    let guards = read(&guarded);
+    assert_eq!(&guards[..16], &[42.; 16]);
+    assert_eq!(&guards[16 + m * n..], &[42.; 16]);
+    assert_eq!(read(&a), input);
+    assert_eq!(read(&b), weight);
+    assert_eq!(read(&bias), vec![0.; n]);
+}
+
+#[test]
+fn ordered_pairwise_flushes_products_and_handles_overflow_and_nan() {
+    let ctx = CudaContext::new(0).unwrap();
+    let tiny = 2f32.powi(-133); // Smallest positive BF16 subnormal.
+    let normal = 2f32.powi(-126);
+    let max = half::bf16::MAX.to_f32();
+    let input = device(
+        &ctx,
+        vec![2, 4],
+        &[1., 1., 1., 1., normal, normal, normal, normal],
+    );
+    let weights = device(
+        &ctx,
+        vec![6, 4],
+        &[
+            tiny,
+            tiny,
+            0.,
+            0.,
+            0.5,
+            0.5,
+            0.,
+            0.,
+            max,
+            max,
+            0.,
+            0.,
+            -max,
+            -max,
+            0.,
+            0.,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.,
+            0.,
+            normal,
+            -normal,
+            0.,
+            0.,
+        ],
+    );
+    let bias = device(&ctx, vec![6], &[0.; 6]);
+    let mut output = device(&ctx, vec![2, 6], &[42.; 12]);
+    let mut gemm = ops::GemmArgs::new(&input, &weights, &mut output).with_output_major_weight();
+    gemm.policy.numerics = ops::GemmNumerics::PairwiseBf16Odd;
+    gemm.policy.allow_fallback = false;
+    ops::gemm_bias(&ctx, ops::GemmBiasArgs { gemm, bias: &bias }).unwrap();
+    ctx.synchronize().unwrap();
+    let actual = read(&output);
+    let expected = [
+        0.,
+        1.,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        0.,
+        0.,
+        0.,
+        7.96875,
+        -7.96875,
+        f32::NAN,
+        0.,
+    ];
+    for (actual, expected) in actual.into_iter().zip(expected) {
+        if expected.is_nan() {
+            assert!(actual.is_nan());
+        } else {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+    }
+}
+
+#[test]
 fn transpose_padding_and_welford_norm_keep_inputs_and_graph_storage() {
     let ctx = CudaContext::new(0).unwrap();
     let input = device(

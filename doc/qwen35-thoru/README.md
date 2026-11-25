@@ -257,7 +257,11 @@ The visual-output gate passes on Jetson Thor against the frozen Hugging Face
 CPU BF16 eager reference (finite, cosine >= 0.999, relative L2 <= 0.02).
 Red, natural photo, OCR, two non-square images and packed photo+OCR outputs
 match the reference element for element; packing preserves each image's output.
-This establishes precision for those cases, not a vision throughput claim.
+The ordered visual GEMM now uses conflict-free shared tiles, register reuse and
+native flush-to-zero arithmetic while retaining the same pairwise reduction.
+On Thor-3, the measured warm model TTFT falls by 59–61% for the tested single-
+and two-image dynamic-FP8 requests; see [image performance acceptance](IMAGE_INPUT_PERFORMANCE.md)
+for the exact scope, precision checks and reproduction procedure.
 
 The Qwen3.5/3.6 MoE runtime accepts up to 16 ordered static images per request. It loads the
 checkpoint's BF16 `model.visual.*` weights on the first image, replaces image

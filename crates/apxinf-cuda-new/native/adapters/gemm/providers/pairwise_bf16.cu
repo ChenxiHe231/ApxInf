@@ -24,11 +24,20 @@ void destroy_pairwise_bf16(Execution&) noexcept {}
 cudaError_t launch_pairwise_bf16(Execution& execution) {
   const auto& s = execution.spec;
   const auto& b = execution.bindings;
-  const unsigned blocks = unsigned(((s.m + 7) / 8) * ((s.n + 15) / 16));
-  kernels::pairwise_bf16_bias<<<blocks, dim3(16, 8), 0, static_cast<cudaStream_t>(b.stream)>>>(
-      static_cast<const __nv_bfloat16*>(b.a), static_cast<const __nv_bfloat16*>(b.b),
-      static_cast<const __nv_bfloat16*>(b.bias), static_cast<__nv_bfloat16*>(b.output),
-      int(s.m), int(s.n), int(s.k));
+  const auto stream = static_cast<cudaStream_t>(b.stream);
+  const auto* a = static_cast<const __nv_bfloat16*>(b.a);
+  const auto* weight = static_cast<const __nv_bfloat16*>(b.b);
+  const auto* bias = static_cast<const __nv_bfloat16*>(b.bias);
+  auto* output = static_cast<__nv_bfloat16*>(b.output);
+  if (s.m >= 16 && s.n >= 32) {
+    const unsigned blocks = unsigned(((s.m + 15) / 16) * ((s.n + 31) / 32));
+    kernels::pairwise_bf16_bias<2, 2><<<blocks, dim3(16, 8), 0, stream>>>(
+        a, weight, bias, output, int(s.m), int(s.n), int(s.k));
+  } else {
+    const unsigned blocks = unsigned(((s.m + 7) / 8) * ((s.n + 15) / 16));
+    kernels::pairwise_bf16_bias<1, 1><<<blocks, dim3(16, 8), 0, stream>>>(
+        a, weight, bias, output, int(s.m), int(s.n), int(s.k));
+  }
   return cudaGetLastError();
 }
 
