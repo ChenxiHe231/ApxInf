@@ -31,6 +31,7 @@ use super::device_weights::{
     DeviceMixerWeights, Qwen35DeviceWeights,
 };
 use super::execution::{Qwen35ExecutionOptions, Qwen35KvCacheDType};
+use super::image_reuse::ImageIdentity;
 use super::loader::load_qwen35_runtime_weights;
 use super::mtp_runtime::{
     MtpGreedyPolicy, Qwen35ContextSnapshot, Qwen35MtpCoordinator, Qwen35MtpRuntime, Qwen35MtpState,
@@ -38,6 +39,8 @@ use super::mtp_runtime::{
 use super::mtp_schedule::QWEN35_MTP_DRAFT_STEPS;
 use super::runtime_weights::KvCacheScales;
 use super::session::{Qwen35Session, Qwen35SessionSnapshot};
+#[path = "llm_image.rs"]
+mod image;
 
 /// Default cache admission for direct `AutoModel` callers. OpenAI serving
 /// supplies its prompt/output admission plus MTP lookahead through
@@ -196,17 +199,21 @@ type ScalarContextSnapshot = Qwen35SessionSnapshot<Qwen35AttentionCache>;
 
 struct SystemPrefixCache {
     tokens: Vec<u32>,
+    image: Option<ImageIdentity>,
+    image_first_token: Option<u32>,
     snapshot: ContextSnapshot,
     capacity: usize,
 }
 
 struct ScalarSystemPrefixCache {
     tokens: Vec<u32>,
+    image: Option<ImageIdentity>,
+    image_logits: Option<Tensor>,
     snapshot: ScalarContextSnapshot,
     capacity: usize,
 }
 
-/// Qwen3.5/3.6-35B-A3B-NVFP4 runtime with optional single-image prefill.
+/// Qwen3.5/3.6-35B-A3B-NVFP4 runtime with ordered static-image prefill.
 ///
 /// MTP weights are loaded and device-resident. Exact neutral greedy generation
 /// uses the native MTP coordinator; sampling, filters, penalties and log-prob
@@ -215,6 +222,7 @@ pub struct Qwen35Moe {
     ctx: CudaContext,
     vision_source: Option<super::vision_weights::VisionSource>,
     vision: Option<super::vision_weights::VisionWeights>,
+    image_features: VecDeque<image::CachedImageFeatures>,
     vision_sessions: VecDeque<(super::vision::VisionScratch, ops::ExecutionSession, bool)>,
     backend: Arc<dyn Backend>,
     decoder: Qwen35Decoder,
@@ -225,18 +233,20 @@ pub struct Qwen35Moe {
     context_reuse_enabled: bool,
     system_prefix_cache: Option<SystemPrefixCache>,
     /// Exact prompt checkpoints in most-recently-used order. Checkpoints stop
-    /// one token before the rendered prompt end: restoring one and appending
-    /// that final token reconstructs the first target token and a fresh MTP
-    /// schedule without re-evaluating the stable prompt body.
+    /// before a volatile rendered tail. Image entries additionally retain a
+    /// complete prompt checkpoint and its first token, so exact replays can
+    /// restart scheduling without evaluating another prompt row.
     mtp_prompt_prefix_caches: VecDeque<SystemPrefixCache>,
     /// Token identity for the live MTP endpoint. The batch-one serving worker
     /// leaves target/GDN/MTP state resident after generation, so an immediate
     /// tool-result follow-up can append without copying a second KV snapshot.
     mtp_live_conversation_prefix: Option<Vec<u32>>,
+    mtp_live_image: Option<ImageIdentity>,
     /// Sampling-only prefix snapshots in most-recently-used order. AIOS tool
     /// bindings can render different system prefixes; retaining a small,
-    /// bounded set prevents those bindings from evicting one another on every
-    /// request without allowing device memory to grow without limit.
+    /// bounded set also retains image prompt endpoints. Image admission keeps
+    /// leading text checkpoints while recycling stable/full image snapshots,
+    /// without allowing device memory to grow without limit.
     scalar_system_prefix_caches: VecDeque<ScalarSystemPrefixCache>,
     last_reused_tokens: usize,
     /// Reused destination for decode logits. This used to be a fresh
@@ -441,6 +451,7 @@ impl Qwen35Moe {
             ctx,
             vision_source: None,
             vision: None,
+            image_features: VecDeque::new(),
             vision_sessions: VecDeque::new(),
             backend,
             decoder,
@@ -452,6 +463,7 @@ impl Qwen35Moe {
             system_prefix_cache: None,
             mtp_prompt_prefix_caches: VecDeque::new(),
             mtp_live_conversation_prefix: None,
+            mtp_live_image: None,
             scalar_system_prefix_caches: VecDeque::new(),
             last_reused_tokens: 0,
             decode_logits_cache: RefCell::new(None),
@@ -469,7 +481,9 @@ impl Qwen35Moe {
             self.system_prefix_cache = None;
             self.mtp_prompt_prefix_caches.clear();
             self.mtp_live_conversation_prefix = None;
+            self.mtp_live_image = None;
             self.scalar_system_prefix_caches.clear();
+            self.image_features.clear();
         }
         Ok(())
     }
@@ -504,7 +518,7 @@ impl Qwen35Moe {
         let hit_index = self
             .scalar_system_prefix_caches
             .iter()
-            .position(|cache| cache.tokens.as_slice() == prefix);
+            .position(|cache| cache.image.is_none() && cache.tokens.as_slice() == prefix);
         let mut cache = if let Some(index) = hit_index {
             self.scalar_system_prefix_caches
                 .remove(index)
@@ -519,10 +533,14 @@ impl Qwen35Moe {
             match reusable.filter(|cache| cache.capacity >= reusable_prefix_tokens) {
                 Some(mut cache) => {
                     cache.tokens.clear();
+                    cache.image = None;
+                    cache.image_logits = None;
                     cache
                 }
                 None => ScalarSystemPrefixCache {
                     tokens: Vec::new(),
+                    image: None,
+                    image_logits: None,
                     snapshot: self.runtime.target_mut().allocate_snapshot(
                         &self.ctx,
                         &self.decoder,
@@ -595,9 +613,13 @@ impl Qwen35Moe {
         }
 
         let exact_hit = longest_reusable_prefix_index(
-            self.mtp_prompt_prefix_caches
-                .iter()
-                .map(|cache| cache.tokens.as_slice()),
+            self.mtp_prompt_prefix_caches.iter().map(|cache| {
+                if cache.image.is_none() {
+                    cache.tokens.as_slice()
+                } else {
+                    &[]
+                }
+            }),
             prompt,
         );
         let exact_hit_tokens = exact_hit
@@ -614,7 +636,12 @@ impl Qwen35Moe {
                 .mtp_live_conversation_prefix
                 .as_ref()
                 .filter(|tokens| {
-                    live_conversation_suffix(tokens, prompt, self.runtime.target().position())
+                    self.mtp_live_image.is_none()
+                        && live_conversation_suffix(
+                            tokens,
+                            prompt,
+                            self.runtime.target().position(),
+                        )
                         .is_some()
                 })
                 .map_or(0, Vec::len);
@@ -639,6 +666,7 @@ impl Qwen35Moe {
 
             if let Some(index) = exact_hit {
                 self.mtp_live_conversation_prefix = None;
+                self.mtp_live_image = None;
                 let cache = self
                     .mtp_prompt_prefix_caches
                     .remove(index)
@@ -700,6 +728,8 @@ impl Qwen35Moe {
             Some(cache) => cache,
             None => SystemPrefixCache {
                 tokens: Vec::new(),
+                image: None,
+                image_first_token: None,
                 snapshot: self.runtime.allocate_context_snapshot(
                     &self.ctx,
                     &self.decoder,
@@ -823,10 +853,14 @@ impl Qwen35Moe {
         match reusable.filter(|cache| cache.capacity >= capacity) {
             Some(mut cache) => {
                 cache.tokens.clear();
+                cache.image = None;
+                cache.image_first_token = None;
                 Ok(cache)
             }
             None => Ok(SystemPrefixCache {
                 tokens: Vec::new(),
+                image: None,
+                image_first_token: None,
                 snapshot: self.runtime.allocate_context_snapshot(
                     &self.ctx,
                     &self.decoder,
@@ -852,6 +886,7 @@ impl Qwen35Moe {
         let position = self.runtime.target().position();
         let Some(tokens) = committed_context_identity(prompt, generated, position)? else {
             self.mtp_live_conversation_prefix = None;
+            self.mtp_live_image = None;
             return Ok(());
         };
         eprintln!(
@@ -859,6 +894,7 @@ impl Qwen35Moe {
             tokens.len()
         );
         self.mtp_live_conversation_prefix = Some(tokens);
+        self.mtp_live_image = None;
         Ok(())
     }
 
@@ -1062,40 +1098,38 @@ impl Qwen35Moe {
         self.runtime.target_mut().set_decode_in_place(false);
 
         let mut profile = GenerationProfile::new();
-        let prefill = if request.input.image.is_some() {
-            let (embeddings, positions) = self.prepare_image_embeddings(request.input)?;
+        let mut image_identity = None;
+        let first_token = if request.input.image.is_some() {
+            let (embeddings, identity) = self.prepare_image_embeddings(request.input)?;
             let previous = self
                 .runtime
                 .target_mut()
                 .attention_mut()
-                .replace_image_positions(Some(positions.clone()));
-            let result = self.runtime.prefill_image_greedy(
-                &self.ctx,
-                &self.decoder,
-                &self.weights,
+                .replace_image_positions(Some(identity.positions.clone()));
+            let result = self.prefill_mtp_image_reuse(
                 prompt,
                 &embeddings,
-                positions,
+                &identity,
+                request.input.reusable_prefix_tokens,
                 request.options,
             );
+            image_identity = Some(identity);
             if result.is_err() {
                 self.runtime
                     .target_mut()
                     .attention_mut()
                     .set_image_positions(previous);
             }
-            self.last_reused_tokens = 0;
-            self.mtp_live_conversation_prefix = None;
             result?
         } else {
             self.prefill_mtp_with_system_reuse(
                 prompt,
                 request.input.reusable_prefix_tokens,
                 request.options,
-            )?
+            )?.first_token
         };
         let first = GeneratedToken {
-            token_id: prefill.first_token,
+            token_id: first_token,
             logprob: None,
         };
         let mut tokens = Vec::with_capacity(policy.max_new_tokens);
@@ -1168,17 +1202,21 @@ impl Qwen35Moe {
             }
         }
         profile.record_decode_end();
-        if scalar_fallback || request.input.image.is_some() {
-            // Images carry different prompt embeddings, so text-token caches cannot identify their state.
+        if scalar_fallback {
             // The target advanced without maintaining proposer KV. Keep the
             // static prefix snapshots, but do not advertise the live endpoint
             // as an exact target+MTP continuation.
             self.mtp_live_conversation_prefix = None;
+            self.mtp_live_image = None;
         } else if let Err(error) = self.publish_mtp_live_conversation_prefix(prompt, &tokens) {
             // Generation has already streamed successfully. A best-effort
             // optimization must not turn that response into an API error.
             self.mtp_live_conversation_prefix = None;
+            self.mtp_live_image = None;
             eprintln!("live conversation prefix publication skipped: {error}");
+        }
+        if self.mtp_live_conversation_prefix.is_some() {
+            self.mtp_live_image = image_identity;
         }
         profile.finalize_with_reuse(prompt.len(), tokens.len(), self.last_reused_tokens);
         Ok(GenerationOutput { tokens, profile })
@@ -1209,97 +1247,6 @@ impl Qwen35Moe {
         // shared sampler owns random selection, top-k/top-p and penalties;
         // MTP's exact argmax acceptance protocol cannot preserve them.
         generate_streaming_with_options(self, request, on_token)
-    }
-
-    fn prepare_image_embeddings(
-        &mut self,
-        input: LlmInput<'_>,
-    ) -> Result<(Tensor, std::rc::Rc<super::vision_input::ImagePositions>)> {
-        let image = input.image.expect("image prefill requires media");
-        if input.token_ids.len() > self.kv_capacity()
-            || input
-                .token_ids
-                .iter()
-                .any(|&id| id as usize >= self.vocab_size)
-        {
-            return Err(Error::Other(
-                "Qwen3.5 image prompt exceeds token or KV bounds".into(),
-            ));
-        }
-        let positions = super::vision_input::ImagePositions::new(input.token_ids, image.grid_thw)?;
-        super::vision::validate_input(image.pixel_values, image.grid_thw)?;
-        if self.vision.is_none() {
-            let source = self.vision_source.as_ref().ok_or_else(|| {
-                Error::Other("checkpoint does not include a supported visual tower".into())
-            })?;
-            self.vision = Some(source.load(&self.ctx)?);
-            self.vision_source = None;
-        }
-        let pixels = super::vision::upload_pixels(&self.ctx, image.pixel_values)?;
-        if let Some(index) = self
-            .vision_sessions
-            .iter()
-            .position(|(scratch, _, _)| scratch.matches_grids(image.grid_thw))
-        {
-            let profile = self.vision_sessions.remove(index).unwrap();
-            self.vision_sessions.push_front(profile);
-        } else {
-            if self.vision_sessions.len() == 4 {
-                self.vision_sessions.pop_back();
-            }
-            self.vision_sessions.push_front((
-                super::vision::VisionScratch::new(&self.ctx, image.grid_thw)?,
-                ops::ExecutionSession::with_capacity(64 * 1024 * 1024, self.ctx.device_id())?,
-                false,
-            ));
-        }
-        let (scratch, session, prepared) = self.vision_sessions.front_mut().unwrap();
-        let visual = super::vision::forward(
-            self.vision.as_ref().unwrap(),
-            &self.ctx,
-            scratch,
-            session,
-            *prepared,
-            &pixels,
-            image.grid_thw,
-        )?;
-        *prepared = true;
-        let embeddings = super::vision::embed_and_replace(
-            &self.ctx,
-            &self.weights.embedding,
-            input.token_ids,
-            &visual,
-        )?;
-        Ok((embeddings, std::rc::Rc::new(positions)))
-    }
-
-    fn prefill_image(&mut self, input: LlmInput<'_>) -> Result<Tensor> {
-        let (embeddings, positions) = self.prepare_image_embeddings(input)?;
-        self.last_reused_tokens = 0;
-        self.mtp_live_conversation_prefix = None;
-        let previous_positions = self
-            .runtime
-            .target_mut()
-            .attention_mut()
-            .replace_image_positions(Some(positions));
-        let result = self
-            .runtime
-            .target_mut()
-            .prefill_image(
-                &self.ctx,
-                &self.decoder,
-                &self.weights,
-                input.token_ids,
-                &embeddings,
-            )
-            .map(|output| output.logits);
-        if result.is_err() {
-            self.runtime
-                .target_mut()
-                .attention_mut()
-                .set_image_positions(previous_positions);
-        }
-        result
     }
 
     fn allocate_decode_logits(&self, rows: usize) -> Result<Tensor> {
@@ -1561,6 +1508,7 @@ impl LlmTrait for Qwen35Moe {
             .attention_mut()
             .set_image_positions(None);
         self.mtp_live_conversation_prefix = None;
+        self.mtp_live_image = None;
         self.reset_error = self
             .runtime
             .reset(&self.ctx)

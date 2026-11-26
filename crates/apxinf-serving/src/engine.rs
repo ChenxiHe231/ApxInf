@@ -289,7 +289,7 @@ impl ChatEngine for ApxInfChatEngine {
                 Some("messages".to_owned()),
             ));
         }
-        let reusable_prefix_tokens = if self.enable_context_reuse && prepared_image.is_none() {
+        let reusable_prefix_tokens = if self.enable_context_reuse {
             let key = system_prefix_cache_key(&messages, &options)?;
             if let Some(index) = self
                 .reusable_prefix_cache
@@ -393,9 +393,10 @@ impl ChatEngine for ApxInfChatEngine {
             .model
             .generate_streaming_with_options(
                 match prepared_image.as_ref() {
-                    Some(image) => LlmInput::with_image(
+                    Some(image) => LlmInput::with_image_and_reusable_prefix(
                         &prompt_tokens,
                         ImageInput::new(&image.pixels, &image.grids),
+                        reusable_prefix_tokens,
                     ),
                     None => {
                         LlmInput::text_with_reusable_prefix(&prompt_tokens, reusable_prefix_tokens)

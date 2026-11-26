@@ -60,5 +60,7 @@ pub use weights::{
 mod vision;
 mod vision_config;
 pub mod vision_input;
+#[cfg(any(feature = "qwen35-cuda", test))]
+mod image_reuse;
 #[cfg(feature = "qwen35-cuda")]
 mod vision_weights;

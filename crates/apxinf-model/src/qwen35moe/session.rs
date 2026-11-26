@@ -680,10 +680,20 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         weights: &Qwen35DeviceWeights,
         token_ids: &[u32],
         embeddings: &Tensor,
+        start_position: usize,
     ) -> Result<DecoderOutput> {
-        self.validate_capacity(0, token_ids.len())?;
+        if start_position != 0 && start_position != self.position {
+            return Err(invalid(
+                "image append position differs from committed state",
+            ));
+        }
+        self.validate_capacity(start_position, token_ids.len())?;
         self.bump_shadow_generation()?;
-        self.prepare_empty_shadow(ctx)?;
+        if start_position == 0 {
+            self.prepare_empty_shadow(ctx)?;
+        } else {
+            self.prepare_shadow_from_committed(ctx)?;
+        }
         let output = decoder.run_image_prefill(
             ctx,
             weights,
@@ -692,10 +702,11 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             &self.shadow_gdn,
             token_ids,
             embeddings,
+            start_position,
             HiddenSelection::Last,
         )?;
         ctx.synchronize().map_err(Error::Cuda)?;
-        self.publish_shadow(output.end_position, 0)?;
+        self.publish_shadow(output.end_position, start_position)?;
         Ok(output)
     }
 
@@ -806,10 +817,20 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         weights: &Qwen35DeviceWeights,
         token_ids: &[u32],
         embeddings: &Tensor,
+        start_position: usize,
     ) -> Result<PreparedTargetPrefill> {
-        self.validate_capacity(0, token_ids.len())?;
+        if start_position != 0 && start_position != self.position {
+            return Err(invalid(
+                "image append position differs from committed state",
+            ));
+        }
+        self.validate_capacity(start_position, token_ids.len())?;
         self.bump_shadow_generation()?;
-        self.prepare_empty_shadow(ctx)?;
+        if start_position == 0 {
+            self.prepare_empty_shadow(ctx)?;
+        } else {
+            self.prepare_shadow_from_committed(ctx)?;
+        }
         let output = decoder.run_image_prefill(
             ctx,
             weights,
@@ -818,6 +839,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
             &self.shadow_gdn,
             token_ids,
             embeddings,
+            start_position,
             HiddenSelection::All,
         )?;
         self.epoch
@@ -826,7 +848,7 @@ impl<B: FullAttentionBackend> Qwen35Session<B> {
         Ok(PreparedTargetPrefill {
             epoch: self.epoch,
             shadow_generation: self.shadow_generation,
-            start_position: 0,
+            start_position,
             end_position: output.end_position,
             output,
         })

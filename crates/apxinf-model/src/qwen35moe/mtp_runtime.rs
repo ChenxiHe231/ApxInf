@@ -371,7 +371,8 @@ impl Qwen35MtpRuntime {
                 &[prompt_tokens.len(), HIDDEN],
                 "image MTP embeddings",
             )?;
-            if positions.prompt.len() != prompt_tokens.len() {
+            // Family prefill may stop at a checkpoint in a validated full image plan.
+            if positions.prompt.len() < prompt_tokens.len() {
                 return Err(invalid("MTP image position length mismatch"));
             }
         }
@@ -446,6 +447,152 @@ impl Qwen35MtpRuntime {
         shadow.shortlist_allowed = shadow.image_positions.is_none()
             && weights.lm_head.a16.is_some()
             && prompt_tokens.iter().copied().all(mtp_shortlist_contains);
+        self.pending_draft = None;
+        Ok(PreparedMtpPrefill {
+            generation: shadow.generation,
+            position,
+        })
+    }
+
+    fn prepare_append_prompt(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+        committed: &Qwen35MtpState,
+        shadow: &mut Qwen35MtpState,
+        chunk_tokens: &[TokenId],
+        previous_target_hidden: &Tensor,
+        target_hidden: &Tensor,
+        image: Option<(&Tensor, Rc<ImagePositions>)>,
+    ) -> Result<PreparedMtpPrefill> {
+        if committed.image_positions.is_some() && image.is_none() {
+            return Err(invalid(
+                "image MTP append requires the original media input",
+            ));
+        }
+        self.validate_weights(ctx, weights)?;
+        validate_state_storage(ctx, committed, self.geometry)?;
+        validate_state_storage(ctx, shadow, self.geometry)?;
+        if chunk_tokens.is_empty() {
+            return Err(invalid("Qwen3.5 MTP append prefill requires tokens"));
+        }
+        validate_tensor(
+            previous_target_hidden,
+            ctx,
+            DType::BF16,
+            &[1, HIDDEN],
+            "previous target hidden",
+        )?;
+        validate_tensor(
+            target_hidden,
+            ctx,
+            DType::BF16,
+            &[chunk_tokens.len(), HIDDEN],
+            "target append hidden",
+        )?;
+
+        let start = committed
+            .position
+            .ok_or_else(|| invalid("Qwen3.5 MTP append prefill requires committed state"))?;
+        start.validate(committed.capacity)?;
+        let position = start.after_commit(chunk_tokens.len())?;
+        position.validate(committed.capacity)?;
+        if let Some((embeddings, plan)) = image.as_ref() {
+            validate_tensor(
+                embeddings,
+                ctx,
+                DType::BF16,
+                &[chunk_tokens.len(), HIDDEN],
+                "image append embeddings",
+            )?;
+            if position.logical_position > plan.prompt.len() {
+                return Err(invalid("image append exceeds position plan"));
+            }
+        }
+        self.copy_state(ctx, committed, shadow)?;
+        shadow.image_positions = image.as_ref().map(|(_, plan)| plan.clone());
+        if image.is_some() {
+            shadow.shortlist_allowed = false;
+        }
+
+        let token_values = chunk_tokens
+            .iter()
+            .map(|&token| {
+                i32::try_from(token)
+                    .map_err(|_| invalid(format!("Qwen3.5 MTP token {token} exceeds i32")))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let position_values = match image.as_ref() {
+            Some((_, plan)) => {
+                plan.token_major_values(start.logical_position, chunk_tokens.len())?
+            }
+            None => (start.logical_position..position.logical_position)
+                .map(|p| i32::try_from(p).map_err(|_| invalid("MTP append position exceeds i32")))
+                .collect::<Result<Vec<_>>>()?,
+        };
+        let tokens = transfers::to_cuda_on_stream(
+            ctx,
+            Tensor::from_i32(vec![chunk_tokens.len()], &token_values)?,
+        )?;
+        let positions = transfers::to_cuda_on_stream(
+            ctx,
+            Tensor::from_i32(
+                if image.is_some() {
+                    vec![chunk_tokens.len(), 3]
+                } else {
+                    vec![chunk_tokens.len()]
+                },
+                &position_values,
+            )?,
+        )?;
+
+        for start_row in (0..chunk_tokens.len()).step_by(MTP_PREFILL_CHUNK) {
+            let rows = (chunk_tokens.len() - start_row).min(MTP_PREFILL_CHUNK);
+            let tokens = vector_view(&tokens, start_row, rows)?;
+            let rope_positions = if image.is_some() {
+                rows_view(&positions, start_row, rows, 3)?
+            } else {
+                vector_view(&positions, start_row, rows)?
+            };
+            let shifted_embeddings = image
+                .as_ref()
+                .map(|(embeddings, _)| rows_view(embeddings, start_row, rows, HIDDEN))
+                .transpose()?;
+            let geometry = self.geometry;
+            let eps = self.rms_norm_eps;
+            let theta = self.rope_theta;
+            let scratch = self.ensure_prefill_scratch(ctx)?;
+            let base_hidden = rows_view(&scratch.base_hidden, 0, rows, HIDDEN)?;
+            if start_row == 0 {
+                let first = rows_view(&scratch.base_hidden, 0, 1, HIDDEN)?;
+                transfers::copy_cuda_to_cuda(ctx, previous_target_hidden, &first)?;
+                if rows > 1 {
+                    let source = rows_view(target_hidden, 0, rows - 1, HIDDEN)?;
+                    let destination = rows_view(&scratch.base_hidden, 1, rows - 1, HIDDEN)?;
+                    transfers::copy_cuda_to_cuda(ctx, &source, &destination)?;
+                }
+            } else {
+                let source = rows_view(target_hidden, start_row - 1, rows, HIDDEN)?;
+                transfers::copy_cuda_to_cuda(ctx, &source, &base_hidden)?;
+            }
+            prefill_kv_chunk(
+                ctx,
+                weights,
+                shadow,
+                scratch,
+                geometry,
+                eps,
+                theta,
+                &base_hidden,
+                &tokens,
+                &rope_positions,
+                start.cache_rows + start_row,
+                shifted_embeddings.as_ref(),
+            )?;
+        }
+        ctx.synchronize().map_err(Error::Cuda)?;
+        shadow.position = Some(position);
+        shadow.shortlist_allowed &= chunk_tokens.iter().copied().all(mtp_shortlist_contains);
         self.pending_draft = None;
         Ok(PreparedMtpPrefill {
             generation: shadow.generation,
@@ -653,106 +800,16 @@ impl MtpBackend for Qwen35MtpRuntime {
         previous_target_hidden: &Tensor,
         target_hidden: &Tensor,
     ) -> Result<Self::PreparedPrefill> {
-        if committed.image_positions.is_some() {
-            return Err(invalid(
-                "image MTP append requires the original media input",
-            ));
-        }
-        self.validate_weights(ctx, weights)?;
-        validate_state_storage(ctx, committed, self.geometry)?;
-        validate_state_storage(ctx, shadow, self.geometry)?;
-        if chunk_tokens.is_empty() {
-            return Err(invalid("Qwen3.5 MTP append prefill requires tokens"));
-        }
-        validate_tensor(
+        self.prepare_append_prompt(
+            ctx,
+            weights,
+            committed,
+            shadow,
+            chunk_tokens,
             previous_target_hidden,
-            ctx,
-            DType::BF16,
-            &[1, HIDDEN],
-            "previous target hidden",
-        )?;
-        validate_tensor(
             target_hidden,
-            ctx,
-            DType::BF16,
-            &[chunk_tokens.len(), HIDDEN],
-            "target append hidden",
-        )?;
-
-        let start = committed
-            .position
-            .ok_or_else(|| invalid("Qwen3.5 MTP append prefill requires committed state"))?;
-        start.validate(committed.capacity)?;
-        let position = start.after_commit(chunk_tokens.len())?;
-        position.validate(committed.capacity)?;
-        self.copy_state(ctx, committed, shadow)?;
-
-        let token_values = chunk_tokens
-            .iter()
-            .map(|&token| {
-                i32::try_from(token)
-                    .map_err(|_| invalid(format!("Qwen3.5 MTP token {token} exceeds i32")))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let position_values = (start.logical_position..position.logical_position)
-            .map(|position| {
-                i32::try_from(position)
-                    .map_err(|_| invalid("Qwen3.5 MTP append position exceeds i32"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let tokens = transfers::to_cuda_on_stream(
-            ctx,
-            Tensor::from_i32(vec![chunk_tokens.len()], &token_values)?,
-        )?;
-        let positions = transfers::to_cuda_on_stream(
-            ctx,
-            Tensor::from_i32(vec![chunk_tokens.len()], &position_values)?,
-        )?;
-
-        for start_row in (0..chunk_tokens.len()).step_by(MTP_PREFILL_CHUNK) {
-            let rows = (chunk_tokens.len() - start_row).min(MTP_PREFILL_CHUNK);
-            let tokens = vector_view(&tokens, start_row, rows)?;
-            let rope_positions = vector_view(&positions, start_row, rows)?;
-            let geometry = self.geometry;
-            let eps = self.rms_norm_eps;
-            let theta = self.rope_theta;
-            let scratch = self.ensure_prefill_scratch(ctx)?;
-            let base_hidden = rows_view(&scratch.base_hidden, 0, rows, HIDDEN)?;
-            if start_row == 0 {
-                let first = rows_view(&scratch.base_hidden, 0, 1, HIDDEN)?;
-                transfers::copy_cuda_to_cuda(ctx, previous_target_hidden, &first)?;
-                if rows > 1 {
-                    let source = rows_view(target_hidden, 0, rows - 1, HIDDEN)?;
-                    let destination = rows_view(&scratch.base_hidden, 1, rows - 1, HIDDEN)?;
-                    transfers::copy_cuda_to_cuda(ctx, &source, &destination)?;
-                }
-            } else {
-                let source = rows_view(target_hidden, start_row - 1, rows, HIDDEN)?;
-                transfers::copy_cuda_to_cuda(ctx, &source, &base_hidden)?;
-            }
-            prefill_kv_chunk(
-                ctx,
-                weights,
-                shadow,
-                scratch,
-                geometry,
-                eps,
-                theta,
-                &base_hidden,
-                &tokens,
-                &rope_positions,
-                start.cache_rows + start_row,
-                None,
-            )?;
-        }
-        ctx.synchronize().map_err(Error::Cuda)?;
-        shadow.position = Some(position);
-        shadow.shortlist_allowed &= chunk_tokens.iter().copied().all(mtp_shortlist_contains);
-        self.pending_draft = None;
-        Ok(PreparedMtpPrefill {
-            generation: shadow.generation,
-            position,
-        })
+            None,
+        )
     }
 
     fn publish_prefill(
@@ -1262,6 +1319,28 @@ impl<B: FullAttentionBackend, M: MtpBackend> Qwen35MtpCoordinator<B, M> {
         self.schedule.as_ref()
     }
 
+    /// A complete prompt checkpoint already owns the final target hidden row
+    /// and proposer state. Restart only request-local scheduling, without
+    /// replaying a token or changing either committed cache.
+    pub(super) fn restart_prefill_greedy(
+        &mut self,
+        first_token: TokenId,
+        options: &GenerationOptions,
+    ) -> Result<()> {
+        let policy = MtpGreedyPolicy::from_generation_options(options)?;
+        let position = self.target.position();
+        if position == 0 || self.target_hidden.is_none() {
+            return Err(invalid("complete prompt restart requires restored state"));
+        }
+        let schedule = Qwen35MtpSchedule::new(
+            position, position, policy.max_new_tokens, 1, policy.eos_token_ids.clone(),
+        ).map_err(schedule_error)?;
+        self.schedule = Some(schedule);
+        self.policy = Some(policy);
+        self.pending = Some(first_token);
+        Ok(())
+    }
+
     pub fn is_finished(&self) -> bool {
         let Some(schedule) = &self.schedule else {
             return false;
@@ -1604,6 +1683,43 @@ impl MtpPrefillScratch {
 
 #[allow(clippy::too_many_arguments)]
 impl<B: FullAttentionBackend> Qwen35MtpCoordinator<B, Qwen35MtpRuntime> {
+    pub(super) fn append_image_prefill_greedy(
+        &mut self,
+        ctx: &CudaContext,
+        decoder: &Qwen35Decoder,
+        weights: &Qwen35DeviceWeights,
+        tokens: &[TokenId],
+        embeddings: &Tensor,
+        positions: Rc<ImagePositions>,
+        options: &GenerationOptions,
+    ) -> Result<MtpPrefillOutcome> {
+        let policy = MtpGreedyPolicy::from_generation_options(options)?;
+        let previous = self
+            .target_hidden
+            .as_ref()
+            .ok_or_else(|| invalid("image append requires prepared target state"))?
+            .clone();
+        let start = self.target.position();
+        if start == 0 {
+            return Err(invalid("image append requires a nonempty prefix"));
+        }
+        let target = self
+            .target
+            .prepare_target_image_prefill(ctx, decoder, weights, tokens, embeddings, start)?;
+        let mtp = self.mtp.prepare_append_prompt(
+            ctx,
+            weights,
+            &self.committed_mtp,
+            &mut self.shadow_mtp,
+            tokens,
+            &previous,
+            &target.output().hidden_states,
+            Some((embeddings, positions)),
+        )?;
+        let end = target.output().end_position;
+        self.finish_prefill(ctx, target, mtp, end, policy)
+    }
+
     pub(super) fn prefill_image_greedy(
         &mut self,
         ctx: &CudaContext,
@@ -1617,7 +1733,7 @@ impl<B: FullAttentionBackend> Qwen35MtpCoordinator<B, Qwen35MtpRuntime> {
         let policy = MtpGreedyPolicy::from_generation_options(options)?;
         let target = self
             .target
-            .prepare_target_image_prefill(ctx, decoder, weights, tokens, embeddings)?;
+            .prepare_target_image_prefill(ctx, decoder, weights, tokens, embeddings, 0)?;
         let mtp = self.mtp.prepare_prompt(
             ctx,
             weights,

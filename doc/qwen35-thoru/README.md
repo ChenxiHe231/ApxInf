@@ -276,8 +276,10 @@ precision and Graph phases. This preserves scalar arithmetic; the batched text
 verifier is numerically different on long multi-image answers. Rowwise image
 verification is a correctness path, with no claimed MTP speedup; the existing
 adaptive scheduler may finish with scalar decode. Dynamic FP8 scalar decode
-retains its native fast kernels. Sampling uses target-only generation. Image requests bypass text-prefix reuse. Text-only requests retain
-their existing paths. Segmented visual attention prevents cross-image attention.
+retains its native fast kernels. Sampling uses target-only generation. With `--enable-context-reuse`, image requests
+validate processed-pixel/grid identity and reuse compatible text/image prompt
+state and bounded visual results; see [image context reuse](IMAGE_CONTEXT_REUSE.md).
+Image resizing, shared pixel budgets and precision policies remain unchanged. Segmented visual attention prevents cross-image attention.
 Up to four visual traversals are retained by their ordered grid profile;
 this does not establish image latency or whole-tower CUDA Graph acceptance.
 

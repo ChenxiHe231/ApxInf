@@ -69,10 +69,19 @@ impl<'a> LlmInput<'a> {
     }
 
     pub const fn with_image(token_ids: &'a [u32], image: ImageInput<'a>) -> Self {
+        Self::with_image_and_reusable_prefix(token_ids, image, 0)
+    }
+
+    /// The runtime must validate media identity before reusing any image rows.
+    pub const fn with_image_and_reusable_prefix(
+        token_ids: &'a [u32],
+        image: ImageInput<'a>,
+        reusable_prefix_tokens: usize,
+    ) -> Self {
         Self {
             token_ids,
             image: Some(image),
-            reusable_prefix_tokens: 0,
+            reusable_prefix_tokens,
         }
     }
 }

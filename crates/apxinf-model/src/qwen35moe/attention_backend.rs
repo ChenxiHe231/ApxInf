@@ -245,9 +245,12 @@ impl Qwen35Fp8AttentionBackend {
         layer_index: usize,
         phase: DecoderPhase,
         tokens: usize,
+        image_prefill: bool,
     ) -> Result<Option<Rc<PreparedExecution>>> {
         let fixed_profile = phase == DecoderPhase::Decode
-            || (phase == DecoderPhase::Prefill && tokens == ops::QWEN35_MTP_DRAFT_STEPS + 1);
+            || (phase == DecoderPhase::Prefill
+                && tokens == ops::QWEN35_MTP_DRAFT_STEPS + 1
+                && !image_prefill);
         if !fixed_profile {
             return Ok(None);
         }
@@ -418,12 +421,17 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
     ) -> Result<()> {
         let tokens = validate_request(ctx, self.hidden_size, &request, cache)?;
         let rope_theta = self.rope_theta;
+        // Image prefix chunks own temporary decoder bindings. A four-row
+        // chunk must not borrow the persistent verifier projection session.
+        let image_prefill =
+            self.image_positions.is_some() && request.phase == DecoderPhase::Prefill;
         let pre_projection = Self::projection_session(
             &mut self.pre_projection_sessions,
             ctx,
             request.layer_index,
             request.phase,
             tokens,
+            image_prefill,
         )?;
         let post_projection = Self::projection_session(
             &mut self.post_projection_sessions,
@@ -431,6 +439,7 @@ impl FullAttentionBackend for Qwen35Fp8AttentionBackend {
             request.layer_index,
             request.phase,
             tokens,
+            image_prefill,
         )?;
         let image_positions = self.image_positions.clone();
         let scratch = self.scratch(ctx, tokens, cache.capacity, request.phase)?;

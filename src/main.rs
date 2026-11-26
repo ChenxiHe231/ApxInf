@@ -319,8 +319,8 @@ enum Commands {
         #[arg(long, default_value_t = 1024)]
         max_output_tokens: usize,
 
-        /// Reuse device-resident state for the rendered system/tool prefix
-        /// across requests. Conversation history and user content are not cached.
+        /// Reuse cached prompt prefixes across requests. Supported models also
+        /// validate and reuse matching image history.
         #[arg(long, default_value_t = false)]
         enable_context_reuse: bool,
 

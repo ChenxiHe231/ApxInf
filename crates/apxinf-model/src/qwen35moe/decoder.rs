@@ -589,6 +589,7 @@ impl Qwen35Decoder {
         states: &[GdnState],
         token_ids: &[u32],
         embeddings: &Tensor,
+        start_position: usize,
         hidden_selection: HiddenSelection,
     ) -> Result<DecoderOutput> {
         self.validate_weights(weights)?;
@@ -596,7 +597,7 @@ impl Qwen35Decoder {
             caches.len(),
             states.len(),
             token_ids,
-            0,
+            start_position,
             DecoderPhase::Prefill,
         )?;
         let moe = self.architecture.layers[0].moe;
@@ -619,7 +620,7 @@ impl Qwen35Decoder {
             caches,
             states,
             None,
-            0,
+            start_position,
             DecoderPhase::Prefill,
             LogitsSelection::Last,
             hidden_selection,
