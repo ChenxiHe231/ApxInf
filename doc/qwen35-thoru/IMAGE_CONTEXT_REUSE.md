@@ -25,7 +25,13 @@ The runtime owns these bounded caches:
 
 - Visual results: at most 64 independent BF16 tensors, totaling at most 128 MiB.
   Entries copy merger outputs; they never retain mutable vision scratch views.
-  Ordered-grid vision execution profiles remain separately bounded at four.
+  On a partial hit, only missing processed images enter the visual tower;
+  duplicate misses are encoded once. Existing and newly encoded rows are
+  assembled in the original request order. Hits retain owning tensors until
+  assembly completes, independently of later LRU eviction. Input pixels keep
+  their exact bytes and dtype on both CPU and CUDA. A complete miss retains
+  the original packed forward. Ordered-grid execution profiles stay bounded
+  at four.
 - Scalar target checkpoints: the existing four-entry LRU holds KV/GDN state,
   modality identity and, for complete prompts, independently copied logits.
   Image admission reserves stable/complete endpoints while preserving leading
@@ -122,7 +128,9 @@ seeded-sampling and MTP checks with Graphs enabled: exact uncached32 controls,
 exact cold-cache/replay32 and scalar/MTP32, normal EOS-ended history, changed
 pixels and text/image separation. The two-image native test additionally proves
 that mixed single-image/packed visual cache entries, odd merged-row boundaries
-and overwritten vision workspaces preserve embeddings elementwise. Restored
+and overwritten vision workspaces preserve embeddings elementwise. Partial-hit
+assembly is checked against the full packed output for CPU/CUDA F32/BF16,
+multiple missing images, duplicate misses and odd merger-row boundaries. Restored
 append logits match fresh native execution with the same chunk boundaries.
 All three CPU identity tests and ten serving unit tests pass. HTTP checks cover
 whole-request retries, history growth, adding an image, replacement/order,
@@ -142,6 +150,56 @@ Development evidence is retained under `devlocal/qwen35-image-input/image-cache/
 `FORMAL_V3.json`, `PROFILE_V3.json`, `http-long-v3-final-{0,1}.json`, matching
 server logs, `precision-*-strict.log`, native mixed-group checks and paired
 `ttft-{baseline,repeat}-v3.nsys-rep` captures.
+
+## Follow-up: partial visual-cache hits
+
+A second change compares the previously accepted cache implementation
+(`cb13f8ac`, v3) with selective missing-image encoding (v4). Both arms enable
+context reuse. Each request preserves the two old images and appends a third
+256x256 green frame with a distinct pixel; the frame changes every iteration.
+Reseeding the same prior history occurs outside the timed request. This avoids
+measuring an all-feature-cache hit as a partial-hit improvement. Both arms use
+the same frame sequence, long conversation, ordinary greedy decoding, dynamic
+FP8 KV, NVFP4 weights/activations and Graph policy described above.
+
+| New-image workload | Original full-batch miss path | Selective missing-image path |
+|---|---:|---:|
+| Median HTTP latency, 2 warmups + 10 measurements | 2.235 s | 1.263 s |
+| Prompt / actually reused / output tokens | 36,809 / 36,711 / 6 | 36,809 / 36,711 / 6 |
+
+Latency decreases 43.5% (1.77x speedup). All ten paired outputs equal
+`Red, Blue, Green`; prompt, output and restored-token counts also match.
+Only the new image is encoded instead of all three. Cached pixels/grid
+identity still decides validity; adding images that resize old images does
+not qualify for this partial-hit shortcut.
+
+All-hit controls in these runs have median HTTP latency 257.7 versus 268.6 ms,
+while server model-call latency is 104.0 versus 103.1 ms. The additional HTTP
+time is outside the model-call interval; preprocessing was not isolated, so
+its cause is not assigned. No all-hit performance improvement is claimed.
+The paired details are retained in `ALL_HIT_V4_AUDIT.json`.
+
+The two strict arms share 504 recipes with unchanged hash
+`b6f943a992778420a15739c48b30ca91e8de484826bdadabe66502c834832746`.
+The original binary hash is the v3 hash above; the v4 binary SHA-256 is
+`dbb1fc3ba4685c1da40e2453bd8cd5f542bd0f6f20a32143ddd6d4c4462fc0eb`.
+Additional MTP shapes were prepared in a separate process after strict mode
+correctly rejected a missing M=23 recipe. Strict HTTP qualification then passed
+ordinary greedy, seeded sampling, MTP, retries, replacements/order, streaming,
+and recovery after malformed images. No fallback or tuning occurs in timing.
+
+Separate prepared feature-only traces use the two-image 616-patch fixture.
+One cached image leaves 308 patches to encode. Both traces contain 111 visual
+GEMM launches; the smaller batch reduces their CUDA kernel-time sum from
+1178.929 to 600.753 ms. This explains the reduced work and is not a model
+latency measurement or an estimate of a critical-path fraction. Exact feature
+checks cover CPU/CUDA F32/BF16 and multiple or duplicate misses. Native
+snapshot/append equivalence also remains exact. Unaffected v3 KV/mode checks
+are reused; this change does not alter language arithmetic or checkpointing.
+
+Evidence: `FORMAL_V4.json`, `PROFILE_V4.json`, `partial-{v3,v4}-final.json`,
+`partial-v4-http-quality-strict2.json`, `partial-v4-{prepare,strict}.log`, and
+`features-{full,partial}-v4.nsys-rep` in the same development evidence directory.
 
 ## Reproduction
 
@@ -167,3 +225,16 @@ set `APXINF_QWEN35_IMAGE_MODES=scalar` and select exactly one profiler label:
 `scalar/baseline/2` or `scalar/repeat/2`. The test's CUDA profiler range ends at
 the first callback, excluding subsequent decode. Profiling is separate from
 formal timing.
+
+For isolated visual-cache profiling, run the ignored library test with a
+multi-image fixture and `APXINF_QWEN35_FEATURE_PROFILE=full` or `partial`.
+Its range captures prepared full packed execution or a partial hit; the first
+image is cached and all remaining unique images are encoded. Small boundary
+checks lie outside the range. Both captures must use the same fixture, recipes
+and precision. These diagnostics do not replace model end-to-end A/B timing.
+
+```bash
+cargo test --release -p apxinf-model --features qwen35-cuda --lib \
+  image_snapshot_append_matches_uncached_chunk_execution \
+  -- --ignored --nocapture --test-threads=1
+```

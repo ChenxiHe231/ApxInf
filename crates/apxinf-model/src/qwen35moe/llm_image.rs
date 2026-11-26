@@ -1,7 +1,12 @@
 //! Bounded visual-result and transactional multimodal prompt reuse.
 use super::super::image_reuse::ImageKey;
-use super::super::vision_input::ImagePositions;
+use super::super::vision_input::{image_patch_offsets, ImagePositions};
 use super::*;
+use apxinf_core::Storage;
+
+#[cfg(test)]
+#[path = "../../examples/support/qwen35_cuda_profile.rs"]
+mod feature_profile;
 
 const FEATURE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 const FEATURE_CACHE_ENTRIES: usize = 64;
@@ -27,6 +32,56 @@ fn allocate(ctx: &CudaContext, rows: usize, width: usize) -> Result<Tensor> {
         .map_err(Error::Cuda)?
         .as_tensor(Shape::new(vec![rows, width]), DType::BF16)
         .map_err(Error::Cuda)
+}
+
+/// Select whole processed images, preserving their bytes, dtype and patch order.
+fn pack_image_pixels(
+    ctx: &CudaContext,
+    pixels: &Tensor,
+    grids: &[[u32; 3]],
+    selected: &[usize],
+) -> Result<Tensor> {
+    let offsets = image_patch_offsets(grids)?;
+    let count: usize = selected
+        .iter()
+        .map(|&i| (offsets[i + 1] - offsets[i]) as usize)
+        .sum();
+    let row_bytes = 1536 * pixels.dtype().size_in_bytes();
+    match pixels.storage() {
+        Storage::Cpu(bytes) if pixels.device() == Device::Cpu => {
+            let mut packed = Vec::with_capacity(count * row_bytes);
+            for &i in selected {
+                packed.extend_from_slice(
+                    &bytes[offsets[i] as usize * row_bytes..offsets[i + 1] as usize * row_bytes],
+                );
+            }
+            Tensor::from_raw(
+                Shape::new(vec![count, 1536]),
+                pixels.dtype(),
+                Device::Cpu,
+                packed,
+            )
+        }
+        _ if pixels.device() == Device::Cuda(ctx.device_id()) => {
+            let packed = CudaBuffer::alloc(count * row_bytes, ctx.device_id())
+                .map_err(Error::Cuda)?
+                .as_tensor(Shape::new(vec![count, 1536]), pixels.dtype())
+                .map_err(Error::Cuda)?;
+            let mut start = 0;
+            for &i in selected {
+                let len = (offsets[i + 1] - offsets[i]) as usize;
+                transfers::copy_cuda_to_cuda(
+                    ctx,
+                    &rows(pixels, offsets[i] as usize, len)?,
+                    &rows(&packed, start, len)?,
+                )?;
+                start += len;
+            }
+            ctx.synchronize().map_err(Error::Cuda)?;
+            Ok(packed)
+        }
+        _ => Err(Error::UnsupportedDevice(pixels.device())),
+    }
 }
 
 fn stable_checkpoint(tokens: &[u32]) -> Option<usize> {
@@ -55,6 +110,11 @@ impl Qwen35Moe {
             return Err(Error::Other(
                 "Qwen3.5 image prompt exceeds token or KV bounds".into(),
             ));
+        }
+        if !matches!(image.pixel_values.device(), Device::Cpu)
+            && image.pixel_values.device() != Device::Cuda(self.ctx.device_id())
+        {
+            return Err(Error::UnsupportedDevice(image.pixel_values.device()));
         }
         super::super::vision::validate_input(image.pixel_values, image.grid_thw)?;
         let identity = if self.context_reuse_enabled {
@@ -86,20 +146,47 @@ impl Qwen35Moe {
         pixels: &Tensor,
         grids: &[[u32; 3]],
     ) -> Result<Tensor> {
-        let hits: Option<Vec<_>> = if self.context_reuse_enabled {
+        let hits: Vec<Option<Tensor>> = if self.context_reuse_enabled {
             identity
                 .keys
                 .iter()
                 .map(|key| {
                     self.image_features
                         .iter()
-                        .position(|entry| entry.key == *key)
+                        .find(|e| e.key == *key)
+                        .map(|e| e.features.clone())
                 })
                 .collect()
         } else {
-            None
+            Vec::new()
         };
-        if let Some(hits) = hits {
+        if hits.iter().any(Option::is_some) {
+            // Retain owners until all copies finish, even if admission evicts
+            // a hit. Deduplicate missing media without changing request order.
+            let mut missing = Vec::new();
+            for (i, hit) in hits.iter().enumerate() {
+                if hit.is_none()
+                    && !missing
+                        .iter()
+                        .any(|&j| identity.keys[j] == identity.keys[i])
+                {
+                    missing.push(i);
+                }
+            }
+            let missing_keys: Vec<_> = missing.iter().map(|&i| identity.keys[i].clone()).collect();
+            let missing_visual = if missing.is_empty() {
+                None
+            } else {
+                let packed = pack_image_pixels(&self.ctx, pixels, grids, &missing)?;
+                let grids: Vec<_> = missing_keys.iter().map(|k| k.grid).collect();
+                Some(self.run_image_encoder(&packed, &grids)?)
+            };
+            let offsets: Vec<_> = std::iter::once(0)
+                .chain(missing_keys.iter().scan(0, |n, k| {
+                    *n += (k.grid[1] * k.grid[2] / 4) as usize;
+                    Some(*n)
+                }))
+                .collect();
             let count = identity
                 .keys
                 .iter()
@@ -107,29 +194,55 @@ impl Qwen35Moe {
                 .sum();
             let visual = allocate(&self.ctx, count, 2048)?;
             let mut start = 0;
-            // Indices are stable until every copy has been submitted.
-            for &index in &hits {
-                let source = &self.image_features[index].features;
-                let len = source.shape().dims()[0];
-                transfers::copy_cuda_to_cuda(&self.ctx, source, &rows(&visual, start, len)?)?;
+            for (i, hit) in hits.iter().enumerate() {
+                let len = (identity.keys[i].grid[1] * identity.keys[i].grid[2] / 4) as usize;
+                let source = if let Some(hit) = hit {
+                    hit.clone()
+                } else {
+                    let index = missing_keys
+                        .iter()
+                        .position(|k| *k == identity.keys[i])
+                        .unwrap();
+                    rows(missing_visual.as_ref().unwrap(), offsets[index], len)?
+                };
+                transfers::copy_cuda_to_cuda(&self.ctx, &source, &rows(&visual, start, len)?)?;
                 start += len;
             }
             self.ctx.synchronize().map_err(Error::Cuda)?;
-            // Touch by key after copying, including duplicate images.
-            for key in &identity.keys {
-                let index = self
-                    .image_features
-                    .iter()
-                    .position(|e| e.key == *key)
-                    .unwrap();
-                let entry = self.image_features.remove(index).unwrap();
-                self.image_features.push_front(entry);
+            for (key, hit) in identity.keys.iter().zip(&hits) {
+                if hit.is_some() {
+                    let index = self
+                        .image_features
+                        .iter()
+                        .position(|e| e.key == *key)
+                        .unwrap();
+                    let entry = self.image_features.remove(index).unwrap();
+                    self.image_features.push_front(entry);
+                }
             }
-            eprintln!("image feature cache hit: {} images", hits.len());
+            if let Some(missing_visual) = missing_visual {
+                self.admit_image_features(&missing_keys, &missing_visual)?;
+                eprintln!(
+                    "image feature cache partial hit: {} of {} images; encoded {} unique images",
+                    hits.iter().filter(|h| h.is_some()).count(),
+                    hits.len(),
+                    missing.len()
+                );
+            } else {
+                eprintln!("image feature cache hit: {} images", hits.len());
+            }
             return Ok(visual);
         }
-        // Preserve the existing packed forward on a miss. Cached rows are
-        // independent copies, never views into reusable vision scratch.
+        let visual = self.run_image_encoder(pixels, grids)?;
+        if self.context_reuse_enabled {
+            self.admit_image_features(&identity.keys, &visual)?;
+        }
+        Ok(visual)
+    }
+
+    fn run_image_encoder(&mut self, pixels: &Tensor, grids: &[[u32; 3]]) -> Result<Tensor> {
+        // Use the original packed encoder for this ordered image subset.
+        // Admission makes independent copies of reusable scratch outputs.
         if self.vision.is_none() {
             let source = self.vision_source.as_ref().ok_or_else(|| {
                 Error::Other("checkpoint does not include a supported visual tower".into())
@@ -166,41 +279,37 @@ impl Qwen35Moe {
             grids,
         )?;
         *prepared = true;
-        if self.context_reuse_enabled {
-            let mut start = 0;
-            for key in &identity.keys {
-                let len = (key.grid[1] * key.grid[2] / 4) as usize;
-                let bytes = len * 2048 * 2;
-                if bytes <= FEATURE_CACHE_BYTES
-                    && !self.image_features.iter().any(|e| e.key == *key)
-                {
-                    while self.image_features.len() >= FEATURE_CACHE_ENTRIES
-                        || self
-                            .image_features
-                            .iter()
-                            .map(|e| e.features.size_in_bytes())
-                            .sum::<usize>()
-                            + bytes
-                            > FEATURE_CACHE_BYTES
-                    {
-                        self.image_features.pop_back();
-                    }
-                    let features = allocate(&self.ctx, len, 2048)?;
-                    transfers::copy_cuda_to_cuda(
-                        &self.ctx,
-                        &rows(&visual, start, len)?,
-                        &features,
-                    )?;
-                    self.ctx.synchronize().map_err(Error::Cuda)?;
-                    self.image_features.push_front(CachedImageFeatures {
-                        key: key.clone(),
-                        features,
-                    });
-                }
-                start += len;
-            }
-        }
         Ok(visual)
+    }
+
+    fn admit_image_features(&mut self, keys: &[ImageKey], visual: &Tensor) -> Result<()> {
+        let mut start = 0;
+        for key in keys {
+            let len = (key.grid[1] * key.grid[2] / 4) as usize;
+            let bytes = len * 2048 * 2;
+            if bytes <= FEATURE_CACHE_BYTES && !self.image_features.iter().any(|e| e.key == *key) {
+                while self.image_features.len() >= FEATURE_CACHE_ENTRIES
+                    || self
+                        .image_features
+                        .iter()
+                        .map(|e| e.features.size_in_bytes())
+                        .sum::<usize>()
+                        + bytes
+                        > FEATURE_CACHE_BYTES
+                {
+                    self.image_features.pop_back();
+                }
+                let features = allocate(&self.ctx, len, 2048)?;
+                transfers::copy_cuda_to_cuda(&self.ctx, &rows(visual, start, len)?, &features)?;
+                self.ctx.synchronize().map_err(Error::Cuda)?;
+                self.image_features.push_front(CachedImageFeatures {
+                    key: key.clone(),
+                    features,
+                });
+            }
+            start += len;
+        }
+        Ok(())
     }
 
     fn take_scalar_image_checkpoint(&mut self) -> Result<ScalarSystemPrefixCache> {
@@ -613,10 +722,23 @@ mod tests {
         let input = LlmInput::with_image(tokens, ImageInput::new(pixels, grids));
         let expected = model.prepare_image_embeddings(input)?.0;
         let expected = transfers::to_cpu(&expected)?.to_f32_vec()?;
+        // Optional isolated diagnostics capture only the representative fixture,
+        // after native preparation, never the small boundary cases below.
+        let profile = if pixels.shape().dims()[0] > 28 {
+            std::env::var("APXINF_QWEN35_FEATURE_PROFILE").ok()
+        } else {
+            None
+        };
+        if profile.as_deref() == Some("full") {
+            let range = feature_profile::CudaProfileRange::start(true)
+                .map_err(|e| Error::Other(e.to_string()))?;
+            model.prepare_image_embeddings(input)?;
+            model.ctx.synchronize().map_err(Error::Cuda)?;
+            range.finish().map_err(|e| Error::Other(e.to_string()))?;
+        }
         model.configure_context_reuse(true)?;
         let patches = (grids[0][1] * grids[0][2]) as usize;
-        let values = pixels.to_f32_vec()?;
-        let first_pixels = Tensor::from_f32(vec![patches, 1536], &values[..patches * 1536])?;
+        let first_pixels = pack_image_pixels(&model.ctx, pixels, grids, &[0])?;
         let mut first_tokens = vec![248053];
         first_tokens.extend(std::iter::repeat_n(248056, patches / 4));
         first_tokens.push(248054);
@@ -624,7 +746,36 @@ mod tests {
             &first_tokens,
             ImageInput::new(&first_pixels, &grids[..1]),
         ))?;
-        model.prepare_image_embeddings(input)?;
+        assert_eq!(model.image_features.len(), 1);
+        let host = if pixels.device() == Device::Cpu {
+            pixels.clone()
+        } else {
+            transfers::to_cpu(pixels)?
+        };
+        let identity = ImageIdentity::new(tokens, &host, grids)?;
+        assert_eq!(model.image_features[0].key, identity.keys[0]);
+        let range = if profile.as_deref() == Some("partial") {
+            let missing: Vec<_> = (1..grids.len()).collect();
+            let packed = pack_image_pixels(&model.ctx, pixels, grids, &missing)?;
+            model.run_image_encoder(&packed, &grids[1..])?;
+            model.ctx.synchronize().map_err(Error::Cuda)?;
+            Some(
+                feature_profile::CudaProfileRange::start(true)
+                    .map_err(|e| Error::Other(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+        let partial = model.prepare_image_embeddings(input)?.0;
+        model.ctx.synchronize().map_err(Error::Cuda)?;
+        if let Some(range) = range {
+            range.finish().map_err(|e| Error::Other(e.to_string()))?;
+        }
+        assert_eq!(
+            transfers::to_cpu(&partial)?.to_f32_vec()?,
+            expected,
+            "partial-hit feature assembly differs from original packed execution"
+        );
         let cached = model.prepare_image_embeddings(input)?.0;
         assert_eq!(
             transfers::to_cpu(&cached)?.to_f32_vec()?,
@@ -692,6 +843,33 @@ mod tests {
             &miniature,
             &[[1, 2, 2], [1, 2, 2]],
         )?;
+        // Two different misses, duplicate missing media, and odd merged-row
+        // boundaries exercise selection, offset assembly and deduplication.
+        let mixed_grids = [[1, 2, 2], [1, 2, 4], [1, 2, 4], [1, 4, 2]];
+        let mixed_values: Vec<_> = [0usize, 1, 1, 2]
+            .iter()
+            .zip(&mixed_grids)
+            .flat_map(|(&id, g)| {
+                values
+                    .iter()
+                    .take((g[1] * g[2]) as usize * 1536)
+                    .map(move |v| v + id as f32 * 0.25)
+            })
+            .collect();
+        let mixed = Tensor::from_f32(vec![28, 1536], &mixed_values)?;
+        let mut mixed_tokens = Vec::new();
+        for g in mixed_grids {
+            mixed_tokens.push(248053);
+            mixed_tokens.extend(std::iter::repeat_n(248056, (g[1] * g[2] / 4) as usize));
+            mixed_tokens.push(248054);
+        }
+        check_mixed_feature_cache(&mut model, &mixed_tokens, &mixed, &mixed_grids)?;
+        let gpu_f32 = transfers::to_cuda(&mixed, model.ctx.device_id())?;
+        check_mixed_feature_cache(&mut model, &mixed_tokens, &gpu_f32, &mixed_grids)?;
+        let gpu_bf16 = super::super::super::vision::upload_pixels(&model.ctx, &mixed)?;
+        check_mixed_feature_cache(&mut model, &mixed_tokens, &gpu_bf16, &mixed_grids)?;
+        let cpu_bf16 = transfers::to_cpu(&gpu_bf16)?;
+        check_mixed_feature_cache(&mut model, &mixed_tokens, &cpu_bf16, &mixed_grids)?;
         model.configure_context_reuse(false)?;
         let suffix = [15, 16, 17];
         let input = LlmInput::with_image(&tokens, ImageInput::new(&pixels, &grids));
