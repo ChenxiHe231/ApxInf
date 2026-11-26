@@ -6,6 +6,7 @@
 //! static unit-scale E4M3 contract and the same 128-token paging as the target.
 
 use super::vision_input::ImagePositions;
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -57,6 +58,7 @@ fn split_profile_or_legacy(
 // Draft-only candidate vocabulary. Main verification always projects VOCAB.
 const MTP_SHORTLIST_PREFIX: usize = 131_072;
 const MTP_SHORTLIST_TAIL: usize = 512;
+const MTP_HOT_TILE_ROWS: usize = 128;
 
 fn mtp_shortlist_contains(token: TokenId) -> bool {
     (token as usize) < MTP_SHORTLIST_PREFIX
@@ -84,14 +86,27 @@ struct MtpShortlistHead {
     sprefix: Tensor,
     qtail: Tensor,
     stail: Tensor,
+    qhot: Tensor,
+    shot: Tensor,
     global_scale: Tensor,
     logits: Tensor,
     prefix_output: Tensor,
     tail_output: Tensor,
+    hot_output: Tensor,
     remap: Tensor,
+    remap_hot: Tensor,
+    staged_hot_tile: Cell<Option<usize>>,
 }
 
 impl MtpShortlistHead {
+    fn slice(tensor: &Tensor, start: usize, rows: usize, width: usize) -> Result<Tensor> {
+        let tile_bytes = HIDDEN / 64 * 128 * width * tensor.dtype().size_in_bytes();
+        CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?
+            .view(start / 128 * tile_bytes, rows / 128 * tile_bytes).map_err(Error::Cuda)?
+            .as_tensor(Shape::new(vec![rows / 128, HIDDEN / 64, 128, width]), tensor.dtype())
+            .map_err(Error::Cuda)
+    }
+
     fn new(ctx: &CudaContext, weights: &Qwen35DeviceWeights) -> Result<Self> {
         let binding = MtpHeadBinding::new(ctx, weights)?;
         let head = weights.lm_head.a16.as_ref().expect("validated head");
@@ -99,28 +114,55 @@ impl MtpShortlistHead {
             || head.block_scales.shape().dims() != [VOCAB / 128, HIDDEN / 64, 128, 4] {
             return Err(invalid("MTP shortlist head does not match fixed checkpoint geometry"));
         }
-        let slice = |tensor: &Tensor, start: usize, rows: usize, width: usize| -> Result<Tensor> {
-            let tile_bytes = HIDDEN / 64 * 128 * width * tensor.dtype().size_in_bytes();
-            CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?
-                .view(start / 128 * tile_bytes, rows / 128 * tile_bytes).map_err(Error::Cuda)?
-                .as_tensor(Shape::new(vec![rows / 128, HIDDEN / 64, 128, width]), tensor.dtype())
-                .map_err(Error::Cuda)
-        };
-        let logits = zeros(ctx, vec![1, MTP_SHORTLIST_PREFIX + MTP_SHORTLIST_TAIL], DType::BF16)?;
+        let logits = zeros(ctx, vec![1, MTP_SHORTLIST_PREFIX + MTP_SHORTLIST_TAIL + MTP_HOT_TILE_ROWS], DType::BF16)?;
         let prefix_output = rows_view(&logits, 0, 1, MTP_SHORTLIST_PREFIX)?;
         let tail_output = reshape(&vector_view(&logits, MTP_SHORTLIST_PREFIX, MTP_SHORTLIST_TAIL)?,
             vec![1, MTP_SHORTLIST_TAIL], DType::BF16)?;
+        let hot_output = reshape(&vector_view(&logits, MTP_SHORTLIST_PREFIX + MTP_SHORTLIST_TAIL,
+            MTP_HOT_TILE_ROWS)?, vec![1, MTP_HOT_TILE_ROWS], DType::BF16)?;
         let map: Vec<i32> = (0..MTP_SHORTLIST_PREFIX)
-            .chain(VOCAB - MTP_SHORTLIST_TAIL..VOCAB).map(|x| x as i32).collect();
+            .chain(VOCAB - MTP_SHORTLIST_TAIL..VOCAB)
+            .chain(0..MTP_HOT_TILE_ROWS).map(|x| x as i32).collect();
         let remap = transfers::to_cuda_on_stream(ctx, Tensor::from_i32(vec![map.len()], &map)?)?;
+        let remap_hot = vector_view(&remap, MTP_SHORTLIST_PREFIX + MTP_SHORTLIST_TAIL,
+            MTP_HOT_TILE_ROWS)?;
         Ok(Self {
             binding,
-            qprefix: slice(&head.qweight, 0, MTP_SHORTLIST_PREFIX, 32)?,
-            sprefix: slice(&head.block_scales, 0, MTP_SHORTLIST_PREFIX, 4)?,
-            qtail: slice(&head.qweight, VOCAB - MTP_SHORTLIST_TAIL, MTP_SHORTLIST_TAIL, 32)?,
-            stail: slice(&head.block_scales, VOCAB - MTP_SHORTLIST_TAIL, MTP_SHORTLIST_TAIL, 4)?,
-            global_scale: head.global_scale.clone(), logits, prefix_output, tail_output, remap,
+            qprefix: Self::slice(&head.qweight, 0, MTP_SHORTLIST_PREFIX, 32)?,
+            sprefix: Self::slice(&head.block_scales, 0, MTP_SHORTLIST_PREFIX, 4)?,
+            qtail: Self::slice(&head.qweight, VOCAB - MTP_SHORTLIST_TAIL, MTP_SHORTLIST_TAIL, 32)?,
+            stail: Self::slice(&head.block_scales, VOCAB - MTP_SHORTLIST_TAIL, MTP_SHORTLIST_TAIL, 4)?,
+            qhot: zeros(ctx, vec![1, HIDDEN / 64, MTP_HOT_TILE_ROWS, 32], DType::E2M1Pair)?,
+            shot: zeros(ctx, vec![1, HIDDEN / 64, MTP_HOT_TILE_ROWS, 4], DType::F8E4M3)?,
+            global_scale: head.global_scale.clone(), logits, prefix_output, tail_output,
+            hot_output, remap, remap_hot, staged_hot_tile: Cell::new(None),
         })
+    }
+
+    fn stage_hot_tile(&self, ctx: &CudaContext, weights: &Qwen35DeviceWeights,
+        tile: usize) -> Result<()> {
+        if tile >= VOCAB / MTP_HOT_TILE_ROWS {
+            return Err(invalid("MTP hot tile exceeds vocabulary"));
+        }
+        if self.staged_hot_tile.get() == Some(tile) {
+            return Ok(());
+        }
+        if MtpHeadBinding::new(ctx, weights)? != self.binding {
+            return Err(invalid("MTP hot tile head binding changed"));
+        }
+        let head = weights.lm_head.a16.as_ref().expect("validated head binding");
+        let start = tile * MTP_HOT_TILE_ROWS;
+        let qsource = Self::slice(&head.qweight, start, MTP_HOT_TILE_ROWS, 32)?;
+        let ssource = Self::slice(&head.block_scales, start, MTP_HOT_TILE_ROWS, 4)?;
+        transfers::copy_cuda_to_cuda(ctx, &qsource, &self.qhot)?;
+        transfers::copy_cuda_to_cuda(ctx, &ssource, &self.shot)?;
+        let map: Vec<i32> = (start..start + MTP_HOT_TILE_ROWS).map(|x| x as i32).collect();
+        // The owned upload waits for preceding stream copies before publishing
+        // the tile identity. Graph replay only reads fixed CUDA addresses.
+        transfers::copy_cpu_to_cuda_on_stream(ctx,
+            Tensor::from_i32(vec![MTP_HOT_TILE_ROWS], &map)?, &self.remap_hot)?;
+        self.staged_hot_tile.set(Some(tile));
+        Ok(())
     }
 
     fn project(&self, ctx: &CudaContext, hidden: &Tensor, next: &Tensor) -> Result<()> {
@@ -128,6 +170,8 @@ impl MtpShortlistHead {
             &self.global_scale, &self.prefix_output)?;
         ops::block_quantized_weight_gemv(ctx, hidden, &self.qtail, &self.stail,
             &self.global_scale, &self.tail_output)?;
+        ops::block_quantized_weight_gemv(ctx, hidden, &self.qhot, &self.shot,
+            &self.global_scale, &self.hot_output)?;
         // This existing remapped argmax has its documented legacy tie rule;
         // the main verifier retains the canonical lowest-index full argmax.
         ops::argmax(ctx, ops::ArgmaxArgs::new(&self.logits, next).with_remap(&self.remap))
@@ -212,7 +256,12 @@ pub struct Qwen35MtpState {
     capacity: usize,
     position: Option<MtpPositionContract>,
     image_positions: Option<Rc<ImagePositions>>,
+    // Text/native-head capability, independent of past token membership.
+    // The pending token chooses full versus shortlist for one complete round.
     shortlist_allowed: bool,
+    // Last out-of-shortlist pending token's aligned W4A16 output tile.
+    // This is transactional state: a failed draft must not publish a hint.
+    hot_tile: Option<usize>,
     generation: u64,
     // Distinguishes allocations and writes even when snapshot restore reuses
     // the same position and transaction generation.
@@ -291,6 +340,7 @@ pub struct Qwen35MtpRuntime {
     kv_only_materialization: bool,
     // Immutable execution policy; never copied into transactional state.
     auto_split_kv: bool,
+    prepared_shortlist_head: Option<Rc<MtpShortlistHead>>,
     scratch: Option<MtpScratch>,
     prefill_scratch: Option<MtpPrefillScratch>,
     pending_draft: Option<PendingDraft>,
@@ -332,6 +382,7 @@ impl Qwen35MtpRuntime {
                 std::env::var("APXINF_QWEN35_MTP_KV_ONLY_MATERIALIZE").ok()
             }),
             auto_split_kv: thor_dynamic_fp8_decode,
+            prepared_shortlist_head: None,
             scratch: None,
             prefill_scratch: None,
             pending_draft: None,
@@ -375,6 +426,9 @@ impl Qwen35MtpRuntime {
             if positions.prompt.len() < prompt_tokens.len() {
                 return Err(invalid("MTP image position length mismatch"));
             }
+        }
+        if image.is_none() && weights.lm_head.a16.is_some() {
+            self.prepare_shortlist_head(ctx, weights)?;
         }
         self.reset_state(ctx, shadow)?;
         shadow.image_positions = image.as_ref().map(|(_, plan)| plan.clone());
@@ -445,8 +499,7 @@ impl Qwen35MtpRuntime {
         ctx.synchronize().map_err(Error::Cuda)?;
         shadow.position = Some(position);
         shadow.shortlist_allowed = shadow.image_positions.is_none()
-            && weights.lm_head.a16.is_some()
-            && prompt_tokens.iter().copied().all(mtp_shortlist_contains);
+            && weights.lm_head.a16.is_some();
         self.pending_draft = None;
         Ok(PreparedMtpPrefill {
             generation: shadow.generation,
@@ -508,6 +561,9 @@ impl Qwen35MtpRuntime {
             if position.logical_position > plan.prompt.len() {
                 return Err(invalid("image append exceeds position plan"));
             }
+        }
+        if image.is_none() && weights.lm_head.a16.is_some() {
+            self.prepare_shortlist_head(ctx, weights)?;
         }
         self.copy_state(ctx, committed, shadow)?;
         shadow.image_positions = image.as_ref().map(|(_, plan)| plan.clone());
@@ -592,12 +648,28 @@ impl Qwen35MtpRuntime {
         }
         ctx.synchronize().map_err(Error::Cuda)?;
         shadow.position = Some(position);
-        shadow.shortlist_allowed &= chunk_tokens.iter().copied().all(mtp_shortlist_contains);
+        shadow.shortlist_allowed = shadow.image_positions.is_none()
+            && weights.lm_head.a16.is_some();
         self.pending_draft = None;
         Ok(PreparedMtpPrefill {
             generation: shadow.generation,
             position,
         })
+    }
+
+    fn prepare_shortlist_head(
+        &mut self,
+        ctx: &CudaContext,
+        weights: &Qwen35DeviceWeights,
+    ) -> Result<()> {
+        let binding = MtpHeadBinding::new(ctx, weights)?;
+        if self.prepared_shortlist_head.as_ref().is_none_or(|head| head.binding != binding) {
+            // Allocate only the existing logits/remap and non-copying views,
+            // before normal Decode; do not prepare or traverse model state.
+            let head = Rc::new(MtpShortlistHead::new(ctx, weights)?);
+            self.prepared_shortlist_head = Some(head);
+        }
+        Ok(())
     }
 
     fn ensure_scratch(
@@ -681,6 +753,7 @@ impl Qwen35MtpRuntime {
         destination.position = source.position;
         destination.image_positions = source.image_positions.clone();
         destination.shortlist_allowed = source.shortlist_allowed;
+        destination.hot_tile = source.hot_tile;
         destination.generation = generation;
         Ok(())
     }
@@ -740,6 +813,7 @@ impl MtpBackend for Qwen35MtpRuntime {
             position: None,
             image_positions: None,
             shortlist_allowed: false,
+            hot_tile: None,
             generation: 0,
             cache_revision: next_cache_revision()?,
         })
@@ -755,6 +829,7 @@ impl MtpBackend for Qwen35MtpRuntime {
         state.position = None;
         state.image_positions = None;
         state.shortlist_allowed = false;
+        state.hot_tile = None;
         self.pending_draft = None;
         self.synced_draft_prefix = None;
         CudaBuffer::from_tensor(&state.key)
@@ -877,22 +952,34 @@ impl MtpBackend for Qwen35MtpRuntime {
             )
         });
         self.copy_state_rows(ctx, committed, shadow, first_row)?;
-        shadow.shortlist_allowed &= mtp_shortlist_contains(pending);
-        let shortlist_active = shadow.shortlist_allowed;
+        // One out-of-set token selects the full head for this round. It does
+        // not disable an eligible later round or change policy within depth3.
+        let shortlist_active = shadow.shortlist_allowed && mtp_shortlist_contains(pending);
+        if !mtp_shortlist_contains(pending) && (pending as usize) < VOCAB {
+            shadow.hot_tile = Some((pending as usize) / MTP_HOT_TILE_ROWS);
+        }
+
+        if shortlist_active || self.prepared_shortlist_head.is_some() {
+            // Normal prefill/append already owns these resources. Retain the
+            // existing cold direct-draft and weight-rebinding preparation
+            // behavior before entering any prepared execution session.
+            self.prepare_shortlist_head(ctx, weights)?;
+        }
+        let prepared_shortlist_head = self.prepared_shortlist_head.clone();
+        if shortlist_active {
+            // Always stage a fixed 128-row tile before running the prepared
+            // draft Graph. Tile zero duplicates prefix IDs until an outside
+            // pending token has supplied a hot tile; the Graph node set never
+            // changes between cold prepare and later replay.
+            prepared_shortlist_head.as_ref().expect("prepared shortlist")
+                .stage_hot_tile(ctx, weights, shadow.hot_tile.unwrap_or(0))?;
+        }
 
         let geometry = self.geometry;
         let eps = self.rms_norm_eps;
         let theta = self.rope_theta;
         let scratch = self.ensure_scratch(ctx, committed.capacity)?;
-        if shortlist_active || scratch.shortlist_head.is_some() {
-            let head_binding = MtpHeadBinding::new(ctx, weights)?;
-            if scratch.shortlist_head.as_ref().is_some_and(|head| head.binding != head_binding) {
-                scratch.shortlist_head = None;
-            }
-            if shortlist_active && scratch.shortlist_head.is_none() {
-                scratch.shortlist_head = Some(MtpShortlistHead::new(ctx, weights)?);
-            }
-        }
+        scratch.shortlist_head = prepared_shortlist_head;
         scratch.shortlist_active = shortlist_active;
         write_i32(ctx, &scratch.token, pending)?;
         let pending_slot = element_view(&scratch.verification_inputs, 0)?;
@@ -1992,7 +2079,7 @@ struct MtpScratch {
     projected: Tensor,
     moe_out: Tensor,
     final_hidden: Tensor,
-    shortlist_head: Option<MtpShortlistHead>,
+    shortlist_head: Option<Rc<MtpShortlistHead>>,
     shortlist_active: bool,
     logits: Tensor,
     next_token: Tensor,
@@ -3383,6 +3470,7 @@ pub(super) mod gpu_raw_protocol {
         same("copy source readonly", source, &source_before)?;
         assert_eq!(destination.position, source.position);
         assert_eq!(destination.shortlist_allowed,source.shortlist_allowed);
+        assert_eq!(destination.hot_tile,source.hot_tile);
         assert_eq!(destination.generation, source.generation + 1);
         assert!(runtime.pending_draft.is_none());
         Ok(())
@@ -3478,7 +3566,7 @@ pub(super) mod gpu_raw_protocol {
         same("prefill publication exact swap", &committed, &staged)?;
         check_copy(f, &mut runtime, &committed, &mut snapshot)?;
         let frozen = image(&snapshot)?;
-        let frozen_meta = (snapshot.position, snapshot.generation, snapshot.shortlist_allowed);
+        let frozen_meta = (snapshot.position, snapshot.generation, snapshot.shortlist_allowed, snapshot.hot_tile);
         for depth in 1..=3usize {
             for keep in 1..=depth + 1 {
                 check_copy(f, &mut runtime, &snapshot, &mut committed)?;
@@ -3603,7 +3691,7 @@ pub(super) mod gpu_raw_protocol {
                 assert_eq!(committed.position, Some(expected_position));
                 assert_eq!(committed.generation, generation);
                 same("MTP snapshot deepfreeze", &snapshot, &frozen)?;
-                assert_eq!((snapshot.position, snapshot.generation, snapshot.shortlist_allowed), frozen_meta);
+                assert_eq!((snapshot.position, snapshot.generation, snapshot.shortlist_allowed, snapshot.hot_tile), frozen_meta);
                 if runtime.draft_kv_suffix_sync && depth == 3 && full {
                     let prefix = runtime.synced_draft_prefix.expect("published draft prefix");
                     let new_rows = expected_position.cache_rows;
@@ -3925,11 +4013,15 @@ pub(super) mod gpu_raw_protocol {
         let options=GenerationOptions::greedy(32,None);
         coordinator.prefill_greedy(&f.ctx,&decoder,&f.weights,&f.prompt,&options)?;
         assert!(coordinator.committed_mtp.shortlist_allowed);
+        let prepared_head=coordinator.mtp.prepared_shortlist_head.as_ref().unwrap().clone();
+        assert!(coordinator.mtp.scratch.is_none(),"head preparation must not allocate full decode scratch");
         // A known in-range pending token makes this a protocol test rather
         // than an assumption about the model's chosen text continuation.
         coordinator.pending=Some(42);
         coordinator.run_greedy_round(&f.ctx,&decoder,&f.weights,3)?;
         assert!(coordinator.mtp.scratch.as_ref().unwrap().shortlist_active);
+        assert!(Rc::ptr_eq(&prepared_head,
+            coordinator.mtp.scratch.as_ref().unwrap().shortlist_head.as_ref().unwrap()));
         let weights=f.weights.lm_head.a16.as_ref().unwrap();
         let before=(raw(&weights.qweight)?,raw(&weights.block_scales)?,raw(&weights.global_scale)?);
         let minimum={
@@ -3966,29 +4058,102 @@ pub(super) mod gpu_raw_protocol {
                 let guard=transfers::to_cpu(&next_storage)?;
                 assert_eq!(guard.as_i32()?[0],0x5a5a5a5a);assert_eq!(guard.as_i32()?[2],0x5a5a5a5a);
             }
+            // Change the fixed hot buffers after Graph capture and verify
+            // that the replay reads the new tile without changing its nodes.
+            let tile = 200000usize / MTP_HOT_TILE_ROWS;
+            shortlist.stage_hot_tile(&f.ctx, &f.weights, tile)?;
+            graph.replay()?;
+            super::super::forward::project_lm_head(&f.ctx, &f.weights, &input, &mut full)?;
+            f.ctx.synchronize().map_err(Error::Cuda)?;
+            let full_bits = transfers::to_cpu(&full)?;
+            let hot_bits = transfers::to_cpu(&shortlist.logits)?;
+            let map = transfers::to_cpu(&shortlist.remap)?;
+            let hot_start = MTP_SHORTLIST_PREFIX + MTP_SHORTLIST_TAIL;
+            for local in 0..MTP_HOT_TILE_ROWS {
+                let id = tile * MTP_HOT_TILE_ROWS + local;
+                assert_eq!(map.as_i32()?[hot_start + local], id as i32);
+                assert_eq!(hot_bits.as_bf16()?[hot_start + local].to_bits(),
+                    full_bits.as_bf16()?[id].to_bits());
+            }
+            // Replay the same captured nodes with both a changed tile and
+            // changed hidden row. The staged weight copies must be bit-exact.
+            transfers::copy_cpu_to_cuda_on_stream(&f.ctx,
+                Tensor::from_bf16(vec![1,HIDDEN],&values)?,&input)?;
+            graph.replay()?;
+            super::super::forward::project_lm_head(&f.ctx,&f.weights,&input,&mut full)?;
+            f.ctx.synchronize().map_err(Error::Cuda)?;
+            let full_changed=transfers::to_cpu(&full)?;
+            let hot_changed=transfers::to_cpu(&shortlist.logits)?;
+            for local in 0..MTP_HOT_TILE_ROWS {
+                let id=tile*MTP_HOT_TILE_ROWS+local;
+                assert_eq!(hot_changed.as_bf16()?[hot_start+local].to_bits(),
+                    full_changed.as_bf16()?[id].to_bits());
+            }
+            let source_q=MtpShortlistHead::slice(&weights.qweight,
+                tile*MTP_HOT_TILE_ROWS,MTP_HOT_TILE_ROWS,32)?;
+            let source_s=MtpShortlistHead::slice(&weights.block_scales,
+                tile*MTP_HOT_TILE_ROWS,MTP_HOT_TILE_ROWS,4)?;
+            assert_eq!(raw(&shortlist.qhot)?,raw(&source_q)?);
+            assert_eq!(raw(&shortlist.shot)?,raw(&source_s)?);
             minimum
         };
         assert_eq!(before,(raw(&weights.qweight)?,raw(&weights.block_scales)?,raw(&weights.global_scale)?));
         let mut snapshot=coordinator.allocate_context_snapshot(&f.ctx,&decoder,&f.weights,64)?;
         coordinator.capture_context(&f.ctx,&mut snapshot)?;
         assert!(snapshot.mtp.shortlist_allowed);
+        assert_eq!(snapshot.mtp.hot_tile, None);
         coordinator.pending=Some(200000);
         coordinator.run_greedy_round(&f.ctx,&decoder,&f.weights,3)?;
-        assert!(!coordinator.committed_mtp.shortlist_allowed);
+        assert!(coordinator.committed_mtp.shortlist_allowed);
+        assert_eq!(coordinator.committed_mtp.hot_tile, Some(200000 / MTP_HOT_TILE_ROWS));
         assert!(!coordinator.mtp.scratch.as_ref().unwrap().shortlist_active);
         assert!(snapshot.mtp.shortlist_allowed);
+        let prepared_sessions=coordinator.mtp.scratch.as_ref().unwrap().draft_sessions_prepared;
+        coordinator.pending=Some(42);
+        coordinator.run_greedy_round(&f.ctx,&decoder,&f.weights,3)?;
+        let scratch=coordinator.mtp.scratch.as_ref().unwrap();
+        assert!(scratch.shortlist_active,"an eligible pending token recovers next round");
+        assert_eq!(coordinator.committed_mtp.hot_tile, Some(200000 / MTP_HOT_TILE_ROWS));
+        assert_eq!(scratch.draft_sessions_prepared,prepared_sessions);
+        assert!(Rc::ptr_eq(&prepared_head,scratch.shortlist_head.as_ref().unwrap()),
+            "recovery must reuse prefill-prepared head buffers and views");
+        assert_eq!(scratch.shortlist_head.as_ref().unwrap().staged_hot_tile.get(),
+            Some(200000/MTP_HOT_TILE_ROWS));
+        // Snapshot a live hot hint, mutate it, restore, append, and replay the
+        // already prepared Graph. A snapshot must restore the hint with KV.
+        let mut hot_snapshot=coordinator.allocate_context_snapshot(&f.ctx,&decoder,&f.weights,64)?;
+        coordinator.capture_context(&f.ctx,&mut hot_snapshot)?;
+        assert_eq!(hot_snapshot.mtp.hot_tile,Some(200000/MTP_HOT_TILE_ROWS));
+        coordinator.pending=Some(180000);
+        coordinator.run_greedy_round(&f.ctx,&decoder,&f.weights,3)?;
+        assert_eq!(coordinator.committed_mtp.hot_tile,Some(180000/MTP_HOT_TILE_ROWS));
+        coordinator.restore_context(&f.ctx,&hot_snapshot)?;
+        assert_eq!(coordinator.committed_mtp.hot_tile,Some(200000/MTP_HOT_TILE_ROWS));
+        coordinator.append_prefill_greedy(&f.ctx,&decoder,&f.weights,&[42],&options)?;
+        assert_eq!(coordinator.committed_mtp.hot_tile,Some(200000/MTP_HOT_TILE_ROWS));
+        coordinator.pending=Some(42);
+        coordinator.run_greedy_round(&f.ctx,&decoder,&f.weights,3)?;
+        assert!(coordinator.mtp.scratch.as_ref().unwrap().shortlist_active);
+        assert_eq!(coordinator.mtp.scratch.as_ref().unwrap().shortlist_head
+            .as_ref().unwrap().staged_hot_tile.get(),Some(200000/MTP_HOT_TILE_ROWS));
         coordinator.reset(&f.ctx)?;
         assert!(!coordinator.committed_mtp.shortlist_allowed && !coordinator.shadow_mtp.shortlist_allowed);
         coordinator.restore_context(&f.ctx,&snapshot)?;
         assert!(coordinator.committed_mtp.shortlist_allowed);
+        assert_eq!(coordinator.committed_mtp.hot_tile, None);
         coordinator.append_prefill_greedy(&f.ctx,&decoder,&f.weights,&[42],&options)?;
         assert!(coordinator.committed_mtp.shortlist_allowed);
         coordinator.append_prefill_greedy(&f.ctx,&decoder,&f.weights,&[200000],&options)?;
-        assert!(!coordinator.committed_mtp.shortlist_allowed);
+        assert!(coordinator.committed_mtp.shortlist_allowed);
         coordinator.reset(&f.ctx)?;
         let mut outside=f.prompt.clone();outside[4]=200000;
         coordinator.prefill_greedy(&f.ctx,&decoder,&f.weights,&outside,&options)?;
-        assert!(!coordinator.committed_mtp.shortlist_allowed);
+        assert!(coordinator.committed_mtp.shortlist_allowed);
+        coordinator.pending=Some(42);
+        coordinator.run_greedy_round(&f.ctx,&decoder,&f.weights,3)?;
+        assert!(coordinator.mtp.scratch.as_ref().unwrap().shortlist_active);
+        assert!(Rc::ptr_eq(&prepared_head,
+            coordinator.mtp.scratch.as_ref().unwrap().shortlist_head.as_ref().unwrap()));
         Ok(minimum)
     }
 
@@ -3998,6 +4163,7 @@ pub(super) mod gpu_raw_protocol {
         let mut shadow=runtime.allocate_state(&f.ctx,64)?;
         committed.position=Some(MtpPositionContract::after_prompt(16)?);
         committed.shortlist_allowed=true;
+        committed.hot_tile=Some(200000/MTP_HOT_TILE_ROWS);
         let data=vec![half::bf16::from_f32(0.5);HIDDEN];
         let hidden=transfers::to_cuda_on_stream(&f.ctx,Tensor::from_bf16(vec![1,HIDDEN],&data)?)?;
         runtime.draft(&f.ctx,&f.weights,&committed,&mut shadow,42,16,&hidden,3)?;
@@ -4014,6 +4180,14 @@ pub(super) mod gpu_raw_protocol {
         let head=runtime.scratch.as_ref().unwrap().shortlist_head.as_ref().unwrap();
         assert!(head.binding!=old_binding);
         assert!(head.binding==MtpHeadBinding::new(&f.ctx,&f.weights)?);
+        assert_eq!(head.staged_hot_tile.get(),Some(200000/MTP_HOT_TILE_ROWS));
+        let source=f.weights.lm_head.a16.as_ref().unwrap();
+        let source_q=MtpShortlistHead::slice(&source.qweight,
+            (200000/MTP_HOT_TILE_ROWS)*MTP_HOT_TILE_ROWS,MTP_HOT_TILE_ROWS,32)?;
+        let source_s=MtpShortlistHead::slice(&source.block_scales,
+            (200000/MTP_HOT_TILE_ROWS)*MTP_HOT_TILE_ROWS,MTP_HOT_TILE_ROWS,4)?;
+        assert_eq!(raw(&head.qhot)?,raw(&source_q)?);
+        assert_eq!(raw(&head.shot)?,raw(&source_s)?);
         f.weights.lm_head.a16.as_mut().unwrap().global_scale=original;
         Ok(())
     }
