@@ -1,5 +1,7 @@
 # Final 默认 MTP 优化的长上下文逐提交验收
 
+> **2026-11-26 完整 benchmark：** 最新 Final 与最新 TRT 的 prefill、decode 12-case 结果见[完整测试](#thoru-full-current-20261126)。
+
 > **2026-11-26 最新 Final 已重编译：** 本次实际最新源码与最新 TRT 的 8K/16K 对照见[最新 Final 对照](#thoru-latest-final-20261126)。
 
 > **2026-11-26 锁屏复测：** 相同产物/缓存约定下的 8K/16K 重测，以及 MTP 算量、API 传输和旧程序参照分析见[新复测](#thoru-locked-repeat-20261126)。
@@ -401,4 +403,75 @@ TRT 的计数来自独立 profiling 请求，只有完整输出 SHA 匹配的正
 ```sh
 python3 doc/qwen35-thoru/model-microbench/verify_thoru_current_final.py \
   doc/qwen35-thoru/model-microbench/evidence/thoru-current-final-20261126.json
+```
+
+<a id="thoru-full-current-20261126"></a>
+
+## Thor-U：最新 Final 完整 prefill 与 decode benchmark（2026-11-26）
+
+按完整的既有 Thor-U 12-case 约定重测：5 档共享长文字 Decode、4 档已有 KV 追加 4K 的 prefill、3 档补充文本 Decode；Final 和最新 TRT 各测一遍，每项 2 次预热、10 次正式测量，**共 240 次正式、48 次预热**。未测 48K，也未使用 1206MHz。
+
+Final 使用测试开始时最新源码 `ae909d2b0f992fbd3a2b33baa88b60057e96c479`，重新编译两个原有 benchmark 程序；Decode ELF SHA256 `de7ad8d2193db4bd1855f019e7b9cb2123ff1ea33241a76eca70022e0885c46c`，追加 prefill ELF SHA256 `fafd22f95cd9e2b3bcc23e91b5732380761b5e81e5c71f3967267015a57fb32c`。计时外沿用已公开的显式 token 输入绑定补丁。TRT 使用最新可用交付 `Qwen3.6-35B-A3B-NVFP4-FP16KV-MTP-703-14sm-64k-latest-20261112` 与运行时 `qwen36-703-viskv_20261105`。
+
+GPU 固定 1530MHz，实际时钟、内存和 GPU 占用持续采样；GDM 登录认证界面执行锁会话并关闭显示输出，每个 case 前后及运行中约每 5 秒检查 Monitor Off。正式测量关闭调优和 profiling，强制使用冻结 recipe。新 CUDA 身份缺少的 66 个 prefill 配置在独立进程预先准备并通过常量参考、边界和只读检查，不计入成绩。
+
+Final 使用动态 FP8 target KV / scale1 FP8 draft KV，TRT target/draft 为 FP16 KV；这是两套交付配置的对照，未做等精度或质量等价验收。Final 模型入口接收预分词 IDs，TRT 经公开文字接口，含分词、调度和适用时的缓存恢复。
+
+### 共享长文字：Decode（tok/s）
+
+严格生成 1024 token，首 token 归 TTFT，后续 1023 个首末回调间隔归 Decode；按正式 token 总数/总时间汇总。
+
+| 输入 / Decode 起始 KV | TRT | Final | Final 较 TRT | TRT 路径 |
+|---|---:|---:|---:|---|
+| 4K | 102.85 | 100.94 | -1.86% | 冷请求 |
+| 8K | 101.28 | 96.63 | -4.59% | 冷请求 |
+| 16K | 93.28 | 96.56 | +3.52% | 缓存前缀 |
+| 24K | 89.22 | 89.58 | +0.40% | 缓存前缀 |
+| 32K | 82.61 | 87.29 | +5.66% | 缓存前缀 |
+
+### 共享长文字：含 prefill 的冷生成吞吐（输出 tok/s）
+
+“—”表示无可比的 TRT 冷请求结果；不使用缓存请求吞吐填补。
+
+| 输入 | TRT 冷生成 | Final 冷生成 | Final 较 TRT |
+|---|---:|---:|---:|
+| 4K | 95.40 | 95.91 | +0.54% |
+| 8K | 88.10 | 86.97 | -1.28% |
+| 16K | — | 76.71 | — |
+| 24K | — | 65.32 | — |
+| 32K | — | 58.12 | — |
+
+### 已有 KV 追加 4K（ms，越低越好）
+
+百分比为 Final 相对 TRT 的时延降低；负数表示更慢。两套入口范围见上文。
+
+| 初始 KV | TRT 请求 | Final 模型 | Final 时延降低 |
+|---|---:|---:|---:|
+| 4K | 846.26 | 566.31 | +33.08% |
+| 8K | 891.96 | 608.11 | +31.82% |
+| 16K | 974.96 | 668.46 | +31.44% |
+| 32K | 1140.47 | 796.08 | +30.20% |
+
+### 补充：本次 13 题循环长文字（输出 1K）
+
+| 输入 / KV | TRT Decode | Final Decode | Final 较 TRT | TRT 冷生成 | Final 冷生成 |
+|---|---:|---:|---:|---:|---:|
+| 4K | 111.48 | 104.54 | -6.23% | 102.63 | 99.12 |
+| 16K | 102.39 | 83.93 | -18.03% | — | 68.53 |
+| 32K | 94.17 | 85.20 | -9.52% | — | 57.21 |
+
+16K/32K 的补充文本 TRT 为缓存前缀 Decode；冷生成留空。TRT greedy 输出在重新 prefill 时存在轮间差异，各档正式输出种类数和波动范围保留在证据中，不能据此作单算子性能或质量等价结论。
+
+### 运行检查与复现
+
+16K/24K/32K 的 TRT 冷 prefill 曾使 Thor-U 无响应，本轮长输入 TRT 仅用 2K 分段在计时外建立前缀，并核验实际复用量；**不将缓存请求总吞吐填为冷生成**。追加 prefill 两边均在计时外建立初始 KV，计时请求追加 4096 输入并生成首 token；表中毫秒值含各自接口开销，不是纯 kernel 时间。TRT Engine 在本机仍提示跨设备型号 plan 警告。
+
+逐 case 核验输入长度、输出数量、缓存复用、1530MHz、普通内存下限和屏幕关闭；结束恢复原 GPU 策略及 7380 页 HugeTLB，无遗留推理进程，自有 GPU 锁释放，显示保持关闭。原始记录存于 Thor-U `devlocal/thoru-final-trt/runs/formal-full-current-20261126-r2/`，准备阶段缺项失败的请求没有计分。旧表完整保留。
+
+- [完整 benchmark 证据](model-microbench/evidence/thoru-full-current-20261126.json)。
+- [离线核验器](model-microbench/verify_thoru_full_current.py)。
+
+```sh
+python3 doc/qwen35-thoru/model-microbench/verify_thoru_full_current.py \
+  doc/qwen35-thoru/model-microbench/evidence/thoru-full-current-20261126.json
 ```
