@@ -1,5 +1,7 @@
 # Final 默认 MTP 优化的长上下文逐提交验收
 
+> **2026-11-26 最新 Final 已重编译：** 本次实际最新源码与最新 TRT 的 8K/16K 对照见[最新 Final 对照](#thoru-latest-final-20261126)。
+
 > **2026-11-26 锁屏复测：** 相同产物/缓存约定下的 8K/16K 重测，以及 MTP 算量、API 传输和旧程序参照分析见[新复测](#thoru-locked-repeat-20261126)。
 
 > **同日缓存协议复测：** 8K/16K、1530MHz、精确 N−1 缓存对照及 MTP 工作量核对见[缓存复测](#thoru-cache-repro-20261125)。
@@ -353,4 +355,50 @@ Final/旧 TRT 每档各 2 预热＋10 计分；最新 TRT 每档独立建立两�
 ```sh
 python3 doc/qwen35-thoru/model-microbench/verify_thoru_locked_repeat.py \
   doc/qwen35-thoru/model-microbench/evidence/thoru-locked-repeat-20261126.json
+```
+
+<a id="thoru-latest-final-20261126"></a>
+
+## Thor-U：拉取最新 Final 重新编译对照（2026-11-26）
+
+本轮按用户新指令实际拉取、快进到测试开始时远程 Final 最新 **`ae909d2b0f992fbd3a2b33baa88b60057e96c479`**，在 Thor-U 重新编译；该提交包含最新代码 `b3292251`。实际新 ELF SHA256 为 **`87916cc1e86f2c659373ab50e99d4def2f83fe32efa939011f1272723c44991c`**，CUDA 静态归档为 `7731dd4e380af81b9871597917bdac54a5fa212123e5d677a1e4ed11820727b1`。上节固定 `9f7aecd2` 的复测不代表本轮源码。沿用同一 benchmark-only 前缀准备适配器，完整补丁、worker 源码和构建命令记入证据；适配器只添加测试入口，构建结束恢复原源码。
+
+最新可用 TRT 交付仍为 `Qwen3.6-35B-A3B-NVFP4-FP16KV-MTP-703-14sm-64k-latest-20261112`，运行时 `qwen36-703-viskv_20261105`，target/draft KV 均为 FP16。本轮不运行旧 FP8-KV TRT。Final 沿用同一检查点、NVFP4 MoE 激活、动态 FP8 target KV / scale=1 FP8 draft KV；后端配置不同，不能称为等精度算子 A/B 或质量等价验收。
+
+执行 `loginctl lock-sessions`，设备为 GDM 登录认证界面，无已解锁用户图形桌面；保持 DPMS Monitor Off。每个 case 前后及约每 5 秒验证认证/锁定状态与显示关闭，保留 GUI 服务。GPU min=max **1530MHz**，运行中检查实际 GPC 时钟、内存和独占推理进程。
+
+与上一轮相同：8K/16K 输入 IDs；2K 分段准备至 N−1；每次 reused=N−1、computed=1；greedy MTP depth3/verify4、Graph、忽略 EOS；输出 1024 token，首 token 归 TTFT，其后 **1023 个首末 token 帧间隔**归 Decode，使用同一父进程墙钟，含 token 帧供给。前缀准备不计入 Decode。**不测 48K，不用 1206MHz。**
+
+Final 每档 2 预热＋10 正式；最新 TRT 每档独立建立两个前缀，每个前缀 2＋10，再另做 3 条 profiling 请求核对 MTP 计数：共 **60 条正式、12 条预热、12 条独立计数诊断**。正式 profiling/autotune 关闭，强制已存在 recipe 且前后不变；新 CUDA 身份所需 recipe 在独立进程预先准备并通过常量参考、边界和只读检查。与上节旧 Final 的变化包含新二进制和相应 recipe，未把它归因为某个单独提交的收益。
+
+### 最新产物对照（tok/s）
+
+TRT 汇总两个前缀各 10 次的 token 总数/时间总数；Final 汇总本档 10 次。差值为 Final / TRT − 1。不同前缀的输出和 MTP 工作量单列，成绩是本次输入轨迹下的配置对比。
+
+| 初始 KV | 最新 Final | 最新 TRT | Final 较 TRT | 上节旧 Final | Final 相对上节变化 |
+|---|---:|---:|---:|---:|---:|
+| 8K | 97.96 | 97.54 | +0.43% | 94.14 | +4.06% |
+| 16K | 93.74 | 93.54 | +0.22% | 86.70 | +8.12% |
+
+本轮两个 TRT 前缀汇总下，两档差距均小于 1%，可描述为本次接近持平；TRT 独立前缀间的吞吐差异大于该差值，不能宣称 Final 已稳定领先。
+
+### 输出与 MTP 工作量
+
+| KV | Final：轮数 / 不同正式输出数 | TRT 前缀 1：tok/s / 同输出诊断轮数 | TRT 前缀 2：tok/s / 同输出诊断轮数 | Final 与上节旧产物输出一致 |
+|---|---:|---:|---:|---|
+| 8K | 369 / 1 | 95.03 / 386 | 100.20 / 368 | 是 |
+| 16K | 384 / 1 | 95.15 / 362 | 91.97 / 375 | 是 |
+
+TRT 的计数来自独立 profiling 请求，只有完整输出 SHA 匹配的正式请求才与该轮数关联；逐条匹配关系在证据中。每个前缀的 10 次计时只是同一状态内重复，不能当成 10 个独立前缀样本。不同后端或不同前缀输出发生变化时，MTP 接受工作量也会变，因此上表不能单独证明底层算子加速比例；此前固定约 4% 的笼统判断继续撤回。
+
+用户历史 TRT 8K 129.6 / 16K 119.4 的原始产物、命令和输出/MTP 记录仍未定位。本次新 Final 的对照也不能替代对那两项历史成绩的复现。
+
+所有计分 case 完成后恢复原 GPU 策略及 7380 页 HugeTLB，无遗留推理进程，自有 GPU 锁释放；显示保持关闭。构建/资源准备不计作性能成绩，历史表格保留。
+
+- [最新 Final 重编译与本轮原始测量摘要](model-microbench/evidence/thoru-current-final-20261126.json)。
+- [独立离线核验器](model-microbench/verify_thoru_current_final.py)。
+
+```sh
+python3 doc/qwen35-thoru/model-microbench/verify_thoru_current_final.py \
+  doc/qwen35-thoru/model-microbench/evidence/thoru-current-final-20261126.json
 ```
