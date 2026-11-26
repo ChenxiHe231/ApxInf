@@ -409,7 +409,7 @@ python3 doc/qwen35-thoru/model-microbench/verify_thoru_current_final.py \
 
 ## Thor-U：最新 Final 完整 prefill 与 decode benchmark（2026-11-26）
 
-按完整的既有 Thor-U 12-case 约定重测：5 档共享长文字 Decode、4 档已有 KV 追加 4K 的 prefill、3 档补充文本 Decode；Final 和最新 TRT 各测一遍，每项 2 次预热、10 次正式测量，**共 240 次正式、48 次预热**。未测 48K，也未使用 1206MHz。
+按完整的既有 Thor-U 12-case 约定重测：5 档共享长文字 Decode、4 档已有 KV 追加 4K 的 prefill、3 档补充文本 Decode；Final 和最新 TRT 各测一遍，每项 2 次预热、10 次正式测量，**共 240 次正式、48 次预热**。未测 48K，也未使用 1206MHz。后续核对 GitHub `Final` 至 `d1d48ba1`：自本轮实测源码以来只有文档提交，模型代码及构建依赖未变，因此沿用本轮计分结果。
 
 Final 使用测试开始时最新源码 `ae909d2b0f992fbd3a2b33baa88b60057e96c479`，重新编译两个原有 benchmark 程序；Decode ELF SHA256 `de7ad8d2193db4bd1855f019e7b9cb2123ff1ea33241a76eca70022e0885c46c`，追加 prefill ELF SHA256 `fafd22f95cd9e2b3bcc23e91b5732380761b5e81e5c71f3967267015a57fb32c`。计时外沿用已公开的显式 token 输入绑定补丁。TRT 使用最新可用交付 `Qwen3.6-35B-A3B-NVFP4-FP16KV-MTP-703-14sm-64k-latest-20261112` 与运行时 `qwen36-703-viskv_20261105`。
 
@@ -429,6 +429,20 @@ Final 使用动态 FP8 target KV / scale1 FP8 draft KV，TRT target/draft 为 FP
 | 24K | 89.22 | 89.58 | +0.40% | 缓存前缀 |
 | 32K | 82.61 | 87.29 | +5.66% | 缓存前缀 |
 
+<a id="thoru-full-current-prefill"></a>
+
+### 冷请求：prefill 至首 token 时延（TTFT，ms，越低越好）
+
+这是冷请求从进入各自接口到收到首 token 的均值，包含 prefill、首 token 计算及接口开销，**不是纯 prefill kernel 时间**。仅 4K/8K 有 TRT 冷请求实测；长输入 TRT 的缓存请求 TTFT 不填入本表。百分比为 Final 相对 TRT 的时延降低。
+
+| 输入 | TRT 冷请求 | Final 冷请求 | Final 时延降低 |
+|---|---:|---:|---:|
+| 4K | 786.76 | 541.78 | +31.14% |
+| 8K | 1520.83 | 1186.21 | +22.00% |
+| 16K | — | 2754.32 | — |
+| 24K | — | 4257.03 | — |
+| 32K | — | 5898.63 | — |
+
 ### 共享长文字：含 prefill 的冷生成吞吐（输出 tok/s）
 
 “—”表示无可比的 TRT 冷请求结果；不使用缓存请求吞吐填补。
@@ -443,7 +457,7 @@ Final 使用动态 FP8 target KV / scale1 FP8 draft KV，TRT target/draft 为 FP
 
 ### 已有 KV 追加 4K（ms，越低越好）
 
-百分比为 Final 相对 TRT 的时延降低；负数表示更慢。两套入口范围见上文。
+每轮在计时外建立初始 KV，请求复用该 KV、追加 4096 输入并生成首 token。表中是 10 次正式请求的平均时延，包含各自接口开销；百分比为 Final 相对 TRT 的时延降低。两套入口范围见上文。
 
 | 初始 KV | TRT 请求 | Final 模型 | Final 时延降低 |
 |---|---:|---:|---:|
